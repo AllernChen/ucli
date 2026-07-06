@@ -245,6 +245,7 @@ export class ClaudeAdapter extends BaseAdapter {
   }
 
   async start() {
+    this._disposed = false
     if (!pty) {
       this._write('\x1b[31mnode-pty 未加载，无法启动终端模式\x1b[0m\r\n')
       this.emitEvent({ type: 'error', message: 'node-pty not available' })
@@ -334,6 +335,7 @@ export class ClaudeAdapter extends BaseAdapter {
 
   async dispose() {
     this._disposed = true
+    if (this._statsTimer) { clearTimeout(this._statsTimer); this._statsTimer = null }
     if (this.ptyProc) {
       try { this.ptyProc.kill() } catch {}
       this.ptyProc = null
