@@ -276,10 +276,12 @@ export class ClaudeAdapter extends BaseAdapter {
 
     try {
       // node-pty needs a real executable. `claude` on Windows is a .ps1 shim,
-      // so we spawn it through powershell which resolves the PATH correctly.
+      // so we spawn it through powershell. We must single-quote each arg
+      // because PowerShell's -Command joins all args into one string and
+      // re-parses — bare paths with spaces (e.g. "John Doe") get split.
       const shell = process.platform === 'win32' ? 'powershell.exe' : 'claude'
       const shellArgs = process.platform === 'win32'
-        ? ['-NoProfile', '-Command', 'claude', ...args]
+        ? ['-NoProfile', '-Command', '& claude ' + args.map(a => `'${a.replace(/'/g, "''")}'`).join(' ')]
         : args
 
       this.ptyProc = pty.spawn(shell, shellArgs, {
