@@ -1,5 +1,5 @@
 import { spawn } from 'child_process'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from 'fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createRequire } from 'module'
@@ -53,42 +53,39 @@ export class ClaudeAdapter extends BaseAdapter {
     this._lastStatsTokens = { input: 0, output: 0 }
   }
 
-  _findTranscript(cliSessionId) {
+  /** Shared: return the matched ~/.claude/projects/<hash> directory, or null. */
+  _projectDir() {
     const home = process.env.HOME || process.env.USERPROFILE || '~'
     const projDir = join(home, '.claude', 'projects')
     if (!existsSync(projDir)) return null
     const hash = (this.session.cwd || '').toLowerCase().replace(/:/g, '-').replace(/\\/g, '-').replace(/\s/g, '-').replace(/\/+/g, '-')
     for (const dir of readdirSync(projDir)) {
-      if (dir.toLowerCase() === hash) {
-        const exact = join(projDir, dir, cliSessionId + '.jsonl')
-        if (existsSync(exact)) return exact
-      }
+      if (dir.toLowerCase() === hash) return join(projDir, dir)
     }
     return null
   }
 
+  _findTranscript(cliSessionId) {
+    const dir = this._projectDir()
+    if (!dir) return null
+    const exact = join(dir, cliSessionId + '.jsonl')
+    return existsSync(exact) ? exact : null
+  }
+
   /** Find the most recent transcript in the project directory (for new sessions without cliSessionId) */
   _findLatestTranscript() {
-    const home = process.env.HOME || process.env.USERPROFILE || '~'
-    const projDir = join(home, '.claude', 'projects')
-    if (!existsSync(projDir)) return null
-    const hash = (this.session.cwd || '').toLowerCase().replace(/:/g, '-').replace(/\\/g, '-').replace(/\s/g, '-').replace(/\/+/g, '-')
-    for (const dir of readdirSync(projDir)) {
-      if (dir.toLowerCase() === hash) {
-        const projectDir = join(projDir, dir)
-        let newest = null, newestMtime = 0
-        for (const f of readdirSync(projectDir)) {
-          if (!f.endsWith('.jsonl')) continue
-          try {
-            const full = join(projectDir, f)
-            const stat = require('fs').statSync(full)
-            if (stat.mtimeMs > newestMtime) { newestMtime = stat.mtimeMs; newest = full }
-          } catch {}
-        }
-        return newest
-      }
+    const dir = this._projectDir()
+    if (!dir) return null
+    let newest = null, newestMtime = 0
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue
+      try {
+        const full = join(dir, f)
+        const stat = statSync(full)
+        if (stat.mtimeMs > newestMtime) { newestMtime = stat.mtimeMs; newest = full }
+      } catch {}
     }
-    return null
+    return newest
   }
 
   _replayHistory() {
