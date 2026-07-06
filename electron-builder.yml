@@ -1,0 +1,30 @@
+appId: com.ucli.app
+productName: UCLI
+directories:
+  output: dist
+  buildResources: build
+# Skip native module rebuild — node-pty ships prebuilds for all platforms.
+# electron-rebuild tries to recompile via node-gyp which fails without Python
+# and breaks on paths with spaces.
+npmRebuild: false
+files:
+  - out/**/*
+  - resources/**/*
+  # sql.js (pure WASM — must be available at runtime for the main process)
+  - node_modules/sql.js/**
+  # node-pty (native module for terminal PTY support)
+  - node_modules/node-pty/**
+# Bundled PreToolUse hook runner (must be runnable via `node <path>` at runtime).
+extraResources:
+  - from: resources/
+    to: resources/
+win:
+  target:
+    - nsis
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  sign: false
+  forceCodeSigning: false
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false

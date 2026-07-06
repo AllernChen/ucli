@@ -1,0 +1,43 @@
+/**
+ * Thin typed wrapper over the preload bridge (`window.ucli`). All renderer
+ * access to the main process goes through here so the IPC surface stays in
+ * one place.
+ */
+const u = window.ucli
+
+export const ipc = {
+  // adapters
+  listAdapters: () => u.listAdapters(),
+  // dialog
+  pickDirectory: () => u.pickDirectory(),
+  scanClaudeSessions: (cwd) => u.scanClaudeSessions(cwd),
+  // sessions
+  createSession: (config) => u.createSession(config),
+  sendTurn: (sessionId, text) => u.sendTurn(sessionId, text),
+  respondApproval: (sessionId, requestId, verdict) => u.respondApproval(sessionId, requestId, verdict),
+  interruptSession: (sessionId) => u.interruptSession(sessionId),
+  sendTerminalInput: (sessionId, data) => u.sendTerminalInput(sessionId, data),
+  terminalResize: (sessionId, cols, rows) => u.terminalResize(sessionId, cols, rows),
+  attachTerminal: (sessionId) => u.attachTerminal(sessionId),
+  resumeSession: (sessionId, cliSessionId) => u.resumeSession(sessionId, cliSessionId),
+  stopSession: (sessionId) => u.stopSession(sessionId),
+  restartSession: (sessionId) => u.restartSession(sessionId),
+  deleteSession: (sessionId) => u.deleteSession(sessionId),
+  listSessions: () => u.listSessions(),
+  updateSessionNote: (sessionId, note) => u.updateSessionNote(sessionId, note),
+  updateSessionName: (sessionId, name) => u.updateSessionName(sessionId, name),
+  // rules
+  getRules: () => u.getRules(),
+  updateRules: (config) => u.updateRules(config),
+  getBlacklist: () => u.getBlacklist(),
+  testPattern: (payload) => u.testPattern(payload),
+  // stats
+  getStats: () => u.getStats(),
+  // settings
+  getSettings: () => u.getSettings(),
+  updateSettings: (s) => u.updateSettings(s),
+  // events
+  on: (channel, handler) => u.on(channel, handler)
+}
+
+export default ipc

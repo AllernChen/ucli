@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist/
+dist-packager/
+.codex-schema/
+.diag/
+*.log
+.DS_Store
+.vite/
+stats-diag.json
