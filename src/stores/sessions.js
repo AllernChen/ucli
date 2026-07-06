@@ -159,6 +159,10 @@ export const useSessionsStore = defineStore('sessions', {
     },
 
     _appendActivity(evt) {
+      // Don't log raw terminal data — it floods the activity list and
+      // pushes out structured events (message, tool_call) that TaskSummary needs.
+      // Terminal output goes directly to xterm.js via session:terminal-output.
+      if (evt.type === 'terminal' || evt.type === 'cli_raw') return
       const list = this.activities[evt.sessionId] || (this.activities[evt.sessionId] = [])
       list.push({ id: newActId(), ...evt })
       if (list.length > MAX_ACTIVITIES) list.splice(0, list.length - MAX_ACTIVITIES)
