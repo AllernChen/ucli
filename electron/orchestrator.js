@@ -275,31 +275,40 @@ export function createOrchestrator() {
 
 
   // ---- claude session index helpers ----
-  /** Scan ~/.claude/sessions/*.json for the session closest to `createdAt` in `cwd`. */
-  function findClaudeSessionIndex(cwd, nearTs) {
+  /** Shared: scan ~/.claude/sessions/*.json for sessions matching cwd.
+   *  Returns array of { sessionId, name, startedAt }. */
+  function listClaudeSessionsByCwd(cwd) {
     try {
       const home = process.env.HOME || process.env.USERPROFILE || '~'
       const sessionsDir = join(home, '.claude', 'sessions')
-      if (!existsSync(sessionsDir)) return null
+      if (!existsSync(sessionsDir)) return []
       const normCwd = (cwd || '').replace(/\\/g, '/').toLowerCase()
-      let best = null, bestDist = Infinity
+      const found = []
       for (const f of readdirSync(sessionsDir)) {
         if (!f.endsWith('.json')) continue
         try {
           const raw = JSON.parse(readFileSync(join(sessionsDir, f), 'utf8'))
           const rawCwd = (raw.cwd || '').replace(/\\/g, '/').toLowerCase()
-          if (rawCwd !== normCwd) continue
-          const dist = nearTs ? Math.abs((raw.startedAt || 0) - nearTs) : 0
-          if (dist < bestDist) {
-            bestDist = dist
-            best = raw
+          if (rawCwd === normCwd) {
+            found.push({ sessionId: raw.sessionId, name: raw.name, startedAt: raw.startedAt })
           }
-        } catch { /* skip */ }
+        } catch { /* skip corrupted files */ }
       }
-      if (best && bestDist < 120_000) return { sessionId: best.sessionId, name: best.name, startedAt: best.startedAt } // within 2 min
-      if (best) return { sessionId: best.sessionId, name: best.name, startedAt: best.startedAt } // no timestamp, take newest
-      return null
-    } catch { return null }
+      return found
+    } catch { return [] }
+  }
+
+  /** Find the session closest to `createdAt` in `cwd`. */
+  function findClaudeSessionIndex(cwd, nearTs) {
+    const found = listClaudeSessionsByCwd(cwd)
+    if (!found.length) return null
+    if (!nearTs) return found[0]
+    let best = null, bestDist = Infinity
+    for (const s of found) {
+      const dist = Math.abs((s.startedAt || 0) - nearTs)
+      if (dist < bestDist) { bestDist = dist; best = s }
+    }
+    return best
   }
 
   function listSessions() {
@@ -355,34 +364,16 @@ export function createOrchestrator() {
 
     // Scan the user's claude sessions dir for sessions matching `cwd`.
     ipcMain.handle('session:scan-claude', (_e, cwd) => {
-      try {
-        const home = process.env.HOME || process.env.USERPROFILE || '~'
-        const sessionsDir = join(home, '.claude', 'sessions')
-        if (!existsSync(sessionsDir)) return []
-        const normCwd = (cwd || '').replace(/\\/g, '/').toLowerCase()
-        // Collect already-imported claude session IDs to exclude
-        const imported = new Set()
-        for (const e of sessions.values()) {
-          if (e.session.cliSessionId) imported.add(e.session.cliSessionId)
-        }
-        const found = []
-        for (const f of readdirSync(sessionsDir)) {
-          if (!f.endsWith('.json')) continue
-          try {
-            const raw = JSON.parse(readFileSync(join(sessionsDir, f), 'utf8'))
-            const rawCwd = (raw.cwd || '').replace(/\\/g, '/').toLowerCase()
-            if (rawCwd === normCwd && !imported.has(raw.sessionId)) {
-              found.push({
-                sessionId: raw.sessionId || null,
-                name: raw.name || null,
-                startedAt: raw.startedAt || null
-              })
-            }
-          } catch { /* skip corrupted files */ }
-        }
-        found.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
-        return found.slice(0, 30) // show at most 30
-      } catch { return [] }
+      const found = listClaudeSessionsByCwd(cwd)
+      // Exclude already-imported sessions
+      const imported = new Set()
+      for (const e of sessions.values()) {
+        if (e.session.cliSessionId) imported.add(e.session.cliSessionId)
+      }
+      return found
+        .filter(s => !imported.has(s.sessionId))
+        .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
+        .slice(0, 30)
     })
 
     ipcMain.handle('session:create', (_e, config) => {
