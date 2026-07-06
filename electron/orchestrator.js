@@ -1,6 +1,6 @@
 import { app, ipcMain, dialog } from 'electron'
 import { join } from 'path'
-import { readFileSync, readdirSync, existsSync, unlinkSync, writeFileSync } from 'fs'
+import { readFileSync, readdirSync, existsSync, unlinkSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { PermissionEngine } from './permission/engine.js'
 import { startHookServer } from './permission/hookServer.js'
@@ -151,8 +151,8 @@ export function createOrchestrator() {
       const key = d.asked
         ? (d.verdict === 'allow' ? 'confirmed' : 'denied')
         : (d.verdict === 'allow' ? 'autoAllowed' : 'denied')
-      const dirty = s._dirtyStats || (s._dirtyStats = { inputTokens: 0, outputTokens: 0, costUsd: 0, turnsDelta: 0, autoAllowed: 0, confirmed: 0, denied: 0 })
-      dirty[key] = (dirty[key] || 0) + 1
+      s.stats.approvals[key] = (s.stats.approvals[key] || 0) + 1
+      scheduleFlush()
     }
   })
 
@@ -275,31 +275,40 @@ export function createOrchestrator() {
 
 
   // ---- claude session index helpers ----
-  /** Scan ~/.claude/sessions/*.json for the session closest to `createdAt` in `cwd`. */
-  function findClaudeSessionIndex(cwd, nearTs) {
+  /** Shared: scan ~/.claude/sessions/*.json for sessions matching cwd.
+   *  Returns array of { sessionId, name, startedAt }. */
+  function listClaudeSessionsByCwd(cwd) {
     try {
       const home = process.env.HOME || process.env.USERPROFILE || '~'
       const sessionsDir = join(home, '.claude', 'sessions')
-      if (!existsSync(sessionsDir)) return null
+      if (!existsSync(sessionsDir)) return []
       const normCwd = (cwd || '').replace(/\\/g, '/').toLowerCase()
-      let best = null, bestDist = Infinity
+      const found = []
       for (const f of readdirSync(sessionsDir)) {
         if (!f.endsWith('.json')) continue
         try {
           const raw = JSON.parse(readFileSync(join(sessionsDir, f), 'utf8'))
           const rawCwd = (raw.cwd || '').replace(/\\/g, '/').toLowerCase()
-          if (rawCwd !== normCwd) continue
-          const dist = nearTs ? Math.abs((raw.startedAt || 0) - nearTs) : 0
-          if (dist < bestDist) {
-            bestDist = dist
-            best = raw
+          if (rawCwd === normCwd) {
+            found.push({ sessionId: raw.sessionId, name: raw.name, startedAt: raw.startedAt })
           }
-        } catch { /* skip */ }
+        } catch { /* skip corrupted files */ }
       }
-      if (best && bestDist < 120_000) return { sessionId: best.sessionId, name: best.name, startedAt: best.startedAt } // within 2 min
-      if (best) return { sessionId: best.sessionId, name: best.name, startedAt: best.startedAt } // no timestamp, take newest
-      return null
-    } catch { return null }
+      return found
+    } catch { return [] }
+  }
+
+  /** Find the session closest to `createdAt` in `cwd`. */
+  function findClaudeSessionIndex(cwd, nearTs) {
+    const found = listClaudeSessionsByCwd(cwd)
+    if (!found.length) return null
+    if (!nearTs) return found[0]
+    let best = null, bestDist = Infinity
+    for (const s of found) {
+      const dist = Math.abs((s.startedAt || 0) - nearTs)
+      if (dist < bestDist) { bestDist = dist; best = s }
+    }
+    return best
   }
 
   function listSessions() {
@@ -355,46 +364,32 @@ export function createOrchestrator() {
 
     // Scan the user's claude sessions dir for sessions matching `cwd`.
     ipcMain.handle('session:scan-claude', (_e, cwd) => {
-      try {
-        const home = process.env.HOME || process.env.USERPROFILE || '~'
-        const sessionsDir = join(home, '.claude', 'sessions')
-        if (!existsSync(sessionsDir)) return []
-        const normCwd = (cwd || '').replace(/\\/g, '/').toLowerCase()
-        // Collect already-imported claude session IDs to exclude
-        const imported = new Set()
-        for (const e of sessions.values()) {
-          if (e.session.cliSessionId) imported.add(e.session.cliSessionId)
-        }
-        const found = []
-        for (const f of readdirSync(sessionsDir)) {
-          if (!f.endsWith('.json')) continue
-          try {
-            const raw = JSON.parse(readFileSync(join(sessionsDir, f), 'utf8'))
-            const rawCwd = (raw.cwd || '').replace(/\\/g, '/').toLowerCase()
-            if (rawCwd === normCwd && !imported.has(raw.sessionId)) {
-              found.push({
-                sessionId: raw.sessionId || null,
-                name: raw.name || null,
-                startedAt: raw.startedAt || null
-              })
-            }
-          } catch { /* skip corrupted files */ }
-        }
-        found.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
-        return found.slice(0, 30) // show at most 30
-      } catch { return [] }
+      const found = listClaudeSessionsByCwd(cwd)
+      // Exclude already-imported sessions
+      const imported = new Set()
+      for (const e of sessions.values()) {
+        if (e.session.cliSessionId) imported.add(e.session.cliSessionId)
+      }
+      return found
+        .filter(s => !imported.has(s.sessionId))
+        .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
+        .slice(0, 30)
     })
 
     ipcMain.handle('session:create', (_e, config) => {
       const { sessionId } = createSession(config)
-      hookReady.then(() => {
-        const e = sessions.get(sessionId)
-        if (e && e.adapter) {
-          e.adapter.hookPort = hookPort
-          return e.adapter.start()
-        }
-      })
       return { sessionId }
+    })
+
+    // Renderer calls this after it has registered the terminal-output listener
+    ipcMain.handle('session:start-adapter', (_e, sessionId) => {
+      const e = sessions.get(sessionId)
+      if (!e || !e.adapter) return false
+      hookReady.then(() => {
+        e.adapter.hookPort = hookPort
+        return e.adapter.start()
+      })
+      return true
     })
     ipcMain.handle('session:send-turn', (_e, sessionId, text) => {
       const e = sessions.get(sessionId)
@@ -486,20 +481,27 @@ export function createOrchestrator() {
     ipcMain.handle('stats:get', () => {
       const perSession = {}
       let total = { input: 0, output: 0, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } }
-      const diag = []
+      const db = getDb()
       for (const [id, e] of sessions) {
         const row = { adapterId: e.session.adapterId, model: e.session.model, cwd: e.session.cwd, status: e.status, ...e.stats }
         perSession[id] = row
-        diag.push({ id: id.slice(0,8), tokens: e.stats.tokens, turns: e.stats.turns, cost: e.stats.costUsd })
         total.input += e.stats.tokens.input
         total.output += e.stats.tokens.output
         total.costUsd += e.stats.costUsd
         total.turns += e.stats.turns
         for (const k of Object.keys(total.approvals)) total.approvals[k] += e.stats.approvals[k] || 0
+        // Persist approval stats to DB
+        if (db) {
+          db.upsertStats(id, {
+            inputTokens: 0, outputTokens: 0, costUsd: 0, turnsDelta: 0,
+            autoAllowed: e.stats.approvals.autoAllowed,
+            confirmed: e.stats.approvals.confirmed,
+            denied: e.stats.approvals.denied
+          })
+        }
       }
-      // Write diag so we can see what stats:get actually returns
-      const result = { total, perSession, modelStats: getDb()?.getModelStats() || [] }
-      try { writeFileSync(join(app.getPath('userData'), 'stats-diag.json'), JSON.stringify({ diag, total: result.total, keys: Object.keys(result.perSession).length, json: JSON.stringify(result).slice(0, 200) }, null, 2)) } catch {}
+      if (db) scheduleFlush()
+      const result = { total, perSession, modelStats: db?.getModelStats() || [] }
       return result
     })
 

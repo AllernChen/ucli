@@ -13,6 +13,7 @@ export const ipc = {
   scanClaudeSessions: (cwd) => u.scanClaudeSessions(cwd),
   // sessions
   createSession: (config) => u.createSession(config),
+  startAdapter: (sessionId) => u.startAdapter(sessionId),
   sendTurn: (sessionId, text) => u.sendTurn(sessionId, text),
   respondApproval: (sessionId, requestId, verdict) => u.respondApproval(sessionId, requestId, verdict),
   interruptSession: (sessionId) => u.interruptSession(sessionId),

@@ -22,6 +22,7 @@ const api = {
 
   // ---- session lifecycle ----
   createSession: (config) => ipcRenderer.invoke('session:create', config),
+  startAdapter: (sessionId) => ipcRenderer.invoke('session:start-adapter', sessionId),
   sendTurn: (sessionId, text) => ipcRenderer.invoke('session:send-turn', sessionId, text),
   respondApproval: (sessionId, requestId, decision) =>
     ipcRenderer.invoke('session:respond-approval', sessionId, requestId, decision),

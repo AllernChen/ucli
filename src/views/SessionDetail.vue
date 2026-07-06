@@ -143,6 +143,12 @@ onMounted(async () => {
     }
   })
 
+  // Now that the terminal-output listener is registered, start the adapter.
+  // This ensures replayed history events are caught.
+  if (session.value?.status === 'starting' || session.value?.status === 'idle') {
+    ipc.startAdapter(id.value)
+  }
+
   // Auto-restart offline sessions
   if (session.value?.status === 'offline') {
     restartSession()

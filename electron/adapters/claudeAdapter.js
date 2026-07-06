@@ -1,5 +1,5 @@
 import { spawn } from 'child_process'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from 'fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createRequire } from 'module'
@@ -53,42 +53,39 @@ export class ClaudeAdapter extends BaseAdapter {
     this._lastStatsTokens = { input: 0, output: 0 }
   }
 
-  _findTranscript(cliSessionId) {
+  /** Shared: return the matched ~/.claude/projects/<hash> directory, or null. */
+  _projectDir() {
     const home = process.env.HOME || process.env.USERPROFILE || '~'
     const projDir = join(home, '.claude', 'projects')
     if (!existsSync(projDir)) return null
     const hash = (this.session.cwd || '').toLowerCase().replace(/:/g, '-').replace(/\\/g, '-').replace(/\s/g, '-').replace(/\/+/g, '-')
     for (const dir of readdirSync(projDir)) {
-      if (dir.toLowerCase() === hash) {
-        const exact = join(projDir, dir, cliSessionId + '.jsonl')
-        if (existsSync(exact)) return exact
-      }
+      if (dir.toLowerCase() === hash) return join(projDir, dir)
     }
     return null
   }
 
+  _findTranscript(cliSessionId) {
+    const dir = this._projectDir()
+    if (!dir) return null
+    const exact = join(dir, cliSessionId + '.jsonl')
+    return existsSync(exact) ? exact : null
+  }
+
   /** Find the most recent transcript in the project directory (for new sessions without cliSessionId) */
   _findLatestTranscript() {
-    const home = process.env.HOME || process.env.USERPROFILE || '~'
-    const projDir = join(home, '.claude', 'projects')
-    if (!existsSync(projDir)) return null
-    const hash = (this.session.cwd || '').toLowerCase().replace(/:/g, '-').replace(/\\/g, '-').replace(/\s/g, '-').replace(/\/+/g, '-')
-    for (const dir of readdirSync(projDir)) {
-      if (dir.toLowerCase() === hash) {
-        const projectDir = join(projDir, dir)
-        let newest = null, newestMtime = 0
-        for (const f of readdirSync(projectDir)) {
-          if (!f.endsWith('.jsonl')) continue
-          try {
-            const full = join(projectDir, f)
-            const stat = require('fs').statSync(full)
-            if (stat.mtimeMs > newestMtime) { newestMtime = stat.mtimeMs; newest = full }
-          } catch {}
-        }
-        return newest
-      }
+    const dir = this._projectDir()
+    if (!dir) return null
+    let newest = null, newestMtime = 0
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue
+      try {
+        const full = join(dir, f)
+        const stat = statSync(full)
+        if (stat.mtimeMs > newestMtime) { newestMtime = stat.mtimeMs; newest = full }
+      } catch {}
     }
-    return null
+    return newest
   }
 
   _replayHistory() {
@@ -245,6 +242,7 @@ export class ClaudeAdapter extends BaseAdapter {
   }
 
   async start() {
+    this._disposed = false
     if (!pty) {
       this._write('\x1b[31mnode-pty 未加载，无法启动终端模式\x1b[0m\r\n')
       this.emitEvent({ type: 'error', message: 'node-pty not available' })
@@ -275,10 +273,12 @@ export class ClaudeAdapter extends BaseAdapter {
 
     try {
       // node-pty needs a real executable. `claude` on Windows is a .ps1 shim,
-      // so we spawn it through powershell which resolves the PATH correctly.
+      // so we spawn it through powershell. We must single-quote each arg
+      // because PowerShell's -Command joins all args into one string and
+      // re-parses — bare paths with spaces (e.g. "John Doe") get split.
       const shell = process.platform === 'win32' ? 'powershell.exe' : 'claude'
       const shellArgs = process.platform === 'win32'
-        ? ['-NoProfile', '-Command', 'claude', ...args]
+        ? ['-NoProfile', '-Command', '& claude ' + args.map(a => `'${a.replace(/'/g, "''")}'`).join(' ')]
         : args
 
       this.ptyProc = pty.spawn(shell, shellArgs, {
@@ -334,6 +334,7 @@ export class ClaudeAdapter extends BaseAdapter {
 
   async dispose() {
     this._disposed = true
+    if (this._statsTimer) { clearTimeout(this._statsTimer); this._statsTimer = null }
     if (this.ptyProc) {
       try { this.ptyProc.kill() } catch {}
       this.ptyProc = null
