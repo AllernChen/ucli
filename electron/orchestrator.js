@@ -1,6 +1,6 @@
 import { app, ipcMain, dialog } from 'electron'
 import { join } from 'path'
-import { readFileSync, readdirSync, existsSync, unlinkSync, writeFileSync } from 'fs'
+import { readFileSync, readdirSync, existsSync, unlinkSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { PermissionEngine } from './permission/engine.js'
 import { startHookServer } from './permission/hookServer.js'
@@ -151,8 +151,8 @@ export function createOrchestrator() {
       const key = d.asked
         ? (d.verdict === 'allow' ? 'confirmed' : 'denied')
         : (d.verdict === 'allow' ? 'autoAllowed' : 'denied')
-      const dirty = s._dirtyStats || (s._dirtyStats = { inputTokens: 0, outputTokens: 0, costUsd: 0, turnsDelta: 0, autoAllowed: 0, confirmed: 0, denied: 0 })
-      dirty[key] = (dirty[key] || 0) + 1
+      s.stats.approvals[key] = (s.stats.approvals[key] || 0) + 1
+      scheduleFlush()
     }
   })
 
@@ -490,20 +490,27 @@ export function createOrchestrator() {
     ipcMain.handle('stats:get', () => {
       const perSession = {}
       let total = { input: 0, output: 0, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } }
-      const diag = []
+      const db = getDb()
       for (const [id, e] of sessions) {
         const row = { adapterId: e.session.adapterId, model: e.session.model, cwd: e.session.cwd, status: e.status, ...e.stats }
         perSession[id] = row
-        diag.push({ id: id.slice(0,8), tokens: e.stats.tokens, turns: e.stats.turns, cost: e.stats.costUsd })
         total.input += e.stats.tokens.input
         total.output += e.stats.tokens.output
         total.costUsd += e.stats.costUsd
         total.turns += e.stats.turns
         for (const k of Object.keys(total.approvals)) total.approvals[k] += e.stats.approvals[k] || 0
+        // Persist approval stats to DB
+        if (db) {
+          db.upsertStats(id, {
+            inputTokens: 0, outputTokens: 0, costUsd: 0, turnsDelta: 0,
+            autoAllowed: e.stats.approvals.autoAllowed,
+            confirmed: e.stats.approvals.confirmed,
+            denied: e.stats.approvals.denied
+          })
+        }
       }
-      // Write diag so we can see what stats:get actually returns
-      const result = { total, perSession, modelStats: getDb()?.getModelStats() || [] }
-      try { writeFileSync(join(app.getPath('userData'), 'stats-diag.json'), JSON.stringify({ diag, total: result.total, keys: Object.keys(result.perSession).length, json: JSON.stringify(result).slice(0, 200) }, null, 2)) } catch {}
+      if (db) scheduleFlush()
+      const result = { total, perSession, modelStats: db?.getModelStats() || [] }
       return result
     })
 
