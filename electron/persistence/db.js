@@ -183,18 +183,20 @@ class Db {
 
   // ---- session stats ----
   upsertStats(sessionId, stats) {
-    // Accumulate into the summary — each call ADDS the delta.
+    // Callers pass CUMULATIVE values (e.stats from transcript extraction,
+    // approval counts from onDecision), not deltas. Use absolute-value
+    // semantics to avoid double-counting on repeated calls.
     this.sql.run(
       `INSERT INTO session_stats (session_id, input_tokens, output_tokens, cost_usd, turns_count, auto_allowed, confirmed, denied)
        VALUES (?,?,?,?,?,?,?,?)
        ON CONFLICT(session_id) DO UPDATE SET
-         input_tokens  = input_tokens  + excluded.input_tokens,
-         output_tokens = output_tokens + excluded.output_tokens,
+         input_tokens  = excluded.input_tokens,
+         output_tokens = excluded.output_tokens,
          cost_usd      = max(cost_usd, excluded.cost_usd),
-         turns_count   = turns_count   + excluded.turns_count,
-         auto_allowed  = auto_allowed  + excluded.auto_allowed,
-         confirmed     = confirmed     + excluded.confirmed,
-         denied        = denied        + excluded.denied`,
+         turns_count   = excluded.turns_count,
+         auto_allowed  = excluded.auto_allowed,
+         confirmed     = excluded.confirmed,
+         denied        = excluded.denied`,
       [sessionId, stats.inputTokens || 0, stats.outputTokens || 0, stats.costUsd || 0,
        stats.turnsDelta || 0, stats.autoAllowed || 0, stats.confirmed || 0, stats.denied || 0]
     )
@@ -202,12 +204,15 @@ class Db {
 
   // ---- per-model stats ----
   upsertModelStats(sessionId, model, stats) {
+    // Caller (_extractStats) passes CUMULATIVE totals from the full transcript,
+    // not deltas. Use absolute-value semantics to avoid double-counting on
+    // repeated extractions.
     this.sql.run(
       `INSERT INTO model_stats (session_id, model, input_tokens, output_tokens, cost_usd)
        VALUES (?,?,?,?,?)
        ON CONFLICT(session_id, model) DO UPDATE SET
-         input_tokens  = input_tokens  + excluded.input_tokens,
-         output_tokens = output_tokens + excluded.output_tokens,
+         input_tokens  = excluded.input_tokens,
+         output_tokens = excluded.output_tokens,
          cost_usd      = MAX(cost_usd, excluded.cost_usd)`,
       [sessionId, model, stats.inputTokens || 0, stats.outputTokens || 0, stats.costUsd || 0]
     )

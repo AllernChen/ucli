@@ -490,10 +490,14 @@ export function createOrchestrator() {
         total.costUsd += e.stats.costUsd
         total.turns += e.stats.turns
         for (const k of Object.keys(total.approvals)) total.approvals[k] += e.stats.approvals[k] || 0
-        // Persist approval stats to DB
+        // Persist full stats (tokens + approvals) to DB — upsertStats uses
+        // absolute-value semantics, so pass the cumulative totals.
         if (db) {
           db.upsertStats(id, {
-            inputTokens: 0, outputTokens: 0, costUsd: 0, turnsDelta: 0,
+            inputTokens: e.stats.tokens.input,
+            outputTokens: e.stats.tokens.output,
+            costUsd: e.stats.costUsd,
+            turnsDelta: e.stats.turns,
             autoAllowed: e.stats.approvals.autoAllowed,
             confirmed: e.stats.approvals.confirmed,
             denied: e.stats.approvals.denied
