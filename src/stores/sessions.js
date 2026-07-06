@@ -68,6 +68,10 @@ export const useSessionsStore = defineStore('sessions', {
       this.sessions.push(summary)
       this.activities[sessionId] = []
       this.pendingApprovals[sessionId] = []
+      // Start the adapter AFTER the store is ready — the renderer's
+      // terminal-output listener (registered in SessionDetail onMounted)
+      // will catch the replayed history.
+      ipc.startAdapter(sessionId)
       return sessionId
     },
 
