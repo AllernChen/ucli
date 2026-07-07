@@ -117,6 +117,38 @@ function initTerminal() {
     window.ucli.sendTerminalInput(id.value, data)
   })
 
+  // Custom keyboard handler for copy/paste
+  term.attachCustomKeyEventHandler((e) => {
+    // Ctrl+Shift+C / Ctrl+Insert → copy
+    if ((e.ctrlKey && e.shiftKey && e.key === 'C') || (e.ctrlKey && e.key === 'Insert')) {
+      const sel = term.getSelection()
+      if (sel) { navigator.clipboard.writeText(sel).catch(() => {}) }
+      return false
+    }
+    // Ctrl+Shift+V / Ctrl+Insert → paste
+    if ((e.ctrlKey && e.shiftKey && e.key === 'V') || (e.ctrlKey && e.key === 'Insert' && e.shiftKey)) {
+      navigator.clipboard.readText().then(t => { if (t) window.ucli.sendTerminalInput(id.value, t) }).catch(() => {})
+      return false
+    }
+    // Ctrl+C with selection → copy; without selection → forward to PTY
+    if (e.ctrlKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) {
+      const sel = term.getSelection()
+      if (sel) {
+        navigator.clipboard.writeText(sel).catch(() => {})
+        term.clearSelection()
+        return false
+      }
+      // No selection: forward Ctrl+C to PTY as interrupt signal
+      return true
+    }
+    // Ctrl+V without selection → paste
+    if (e.ctrlKey && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
+      navigator.clipboard.readText().then(t => { if (t) window.ucli.sendTerminalInput(id.value, t) }).catch(() => {})
+      return false
+    }
+    return true
+  })
+
   // Resize sync
   resizeObserver = new ResizeObserver(() => {
     if (fitAddon) { fitAddon.fit(); syncSize() }
@@ -168,11 +200,12 @@ watch(() => route.params.id, () => {
 })
 
 function onContextMenu(e) {
-  // Allow right-click paste in terminal
-  const text = window.clipboardData?.getData('text') || ''
-  if (text && term) {
-    window.ucli.sendTerminalInput(id.value, text)
-  }
+  // Right-click: paste from clipboard into terminal
+  navigator.clipboard.readText().then(text => {
+    if (text && term) {
+      window.ucli.sendTerminalInput(id.value, text)
+    }
+  }).catch(() => {})
 }
 
 async function interrupt() {
