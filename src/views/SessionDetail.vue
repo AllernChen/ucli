@@ -57,6 +57,7 @@
               ↑{{ fmtNum(s.stats.tokens.input) }} ↓{{ fmtNum(s.stats.tokens.output) }}
               <span v-if="s.stats.turns"> {{ s.stats.turns }}轮</span>
             </div>
+            <div class="item-note" v-if="s.taskNote" :title="s.taskNote">📝 {{ s.taskNote.slice(0,30) }}{{ s.taskNote.length > 30 ? '…' : '' }}</div>
             <div class="item-activity">{{ s.lastActivity || '—' }}</div>
           </div>
           <a-empty v-if="!filteredSessions.length" description="无匹配会话" :imageStyle="{height:36}" />
@@ -80,26 +81,37 @@
             </span>
             <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
             <a-space size="small">
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="interruptPane(i)" title="中断">
-                ⏹
-              </a-button>
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="clearPane(i)" title="清空">
-                ✕
-              </a-button>
+              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="openNote(i)" title="备注">📝</a-button>
+              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="interruptPane(i)" title="中断">⏹</a-button>
+              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="clearPane(i)" title="清空">✕</a-button>
             </a-space>
+          </div>
+          <!-- Pane info bar -->
+          <div v-if="pane.sessionId" class="pane-info">
+            <span class="pi-item">🔹 {{ sessions.byId(pane.sessionId)?.model || '—' }}</span>
+            <span class="pi-item">↑{{ fmtNum(sessions.byId(pane.sessionId)?.stats?.tokens?.input) }}</span>
+            <span class="pi-item">↓{{ fmtNum(sessions.byId(pane.sessionId)?.stats?.tokens?.output) }}</span>
+            <span class="pi-item" v-if="sessions.byId(pane.sessionId)?.stats?.costUsd">${{ sessions.byId(pane.sessionId).stats.costUsd.toFixed(4) }}</span>
+            <span class="pi-item">{{ sessions.byId(pane.sessionId)?.stats?.turns || 0 }} 轮</span>
+            <span class="pi-item sid">{{ sessions.byId(pane.sessionId)?.id?.slice(0,8) }}</span>
           </div>
           <!-- Terminal container -->
           <div :ref="el => setPaneRef(i, el)" class="pane-terminal"></div>
         </div>
       </div>
     </div>
+
+    <!-- Task note modal -->
+    <a-modal v-model:open="noteVisible" title="会话备注" @ok="saveNote" okText="保存" cancelText="取消">
+      <a-textarea v-model:value="noteDraft" :rows="6" placeholder="标记进度、下一步计划…" />
+    </a-modal>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import { ArrowLeftOutlined } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { ipc } from '../ipc.js'
@@ -285,6 +297,22 @@ function interruptPane(i) {
   if (sid) sessions.interrupt(sid)
 }
 
+let noteVisible = ref(false)
+let noteSessionId = ref(null)
+let noteDraft = ref('')
+function openNote(i) {
+  const sid = panes.value[i]?.sessionId
+  if (!sid) return
+  noteSessionId.value = sid
+  noteDraft.value = sessions.byId(sid)?.taskNote || ''
+  noteVisible.value = true
+}
+async function saveNote() {
+  if (!noteSessionId.value) return
+  await sessions.updateNote(noteSessionId.value, noteDraft.value.trim())
+  noteVisible.value = false
+}
+
 // --- Terminal output routing ---
 function subscribePaneTerminal(i, sessionId) {
   unsubscribePane(i)
@@ -380,6 +408,12 @@ onBeforeUnmount(() => {
 .pane-session { font-size: 12px; font-weight: 500; display: flex; align-items: center; gap: 4px; }
 .pane-session.empty { color: #bfbfbf; }
 
+.pane-info {
+  display: flex; gap: 10px; padding: 2px 8px; background: #fff; font-size: 11px;
+  border-bottom: 1px solid #f0f0f0; flex-shrink: 0; color: #595959; flex-wrap: wrap;
+}
+.pi-item { white-space: nowrap; }
+.pi-item.sid { font-family: monospace; color: #bfbfbf; font-size: 10px; }
 .pane-terminal { flex: 1; min-height: 0; padding: 4px; background: #0b1021; }
 .pane-terminal :deep(.xterm) { height: 100%; }
 </style>
