@@ -1,0 +1,56 @@
+﻿=== commits ===
+0a9e2db fix: reset _disposed in start() and clear _statsTimer in dispose()
+
+=== stat ===
+ electron/adapters/claudeAdapter.js | 2 ++
+ 1 file changed, 2 insertions(+)
+
+=== full diff ===
+diff --git a/electron/adapters/claudeAdapter.js b/electron/adapters/claudeAdapter.js
+index fc39882..deb174d 100644
+--- a/electron/adapters/claudeAdapter.js
++++ b/electron/adapters/claudeAdapter.js
+@@ -238,20 +238,21 @@ export class ClaudeAdapter extends BaseAdapter {
+         if (u.output_tokens) parts.push(`out:${u.output_tokens.toLocaleString()}`)
+         if (obj.total_cost_usd) parts.push(`$${obj.total_cost_usd.toFixed(4)}`)
+         if (parts.length) this._write(`\x1b[90m${parts.join(' | ')}\x1b[0m\r\n`)
+         this._write('\r\n')
+         break
+       }
+     }
+   }
+ 
+   async start() {
++    this._disposed = false
+     if (!pty) {
+       this._write('\x1b[31mnode-pty 未加载，无法启动终端模式\x1b[0m\r\n')
+       this.emitEvent({ type: 'error', message: 'node-pty not available' })
+       return
+     }
+ 
+     // Replay history before starting
+     this._replayHistory()
+ 
+     this._settingsDir = mkdtempSync(join(tmpdir(), 'ucli-claude-'))
+@@ -327,20 +328,21 @@ export class ClaudeAdapter extends BaseAdapter {
+   }
+ 
+   async resume(cliSessionId) {
+     await this.dispose()
+     this.session.cliSessionId = cliSessionId
+     await this.start()
+   }
+ 
+   async dispose() {
+     this._disposed = true
++    if (this._statsTimer) { clearTimeout(this._statsTimer); this._statsTimer = null }
+     if (this.ptyProc) {
+       try { this.ptyProc.kill() } catch {}
+       this.ptyProc = null
+     }
+     if (this._settingsDir) {
+       rmSync(this._settingsDir, { recursive: true, force: true })
+       this._settingsDir = null
+     }
+     super.dispose()
+   }
