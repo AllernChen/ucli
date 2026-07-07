@@ -195,6 +195,9 @@ export class ClaudeAdapter extends BaseAdapter {
   }
 
   _formatEvent(obj) {
+    // Skip internal/system noise from the transcript
+    if (!obj.type || obj.type === 'queue-operation' || obj.type === 'last-prompt') return
+    if (obj.type === 'system' && obj.subtype !== 'init') return
     switch (obj.type) {
       case 'user': {
         for (const b of obj.message?.content || []) {
