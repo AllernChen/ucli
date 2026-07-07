@@ -15,7 +15,8 @@ export const useSessionsStore = defineStore('sessions', {
     adapters: [],
     sessions: [], // summary cards: {id, adapterId, displayName, icon, cwd, model, tier, status, stats, cliSessionId, lastActivity, lastActivityTs, taskNote, contextWindow, maxOutputTokens}
     activities: {}, // sessionId -> [activityItem]
-    pendingApprovals: {} // sessionId -> [approvalReq]
+    pendingApprovals: {}, // sessionId -> [approvalReq]
+    pendingAssign: null // sessionId to auto-assign on SessionDetail load
   }),
 
   getters: {

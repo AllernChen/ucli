@@ -7,7 +7,7 @@ import Settings from './views/Settings.vue'
 
 const routes = [
   { path: '/', name: 'workbench', component: Workbench },
-  { path: '/session/:id', name: 'session', component: SessionDetail, props: true },
+  { path: '/session', name: 'session', component: SessionDetail },
   { path: '/stats', name: 'stats', component: Stats },
   { path: '/rules', name: 'rules', component: Rules },
   { path: '/settings', name: 'settings', component: Settings }

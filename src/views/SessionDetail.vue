@@ -1,245 +1,385 @@
 <template>
   <div class="detail">
+    <!-- Header -->
     <div class="detail-header">
       <a-button size="small" @click="$router.push('/')"><ArrowLeftOutlined /> 返回</a-button>
-      <span class="title">{{ session?.icon }} {{ session?.displayName }}</span>
-      <span class="cwd" :title="session?.cwd">{{ session?.cwd }}</span>
-      <span :class="['status-badge', statusCls]">{{ statusText }}</span>
-      <a-tag :color="tierColor">{{ tierLabel }}</a-tag>
+      <span class="title">🖥️ 会话工作台</span>
       <span class="spacer"></span>
       <a-space size="small">
-        <template v-if="isOffline">
-          <a-button type="primary" size="small" @click="restartSession">重新启动</a-button>
-          <a-popconfirm title="永久删除该会话？" @confirm="deleteSession"><a-button size="small" danger>删除</a-button></a-popconfirm>
-        </template>
-        <template v-else>
-          <a-button size="small" @click="interrupt">中断</a-button>
-          <a-popconfirm title="停止并离线保存？" @confirm="stop"><a-button size="small">停止</a-button></a-popconfirm>
-        </template>
+        <a-radio-group v-model:value="splitCount" size="small" button-style="solid">
+          <a-radio-button :value="1">1</a-radio-button>
+          <a-radio-button :value="2">2</a-radio-button>
+          <a-radio-button :value="4">4</a-radio-button>
+        </a-radio-group>
       </a-space>
     </div>
 
-    <div v-if="session" class="info-bar">
-      <a-space size="middle" wrap>
-        <span class="info-kv"><b>模型</b> {{ session.model || '—' }}</span>
-        <span class="info-kv"><b>↑</b> {{ fmtNum(session.stats.tokens.input) }}</span>
-        <span class="info-kv"><b>↓</b> {{ fmtNum(session.stats.tokens.output) }}</span>
-        <span v-if="session.stats.costUsd" class="info-kv"><b>$</b> {{ session.stats.costUsd.toFixed(4) }}</span>
-        <span class="info-kv"><b>{{ session.stats.turns }}</b> 轮</span>
-      </a-space>
-    </div>
-
-    <a-alert v-if="!session" type="info" message="会话不存在或已停止" />
-
-    <div v-else class="detail-body">
-      <TaskSummary :activities="activities" />
-      <div class="task-note">
-        <a-collapse :bordered="false" size="small">
-          <a-collapse-panel key="note" header="📝 手动备注">
-            <a-input v-model:value="noteDraft" placeholder="标记进度、下一步计划…（可选）" size="small" @blur="saveNote" />
-          </a-collapse-panel>
-        </a-collapse>
+    <div class="detail-layout">
+      <!-- Left sidebar: session list -->
+      <div class="sidebar">
+        <div class="sidebar-toolbar">
+          <a-input-search
+            v-model:value="filter.search"
+            placeholder="搜索 ID / 备注…"
+            size="small"
+            allowClear
+          />
+          <a-select
+            v-model:value="filter.status"
+            size="small"
+            mode="multiple"
+            placeholder="状态"
+            style="width: 100%"
+            allowClear
+          >
+            <a-select-option value="idle">空闲</a-select-option>
+            <a-select-option value="running">运行中</a-select-option>
+            <a-select-option value="waiting">待确认</a-select-option>
+            <a-select-option value="offline">已离线</a-select-option>
+            <a-select-option value="exited">已退出</a-select-option>
+          </a-select>
+        </div>
+        <div class="session-list">
+          <div
+            v-for="s in filteredSessions"
+            :key="s.id"
+            :class="['session-item', activePane !== null && panes[activePane]?.sessionId === s.id ? 'assigned' : '']"
+            @click="assignToPane(s.id)"
+            @dblclick="openInNewPane(s.id)"
+          >
+            <div class="item-head">
+              <span class="item-icon">{{ s.icon }}</span>
+              <span class="item-name">{{ s.displayName?.slice(0,20) || s.adapterId }}</span>
+              <span :class="['status-dot', s.status]"></span>
+            </div>
+            <div class="item-id">{{ s.id.slice(0,8) }}</div>
+            <div class="item-stats" v-if="s.stats">
+              ↑{{ fmtNum(s.stats.tokens.input) }} ↓{{ fmtNum(s.stats.tokens.output) }}
+              <span v-if="s.stats.turns"> {{ s.stats.turns }}轮</span>
+            </div>
+            <div class="item-activity">{{ s.lastActivity || '—' }}</div>
+          </div>
+          <a-empty v-if="!filteredSessions.length" description="无匹配会话" :imageStyle="{height:36}" />
+        </div>
       </div>
-      <!-- Terminal — full interactive mode, user types directly -->
-      <div ref="terminalEl" class="terminal-container" @contextmenu.prevent="onContextMenu"></div>
-      <ApprovalPanel :session-id="id" />
+
+      <!-- Right: split panes -->
+      <div :class="['pane-grid', `split-${splitCount}`]">
+        <div
+          v-for="(pane, i) in panes"
+          :key="pane.id"
+          :class="['pane', activePane === i ? 'pane-active' : '']"
+          @click="activePane = i"
+        >
+          <!-- Pane header -->
+          <div class="pane-header">
+            <span v-if="pane.sessionId" class="pane-session">
+              {{ (sessions.byId(pane.sessionId)?.icon) || '•' }}
+              {{ (sessions.byId(pane.sessionId)?.displayName || pane.sessionId.slice(0,8)) }}
+              <span :class="['status-dot', sessions.byId(pane.sessionId)?.status]"></span>
+            </span>
+            <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
+            <a-space size="small">
+              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="interruptPane(i)" title="中断">
+                ⏹
+              </a-button>
+              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="clearPane(i)" title="清空">
+                ✕
+              </a-button>
+            </a-space>
+          </div>
+          <!-- Terminal container -->
+          <div :ref="el => setPaneRef(i, el)" class="pane-terminal"></div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { message, Modal } from 'ant-design-vue'
+import { useRouter } from 'vue-router'
+import { message } from 'ant-design-vue'
 import { ArrowLeftOutlined } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
-import ApprovalPanel from '../components/ApprovalPanel.vue'
-import TaskSummary from '../components/TaskSummary.vue'
 import { ipc } from '../ipc.js'
 
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
-const route = useRoute()
 const router = useRouter()
-const store = useSessionsStore()
-const id = computed(() => route.params.id)
-const session = computed(() => store.byId(id.value))
-const activities = computed(() => store.activitiesFor(id.value))
-const terminalEl = ref(null)
-const noteDraft = ref('')
+const sessions = useSessionsStore()
 
-let term = null
-let fitAddon = null
-let unsubEvents = null
-let resizeObserver = null
+// Split mode
+const splitCount = ref(1)
 
-const isRunning = computed(() => ['running', 'waiting'].includes(session.value?.status))
-const isOffline = computed(() => session.value?.status === 'offline')
+// Active pane (click to select)
+const activePane = ref(0)
 
-const statusCls = computed(() => {
-  const m = { running: 'status-running', idle: 'status-idle', waiting: 'status-waiting', starting: 'status-running', error: 'status-error', exited: 'status-exited', offline: 'status-exited' }
-  return m[session.value?.status] || 'status-idle'
+// Each pane: { id, sessionId, term, fitAddon, resizeObserver }
+const panes = ref([])
+// Refs storage for pane terminal containers
+const paneRefs = {}
+function setPaneRef(i, el) { if (el) paneRefs[i] = el }
+
+// IPC unsubscribers per pane
+const unsubs = {}
+
+// Filters
+const filter = ref({ search: '', status: [] })
+
+const filteredSessions = computed(() => {
+  let list = sessions.sessions
+  const s = filter.value.search?.toLowerCase()
+  if (s) {
+    list = list.filter(x =>
+      x.id.toLowerCase().includes(s) ||
+      (x.displayName || '').toLowerCase().includes(s) ||
+      (x.taskNote || '').toLowerCase().includes(s)
+    )
+  }
+  if (filter.value.status.length) {
+    list = list.filter(x => filter.value.status.includes(x.status))
+  }
+  return list
 })
-const statusText = computed(() => {
-  const m = { running: '运行中', idle: '空闲', waiting: '待确认', starting: '启动中', error: '错误', exited: '已退出', offline: '已离线' }
-  return m[session.value?.status] || session.value?.status
-})
-const tierMap = {
-  'always-agree': { label: '一直同意', color: 'red' },
-  'safety-rules': { label: '安全规则', color: 'blue' },
-  'ask-everything': { label: '逐次确认', color: 'orange' }
-}
-const tierLabel = computed(() => tierMap[session.value?.tier]?.label || session.value?.tier)
-const tierColor = computed(() => tierMap[session.value?.tier]?.color || 'default')
 
 function fmtNum(n) { return n ? n.toLocaleString() : '0' }
 
-function initTerminal() {
-  if (!terminalEl.value || term) return
-  term = new Terminal({
+// --- Pane management ---
+function createPanes(count) {
+  // Dispose old terminals
+  for (let i = 0; i < panes.value.length; i++) {
+    destroyPaneTerminal(i)
+  }
+  panes.value = Array.from({ length: count }, (_, i) => ({
+    id: `pane-${i}`, sessionId: panes.value[i]?.sessionId || null
+  }))
+  // Re-initialize terminals for all panes
+  nextTick(() => { for (let i = 0; i < count; i++) initPaneTerminal(i) })
+}
+
+watch(splitCount, (n) => createPanes(n))
+
+function initPaneTerminal(i) {
+  const el = paneRefs[i]
+  if (!el || panes.value[i]?.term) return
+  const term = new Terminal({
     cursorBlink: true,
-    fontSize: 14,
+    disableStdin: false,
+    fontSize: 13,
     fontFamily: "'Cascadia Code', Consolas, 'Courier New', monospace",
     allowProposedApi: true,
-    scrollback: 10000,
+    scrollback: 5000,
     theme: { background: '#0b1021', foreground: '#d4d4d4', cursor: '#d4d4d4', selectionBackground: '#264f78' }
   })
-  fitAddon = new FitAddon()
+  const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
-  term.open(terminalEl.value)
+  term.open(el)
   fitAddon.fit()
-  syncSize()
 
-  // Forward ALL terminal input directly to PTY (typing, Enter, Ctrl+C, slash commands, arrows)
-  term.onData((data) => {
-    window.ucli.sendTerminalInput(id.value, data)
-  })
-
-  // Custom keyboard handler for copy/paste
+  // Custom key handler for copy/paste
   term.attachCustomKeyEventHandler((e) => {
-    // Ctrl+Shift+C / Ctrl+Insert → copy
     if ((e.ctrlKey && e.shiftKey && e.key === 'C') || (e.ctrlKey && e.key === 'Insert')) {
       const sel = term.getSelection()
       if (sel) { navigator.clipboard.writeText(sel).catch(() => {}) }
       return false
     }
-    // Ctrl+Shift+V / Ctrl+Insert → paste
-    if ((e.ctrlKey && e.shiftKey && e.key === 'V') || (e.ctrlKey && e.key === 'Insert' && e.shiftKey)) {
-      navigator.clipboard.readText().then(t => { if (t) window.ucli.sendTerminalInput(id.value, t) }).catch(() => {})
+    if ((e.ctrlKey && e.shiftKey && e.key === 'V')) {
+      navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
       return false
     }
-    // Ctrl+C with selection → copy; without selection → forward to PTY
     if (e.ctrlKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) {
       const sel = term.getSelection()
-      if (sel) {
-        navigator.clipboard.writeText(sel).catch(() => {})
-        term.clearSelection()
-        return false
-      }
-      // No selection: forward Ctrl+C to PTY as interrupt signal
+      if (sel) { navigator.clipboard.writeText(sel).catch(() => {}); term.clearSelection(); return false }
       return true
     }
-    // Ctrl+V without selection → paste
     if (e.ctrlKey && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
-      navigator.clipboard.readText().then(t => { if (t) window.ucli.sendTerminalInput(id.value, t) }).catch(() => {})
+      navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
       return false
     }
     return true
   })
 
-  // Resize sync
-  resizeObserver = new ResizeObserver(() => {
-    if (fitAddon) { fitAddon.fit(); syncSize() }
+  // Forward input to PTY
+  term.onData((data) => {
+    const sid = panes.value[i]?.sessionId
+    if (sid) window.ucli.sendTerminalInput(sid, data)
   })
-  resizeObserver.observe(terminalEl.value)
-}
 
-function syncSize() {
-  if (term && id.value) {
-    window.ucli.terminalResize(id.value, term.cols, term.rows)
-  }
-}
-
-onMounted(async () => {
-  await store.init()
-  noteDraft.value = session.value?.taskNote || ''
-  await nextTick()
-  initTerminal()
-
-  // Subscribe to terminal output from PTY
-  unsubEvents = ipc.on('session:terminal-output', (evt) => {
-    if (evt.sessionId === id.value && term) {
-      term.write(evt.data)
+  // Resize
+  const resizeObserver = new ResizeObserver(() => {
+    if (fitAddon) {
+      try { fitAddon.fit() } catch {}
+      const sid = panes.value[i]?.sessionId
+      if (sid && term) window.ucli.terminalResize(sid, term.cols, term.rows)
     }
   })
+  resizeObserver.observe(el)
 
-  // Now that the terminal-output listener is registered, start the adapter.
-  // This ensures replayed history events are caught.
-  if (session.value?.status === 'starting' || session.value?.status === 'idle') {
-    ipc.startAdapter(id.value)
+  panes.value[i].term = term
+  panes.value[i].fitAddon = fitAddon
+  panes.value[i].resizeObserver = resizeObserver
+}
+
+function destroyPaneTerminal(i) {
+  const p = panes.value[i]
+  p?.resizeObserver?.disconnect()
+  if (p?.term) {
+    p.term.dispose()
+    p.term = null
+    p.fitAddon = null
+    p.resizeObserver = null
   }
+}
 
-  // Auto-restart offline sessions
-  if (session.value?.status === 'offline') {
-    restartSession()
+function sendToPane(i, data) {
+  const sid = panes.value[i]?.sessionId
+  if (sid) window.ucli.sendTerminalInput(sid, data)
+}
+
+// --- Assign sessions to panes ---
+function assignToPane(sessionId) {
+  if (activePane.value === null || activePane.value >= panes.value.length) {
+    activePane.value = 0
+  }
+  // If same session already in other pane, clear it
+  for (let i = 0; i < panes.value.length; i++) {
+    if (i !== activePane.value && panes.value[i].sessionId === sessionId) {
+      panes.value[i].sessionId = null
+      panes.value[i].term?.clear()
+    }
+  }
+  const oldSid = panes.value[activePane.value].sessionId
+  panes.value[activePane.value].sessionId = sessionId
+  // If session is offline, auto-restart; if running, attach terminal output
+  const s = sessions.byId(sessionId)
+  if (s?.status === 'offline') {
+    sessions.restart(sessionId).catch(e => message.error('重启失败：' + (e?.message || e)))
+  }
+  // Subscribe terminal output for this pane
+  subscribePaneTerminal(activePane.value, sessionId)
+}
+
+async function openInNewPane(sessionId) {
+  // Open in a different pane if possible, otherwise same as click
+  for (let i = 0; i < panes.value.length; i++) {
+    if (!panes.value[i].sessionId) {
+      activePane.value = i
+      assignToPane(sessionId)
+      return
+    }
+  }
+  assignToPane(sessionId)
+}
+
+function clearPane(i) {
+  panes.value[i].sessionId = null
+  panes.value[i].term?.clear()
+  unsubscribePane(i)
+}
+
+function interruptPane(i) {
+  const sid = panes.value[i]?.sessionId
+  if (sid) sessions.interrupt(sid)
+}
+
+// --- Terminal output routing ---
+function subscribePaneTerminal(i, sessionId) {
+  unsubscribePane(i)
+  unsubs[i] = ipc.on('session:terminal-output', (evt) => {
+    if (evt.sessionId === sessionId && panes.value[i]?.term) {
+      panes.value[i].term.write(evt.data)
+    }
+  })
+}
+
+function unsubscribePane(i) {
+  if (unsubs[i]) { unsubs[i](); unsubs[i] = null }
+}
+
+// --- Lifecycle ---
+onMounted(async () => {
+  await sessions.init()
+  createPanes(1)
+  // Auto-assign session if navigated from workbench card click
+  if (sessions.pendingAssign) {
+    assignToPane(sessions.pendingAssign)
+    sessions.pendingAssign = null
   }
 })
 
 onBeforeUnmount(() => {
-  if (unsubEvents) { unsubEvents(); unsubEvents = null }
-  if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null }
-  if (term) { term.dispose(); term = null }
+  for (let i = 0; i < panes.value.length; i++) {
+    destroyPaneTerminal(i)
+    unsubscribePane(i)
+  }
 })
-
-watch(() => route.params.id, () => {
-  noteDraft.value = session.value?.taskNote || ''
-  if (term) term.clear()
-  if (session.value?.status === 'offline') restartSession()
-})
-
-function onContextMenu(e) {
-  // Right-click: paste from clipboard into terminal
-  navigator.clipboard.readText().then(text => {
-    if (text && term) {
-      window.ucli.sendTerminalInput(id.value, text)
-    }
-  }).catch(() => {})
-}
-
-async function interrupt() {
-  try { await store.interrupt(id.value); message.info('已发送中断') } catch (e) { message.error(String(e)) }
-}
-async function stop() {
-  await store.stop(id.value)
-  message.success('会话已离线保存')
-}
-async function restartSession() {
-  try { await store.restart(id.value) } catch (e) { message.error('重启失败：' + (e?.message || e)) }
-}
-async function deleteSession() {
-  await store.deleteSession(id.value)
-  message.success('会话已删除')
-  router.push('/')
-}
-async function saveNote() {
-  await store.updateNote(id.value, noteDraft.value.trim())
-}
 </script>
 
 <style scoped>
 .detail { display: flex; flex-direction: column; height: 100%; }
-.detail-header { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #fff; border: 1px solid #f0f0f0; border-radius: 8px; margin-bottom: 8px; flex-shrink: 0; }
+.detail-header {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  background: #fff; border: 1px solid #f0f0f0; border-radius: 8px;
+  margin-bottom: 8px; flex-shrink: 0;
+}
 .detail-header .title { font-weight: 600; }
-.detail-header .cwd { font-size: 12px; color: #8c8c8c; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spacer { flex: 1; }
-.info-bar { background: #fff; border: 1px solid #f0f0f0; border-radius: 6px; padding: 6px 12px; margin-bottom: 8px; font-size: 12px; flex-shrink: 0; }
-.info-kv { color: #595959; white-space: nowrap; }
-.info-kv b { color: #262626; }
-.task-note { margin-bottom: 8px; flex-shrink: 0; }
-.task-note :deep(.ant-input) { font-size: 12px; }
-.detail-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.terminal-container { flex: 1; min-height: 0; background: #0b1021; border-radius: 8px; padding: 4px; overflow: hidden; }
-.terminal-container :deep(.xterm) { height: 100%; }
+
+.detail-layout { flex: 1; display: flex; gap: 8px; min-height: 0; }
+
+/* Sidebar */
+.sidebar {
+  width: 240px; flex-shrink: 0; display: flex; flex-direction: column;
+  background: #fff; border: 1px solid #f0f0f0; border-radius: 8px; overflow: hidden;
+}
+.sidebar-toolbar { padding: 8px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid #f0f0f0; }
+.session-list { flex: 1; overflow-y: auto; padding: 4px; }
+.session-item {
+  padding: 8px 10px; cursor: pointer; border-radius: 6px; margin-bottom: 2px;
+  transition: background .12s; border: 1px solid transparent;
+}
+.session-item:hover { background: #f5f5f5; }
+.session-item.assigned { background: #e6f4ff; border-color: #1677ff; }
+.item-head { display: flex; align-items: center; gap: 4px; }
+.item-icon { font-size: 14px; }
+.item-name { font-size: 12px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-id { font-size: 10px; color: #bfbfbf; font-family: monospace; margin-top: 1px; }
+.item-stats { font-size: 10px; color: #8c8c8c; }
+.item-activity { font-size: 10px; color: #bfbfbf; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+}
+.status-dot.running { background: #1677ff; }
+.status-dot.idle { background: #52c41a; }
+.status-dot.waiting { background: #faad14; }
+.status-dot.offline, .status-dot.exited { background: #bfbfbf; }
+.status-dot.error { background: #ff4d4f; }
+
+/* Pane grid */
+.pane-grid { flex: 1; display: grid; gap: 6px; min-height: 0; }
+.pane-grid.split-1 { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.pane-grid.split-2 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
+.pane-grid.split-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+
+.pane {
+  display: flex; flex-direction: column; min-height: 0;
+  border-radius: 8px; overflow: hidden;
+  border: 2px solid #d9d9d9;
+}
+.pane-active { border-color: #1677ff; }
+
+.pane-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 3px 8px; background: #fafafa; border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0; min-height: 28px;
+}
+.pane-session { font-size: 12px; font-weight: 500; display: flex; align-items: center; gap: 4px; }
+.pane-session.empty { color: #bfbfbf; }
+
+.pane-terminal { flex: 1; min-height: 0; padding: 4px; background: #0b1021; }
+.pane-terminal :deep(.xterm) { height: 100%; }
 </style>

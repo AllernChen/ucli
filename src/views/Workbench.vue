@@ -109,7 +109,8 @@ onMounted(async () => {
 })
 
 function openSession(id) {
-  router.push(`/session/${id}`)
+  sessions.pendingAssign = id
+  router.push('/session')
 }
 
 async function pickDir() {
