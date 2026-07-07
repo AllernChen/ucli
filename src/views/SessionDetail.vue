@@ -264,6 +264,9 @@ function assignToPane(sessionId) {
     }
   }
   const oldSid = panes.value[activePane.value].sessionId
+  if (oldSid !== sessionId) {
+    panes.value[activePane.value].term?.clear()
+  }
   panes.value[activePane.value].sessionId = sessionId
   // If session is offline, auto-restart; if running, attach terminal output
   const s = sessions.byId(sessionId)
