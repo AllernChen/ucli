@@ -47,7 +47,7 @@ app.whenReady().then(async () => {
   // server (that the bundled Claude PreToolUse runner calls back into), the
   // adapter registry, sessions, stats, and all IPC handlers.
   const orchestrator = createOrchestrator()
-  await orchestrator.initPersistence() // opens sql.js DB + migrates old JSON
+  try { await orchestrator.initPersistence() } catch (e) { console.error('initPersistence failed:', e) }
   orchestrator.registerIpc()
 
   createWindow()

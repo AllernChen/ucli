@@ -24,12 +24,16 @@ let SQL = null
  */
 export async function openDb(dbPath) {
   if (!SQL) {
-    const init = await import('sql.js')
-    // sql.js default export is `initSqlJs()`, an async function that returns
-    // the SQL module (which has `.Database`, `.Statement`, etc.)
-    const initFn = init.default || init
-    SQL = await initFn()
+    try {
+      const init = await import('sql.js')
+      const initFn = init.default || init
+      SQL = await initFn()
+    } catch (err) {
+      console.error('Failed to load sql.js WASM — persistence disabled:', err.message)
+      SQL = null // prevent retry
+    }
   }
+  if (!SQL) return null // sql.js not available, app runs without persistence
   let buffer
   if (existsSync(dbPath)) {
     buffer = readFileSync(dbPath)

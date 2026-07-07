@@ -56,6 +56,10 @@ export function createOrchestrator() {
 
   async function initPersistence() {
     const db = await openDb(dbPath)
+    if (!db) {
+      console.error('Persistence not available — running without saving data')
+      return // app continues without DB (stats work from in-memory sessions)
+    }
 
     // Migrate old JSON files if they exist
     const configPath = join(app.getPath('userData'), 'ucli-config.json')
