@@ -6,6 +6,8 @@
       <span class="title">🖥️ 会话工作台</span>
       <span class="spacer"></span>
       <a-space size="small">
+        <a-button size="small" @click="showImport = true">📥 导入</a-button>
+        <a-button size="small" @click="$router.push('/')">➕ 新建</a-button>
         <a-radio-group v-model:value="splitCount" size="small" button-style="solid">
           <a-radio-button :value="1">1</a-radio-button>
           <a-radio-button :value="2">2</a-radio-button>
@@ -83,7 +85,10 @@
             <a-space size="small">
               <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="openNote(i)" title="备注">📝</a-button>
               <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="interruptPane(i)" title="中断">⏹</a-button>
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="clearPane(i)" title="清空">✕</a-button>
+              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="stopPane(i)" title="停止(离线保存)">⏸</a-button>
+              <a-popconfirm v-if="pane.sessionId" title="删除会话？" @confirm="deletePane(i)" @click.stop>
+                <a-button size="small" type="text" danger>🗑</a-button>
+              </a-popconfirm>
             </a-space>
           </div>
           <!-- Pane info bar -->
@@ -104,6 +109,33 @@
     <!-- Task note modal -->
     <a-modal v-model:open="noteVisible" title="会话备注" @ok="saveNote" okText="保存" cancelText="取消">
       <a-textarea v-model:value="noteDraft" :rows="6" placeholder="标记进度、下一步计划…" />
+    </a-modal>
+
+    <!-- Import historical sessions modal -->
+    <a-modal v-model:open="showImport" title="导入历史会话" @ok="doImport" okText="导入" cancelText="取消" :confirmLoading="importing">
+      <a-form layout="vertical">
+        <a-form-item label="项目目录">
+          <a-input-group compact>
+            <a-input v-model:value="importCwd" style="width: calc(100% - 80px)" placeholder="选择目录" />
+            <a-button style="width: 80px" @click="pickImportDir">浏览</a-button>
+          </a-input-group>
+        </a-form-item>
+        <a-form-item v-if="importSessions.length" label="选择会话">
+          <a-select v-model:value="importSessionIds2" mode="multiple" allowClear placeholder="选择历史会话（可多选）" style="width:100%">
+            <a-select-option v-for="cs in importSessions" :key="cs.sessionId" :value="cs.sessionId">
+              {{ cs.name || cs.sessionId?.slice(0,8) }}
+              <span style="color:#8c8c8c;font-size:11px">{{ fmtTime(cs.startedAt) }}</span>
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item label="权限模式">
+          <a-radio-group v-model:value="importTier">
+            <a-radio value="always-agree">一直同意</a-radio>
+            <a-radio value="safety-rules">安全规则</a-radio>
+            <a-radio value="ask-everything">逐次确认</a-radio>
+          </a-radio-group>
+        </a-form-item>
+      </a-form>
     </a-modal>
   </div>
 </template>
@@ -294,6 +326,23 @@ function clearPane(i) {
   panes.value[i].term?.clear()
   unsubscribePane(i)
 }
+async function stopPane(i) {
+  const sid = panes.value[i]?.sessionId
+  if (!sid) return
+  await sessions.stop(sid)
+  panes.value[i].term?.clear()
+  unsubscribePane(i)
+  message.success('会话已离线保存')
+}
+async function deletePane(i) {
+  const sid = panes.value[i]?.sessionId
+  if (!sid) return
+  await sessions.deleteSession(sid)
+  panes.value[i].sessionId = null
+  panes.value[i].term?.clear()
+  unsubscribePane(i)
+  message.success('会话已删除')
+}
 
 function interruptPane(i) {
   const sid = panes.value[i]?.sessionId
@@ -314,6 +363,48 @@ async function saveNote() {
   if (!noteSessionId.value) return
   await sessions.updateNote(noteSessionId.value, noteDraft.value.trim())
   noteVisible.value = false
+}
+
+// Import historical sessions
+const showImport = ref(false)
+const importCwd = ref('')
+const importSessions = ref([])
+const importSessionIds2 = ref([])
+const importTier = ref('safety-rules')
+const importing = ref(false)
+
+async function pickImportDir() {
+  const dir = await ipc.pickDirectory()
+  if (dir) { importCwd.value = dir; await scanImport(dir) }
+}
+async function scanImport(dir) {
+  importSessions.value = await ipc.scanClaudeSessions(dir)
+  importSessionIds2.value = []
+}
+async function doImport() {
+  const ids = importSessionIds2.value
+  if (!ids.length || !importCwd.value) { message.warning('请选择目录和会话'); return }
+  importing.value = true
+  try {
+    for (const sid of ids) {
+      const cs = importSessions.value.find(s => s.sessionId === sid)
+      const config = { adapterId: 'claude', cwd: importCwd.value, tier: importTier.value, cliSessionId: sid }
+      if (cs?.name) config.name = cs.name
+      if (cs?.startedAt) config.startedAt = cs.startedAt
+      await sessions.createSession(config)
+    }
+    showImport.value = false
+    importSessions.value = []
+    importSessionIds2.value = []
+    message.success(`已导入 ${ids.length} 个会话`)
+  } catch (e) { message.error('导入失败：' + (e?.message || e)) }
+  finally { importing.value = false }
+}
+
+function fmtTime(ts) {
+  if (!ts) return ''
+  const d = new Date(ts)
+  return `${d.getMonth()+1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`
 }
 
 // --- Terminal output routing ---
