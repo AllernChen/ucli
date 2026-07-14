@@ -51,16 +51,19 @@
           >
             <div class="item-head">
               <span class="item-icon">{{ s.icon }}</span>
-              <span class="item-name">{{ s.displayName?.slice(0,20) || s.adapterId }}</span>
+              <span class="item-name">{{ s.displayName || s.adapterId }}</span>
               <span :class="['status-dot', s.status]"></span>
             </div>
-            <div class="item-id">{{ s.id.slice(0,8) }}</div>
+            <div class="item-path" :title="s.cwd">📁 {{ s.cwd || '—' }}</div>
+            <div class="item-meta">
+              <span class="item-id">{{ s.id.slice(0,8) }}</span>
+              <span class="item-time">{{ fmtTime(s.createdAt || s.startedAt) }}</span>
+            </div>
             <div class="item-stats" v-if="s.stats">
               ↑{{ fmtNum(s.stats.tokens.input) }} ↓{{ fmtNum(s.stats.tokens.output) }}
-              <span v-if="s.stats.turns"> {{ s.stats.turns }}轮</span>
+              <span v-if="s.stats.turns"> · {{ s.stats.turns }}轮</span>
             </div>
             <div class="item-note" v-if="s.taskNote" :title="s.taskNote">📝 {{ s.taskNote.slice(0,30) }}{{ s.taskNote.length > 30 ? '…' : '' }}</div>
-            <div class="item-activity">{{ s.lastActivity || '—' }}</div>
           </div>
           <a-empty v-if="!filteredSessions.length" description="无匹配会话" :imageStyle="{height:36}" />
         </div>
@@ -112,22 +115,46 @@
     </a-modal>
 
     <!-- Import historical sessions modal -->
-    <a-modal v-model:open="showImport" title="导入历史会话" @ok="doImport" okText="导入" cancelText="取消" :confirmLoading="importing">
+    <a-modal v-model:open="showImport" title="导入历史会话" :footer="null" width="640px">
       <a-form layout="vertical">
         <a-form-item label="项目目录">
           <a-input-group compact>
-            <a-input v-model:value="importCwd" style="width: calc(100% - 80px)" placeholder="选择目录" />
+            <a-input v-model:value="importCwd" style="width: calc(100% - 80px)" placeholder="选择目录" @change="onImportCwdChange" />
             <a-button style="width: 80px" @click="pickImportDir">浏览</a-button>
           </a-input-group>
         </a-form-item>
-        <a-form-item v-if="importSessions.length" label="选择会话">
-          <a-select v-model:value="importSessionIds2" mode="multiple" allowClear placeholder="选择历史会话（可多选）" style="width:100%">
-            <a-select-option v-for="cs in importSessions" :key="cs.sessionId" :value="cs.sessionId">
-              {{ cs.name || cs.sessionId?.slice(0,8) }}
-              <span style="color:#8c8c8c;font-size:11px">{{ fmtTime(cs.startedAt) }}</span>
-            </a-select-option>
-          </a-select>
-        </a-form-item>
+
+        <!-- Grouped by CLI -->
+        <div v-if="hasImportGroups" style="margin-bottom:12px">
+          <div class="section-label">发现的历史会话</div>
+          <div v-for="group in importGroups" :key="group.id" class="import-cli-group">
+            <div class="import-cli-header">
+              <span class="import-cli-icon">{{ group.icon }}</span>
+              <span class="import-cli-name">{{ group.displayName }}</span>
+              <span class="import-cli-count">{{ group.sessions.length }} 个</span>
+            </div>
+            <div v-if="group.sessions.length" class="import-session-list">
+              <a-checkbox-group v-model:value="importSelection[group.id]" style="width:100%">
+                <div v-for="s in group.sessions" :key="s.sessionId" class="import-session-row">
+                  <a-checkbox :value="s.sessionId">
+                    <div>
+                      <span class="iss-name">{{ s.name || s.sessionId?.slice(0, 12) }}</span>
+                      <span class="iss-meta" v-if="s.model">{{ s.model }}</span>
+                      <span class="iss-meta" v-if="s.turns">{{ s.turns }} 轮</span>
+                      <span class="iss-meta">{{ fmtTime(s.startedAt) }}</span>
+                    </div>
+                    <div class="iss-preview" v-if="s.lastMessage">{{ s.lastMessage }}</div>
+                  </a-checkbox>
+                </div>
+              </a-checkbox-group>
+            </div>
+            <div v-else class="import-none">该目录下无 {{ group.displayName }} 历史会话</div>
+          </div>
+        </div>
+        <div v-else-if="importCwd" class="import-none" style="text-align:center;padding:12px">
+          该目录下没有发现任何历史会话
+        </div>
+
         <a-form-item label="权限模式">
           <a-radio-group v-model:value="importTier">
             <a-radio value="always-agree">一直同意</a-radio>
@@ -136,6 +163,12 @@
           </a-radio-group>
         </a-form-item>
       </a-form>
+      <div class="modal-footer">
+        <a-button @click="showImport = false">取消</a-button>
+        <a-button type="primary" @click="doImport" :loading="importing" :disabled="!totalImportSelected">
+          导入选中会话 ({{ totalImportSelected }})
+        </a-button>
+      </div>
     </a-modal>
   </div>
 </template>
@@ -155,11 +188,17 @@ import '@xterm/xterm/css/xterm.css'
 const router = useRouter()
 const sessions = useSessionsStore()
 
-// Split mode
-const splitCount = ref(1)
+// Split mode — backed by store so it survives route changes
+const splitCount = computed({
+  get: () => sessions.workbench.splitCount,
+  set: (v) => sessions.setWorkbenchSplit(v)
+})
 
-// Active pane (click to select)
-const activePane = ref(0)
+// Active pane — backed by store
+const activePane = computed({
+  get: () => sessions.workbench.activePane,
+  set: (v) => sessions.setWorkbenchActivePane(v)
+})
 
 // Each pane: { id, sessionId, term, fitAddon, resizeObserver }
 const panes = ref([])
@@ -300,13 +339,21 @@ function assignToPane(sessionId) {
     panes.value[activePane.value].term?.clear()
   }
   panes.value[activePane.value].sessionId = sessionId
+  sessions.setWorkbenchPane(activePane.value, sessionId)
   // If session is offline, auto-restart; if running, attach terminal output
   const s = sessions.byId(sessionId)
-  if (s?.status === 'offline') {
-    sessions.restart(sessionId).catch(e => message.error('重启失败：' + (e?.message || e)))
-  }
-  // Subscribe terminal output for this pane
+  // Subscribe terminal output first so we don't miss startup output
   subscribePaneTerminal(activePane.value, sessionId)
+  if (s?.status === 'offline') {
+    // Offline persisted session — restart (which calls start → replays history)
+    sessions.restart(sessionId).catch(e => message.error('重启失败：' + (e?.message || e)))
+  } else if (s?.status === 'starting') {
+    // Brand new session — start the adapter (terminal is already subscribed)
+    ipc.startAdapter(sessionId)
+  } else {
+    // Already running/idle — replay history to this pane
+    ipc.attachTerminal(sessionId)
+  }
 }
 
 async function openInNewPane(sessionId) {
@@ -324,6 +371,7 @@ async function openInNewPane(sessionId) {
 function clearPane(i) {
   panes.value[i].sessionId = null
   panes.value[i].term?.clear()
+  sessions.setWorkbenchPane(i, null)
   unsubscribePane(i)
 }
 async function stopPane(i) {
@@ -331,6 +379,7 @@ async function stopPane(i) {
   if (!sid) return
   await sessions.stop(sid)
   panes.value[i].term?.clear()
+  sessions.setWorkbenchPane(i, null)
   unsubscribePane(i)
   message.success('会话已离线保存')
 }
@@ -340,6 +389,7 @@ async function deletePane(i) {
   await sessions.deleteSession(sid)
   panes.value[i].sessionId = null
   panes.value[i].term?.clear()
+  sessions.setWorkbenchPane(i, null)
   unsubscribePane(i)
   message.success('会话已删除')
 }
@@ -368,35 +418,68 @@ async function saveNote() {
 // Import historical sessions
 const showImport = ref(false)
 const importCwd = ref('')
-const importSessions = ref([])
-const importSessionIds2 = ref([])
+const importDiscovered = ref({ claude: [], codex: [], opencode: [] })
+const importSelection = ref({})
 const importTier = ref('safety-rules')
 const importing = ref(false)
 
+const importGroups = computed(() => {
+  const groups = []
+  for (const a of sessions.adapters) {
+    groups.push({
+      id: a.id, icon: a.icon, displayName: a.displayName,
+      sessions: importDiscovered.value[a.id] || []
+    })
+  }
+  return groups
+})
+const hasImportGroups = computed(() =>
+  importGroups.value.some(g => g.sessions.length > 0)
+)
+const totalImportSelected = computed(() => {
+  let n = 0
+  for (const arr of Object.values(importSelection.value)) n += (arr || []).length
+  return n
+})
+
+let _importDebounce = null
+function onImportCwdChange() {
+  if (_importDebounce) clearTimeout(_importDebounce)
+  _importDebounce = setTimeout(() => {
+    if (importCwd.value) discoverImport(importCwd.value)
+  }, 400)
+}
 async function pickImportDir() {
   const dir = await ipc.pickDirectory()
-  if (dir) { importCwd.value = dir; await scanImport(dir) }
+  if (dir) { importCwd.value = dir; await discoverImport(dir) }
 }
-async function scanImport(dir) {
-  importSessions.value = await ipc.scanClaudeSessions(dir)
-  importSessionIds2.value = []
+async function discoverImport(dir) {
+  importDiscovered.value = await ipc.discoverSessions(dir)
+  importSelection.value = {}
 }
 async function doImport() {
-  const ids = importSessionIds2.value
-  if (!ids.length || !importCwd.value) { message.warning('请选择目录和会话'); return }
+  if (!totalImportSelected.value || !importCwd.value) {
+    message.warning('请选择目录和会话'); return
+  }
   importing.value = true
   try {
-    for (const sid of ids) {
-      const cs = importSessions.value.find(s => s.sessionId === sid)
-      const config = { adapterId: 'claude', cwd: importCwd.value, tier: importTier.value, cliSessionId: sid }
-      if (cs?.name) config.name = cs.name
-      if (cs?.startedAt) config.startedAt = cs.startedAt
-      await sessions.createSession(config)
+    let count = 0
+    for (const group of importGroups.value) {
+      const ids = importSelection.value[group.id] || []
+      for (const sid of ids) {
+        const cs = group.sessions.find(s => s.sessionId === sid)
+        const config = { adapterId: group.id, cwd: importCwd.value, tier: importTier.value, cliSessionId: sid }
+        if (cs?.name) config.name = cs.name
+        if (cs?.startedAt) config.startedAt = cs.startedAt
+        if (cs?.model) config.model = cs.model
+        await sessions.createSession(config)
+        count++
+      }
     }
     showImport.value = false
-    importSessions.value = []
-    importSessionIds2.value = []
-    message.success(`已导入 ${ids.length} 个会话`)
+    importDiscovered.value = { claude: [], codex: [], opencode: [] }
+    importSelection.value = {}
+    message.success(`已导入 ${count} 个会话`)
   } catch (e) { message.error('导入失败：' + (e?.message || e)) }
   finally { importing.value = false }
 }
@@ -424,11 +507,27 @@ function unsubscribePane(i) {
 // --- Lifecycle ---
 onMounted(async () => {
   await sessions.init()
-  createPanes(1)
-  // Auto-assign session if navigated from workbench card click
+  const savedIds = sessions.workbench.paneSessionIds
+  const count = sessions.workbench.splitCount || 1
+  createPanes(count)
+  await nextTick()
+
+  // If navigated from card click, put pending session in first empty pane
   if (sessions.pendingAssign) {
+    activePane.value = panes.value.findIndex(p => !p.sessionId)
+    if (activePane.value < 0) activePane.value = 0
     assignToPane(sessions.pendingAssign)
     sessions.pendingAssign = null
+  }
+
+  // Restore remaining saved pane assignments (skip deleted sessions)
+  for (let i = 0; i < Math.min(count, savedIds.length); i++) {
+    if (!panes.value[i].sessionId && savedIds[i] && sessions.byId(savedIds[i])) {
+      activePane.value = i
+      assignToPane(savedIds[i])
+    } else if (savedIds[i] && !sessions.byId(savedIds[i])) {
+      sessions.setWorkbenchPane(i, null)
+    }
   }
 })
 
@@ -468,8 +567,12 @@ onBeforeUnmount(() => {
 .item-head { display: flex; align-items: center; gap: 4px; }
 .item-icon { font-size: 14px; }
 .item-name { font-size: 12px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.item-id { font-size: 10px; color: #bfbfbf; font-family: monospace; margin-top: 1px; }
+.item-path { font-size: 10px; color: #8c8c8c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+.item-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 1px; }
+.item-id { font-size: 10px; color: #bfbfbf; font-family: monospace; }
+.item-time { font-size: 10px; color: #bfbfbf; }
 .item-stats { font-size: 10px; color: #8c8c8c; }
+.item-note { font-size: 10px; color: #faad14; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
 .item-activity { font-size: 10px; color: #bfbfbf; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .status-dot {
@@ -510,4 +613,20 @@ onBeforeUnmount(() => {
 .pi-item.sid { font-family: monospace; color: #bfbfbf; font-size: 10px; }
 .pane-terminal { flex: 1; min-height: 0; padding: 4px; background: #0b1021; }
 .pane-terminal :deep(.xterm) { height: 100%; }
+
+/* Import modal */
+.section-label { font-weight: 600; font-size: 13px; margin-bottom: 8px; color: #262626; }
+.import-cli-group { border: 1px solid #f0f0f0; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+.import-cli-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.import-cli-icon { font-size: 16px; }
+.import-cli-name { font-weight: 600; font-size: 13px; }
+.import-cli-count { font-size: 11px; color: #8c8c8c; }
+.import-session-list { max-height: 180px; overflow-y: auto; margin-bottom: 4px; }
+.import-session-row { padding: 3px 0; border-bottom: 1px solid #fafafa; }
+.import-session-row :deep(.ant-checkbox-wrapper) { width: 100%; }
+.iss-name { font-weight: 500; margin-right: 6px; font-size: 12px; }
+.iss-meta { font-size: 10px; color: #8c8c8c; margin-right: 6px; }
+.iss-preview { font-size: 11px; color: #595959; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 480px; }
+.import-none { color: #bfbfbf; font-size: 12px; padding: 4px 0; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 </style>

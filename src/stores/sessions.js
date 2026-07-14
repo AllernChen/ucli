@@ -16,7 +16,13 @@ export const useSessionsStore = defineStore('sessions', {
     sessions: [], // summary cards: {id, adapterId, displayName, icon, cwd, model, tier, status, stats, cliSessionId, lastActivity, lastActivityTs, taskNote, contextWindow, maxOutputTokens}
     activities: {}, // sessionId -> [activityItem]
     pendingApprovals: {}, // sessionId -> [approvalReq]
-    pendingAssign: null // sessionId to auto-assign on SessionDetail load
+    pendingAssign: null, // sessionId to auto-assign on SessionDetail load
+    // Persisted workbench state — survives route changes
+    workbench: {
+      splitCount: 1,
+      activePane: 0,
+      paneSessionIds: [] // [sessionId|null, ...] — which session is in each pane
+    }
   }),
 
   getters: {
@@ -50,13 +56,15 @@ export const useSessionsStore = defineStore('sessions', {
         id: sessionId,
         adapterId: config.adapterId || 'claude',
         displayName: isImport
-          ? (config.name || 'Claude') + ' · ' + fmtShort(config.startedAt)
-          : (config.name || adapter?.displayName || config.adapterId) + ' · ' + fmtShort(Date.now()),
+          ? (config.name || adapter?.displayName || config.adapterId) + ' · ' + fmtShort(config.startedAt)
+          : (config.name || adapter?.displayName || config.adapterId),
         icon: adapter?.icon || '•',
         cwd: config.cwd,
         model: config.model || adapter?.models?.[0] || null,
         tier: config.tier,
         status: 'starting',
+        createdAt: Date.now(),
+        startedAt: config.startedAt || null,
         stats: { tokens: { input: 0, output: 0 }, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } },
         cliSessionId: config.cliSessionId || null,
         startedAt: config.startedAt || null,
@@ -104,6 +112,21 @@ export const useSessionsStore = defineStore('sessions', {
       await ipc.updateSessionName(id, name)
     },
 
+    // Workbench state persistence
+    setWorkbenchSplit(count) {
+      this.workbench.splitCount = count
+      // Extend paneSessionIds if needed
+      while (this.workbench.paneSessionIds.length < count) {
+        this.workbench.paneSessionIds.push(null)
+      }
+    },
+    setWorkbenchPane(index, sessionId) {
+      this.workbench.paneSessionIds[index] = sessionId
+    },
+    setWorkbenchActivePane(index) {
+      this.workbench.activePane = index
+    },
+
     _upsertSummary(s) {
       let row = this.sessions.find((x) => x.id === s.id)
       const adapter = this.adapters.find((a) => a.id === s.adapterId)
@@ -149,9 +172,10 @@ export const useSessionsStore = defineStore('sessions', {
         } else if (evt.type === 'stats_update') {
           // Live stats from transcript extraction
           row.stats.tokens = { input: evt.usage.inputTokens, output: evt.usage.outputTokens }
-          if (evt.costUsd) row.stats.costUsd = evt.costUsd
-          if (evt.turns) row.stats.turns = evt.turns
+          if (evt.costUsd != null) row.stats.costUsd = evt.costUsd
+          if (evt.turns != null) row.stats.turns = evt.turns
           if (evt.model) row.model = evt.model
+          if (evt.contextWindow) row.contextWindow = evt.contextWindow
           row.lastActivity = `↑${evt.usage.inputTokens.toLocaleString()} ↓${evt.usage.outputTokens.toLocaleString()}`
         }
         row.lastActivityTs = evt.ts || Date.now()
