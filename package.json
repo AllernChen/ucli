@@ -1,6 +1,6 @@
 {
   "name": "ucli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "UCLI — 多 CLI 编排工作台 GUI（Claude Code / Codex 等的卡片式编排与权限管控）",
   "author": "ucli",
   "license": "MIT",
@@ -9,6 +9,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "test": "node --test test/adapter-stats.test.mjs test/db-retention.test.mjs test/cli-tools.test.mjs test/session-discovery.test.mjs test/hook-server.test.mjs test/workbench-keyboard.test.mjs",
     "dist": "electron-vite build && electron-builder --win",
     "schema:codex": "codex app-server generate-json-schema --out .codex-schema",
     "smoke:claude": "claude -p \"Reply with exactly: hello\" --output-format stream-json --verbose",

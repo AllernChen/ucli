@@ -15,6 +15,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 const api = {
   // ---- adapters / discovery ----
   listAdapters: () => ipcRenderer.invoke('adapters:list'),
+  listCliTools: () => ipcRenderer.invoke('cli-tools:list'),
+  runCliToolAction: (id, action) => ipcRenderer.invoke('cli-tools:run', id, action),
 
   // ---- dialog ----
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),

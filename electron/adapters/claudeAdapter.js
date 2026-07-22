@@ -3,6 +3,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
+import { findClaudeProjectDirectory } from '../sessionDiscovery.js'
 
 const DISPLAY_NAME = 'Claude Code'
 const ICON = '🟣'
@@ -111,13 +112,7 @@ export class ClaudeAdapter extends BaseAdapter {
   /** Shared: return the matched ~/.claude/projects/<hash> directory, or null. */
   _projectDir() {
     const home = process.env.HOME || process.env.USERPROFILE || '~'
-    const projDir = join(home, '.claude', 'projects')
-    if (!existsSync(projDir)) return null
-    const hash = (this.session.cwd || '').toLowerCase().replace(/:/g, '-').replace(/\\/g, '-').replace(/\s/g, '-').replace(/\/+/g, '-')
-    for (const dir of readdirSync(projDir)) {
-      if (dir.toLowerCase() === hash) return join(projDir, dir)
-    }
-    return null
+    return findClaudeProjectDirectory(home, this.session.cwd)
   }
 
   _findTranscript(cliSessionId) {

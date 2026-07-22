@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { parseClaudeTranscriptStats } from '../electron/adapters/claudeAdapter.js'
-import { parseCodexTranscriptStats } from '../electron/adapters/codexAdapter.js'
+import { CodexAdapter, parseCodexTranscriptStats } from '../electron/adapters/codexAdapter.js'
 
 test('parses Claude transcript stats from assistant usage and result modelUsage', () => {
   const stats = parseClaudeTranscriptStats([
@@ -87,4 +87,41 @@ test('parses Codex token_count events and session metadata', () => {
   assert.equal(stats.contextWindow, 258400)
   assert.equal(stats.turnsCount, 1)
   assert.equal(stats.lastModel, 'gpt-5.5')
+})
+
+test('Codex transcript scan has a max wait during continuous TUI output', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const adapter = new CodexAdapter({
+    session: { id: 'ucli-session', cwd: 'F:\\projects\\ucli', cliSessionId: null },
+    engine: null,
+    settings: {}
+  })
+  let scans = 0
+  adapter._extractStats = () => { scans += 1 }
+
+  for (let second = 0; second < 30; second++) {
+    adapter._scheduleStatsUpdate()
+    t.mock.timers.tick(1000)
+  }
+
+  assert.equal(scans, 1)
+  await adapter.dispose()
+})
+
+test('Codex transcript scan still runs quickly after terminal output becomes idle', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const adapter = new CodexAdapter({
+    session: { id: 'ucli-session', cwd: 'F:\\projects\\ucli', cliSessionId: null },
+    engine: null,
+    settings: {}
+  })
+  let scans = 0
+  adapter._extractStats = () => { scans += 1 }
+
+  adapter._scheduleStatsUpdate()
+  t.mock.timers.tick(1999)
+  assert.equal(scans, 0)
+  t.mock.timers.tick(1)
+  assert.equal(scans, 1)
+  await adapter.dispose()
 })

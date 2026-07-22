@@ -1,13 +1,17 @@
 <template>
   <a-layout class="app-layout">
     <a-layout-sider width="184" class="sider" :collapsed="false">
-      <div class="logo">UCLI</div>
+      <div class="logo"><img :src="ucliLogo" alt="" />UCLI</div>
       <a-menu
         v-model:selectedKeys="selectedKeys"
         mode="inline"
         theme="light"
         @click="onMenuClick"
       >
+        <a-menu-item key="/">
+          <AppstoreOutlined />
+          <span>会话</span>
+        </a-menu-item>
         <a-menu-item key="/session">
           <DesktopOutlined />
           <span>工作台</span>
@@ -27,10 +31,10 @@
       </a-menu>
       <div class="sider-footer">
         <a-tag v-if="waitingCount > 0" color="orange">待确认 {{ waitingCount }}</a-tag>
-        <span class="version">v0.1.0</span>
+        <span class="version">v0.2.0</span>
       </div>
     </a-layout-sider>
-    <a-layout>
+    <a-layout class="main-layout">
       <a-layout-header class="header">
         <span>{{ title }}</span>
         <a-space size="small">
@@ -48,8 +52,9 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DesktopOutlined, BarChartOutlined, SafetyOutlined, SettingOutlined } from '@ant-design/icons-vue'
+import { AppstoreOutlined, DesktopOutlined, BarChartOutlined, SafetyOutlined, SettingOutlined } from '@ant-design/icons-vue'
 import { useSessionsStore } from './stores/sessions.js'
+import ucliLogo from '../resources/icons/ucli.png'
 
 const route = useRoute()
 const router = useRouter()
@@ -67,7 +72,7 @@ const title = computed(() => {
   if (route.path === '/stats') return '运行统计'
   if (route.path === '/rules') return '安全规则'
   if (route.path === '/settings') return '设置'
-  return '工作台'
+  return '会话'
 })
 
 function onMenuClick({ key }) {
@@ -85,5 +90,6 @@ function onMenuClick({ key }) {
   justify-content: space-between;
 }
 .version { font-size: 11px; color: #bfbfbf; }
+.logo img { width: 30px; height: 30px; object-fit: contain; margin-right: 8px; }
 :deep(.ant-layout-sider-children) { display: flex; flex-direction: column; }
 </style>

@@ -8,6 +8,7 @@
       <a-space size="small">
         <a-button size="small" @click="showImport = true">📥 导入</a-button>
         <a-button size="small" @click="$router.push('/')">➕ 新建</a-button>
+        <span v-if="assignedPaneCount > 1" class="shortcut-hint"><kbd>Tab</kbd> 切换会话</span>
         <a-radio-group v-model:value="splitCount" size="small" button-style="solid">
           <a-radio-button :value="1">1</a-radio-button>
           <a-radio-button :value="2">2</a-radio-button>
@@ -75,7 +76,7 @@
           v-for="(pane, i) in panes"
           :key="pane.id"
           :class="['pane', activePane === i ? 'pane-active' : '']"
-          @click="activePane = i"
+          @click="activatePane(i)"
         >
           <!-- Pane header -->
           <div class="pane-header">
@@ -88,9 +89,10 @@
             <a-space size="small">
               <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="openNote(i)" title="备注">📝</a-button>
               <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="interruptPane(i)" title="中断">⏹</a-button>
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="stopPane(i)" title="停止(离线保存)">⏸</a-button>
-              <a-popconfirm v-if="pane.sessionId" title="删除会话？" @confirm="deletePane(i)" @click.stop>
-                <a-button size="small" type="text" danger>🗑</a-button>
+              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="stopPane(i)" title="停止 CLI 进程并保留会话">停止</a-button>
+              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="clearPane(i)" title="仅关闭窗格，会话继续运行">关闭</a-button>
+              <a-popconfirm v-if="pane.sessionId" title="从 UCLI 移除会话？源会话和用量统计会保留。" @confirm="deletePane(i)" @click.stop>
+                <a-button size="small" type="text" danger title="移除 UCLI 记录">移除</a-button>
               </a-popconfirm>
             </a-space>
           </div>
@@ -136,10 +138,13 @@
             <div v-if="group.sessions.length" class="import-session-list">
               <a-checkbox-group v-model:value="importSelection[group.id]" style="width:100%">
                 <div v-for="s in group.sessions" :key="s.sessionId" class="import-session-row">
-                  <a-checkbox :value="s.sessionId">
+                  <a-checkbox :value="s.sessionId" :disabled="s.imported">
                     <div>
                       <span class="iss-name">{{ s.name || s.sessionId?.slice(0, 12) }}</span>
+                      <a-tag v-if="s.imported" color="default">已添加</a-tag>
                       <span class="iss-meta" v-if="s.model">{{ s.model }}</span>
+                      <span class="iss-meta provider-change" v-if="s.providerChanged">provider: {{ s.sourceProvider }} → {{ s.resumeProvider }}</span>
+                      <span class="iss-meta" v-else-if="s.sourceProvider">provider: {{ s.sourceProvider }}</span>
                       <span class="iss-meta" v-if="s.turns">{{ s.turns }} 轮</span>
                       <span class="iss-meta">{{ fmtTime(s.startedAt) }}</span>
                     </div>
@@ -152,7 +157,9 @@
           </div>
         </div>
         <div v-else-if="importCwd" class="import-none" style="text-align:center;padding:12px">
-          该目录下没有发现任何历史会话
+          <span v-if="discoveringImport"><a-spin size="small" /> 正在查找历史会话…</span>
+          <a-alert v-else-if="importError" type="error" show-icon :message="`历史会话读取失败：${importError}`" />
+          <span v-else>该目录下没有发现任何历史会话</span>
         </div>
 
         <a-form-item label="权限模式">
@@ -180,6 +187,7 @@ import { message, Modal } from 'ant-design-vue'
 import { ArrowLeftOutlined } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { ipc } from '../ipc.js'
+import { nextSessionPaneIndex } from '../workbenchKeyboard.js'
 
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -202,6 +210,7 @@ const activePane = computed({
 
 // Each pane: { id, sessionId, term, fitAddon, resizeObserver }
 const panes = ref([])
+const assignedPaneCount = computed(() => panes.value.filter((pane) => pane.sessionId).length)
 // Refs storage for pane terminal containers
 const paneRefs = {}
 function setPaneRef(i, el) { if (el) paneRefs[i] = el }
@@ -235,12 +244,24 @@ function createPanes(count) {
   // Dispose old terminals
   for (let i = 0; i < panes.value.length; i++) {
     destroyPaneTerminal(i)
+    if (i >= count) unsubscribePane(i)
   }
   panes.value = Array.from({ length: count }, (_, i) => ({
-    id: `pane-${i}`, sessionId: panes.value[i]?.sessionId || null
+    id: `pane-${i}`,
+    sessionId: panes.value[i]?.sessionId || (sessions.byId(sessions.workbench.paneSessionIds[i]) ? sessions.workbench.paneSessionIds[i] : null)
   }))
+  if (activePane.value >= count) activePane.value = count - 1
   // Re-initialize terminals for all panes
-  nextTick(() => { for (let i = 0; i < count; i++) initPaneTerminal(i) })
+  nextTick(() => {
+    for (let i = 0; i < count; i++) {
+      initPaneTerminal(i)
+      const sessionId = panes.value[i]?.sessionId
+      if (sessionId) {
+        if (!unsubs[i]) subscribePaneTerminal(i, sessionId)
+        ipc.attachTerminal(sessionId)
+      }
+    }
+  })
 }
 
 watch(splitCount, (n) => createPanes(n))
@@ -264,6 +285,14 @@ function initPaneTerminal(i) {
 
   // Custom key handler for copy/paste
   term.attachCustomKeyEventHandler((e) => {
+    if (e.type === 'keydown' && e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const switched = switchSessionPane(e.shiftKey ? -1 : 1)
+      if (switched) {
+        e.preventDefault()
+        e.stopPropagation()
+      }
+      return !switched
+    }
     if ((e.ctrlKey && e.shiftKey && e.key === 'C') || (e.ctrlKey && e.key === 'Insert')) {
       const sel = term.getSelection()
       if (sel) { navigator.clipboard.writeText(sel).catch(() => {}) }
@@ -322,6 +351,28 @@ function sendToPane(i, data) {
   if (sid) window.ucli.sendTerminalInput(sid, data)
 }
 
+function activatePane(i) {
+  activePane.value = i
+  nextTick(() => panes.value[i]?.term?.focus())
+}
+
+function switchSessionPane(direction = 1) {
+  const next = nextSessionPaneIndex(panes.value, activePane.value, direction)
+  if (next === null) return false
+  activatePane(next)
+  return true
+}
+
+function onWorkbenchKeydown(event) {
+  if (event.defaultPrevented || event.key !== 'Tab' || event.ctrlKey || event.altKey || event.metaKey) return
+  const target = event.target
+  if (target instanceof Element && !target.closest('.xterm') && target.closest('button, a, input, textarea, select, [contenteditable="true"], [role="button"], .ant-select')) return
+  if (switchSessionPane(event.shiftKey ? -1 : 1)) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+}
+
 // --- Assign sessions to panes ---
 function assignToPane(sessionId) {
   if (activePane.value === null || activePane.value >= panes.value.length) {
@@ -332,6 +383,8 @@ function assignToPane(sessionId) {
     if (i !== activePane.value && panes.value[i].sessionId === sessionId) {
       panes.value[i].sessionId = null
       panes.value[i].term?.clear()
+      sessions.setWorkbenchPane(i, null)
+      unsubscribePane(i)
     }
   }
   const oldSid = panes.value[activePane.value].sessionId
@@ -340,6 +393,7 @@ function assignToPane(sessionId) {
   }
   panes.value[activePane.value].sessionId = sessionId
   sessions.setWorkbenchPane(activePane.value, sessionId)
+  nextTick(() => panes.value[activePane.value]?.term?.focus())
   // If session is offline, auto-restart; if running, attach terminal output
   const s = sessions.byId(sessionId)
   // Subscribe terminal output first so we don't miss startup output
@@ -378,9 +432,6 @@ async function stopPane(i) {
   const sid = panes.value[i]?.sessionId
   if (!sid) return
   await sessions.stop(sid)
-  panes.value[i].term?.clear()
-  sessions.setWorkbenchPane(i, null)
-  unsubscribePane(i)
   message.success('会话已离线保存')
 }
 async function deletePane(i) {
@@ -391,7 +442,7 @@ async function deletePane(i) {
   panes.value[i].term?.clear()
   sessions.setWorkbenchPane(i, null)
   unsubscribePane(i)
-  message.success('会话已删除')
+  message.success('会话已从 UCLI 移除，源会话和用量统计已保留')
 }
 
 function interruptPane(i) {
@@ -422,6 +473,8 @@ const importDiscovered = ref({ claude: [], codex: [], opencode: [] })
 const importSelection = ref({})
 const importTier = ref('safety-rules')
 const importing = ref(false)
+const discoveringImport = ref(false)
+const importError = ref('')
 
 const importGroups = computed(() => {
   const groups = []
@@ -454,8 +507,18 @@ async function pickImportDir() {
   if (dir) { importCwd.value = dir; await discoverImport(dir) }
 }
 async function discoverImport(dir) {
-  importDiscovered.value = await ipc.discoverSessions(dir)
+  discoveringImport.value = true
+  importError.value = ''
+  importDiscovered.value = { claude: [], codex: [], opencode: [] }
   importSelection.value = {}
+  try {
+    importDiscovered.value = await ipc.discoverSessions(dir)
+  } catch (e) {
+    importDiscovered.value = { claude: [], codex: [], opencode: [] }
+    importError.value = e?.message || String(e)
+  } finally {
+    discoveringImport.value = false
+  }
 }
 async function doImport() {
   if (!totalImportSelected.value || !importCwd.value) {
@@ -468,7 +531,14 @@ async function doImport() {
       const ids = importSelection.value[group.id] || []
       for (const sid of ids) {
         const cs = group.sessions.find(s => s.sessionId === sid)
-        const config = { adapterId: group.id, cwd: importCwd.value, tier: importTier.value, cliSessionId: sid }
+        const config = {
+          adapterId: group.id,
+          cwd: importCwd.value,
+          tier: importTier.value,
+          cliSessionId: sid,
+          provider: cs?.resumeProvider || undefined,
+          sourceProvider: cs?.sourceProvider || undefined
+        }
         if (cs?.name) config.name = cs.name
         if (cs?.startedAt) config.startedAt = cs.startedAt
         if (cs?.model) config.model = cs.model
@@ -506,6 +576,7 @@ function unsubscribePane(i) {
 
 // --- Lifecycle ---
 onMounted(async () => {
+  window.addEventListener('keydown', onWorkbenchKeydown)
   await sessions.init()
   const savedIds = sessions.workbench.paneSessionIds
   const count = sessions.workbench.splitCount || 1
@@ -532,6 +603,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onWorkbenchKeydown)
   for (let i = 0; i < panes.value.length; i++) {
     destroyPaneTerminal(i)
     unsubscribePane(i)
@@ -596,6 +668,8 @@ onBeforeUnmount(() => {
   border: 2px solid #d9d9d9;
 }
 .pane-active { border-color: #1677ff; }
+.shortcut-hint { color: #8c8c8c; font-size: 12px; white-space: nowrap; }
+.shortcut-hint kbd { padding: 1px 5px; border: 1px solid #d9d9d9; border-bottom-width: 2px; border-radius: 4px; background: #fff; color: #595959; font-family: inherit; }
 
 .pane-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -626,6 +700,7 @@ onBeforeUnmount(() => {
 .import-session-row :deep(.ant-checkbox-wrapper) { width: 100%; }
 .iss-name { font-weight: 500; margin-right: 6px; font-size: 12px; }
 .iss-meta { font-size: 10px; color: #8c8c8c; margin-right: 6px; }
+.provider-change { color: #d46b08; }
 .iss-preview { font-size: 11px; color: #595959; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 480px; }
 .import-none { color: #bfbfbf; font-size: 12px; padding: 4px 0; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }

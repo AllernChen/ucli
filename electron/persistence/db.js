@@ -74,11 +74,25 @@ class Db {
         task_note         TEXT DEFAULT '',
         tier              TEXT NOT NULL DEFAULT 'safety-rules',
         model             TEXT,
+        provider          TEXT,
+        source_provider   TEXT,
         status            TEXT DEFAULT 'offline',
         created_at        INTEGER NOT NULL,
         updated_at        INTEGER NOT NULL
       )
     `)
+    // Existing 0.1.0 databases do not have this column. Keep the migration
+    // additive so removed sessions can retain their audit and usage history.
+    const sessionColumns = rows(this.sql.exec('PRAGMA table_info(sessions)'))
+    if (!sessionColumns.some((column) => column.name === 'removed_at')) {
+      this.sql.run('ALTER TABLE sessions ADD COLUMN removed_at INTEGER')
+    }
+    if (!sessionColumns.some((column) => column.name === 'provider')) {
+      this.sql.run('ALTER TABLE sessions ADD COLUMN provider TEXT')
+    }
+    if (!sessionColumns.some((column) => column.name === 'source_provider')) {
+      this.sql.run('ALTER TABLE sessions ADD COLUMN source_provider TEXT')
+    }
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS session_stats (
         session_id    TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
@@ -133,10 +147,11 @@ class Db {
   // ---- sessions ----
   insertSession(s) {
     this.sql.run(
-      `INSERT INTO sessions (id, project_path, adapter_id, native_session_id, name, task_note, tier, model, status, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO sessions (id, project_path, adapter_id, native_session_id, name, task_note, tier, model, provider, source_provider, status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [s.id, s.project_path, s.adapter_id, s.native_session_id || null, s.name || null,
-       s.task_note || '', s.tier, s.model || null, s.status, s.created_at, Date.now()]
+       s.task_note || '', s.tier, s.model || null, s.provider || null, s.source_provider || null,
+       s.status, s.created_at, Date.now()]
     )
     this.sql.run(
       `INSERT OR IGNORE INTO session_stats (session_id) VALUES (?)`, [s.id]
@@ -144,7 +159,7 @@ class Db {
   }
 
   updateSession(sessionId, fields) {
-    const allowed = ['native_session_id', 'name', 'task_note', 'status', 'model']
+    const allowed = ['native_session_id', 'name', 'task_note', 'status', 'model', 'provider', 'source_provider']
     const sets = []
     const vals = []
     for (const k of allowed) {
@@ -155,18 +170,22 @@ class Db {
     this.sql.run(`UPDATE sessions SET ${sets.join(',')} WHERE id=?`, vals)
   }
 
-  deleteSession(id) {
-    this.sql.run('DELETE FROM session_stats WHERE session_id=?', [id])
-    this.sql.run('DELETE FROM sessions WHERE id=?', [id])
+  removeSession(id) {
+    this.sql.run(
+      "UPDATE sessions SET status='removed', removed_at=?, updated_at=? WHERE id=?",
+      [Date.now(), Date.now(), id]
+    )
   }
 
-  listSessions() {
+  listSessions({ includeRemoved = false } = {}) {
+    const where = includeRemoved ? '' : 'WHERE s.removed_at IS NULL'
     const r = this.sql.exec(
       `SELECT s.*,
               st.input_tokens, st.output_tokens, st.cost_usd, st.turns_count,
               st.auto_allowed, st.confirmed, st.denied
        FROM sessions s
        LEFT JOIN session_stats st ON st.session_id = s.id
+       ${where}
        ORDER BY s.updated_at DESC`
     )
     return rows(r).map(rowToSession)
@@ -381,9 +400,12 @@ function rowToSession(row) {
     taskNote: row.task_note,
     tier: row.tier,
     model: row.model,
+    provider: row.provider || null,
+    sourceProvider: row.source_provider || null,
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    removedAt: row.removed_at || null,
     stats: {
       tokens: { input: row.input_tokens || 0, output: row.output_tokens || 0 },
       costUsd: row.cost_usd || 0,

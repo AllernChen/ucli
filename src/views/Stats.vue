@@ -53,6 +53,7 @@
         <template #bodyCell="{ column, record }">
           <template v-if="column.dataIndex === 'status'">
             <a-tag v-if="record.status === 'offline'" color="default">已离线</a-tag>
+            <a-tag v-else-if="record.status === 'removed'" color="default">已移除（留痕）</a-tag>
             <a-tag v-else-if="record.status === 'running'" color="blue">运行中</a-tag>
             <a-tag v-else-if="record.status === 'idle'" color="green">空闲</a-tag>
             <a-tag v-else color="default">{{ record.status }}</a-tag>

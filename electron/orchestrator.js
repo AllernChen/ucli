@@ -10,6 +10,8 @@ import { claudeDescriptor } from './adapters/claudeAdapter.js'
 import { codexDescriptor } from './adapters/codexAdapter.js'
 import { TIER } from './adapters/cliAdapter.js'
 import { openDb, getDb } from './persistence/db.js'
+import { inspectCliTools, runCliToolAction } from './cliTools.js'
+import { annotateImportedSessions, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
 
 const DEFAULT_RULESET = {
   id: 'default',
@@ -106,15 +108,25 @@ export function createOrchestrator() {
     // Restore session entries (metadata only — no running adapters)
     const dbSessions = db.listSessions()
     for (const s of dbSessions) {
-      // Recover native_session_id from claude index if missing
+      // Recover/enrich native metadata using the matching adapter only.
       let cliSessionId = s.cliSessionId || s.nativeSessionId || null
       let sessionName = s.name || null
-      if (!cliSessionId && s.cwd) {
+      let provider = s.provider || null
+      let sourceProvider = s.sourceProvider || null
+      if (!cliSessionId && s.cwd && s.adapterId === 'claude') {
         const found = findClaudeSessionIndex(s.cwd, s.createdAt)
         if (found) {
           cliSessionId = found.sessionId
           sessionName = sessionName || found.name
           db.updateSession(s.id, { native_session_id: cliSessionId, name: sessionName })
+        }
+      }
+      if (cliSessionId && s.cwd && s.adapterId === 'codex' && !provider) {
+        const found = listCodexSessions(s.cwd).find((item) => item.sessionId === cliSessionId)
+        if (found) {
+          provider = found.resumeProvider || null
+          sourceProvider = found.sourceProvider || null
+          db.updateSession(s.id, { provider, source_provider: sourceProvider })
         }
       }
       const entry = {
@@ -123,6 +135,8 @@ export function createOrchestrator() {
           id: s.id, adapterId: s.adapterId,
           cwd: s.cwd || s.projectPath,
           model: s.model, tier: s.tier, rulesetId: 'default',
+          provider,
+          sourceProvider,
           cliSessionId,
           name: sessionName,
           taskNote: s.taskNote || ''
@@ -193,6 +207,8 @@ export function createOrchestrator() {
     const session = {
       id: sessionId, adapterId, cwd,
       model: config.model || null, tier, rulesetId,
+      provider: config.provider || null,
+      sourceProvider: config.sourceProvider || null,
       cliSessionId: config.cliSessionId || null,
       name: config.name || null,
       taskNote: ''
@@ -217,7 +233,8 @@ export function createOrchestrator() {
       db.touchProject(cwd, session.name || cwd.split(/[\\/]/).pop() || cwd)
       db.insertSession({
         id: sessionId, project_path: cwd, adapter_id: adapterId,
-        native_session_id: null, name: session.name, task_note: '', tier, model: session.model,
+        native_session_id: session.cliSessionId, name: session.name, task_note: '', tier, model: session.model,
+        provider: session.provider, source_provider: session.sourceProvider,
         status: 'starting', created_at: entry.createdAt
       })
       db.flush()
@@ -365,11 +382,6 @@ export function createOrchestrator() {
     return map
   }
 
-  /** Hash a cwd into the directory name claude uses under ~/.claude/projects/. */
-  function projectHash(cwd) {
-    return cwd.toLowerCase().replace(/:/g, '-').replace(/\\/g, '-').replace(/\s/g, '-').replace(/\/+/g, '-')
-  }
-
   /** Discover Claude sessions for a cwd by scanning
    *  ~/.claude/projects/<hash>/*.jsonl directly, then enriching with name
    *  metadata from ~/.claude/sessions/.
@@ -378,23 +390,11 @@ export function createOrchestrator() {
     try {
       if (!cwd) return []
       const idx = _claudeIndexByName()
-      const hash = projectHash(cwd)
-      const projDir = join(home, '.claude', 'projects')
-      if (!existsSync(projDir)) return []
-
-      // Find the project directory (case-insensitive on Windows)
-      let targetDir = null
-      for (const d of readdirSync(projDir)) {
-        if (d.toLowerCase() === hash) { targetDir = join(projDir, d); break }
-      }
-      if (!targetDir) return []
-
       const found = []
-      for (const f of readdirSync(targetDir)) {
-        if (!f.endsWith('.jsonl')) continue
-        const sessionId = f.replace(/\.jsonl$/, '')
+      for (const transcript of listClaudeTranscriptFiles(home, cwd)) {
+        const sessionId = transcript.sessionId
         const meta = idx.get(sessionId) || {}
-        const fullPath = join(targetDir, f)
+        const fullPath = transcript.fullPath
         let model = meta.model || null
         let turns = 0
         try {
@@ -421,7 +421,7 @@ export function createOrchestrator() {
         found.push({
           sessionId,
           name: meta.name || null,
-          startedAt: meta.startedAt || statSync(fullPath).birthtimeMs,
+          startedAt: meta.startedAt || transcript.startedAt,
           model: model || meta.model || null,
           turns,
           lastMessage: _extractLastText(fullPath)
@@ -441,6 +441,11 @@ export function createOrchestrator() {
     try {
       const sessionsDir = join(home, '.codex', 'sessions')
       if (!existsSync(sessionsDir)) return []
+      let providerConfig = parseCodexProviderConfig('')
+      try {
+        const configPath = join(home, '.codex', 'config.toml')
+        if (existsSync(configPath)) providerConfig = parseCodexProviderConfig(readFileSync(configPath, 'utf8'))
+      } catch { /* default to the built-in provider */ }
 
       // Build name lookup from session_index.jsonl
       const nameMap = new Map()
@@ -498,10 +503,12 @@ export function createOrchestrator() {
                 const metaCwd = (meta.cwd || '').replace(/\\/g, '/').toLowerCase()
                 if (metaCwd !== normCwd) continue
               }
+              const provider = resolveCodexResumeProvider(meta.model_provider || null, providerConfig)
               found.push({
                 sessionId,
                 name: nameMap.get(sessionId) || null,
                 startedAt: meta.timestamp ? new Date(meta.timestamp).getTime() : statSync(fullPath).birthtimeMs,
+                ...provider,
                 lastMessage: _extractLastText(fullPath)
               })
             }
@@ -600,6 +607,8 @@ export function createOrchestrator() {
       adapterId: e.session.adapterId,
       cwd: e.session.cwd,
       model: e.session.model,
+      provider: e.session.provider || null,
+      sourceProvider: e.session.sourceProvider || null,
       tier: e.session.tier,
       status: e.status,
       stats: e.stats,
@@ -640,6 +649,8 @@ export function createOrchestrator() {
     ipcMain.handle('adapters:list', () =>
       Array.from(adapters.values()).map((d) => ({ id: d.id, displayName: d.displayName, icon: d.icon, models: d.models }))
     )
+    ipcMain.handle('cli-tools:list', () => inspectCliTools())
+    ipcMain.handle('cli-tools:run', (_e, id, action) => runCliToolAction(id, action))
 
     ipcMain.handle('dialog:pick-directory', async () => {
       const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
@@ -653,15 +664,14 @@ export function createOrchestrator() {
       for (const e of sessions.values()) {
         if (e.session.cliSessionId) imported.add(e.session.cliSessionId)
       }
-      const filterNew = (list) => list
-        .filter(s => !imported.has(s.sessionId))
+      const decorate = (list) => annotateImportedSessions(list, imported)
         .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
         .slice(0, 30)
 
       return {
-        claude: filterNew(listClaudeSessionsByCwd(cwd)),
-        codex: filterNew(listCodexSessions(cwd)),
-        opencode: filterNew(listOpenCodeSessions(cwd))
+        claude: decorate(listClaudeSessionsByCwd(cwd)),
+        codex: decorate(listCodexSessions(cwd)),
+        opencode: decorate(listOpenCodeSessions(cwd))
       }
     })
 
@@ -744,7 +754,7 @@ export function createOrchestrator() {
         if (e.adapter) e.adapter.dispose()
         sessions.delete(sessionId)
         const db = getDb()
-        if (db) { db.deleteSession(sessionId); scheduleFlush() }
+        if (db) { db.removeSession(sessionId); scheduleFlush() }
       }
       return true
     })
@@ -777,17 +787,8 @@ export function createOrchestrator() {
     })
 
     ipcMain.handle('stats:get', () => {
-      const perSession = {}
-      let total = { input: 0, output: 0, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } }
       const db = getDb()
       for (const [id, e] of sessions) {
-        const row = { adapterId: e.session.adapterId, model: e.session.model, cwd: e.session.cwd, status: e.status, ...e.stats }
-        perSession[id] = row
-        total.input += e.stats.tokens.input
-        total.output += e.stats.tokens.output
-        total.costUsd += e.stats.costUsd
-        total.turns += e.stats.turns
-        for (const k of Object.keys(total.approvals)) total.approvals[k] += e.stats.approvals[k] || 0
         // Persist full stats (tokens + approvals) to DB — upsertStats uses
         // absolute-value semantics, so pass the cumulative totals.
         if (db) {
@@ -802,6 +803,36 @@ export function createOrchestrator() {
           })
         }
       }
+
+      // Statistics are historical records. Read removed sessions from the DB
+      // as well, then overlay live in-memory entries with their latest state.
+      const historical = db?.listSessions({ includeRemoved: true }) || []
+      const source = new Map(historical.map((s) => [s.id, {
+        adapterId: s.adapterId,
+        model: s.model,
+        cwd: s.cwd,
+        status: s.removedAt ? 'removed' : s.status,
+        ...s.stats
+      }]))
+      for (const [id, e] of sessions) {
+        source.set(id, {
+          adapterId: e.session.adapterId,
+          model: e.session.model,
+          cwd: e.session.cwd,
+          status: e.status,
+          ...e.stats
+        })
+      }
+
+      const perSession = Object.fromEntries(source)
+      const total = { input: 0, output: 0, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } }
+      for (const row of source.values()) {
+        total.input += row.tokens.input
+        total.output += row.tokens.output
+        total.costUsd += row.costUsd
+        total.turns += row.turns
+        for (const k of Object.keys(total.approvals)) total.approvals[k] += row.approvals[k] || 0
+      }
       if (db) scheduleFlush()
       const result = { total, perSession, modelStats: db?.getModelStats() || [] }
       return result
@@ -815,5 +846,34 @@ export function createOrchestrator() {
     })
   }
 
-  return { registerIpc, setMainWindow, hookReady, initPersistence }
+  let shutdownPromise = null
+  function shutdown() {
+    if (shutdownPromise) return shutdownPromise
+    shutdownPromise = (async () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer)
+        flushTimer = null
+      }
+      const db = getDb()
+      for (const [id, entry] of sessions) {
+        if (entry.adapter) {
+          try { await Promise.resolve(entry.adapter.dispose()) }
+          catch (error) { console.error(`Failed to dispose session ${id}:`, error) }
+          entry.adapter = null
+        }
+        entry.status = 'offline'
+        if (db) db.updateSession(id, { status: 'offline' })
+      }
+      if (db) db.flush()
+      try {
+        const server = hookServer || await hookReady
+        await server?.close()
+      } catch (error) {
+        console.error('Failed to close permission hook server:', error)
+      }
+    })()
+    return shutdownPromise
+  }
+
+  return { registerIpc, setMainWindow, hookReady, initPersistence, shutdown }
 }

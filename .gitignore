@@ -8,3 +8,5 @@ dist-packager/
 .DS_Store
 .vite/
 stats-diag.json
+.scratch/
+data/*.zip

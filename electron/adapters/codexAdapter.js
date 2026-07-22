@@ -2,8 +2,12 @@ import { readFileSync, existsSync, readdirSync, statSync, rmSync } from 'fs'
 import { join } from 'path'
 import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
+import { isSafeProviderName } from '../sessionDiscovery.js'
 
 const DISPLAY_NAME = 'Codex'
+const STATS_IDLE_DELAY_MS = 2000
+const STATS_MAX_WAIT_MS = 30000
+const STATS_FALLBACK_INTERVAL_MS = 30000
 const ICON = '🟢'
 
 const require = createRequire(import.meta.url)
@@ -74,6 +78,16 @@ export function parseCodexTranscriptStats(lines) {
   }
 }
 
+export function buildCodexArgs(session) {
+  const args = []
+  if (session.cliSessionId) args.push('resume', session.cliSessionId)
+  if (session.provider && isSafeProviderName(session.provider)) {
+    args.push('-c', `model_provider=${session.provider}`)
+  }
+  if (session.model) args.push('--model', session.model)
+  return args
+}
+
 /**
  * CodexAdapter — PTY terminal mode, like ClaudeAdapter.
  *
@@ -88,6 +102,10 @@ export class CodexAdapter extends BaseAdapter {
     this.ptyProc = null
     this._settingsDir = null
     this._statsTimer = null
+    this._statsMaxTimer = null
+    this._statsFallbackTimer = null
+    this._transcriptPath = null
+    this._lastStatsScanAt = 0
     this._lastStatsTokens = { input: 0, output: 0 }
     this._lastModel = null
     this._startedAt = Date.now()
@@ -158,11 +176,12 @@ export class CodexAdapter extends BaseAdapter {
   _replayHistory() {
     const cliSessionId = this.session.cliSessionId
     if (!cliSessionId) return
-    const path = this._findTranscript(cliSessionId)
+    const path = this._transcriptPath || this._findTranscript(cliSessionId)
     if (!path) {
       this._write('\x1b[90m(未找到 Codex 历史记录)\x1b[0m\r\n\r\n')
       return
     }
+    this._transcriptPath = path
     try {
       const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
       this._write('\x1b[90m━━━ Codex 历史记录 ━━━\x1b[0m\r\n\r\n')
@@ -222,13 +241,41 @@ export class CodexAdapter extends BaseAdapter {
 
   _scheduleStatsUpdate() {
     if (this._statsTimer) clearTimeout(this._statsTimer)
-    this._statsTimer = setTimeout(() => this._extractStats(), 2000)
+    this._statsTimer = setTimeout(() => this._runStatsUpdate(), STATS_IDLE_DELAY_MS)
+    if (!this._statsMaxTimer) {
+      this._statsMaxTimer = setTimeout(() => this._runStatsUpdate(), STATS_MAX_WAIT_MS)
+    }
+  }
+
+  _runStatsUpdate() {
+    if (this._statsTimer) clearTimeout(this._statsTimer)
+    if (this._statsMaxTimer) clearTimeout(this._statsMaxTimer)
+    this._statsTimer = null
+    this._statsMaxTimer = null
+    this._extractStats()
+  }
+
+  _startStatsFallback() {
+    if (this._statsFallbackTimer) clearInterval(this._statsFallbackTimer)
+    this._statsFallbackTimer = setInterval(() => {
+      if (Date.now() - this._lastStatsScanAt >= STATS_FALLBACK_INTERVAL_MS) {
+        this._extractStats()
+      }
+    }, STATS_FALLBACK_INTERVAL_MS)
+    this._statsFallbackTimer.unref?.()
   }
 
   _extractStats() {
+    this._lastStatsScanAt = Date.now()
     const cliSessionId = this.session.cliSessionId
-    const path = cliSessionId ? this._findTranscript(cliSessionId) : this._findLatestTranscript()
+    let path = this._transcriptPath
+    if (path && !existsSync(path)) {
+      path = null
+      this._transcriptPath = null
+    }
+    if (!path) path = cliSessionId ? this._findTranscript(cliSessionId) : this._findLatestTranscript()
     if (!path) return
+    this._transcriptPath = path
     try {
       const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
       const stats = parseCodexTranscriptStats(lines)
@@ -275,12 +322,9 @@ export class CodexAdapter extends BaseAdapter {
 
     this._replayHistory()
 
-    const args = []
-    if (this.session.cliSessionId) {
-      // codex uses `resume` subcommand, not `--resume` flag
-      args.push('resume', this.session.cliSessionId)
-    }
-    if (this.session.model) args.push('--model', this.session.model)
+    // Codex uses the `resume` subcommand. A provider override is persisted by
+    // UCLI when the historical provider no longer exists in current config.
+    const args = buildCodexArgs(this.session)
 
     const env = {
       ...process.env,
@@ -312,6 +356,8 @@ export class CodexAdapter extends BaseAdapter {
         this._write(`\r\n\x1b[90mCodex process exited (code ${exitCode})\x1b[0m\r\n`)
         this.emitEvent({ type: 'exit', code: exitCode })
       })
+
+      this._startStatsFallback()
 
       this.emitEvent({
         type: 'stats_update',
@@ -356,6 +402,12 @@ export class CodexAdapter extends BaseAdapter {
 
   async dispose() {
     this._disposed = true
+    if (this._statsTimer) clearTimeout(this._statsTimer)
+    if (this._statsMaxTimer) clearTimeout(this._statsMaxTimer)
+    if (this._statsFallbackTimer) clearInterval(this._statsFallbackTimer)
+    this._statsTimer = null
+    this._statsMaxTimer = null
+    this._statsFallbackTimer = null
     if (this.ptyProc) {
       try { this.ptyProc.kill() } catch {}
       this.ptyProc = null

@@ -55,7 +55,20 @@ export function startHookServer() {
           handler = fn
         },
         close() {
-          return new Promise((r) => server.close(r))
+          return new Promise((resolveClose) => {
+            let settled = false
+            let timer = null
+            const done = () => {
+              if (settled) return
+              settled = true
+              if (timer) clearTimeout(timer)
+              resolveClose()
+            }
+            server.close(done)
+            server.closeAllConnections?.()
+            timer = setTimeout(done, 1500)
+            timer.unref?.()
+          })
         }
       })
     })

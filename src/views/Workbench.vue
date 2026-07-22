@@ -43,10 +43,13 @@
           <div v-if="group.sessions.length" class="session-list">
             <a-checkbox-group v-model:value="selectedSessions[group.id]" style="width:100%">
               <div v-for="s in group.sessions" :key="group.id + '/' + s.sessionId" class="session-row">
-                <a-checkbox :value="s.sessionId">
+                <a-checkbox :value="s.sessionId" :disabled="s.imported">
                   <div>
                     <span class="sess-item-name">{{ s.name || s.sessionId?.slice(0, 12) }}</span>
+                    <a-tag v-if="s.imported" color="default">已添加</a-tag>
                     <span class="sess-item-meta" v-if="s.model">{{ s.model }}</span>
+                    <span class="sess-item-meta provider-change" v-if="s.providerChanged">provider: {{ s.sourceProvider }} → {{ s.resumeProvider }}</span>
+                    <span class="sess-item-meta" v-else-if="s.sourceProvider">provider: {{ s.sourceProvider }}</span>
                     <span class="sess-item-meta" v-if="s.turns">{{ s.turns }} 轮</span>
                     <span class="sess-item-meta">{{ fmtTime(s.startedAt) }}</span>
                   </div>
@@ -63,7 +66,9 @@
       </div>
 
       <div v-else-if="form.cwd" class="new-section">
-        <div class="discover-empty">该目录下没有发现历史会话。</div>
+        <div v-if="discovering" class="discover-empty"><a-spin size="small" /> 正在查找历史会话…</div>
+        <a-alert v-else-if="discoverError" type="error" show-icon :message="`历史会话读取失败：${discoverError}`" />
+        <div v-else class="discover-empty">该目录下没有发现历史会话。</div>
         <div class="cli-quick-new">
           <span>快速新建：</span>
           <a-button v-for="a in sessions.adapters" :key="a.id" size="small" type="primary" ghost @click="newSession(a)">
@@ -109,6 +114,8 @@ const settings = useSettingsStore()
 
 const showNew = ref(false)
 const creating = ref(false)
+const discovering = ref(false)
+const discoverError = ref('')
 const filterTier = ref(undefined)
 
 const form = ref({ adapterId: 'claude', cwd: '', model: undefined, tier: 'safety-rules' })
@@ -178,8 +185,18 @@ function onCwdChange() {
 
 async function discover(cwd) {
   if (!cwd) return
-  discovered.value = await ipc.discoverSessions(cwd)
+  discovering.value = true
+  discoverError.value = ''
+  discovered.value = { claude: [], codex: [] }
   selectedSessions.value = {}
+  try {
+    discovered.value = await ipc.discoverSessions(cwd)
+  } catch (e) {
+    discovered.value = { claude: [], codex: [] }
+    discoverError.value = e?.message || String(e)
+  } finally {
+    discovering.value = false
+  }
 }
 
 function fmtTime(ts) {
@@ -197,7 +214,15 @@ async function importSelected() {
       const ids = selectedSessions.value[group.id] || []
       for (const sid of ids) {
         const cs = group.sessions.find(s => s.sessionId === sid)
-        const config = { adapterId: group.id, cwd: form.value.cwd, tier: form.value.tier, cliSessionId: sid, model: cs?.model || undefined }
+        const config = {
+          adapterId: group.id,
+          cwd: form.value.cwd,
+          tier: form.value.tier,
+          cliSessionId: sid,
+          model: cs?.model || undefined,
+          provider: cs?.resumeProvider || undefined,
+          sourceProvider: cs?.sourceProvider || undefined
+        }
         if (cs?.name) config.name = cs.name
         if (cs?.startedAt) config.startedAt = cs.startedAt
         lastId = await sessions.createSession(config)
@@ -223,7 +248,7 @@ async function newSession(adapter) {
       cwd: form.value.cwd,
       tier: form.value.tier
     }
-    const { sessionId } = await sessions.createSession(config)
+    const sessionId = await sessions.createSession(config)
     message.success(`已创建 ${adapter.displayName} 会话`)
     showNew.value = false
     openSession(sessionId)
@@ -253,6 +278,7 @@ async function newSession(adapter) {
 .session-row :deep(.ant-checkbox-wrapper) { width: 100%; }
 .sess-item-name { font-weight: 500; margin-right: 8px; }
 .sess-item-meta { font-size: 11px; color: #8c8c8c; margin-right: 8px; }
+.provider-change { color: #d46b08; }
 .sess-item-preview { font-size: 11px; color: #595959; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 480px; }
 
 .cli-group-actions { display: flex; gap: 8px; }

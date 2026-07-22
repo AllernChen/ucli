@@ -1,6 +1,7 @@
 appId: com.ucli.app
 asar: false
 productName: UCLI
+electronDist: node_modules/electron/dist
 directories:
   output: dist
   buildResources: build
@@ -20,12 +21,16 @@ extraResources:
   - from: resources/
     to: resources/
 win:
+  icon: resources/icons/ucli.png
   target:
     - nsis
-  artifactName: ${productName}-${version}-${arch}.${ext}
+    - portable
   sign: false
   forceCodeSigning: false
 nsis:
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
   oneClick: false
   allowToChangeInstallationDirectory: true
   perMachine: false
+portable:
+  artifactName: ${productName}-Portable-${version}-${arch}.${ext}

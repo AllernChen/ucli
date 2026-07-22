@@ -8,6 +8,8 @@ const u = window.ucli
 export const ipc = {
   // adapters
   listAdapters: () => u.listAdapters(),
+  listCliTools: () => u.listCliTools(),
+  runCliToolAction: (id, action) => u.runCliToolAction(id, action),
   // dialog
   pickDirectory: () => u.pickDirectory(),
   scanClaudeSessions: (cwd) => u.scanClaudeSessions(cwd),

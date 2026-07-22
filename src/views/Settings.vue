@@ -1,6 +1,56 @@
 <template>
   <div class="settings">
-    <a-card title="默认设置" style="max-width: 640px">
+    <a-card title="CLI 管理" class="settings-card">
+      <div class="cli-toolbar">
+        <span class="muted">检测本机 PATH 中的 AI CLI。安装或升级前会显示并确认完整命令。</span>
+        <a-button size="small" :loading="detecting" @click="loadCliTools">重新检测</a-button>
+      </div>
+      <a-list :data-source="cliTools" :loading="detecting" item-layout="horizontal">
+        <template #renderItem="{ item }">
+          <a-list-item>
+            <template #actions>
+              <a-button
+                v-if="!item.installed"
+                size="small"
+                type="primary"
+                :loading="runningTool === `${item.id}:install`"
+                @click="confirmCliAction(item, 'install')"
+              >安装</a-button>
+              <a-button
+                v-else
+                size="small"
+                :loading="runningTool === `${item.id}:upgrade`"
+                @click="confirmCliAction(item, 'upgrade')"
+              >升级</a-button>
+            </template>
+            <a-list-item-meta :title="item.displayName">
+              <template #description>
+                <div class="cli-meta">
+                  <a-tag :color="item.installed ? 'green' : 'default'">{{ item.installed ? '已安装' : '未检测到' }}</a-tag>
+                  <span v-if="item.version">{{ item.version }}</span>
+                  <span v-if="item.path" class="cli-path" :title="item.path">{{ item.path }}</span>
+                  <span v-else-if="item.error" class="cli-error">{{ item.error }}</span>
+                </div>
+              </template>
+            </a-list-item-meta>
+          </a-list-item>
+        </template>
+      </a-list>
+      <a-alert
+        v-if="lastCliResult"
+        style="margin-top: 12px"
+        :type="lastCliResult.ok ? 'success' : 'error'"
+        show-icon
+        :message="lastCliResult.ok ? 'CLI 操作完成' : `CLI 操作失败（退出码 ${lastCliResult.code}）`"
+      >
+        <template #description>
+          <div class="result-command">{{ lastCliResult.command }}</div>
+          <pre v-if="lastCliOutput" class="result-output">{{ lastCliOutput }}</pre>
+        </template>
+      </a-alert>
+    </a-card>
+
+    <a-card title="默认设置" class="settings-card">
       <a-form layout="vertical">
         <a-form-item label="默认 CLI">
           <a-select v-model:value="local.defaultAdapter">
@@ -30,7 +80,7 @@
       </a-form>
     </a-card>
 
-    <a-card title="关于" style="max-width: 640px; margin-top: 14px">
+    <a-card title="关于" class="settings-card">
       <p>UCLI — 多 CLI 编排工作台</p>
       <p class="muted">集成 Claude Code 与 Codex 的卡片式编排 GUI，提供三档权限管控与 token 统计。</p>
     </a-card>
@@ -38,8 +88,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
-import { message } from 'ant-design-vue'
+import { ref, computed, onMounted, h } from 'vue'
+import { message, Modal } from 'ant-design-vue'
 import { useSettingsStore } from '../stores/settings.js'
 import { useSessionsStore } from '../stores/sessions.js'
 import { ipc } from '../ipc.js'
@@ -48,12 +98,62 @@ const settings = useSettingsStore()
 const sessions = useSessionsStore()
 const adapters = ref([])
 const local = ref({ defaultAdapter: 'claude', defaultTier: 'safety-rules', defaultCwd: '', language: 'zh-CN' })
+const cliTools = ref([])
+const detecting = ref(false)
+const runningTool = ref('')
+const lastCliResult = ref(null)
+const lastCliOutput = computed(() => {
+  const result = lastCliResult.value
+  if (!result) return ''
+  return [result.stdout, result.stderr].filter(Boolean).join('\n').trim()
+})
 
 onMounted(async () => {
-  await Promise.all([settings.load(), sessions.init()])
+  await Promise.all([settings.load(), sessions.init(), loadCliTools()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
 })
+
+async function loadCliTools() {
+  detecting.value = true
+  try {
+    cliTools.value = await ipc.listCliTools()
+  } catch (e) {
+    message.error('CLI 检测失败：' + (e?.message || e))
+  } finally {
+    detecting.value = false
+  }
+}
+
+function confirmCliAction(item, action) {
+  const command = action === 'install' ? item.installCommand : item.upgradeCommand
+  const label = action === 'install' ? '安装' : '升级'
+  Modal.confirm({
+    title: `${label} ${item.displayName}？`,
+    content: h('div', [
+      h('p', 'UCLI 将在本机执行以下官方命令：'),
+      h('code', { class: 'confirm-command' }, command)
+    ]),
+    okText: `确认${label}`,
+    cancelText: '取消',
+    async onOk() {
+      runningTool.value = `${item.id}:${action}`
+      lastCliResult.value = null
+      try {
+        const result = await ipc.runCliToolAction(item.id, action)
+        lastCliResult.value = result
+        const index = cliTools.value.findIndex((tool) => tool.id === item.id)
+        if (index >= 0) cliTools.value[index] = result.status
+        if (result.ok) message.success(`${item.displayName} ${label}完成`)
+        else message.error(`${item.displayName} ${label}失败`)
+      } catch (e) {
+        message.error(`${label}失败：` + (e?.message || e))
+      } finally {
+        runningTool.value = ''
+      }
+    }
+  })
+}
 
 async function pickDir() {
   const dir = await ipc.pickDirectory()
@@ -67,5 +167,14 @@ async function save() {
 </script>
 
 <style scoped>
+.settings { max-width: 820px; }
+.settings-card { margin-bottom: 14px; }
 .muted { color: #8c8c8c; }
+.cli-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.cli-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cli-path { color: #8c8c8c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cli-error { color: #bfbfbf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-command, :global(.confirm-command) { font-family: 'Cascadia Code', Consolas, monospace; }
+.result-command { margin-bottom: 6px; color: #262626; }
+.result-output { margin: 0; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
 </style>
