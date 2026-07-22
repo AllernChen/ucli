@@ -1,4 +1,5 @@
 appId: com.ucli.app
+asar: false
 productName: UCLI
 directories:
   output: dist

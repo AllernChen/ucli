@@ -159,6 +159,7 @@ const route = useRoute()
 watch(() => route.path, (p) => { if (p === '/stats') load() })
 
 async function load() {
+  stats.initLiveUpdates()
   await Promise.all([sessions.init(), stats.refresh()])
 }
 </script>

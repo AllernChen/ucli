@@ -1,6 +1,6 @@
 import { app, ipcMain, dialog } from 'electron'
 import { join } from 'path'
-import { readFileSync, readdirSync, existsSync, unlinkSync } from 'fs'
+import { readFileSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { PermissionEngine } from './permission/engine.js'
 import { startHookServer } from './permission/hookServer.js'
@@ -201,7 +201,7 @@ export function createOrchestrator() {
     const adapter = descriptor.create({ session, engine, settings: { hookRunnerPath, hookPort: null } })
     const entry = {
       adapter, session,
-      status: 'idle',
+      status: 'starting', // not yet started — renderer calls start-adapter when pane is ready
       stats: { tokens: { input: 0, output: 0 }, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } },
       lastActivity: '启动中…',
       createdAt: Date.now(),
@@ -218,7 +218,7 @@ export function createOrchestrator() {
       db.insertSession({
         id: sessionId, project_path: cwd, adapter_id: adapterId,
         native_session_id: null, name: session.name, task_note: '', tier, model: session.model,
-        status: 'idle', created_at: entry.createdAt
+        status: 'starting', created_at: entry.createdAt
       })
       db.flush()
     }
@@ -255,12 +255,27 @@ export function createOrchestrator() {
         break
       case 'stats_update':
         entry.stats.tokens = { input: evt.usage.inputTokens, output: evt.usage.outputTokens }
-        if (evt.costUsd) entry.stats.costUsd = evt.costUsd
-        if (evt.turns) entry.stats.turns = evt.turns
+        if (evt.costUsd != null) entry.stats.costUsd = evt.costUsd
+        if (evt.turns != null) entry.stats.turns = evt.turns
+        if (evt.contextWindow) entry.session.contextWindow = evt.contextWindow
         if (evt.model && evt.model !== entry.session.model) {
           entry.session.model = evt.model
           const db = getDb()
           if (db) db.updateSession(sessionId, { model: evt.model })
+        }
+        {
+          const db = getDb()
+          if (db) {
+            db.upsertStats(sessionId, {
+              inputTokens: entry.stats.tokens.input,
+              outputTokens: entry.stats.tokens.output,
+              costUsd: entry.stats.costUsd,
+              turnsDelta: entry.stats.turns,
+              autoAllowed: entry.stats.approvals.autoAllowed,
+              confirmed: entry.stats.approvals.confirmed,
+              denied: entry.stats.approvals.denied
+            })
+          }
         }
         // Persist per-model breakdown to model_stats table
         if (evt.modelBreakdown && evt.modelBreakdown.length) {
@@ -270,6 +285,15 @@ export function createOrchestrator() {
               db.upsertModelStats(sessionId, mb.model, { inputTokens: mb.inputTokens, outputTokens: mb.outputTokens, costUsd: mb.costUsd })
             }
           }
+        } else if (evt.model) {
+          const db = getDb()
+          if (db) {
+            db.upsertModelStats(sessionId, evt.model, {
+              inputTokens: entry.stats.tokens.input,
+              outputTokens: entry.stats.tokens.output,
+              costUsd: entry.stats.costUsd
+            })
+          }
         }
         scheduleFlush()
         break
@@ -278,27 +302,282 @@ export function createOrchestrator() {
   }
 
 
-  // ---- claude session index helpers ----
-  /** Shared: scan ~/.claude/sessions/*.json for sessions matching cwd.
-   *  Returns array of { sessionId, name, startedAt }. */
-  function listClaudeSessionsByCwd(cwd) {
+  // ---- session discovery helpers ----
+  const home = process.env.HOME || process.env.USERPROFILE || '~'
+
+  /** Read the last ~16 KB of a transcript file and extract the last text-bearing
+   *  message (user or assistant). Returns a short preview string or null. */
+  function _extractLastText(jsonlPath) {
     try {
-      const home = process.env.HOME || process.env.USERPROFILE || '~'
-      const sessionsDir = join(home, '.claude', 'sessions')
-      if (!existsSync(sessionsDir)) return []
-      const normCwd = (cwd || '').replace(/\\/g, '/').toLowerCase()
-      const found = []
-      for (const f of readdirSync(sessionsDir)) {
+      const content = readFileSync(jsonlPath, 'utf8')
+      const tail = content.length > 16384 ? content.slice(-16384) : content
+      const lines = tail.split('\n')
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim()
+        if (!line) continue
+        try {
+          const obj = JSON.parse(line)
+          // Claude format
+          if (obj.type === 'assistant' && obj.message?.content) {
+            for (const b of obj.message.content) {
+              if (b.type === 'text' && b.text) return b.text.slice(0, 120)
+            }
+          }
+          if (obj.type === 'user' && obj.message?.content) {
+            for (const b of obj.message.content) {
+              if (b.type === 'text' && b.text) return b.text.slice(0, 120)
+            }
+          }
+          // Codex format: response_item with payload.type === "message"
+          if (obj.type === 'response_item' && obj.payload?.type === 'message') {
+            const p = obj.payload
+            if (p.content && Array.isArray(p.content)) {
+              for (const b of p.content) {
+                if ((b.type === 'output_text' || b.type === 'text') && b.text) return b.text.slice(0, 120)
+              }
+            }
+          }
+          // Codex format: event_msg with payload.type === "agent_message"
+          if (obj.type === 'event_msg' && obj.payload?.type === 'agent_message' && obj.payload.message) {
+            return String(obj.payload.message).slice(0, 120)
+          }
+        } catch { /* skip */ }
+      }
+      return null
+    } catch { return null }
+  }
+
+  /** Build a session-index lookup from ~/.claude/sessions/*.json for name
+   *  metadata. Keys are sessionId strings. */
+  function _claudeIndexByName() {
+    const map = new Map()
+    try {
+      const dir = join(home, '.claude', 'sessions')
+      if (!existsSync(dir)) return map
+      for (const f of readdirSync(dir)) {
         if (!f.endsWith('.json')) continue
         try {
-          const raw = JSON.parse(readFileSync(join(sessionsDir, f), 'utf8'))
-          const rawCwd = (raw.cwd || '').replace(/\\/g, '/').toLowerCase()
-          if (rawCwd === normCwd) {
-            found.push({ sessionId: raw.sessionId, name: raw.name, startedAt: raw.startedAt })
+          const raw = JSON.parse(readFileSync(join(dir, f), 'utf8'))
+          if (raw.sessionId) map.set(raw.sessionId, raw)
+        } catch { /* skip */ }
+      }
+    } catch { /* ignore */ }
+    return map
+  }
+
+  /** Hash a cwd into the directory name claude uses under ~/.claude/projects/. */
+  function projectHash(cwd) {
+    return cwd.toLowerCase().replace(/:/g, '-').replace(/\\/g, '-').replace(/\s/g, '-').replace(/\/+/g, '-')
+  }
+
+  /** Discover Claude sessions for a cwd by scanning
+   *  ~/.claude/projects/<hash>/*.jsonl directly, then enriching with name
+   *  metadata from ~/.claude/sessions/.
+   *  Returns array of { sessionId, name, startedAt, model, turns }. */
+  function listClaudeSessionsByCwd(cwd) {
+    try {
+      if (!cwd) return []
+      const idx = _claudeIndexByName()
+      const hash = projectHash(cwd)
+      const projDir = join(home, '.claude', 'projects')
+      if (!existsSync(projDir)) return []
+
+      // Find the project directory (case-insensitive on Windows)
+      let targetDir = null
+      for (const d of readdirSync(projDir)) {
+        if (d.toLowerCase() === hash) { targetDir = join(projDir, d); break }
+      }
+      if (!targetDir) return []
+
+      const found = []
+      for (const f of readdirSync(targetDir)) {
+        if (!f.endsWith('.jsonl')) continue
+        const sessionId = f.replace(/\.jsonl$/, '')
+        const meta = idx.get(sessionId) || {}
+        const fullPath = join(targetDir, f)
+        let model = meta.model || null
+        let turns = 0
+        try {
+          const content = readFileSync(fullPath, 'utf8')
+          // Extract model from init line (first ~2KB)
+          for (const line of content.slice(0, 2048).split('\n').filter(Boolean)) {
+            try {
+              const obj = JSON.parse(line)
+              if (obj.type === 'system' && obj.subtype === 'init' && !model) model = obj.model
+              if (obj.type === 'result' && obj.num_turns) turns = obj.num_turns
+            } catch { /* skip */ }
           }
-        } catch { /* skip corrupted files */ }
+          // Also scan for result lines with num_turns
+          if (!turns) {
+            for (const line of content.split('\n')) {
+              try {
+                const obj = JSON.parse(line)
+                if (obj.type === 'result' && obj.num_turns) { turns = obj.num_turns; break }
+              } catch { /* skip */ }
+            }
+          }
+        } catch { /* metadata extraction is best-effort */ }
+
+        found.push({
+          sessionId,
+          name: meta.name || null,
+          startedAt: meta.startedAt || statSync(fullPath).birthtimeMs,
+          model: model || meta.model || null,
+          turns,
+          lastMessage: _extractLastText(fullPath)
+        })
       }
       return found
+    } catch { return [] }
+  }
+
+  /** Discover Codex sessions by scanning ~/.codex/sessions/<year>/<month>/<day>/
+   *  for rollout-*.jsonl files. Reads the first line (session_meta) of each to
+   *  extract cwd, sessionId, and timestamp. Falls back to session_index.jsonl
+   *  for session names.
+   *  If cwd is given, only returns sessions matching that directory.
+   *  Returns array of { sessionId, name, startedAt }. */
+  function listCodexSessions(cwd) {
+    try {
+      const sessionsDir = join(home, '.codex', 'sessions')
+      if (!existsSync(sessionsDir)) return []
+
+      // Build name lookup from session_index.jsonl
+      const nameMap = new Map()
+      try {
+        const idxPath = join(home, '.codex', 'session_index.jsonl')
+        if (existsSync(idxPath)) {
+          const lines = readFileSync(idxPath, 'utf8').split('\n').filter(Boolean)
+          for (const line of lines) {
+            try {
+              const obj = JSON.parse(line)
+              if (obj.id) {
+                nameMap.set(obj.id, (obj.thread_name || '').replace(/<[^>]+>/g, '').trim() || null)
+              }
+            } catch { /* skip */ }
+          }
+        }
+      } catch { /* ok */ }
+
+      const normCwd = cwd ? (cwd || '').replace(/\\/g, '/').toLowerCase() : null
+      const found = []
+
+      // Walk year/month/day directories
+      const years = readdirSync(sessionsDir)
+      for (const year of years) {
+        const yearDir = join(sessionsDir, year)
+        let months
+        try { months = readdirSync(yearDir) } catch { continue }
+        for (const month of months) {
+          const monthDir = join(yearDir, month)
+          let days
+          try { days = readdirSync(monthDir) } catch { continue }
+          for (const day of days) {
+            const dayDir = join(monthDir, day)
+            let files
+            try { files = readdirSync(dayDir) } catch { continue }
+            for (const f of files) {
+              if (!f.endsWith('.jsonl')) continue
+              const fullPath = join(dayDir, f)
+              let meta = null
+              try {
+                // Codex session_meta lines can be large — read 64 KB for the first line
+                const head = readFileSync(fullPath, 'utf8').slice(0, 65536)
+                const nl = head.indexOf('\n')
+                if (nl > 0) {
+                  const firstLine = head.slice(0, nl)
+                  const obj = JSON.parse(firstLine)
+                  if (obj.type === 'session_meta' && obj.payload) {
+                    meta = obj.payload
+                  }
+                }
+              } catch { /* unreadable — skip */ }
+              if (!meta || !meta.session_id && !meta.id) continue
+              const sessionId = meta.session_id || meta.id
+              if (normCwd) {
+                const metaCwd = (meta.cwd || '').replace(/\\/g, '/').toLowerCase()
+                if (metaCwd !== normCwd) continue
+              }
+              found.push({
+                sessionId,
+                name: nameMap.get(sessionId) || null,
+                startedAt: meta.timestamp ? new Date(meta.timestamp).getTime() : statSync(fullPath).birthtimeMs,
+                lastMessage: _extractLastText(fullPath)
+              })
+            }
+          }
+        }
+      }
+
+      // Deduplicate by sessionId (latest file wins)
+      const seen = new Map()
+      for (const s of found) {
+        const existing = seen.get(s.sessionId)
+        if (!existing || (s.startedAt || 0) > (existing.startedAt || 0)) {
+          seen.set(s.sessionId, s)
+        }
+      }
+      return Array.from(seen.values()).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
+    } catch { return [] }
+  }
+
+  /** Discover OpenCode sessions from ~/.opencode/sessions/.
+   *  OpenCode stores each session as a directory with a session.json or
+   *  session meta file. If not installed, returns empty array.
+   *  Returns array of { sessionId, name, startedAt }. */
+  function listOpenCodeSessions(cwd) {
+    try {
+      const opencodeDir = join(home, '.opencode')
+      if (!existsSync(opencodeDir)) return []
+      const sessionsDir = join(opencodeDir, 'sessions')
+      if (!existsSync(sessionsDir)) return []
+
+      const normCwd = cwd ? (cwd || '').replace(/\\/g, '/').toLowerCase() : null
+      const found = []
+
+      for (const entry of readdirSync(sessionsDir)) {
+        const entryPath = join(sessionsDir, entry)
+        let stat
+        try { stat = statSync(entryPath) } catch { continue }
+
+        // OpenCode sessions are typically named directories
+        if (!stat.isDirectory()) continue
+
+        // Try to read session metadata
+        let meta = null
+        for (const metaFile of ['session.json', 'meta.json', 'session_meta.json']) {
+          const mp = join(entryPath, metaFile)
+          if (!existsSync(mp)) continue
+          try {
+            meta = JSON.parse(readFileSync(mp, 'utf8'))
+            break
+          } catch { /* try next */ }
+        }
+
+        if (!meta) {
+          // No metadata file — use directory name as sessionId, dir mtime as timestamp
+          found.push({
+            sessionId: entry,
+            name: null,
+            startedAt: stat.birthtimeMs
+          })
+          continue
+        }
+
+        const sessionId = meta.session_id || meta.id || meta.sessionId || entry
+        if (normCwd) {
+          const metaCwd = (meta.cwd || meta.working_directory || '').replace(/\\/g, '/').toLowerCase()
+          if (metaCwd !== normCwd) continue
+        }
+
+        found.push({
+          sessionId,
+          name: meta.name || meta.thread_name || null,
+          startedAt: meta.startedAt || meta.timestamp ? new Date(meta.startedAt || meta.timestamp).getTime() : stat.birthtimeMs
+        })
+      }
+
+      return found.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
     } catch { return [] }
   }
 
@@ -328,6 +607,7 @@ export function createOrchestrator() {
       nativeSessionId: e.session.cliSessionId || null,
       name: e.session.name || null,
       taskNote: e.session.taskNote || '',
+      contextWindow: e.session.contextWindow || null,
       lastActivity: e.lastActivity || '',
       startedAt: e.createdAt || null,
       createdAt: e.createdAt
@@ -366,18 +646,28 @@ export function createOrchestrator() {
       return result.canceled ? null : result.filePaths[0]
     })
 
-    // Scan the user's claude sessions dir for sessions matching `cwd`.
-    ipcMain.handle('session:scan-claude', (_e, cwd) => {
-      const found = listClaudeSessionsByCwd(cwd)
-      // Exclude already-imported sessions
+    // Discover all CLI sessions for a cwd, grouped by adapter type.
+    // Returns { claude: [...], codex: [...] }
+    ipcMain.handle('session:discover', (_e, cwd) => {
       const imported = new Set()
       for (const e of sessions.values()) {
         if (e.session.cliSessionId) imported.add(e.session.cliSessionId)
       }
-      return found
+      const filterNew = (list) => list
         .filter(s => !imported.has(s.sessionId))
         .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
         .slice(0, 30)
+
+      return {
+        claude: filterNew(listClaudeSessionsByCwd(cwd)),
+        codex: filterNew(listCodexSessions(cwd)),
+        opencode: filterNew(listOpenCodeSessions(cwd))
+      }
+    })
+
+    // Legacy: keep old handlers for backwards compat
+    ipcMain.handle('session:scan-claude', (_e, cwd) => {
+      return [] // deprecated — use session:discover
     })
 
     ipcMain.handle('session:create', (_e, config) => {
@@ -416,6 +706,10 @@ export function createOrchestrator() {
       }
     })
     ipcMain.handle('session:attach-terminal', (_e, sessionId) => {
+      const e = sessions.get(sessionId)
+      if (e?.adapter && typeof e.adapter.replayHistory === 'function') {
+        e.adapter.replayHistory()
+      }
       return true
     })
     ipcMain.handle('session:respond-approval', (_e, sessionId, requestId, verdict) => {

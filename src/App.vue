@@ -8,7 +8,7 @@
         theme="light"
         @click="onMenuClick"
       >
-        <a-menu-item key="/">
+        <a-menu-item key="/session">
           <DesktopOutlined />
           <span>工作台</span>
         </a-menu-item>
@@ -57,13 +57,13 @@ const sessions = useSessionsStore()
 
 const selectedKeys = ref([route.path])
 watch(() => route.path, (p) => {
-  if (p.startsWith('/session/')) selectedKeys.value = ['/']
+  if (p.startsWith('/session')) selectedKeys.value = ['/session']
   else selectedKeys.value = [p]
 })
 
 const waitingCount = computed(() => sessions.totalWaiting)
 const title = computed(() => {
-  if (route.path.startsWith('/session/')) return '会话详情'
+  if (route.path.startsWith('/session')) return '会话工作台'
   if (route.path === '/stats') return '运行统计'
   if (route.path === '/rules') return '安全规则'
   if (route.path === '/settings') return '设置'

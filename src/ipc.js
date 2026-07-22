@@ -11,6 +11,7 @@ export const ipc = {
   // dialog
   pickDirectory: () => u.pickDirectory(),
   scanClaudeSessions: (cwd) => u.scanClaudeSessions(cwd),
+  discoverSessions: (cwd) => u.discoverSessions(cwd),
   // sessions
   createSession: (config) => u.createSession(config),
   startAdapter: (sessionId) => u.startAdapter(sessionId),

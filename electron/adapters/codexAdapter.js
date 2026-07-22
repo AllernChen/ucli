@@ -1,333 +1,377 @@
-import { spawn } from 'child_process'
+import { readFileSync, existsSync, readdirSync, statSync, rmSync } from 'fs'
+import { join } from 'path'
+import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
 
 const DISPLAY_NAME = 'Codex'
 const ICON = '🟢'
 
+const require = createRequire(import.meta.url)
+let pty
+try { pty = require('node-pty') } catch (err) {
+  console.error('Failed to load node-pty for codex:', err.message)
+}
+
+export function parseCodexTranscriptStats(lines) {
+  let cliSessionId = null
+  let inputTokens = 0
+  let outputTokens = 0
+  let cachedInputTokens = 0
+  let reasoningOutputTokens = 0
+  let totalTokens = 0
+  let contextWindow = null
+  let turnsCount = 0
+  let lastModel = null
+
+  for (const line of lines) {
+    let obj
+    try { obj = typeof line === 'string' ? JSON.parse(line) : line } catch { continue }
+
+    if (obj.type === 'session_meta' && obj.payload) {
+      cliSessionId = obj.payload.session_id || obj.payload.id || cliSessionId
+      lastModel = obj.payload.model || obj.payload.model_provider || lastModel
+      continue
+    }
+
+    if (obj.type === 'turn_context' && obj.payload?.model) {
+      lastModel = obj.payload.model
+    }
+
+    if (obj.type === 'event_msg' && obj.payload?.type === 'token_count') {
+      const info = obj.payload.info || {}
+      const total = info.total_token_usage || info.totalTokenUsage || {}
+      inputTokens = total.input_tokens || total.inputTokens || inputTokens
+      outputTokens = total.output_tokens || total.outputTokens || outputTokens
+      cachedInputTokens = total.cached_input_tokens || total.cachedInputTokens || cachedInputTokens
+      reasoningOutputTokens = total.reasoning_output_tokens || total.reasoningOutputTokens || reasoningOutputTokens
+      totalTokens = total.total_tokens || total.totalTokens || totalTokens
+      contextWindow = info.model_context_window || info.modelContextWindow || contextWindow
+      continue
+    }
+
+    if (obj.usage) {
+      inputTokens = Math.max(inputTokens, obj.usage.input_tokens || obj.usage.inputTokens || 0)
+      outputTokens = Math.max(outputTokens, obj.usage.output_tokens || obj.usage.outputTokens || 0)
+    }
+
+    if (obj.role === 'user' || obj.type === 'user_message') {
+      turnsCount += 1
+    } else if (obj.type === 'response_item' && obj.payload?.role === 'user') {
+      turnsCount += 1
+    }
+  }
+
+  return {
+    cliSessionId,
+    inputTokens,
+    outputTokens,
+    cachedInputTokens,
+    reasoningOutputTokens,
+    totalTokens,
+    contextWindow,
+    turnsCount,
+    lastModel
+  }
+}
+
 /**
- * Drives `codex app-server --listen stdio://` as a stateful JSON-RPC 2.0 peer.
+ * CodexAdapter — PTY terminal mode, like ClaudeAdapter.
  *
- *   spawn → initialize → thread/start (per session) → turn/start (per prompt)
- *   Notifications stream deltas, token usage, item lifecycle, turn completion.
- *   Server *requests* (item/.../requestApproval) are the approval channel: we
- *   route each through the permission engine and respond accept/decline.
- *
- * Method/field names are taken from `codex app-server generate-json-schema`
- * (v2). Parsing is defensive — codex is experimental and shapes may shift; we
- * verify against a live run in the smoke test.
+ * Spawns `codex` interactively via node-pty. Output goes directly to xterm.js.
+ * User types directly in the terminal. Permissions are handled by codex's
+ * built-in approval prompts in the TUI.
  */
 export class CodexAdapter extends BaseAdapter {
   constructor({ session, engine, settings }) {
     super({ id: 'codex', displayName: DISPLAY_NAME, session, engine })
-    /** @type {import('child_process').ChildProcess|null} */
-    this.proc = null
-    this._buffer = ''
-    this._nextId = 1
-    /** @type {Map<number, {resolve, reject}>} pending ClientRequest responses */
-    this._pending = new Map()
-    this._threadId = null
-    this._initialized = false
+    this.hookPort = settings.hookPort
+    this.ptyProc = null
+    this._settingsDir = null
+    this._statsTimer = null
+    this._lastStatsTokens = { input: 0, output: 0 }
+    this._lastModel = null
+    this._startedAt = Date.now()
+  }
+
+  _findTranscript(cliSessionId) {
+    const home = process.env.HOME || process.env.USERPROFILE || '~'
+    const sessionsDir = join(home, '.codex', 'sessions')
+    if (!existsSync(sessionsDir)) return null
+    // Walk year/month/day for the session file
+    for (const year of readdirSync(sessionsDir)) {
+      const yDir = join(sessionsDir, year)
+      let months; try { months = readdirSync(yDir) } catch { continue }
+      for (const month of months) {
+        const mDir = join(yDir, month)
+        let days; try { days = readdirSync(mDir) } catch { continue }
+        for (const day of days) {
+          const dDir = join(mDir, day)
+          let files; try { files = readdirSync(dDir) } catch { continue }
+          for (const f of files) {
+            if (f.endsWith(cliSessionId + '.jsonl')) return join(dDir, f)
+          }
+        }
+      }
+    }
+    return null
+  }
+
+  _findLatestTranscript() {
+    const home = process.env.HOME || process.env.USERPROFILE || '~'
+    const sessionsDir = join(home, '.codex', 'sessions')
+    if (!existsSync(sessionsDir)) return null
+    const normCwd = (this.session.cwd || '').replace(/\\/g, '/').toLowerCase()
+    let newest = null
+    let newestMtime = 0
+    for (const year of readdirSync(sessionsDir)) {
+      const yDir = join(sessionsDir, year)
+      let months; try { months = readdirSync(yDir) } catch { continue }
+      for (const month of months) {
+        const mDir = join(yDir, month)
+        let days; try { days = readdirSync(mDir) } catch { continue }
+        for (const day of days) {
+          const dDir = join(mDir, day)
+          let files; try { files = readdirSync(dDir) } catch { continue }
+          for (const f of files) {
+            if (!f.endsWith('.jsonl')) continue
+            const full = join(dDir, f)
+            let stat
+            try { stat = statSync(full) } catch { continue }
+            if (stat.mtimeMs < this._startedAt - 10000 || stat.mtimeMs < newestMtime) continue
+            try {
+              const head = readFileSync(full, 'utf8').slice(0, 65536)
+              const firstLine = head.slice(0, head.indexOf('\n') >= 0 ? head.indexOf('\n') : head.length)
+              const meta = JSON.parse(firstLine)
+              const metaCwd = (meta.payload?.cwd || '').replace(/\\/g, '/').toLowerCase()
+              if (meta.type === 'session_meta' && metaCwd === normCwd) {
+                newest = full
+                newestMtime = stat.mtimeMs
+              }
+            } catch { /* skip */ }
+          }
+        }
+      }
+    }
+    return newest
+  }
+
+  _replayHistory() {
+    const cliSessionId = this.session.cliSessionId
+    if (!cliSessionId) return
+    const path = this._findTranscript(cliSessionId)
+    if (!path) {
+      this._write('\x1b[90m(未找到 Codex 历史记录)\x1b[0m\r\n\r\n')
+      return
+    }
+    try {
+      const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
+      this._write('\x1b[90m━━━ Codex 历史记录 ━━━\x1b[0m\r\n\r\n')
+      for (const line of lines) {
+        let obj
+        try { obj = JSON.parse(line) } catch { continue }
+        this._formatEvent(obj)
+      }
+      this._write('\x1b[90m━━━ 历史结束 ━━━\x1b[0m\r\n\r\n')
+    } catch {
+      this._write('\x1b[90m(读取 Codex 历史失败)\x1b[0m\r\n\r\n')
+    }
+  }
+
+  _formatEvent(obj) {
+    if (!obj || !obj.type) return
+    // Session meta
+    if (obj.type === 'session_meta' && obj.payload) {
+      const p = obj.payload
+      this._write(`\x1b[44m\x1b[1m Codex \x1b[0m \x1b[90msession: ${(p.session_id||p.id||'').slice(0,8)}\x1b[0m\r\n`)
+      this._write(`\x1b[90mcwd: ${p.cwd||'—'}  ·  cli: ${p.cli_version||'—'}\x1b[0m\r\n\r\n`)
+      return
+    }
+    // User messages
+    if (obj.role === 'user' || obj.type === 'user_message') {
+      const text = typeof obj.content === 'string' ? obj.content : JSON.stringify(obj.content)
+      this._write(`\x1b[32m> ${text}\x1b[0m\r\n\r\n`)
+      return
+    }
+    // Assistant messages
+    if (obj.role === 'assistant' || obj.type === 'assistant_message') {
+      const text = typeof obj.content === 'string' ? obj.content : JSON.stringify(obj.content)
+      for (const l of text.split('\n')) this._write(`\x1b[36m│\x1b[0m ${l}\r\n`)
+      this._write('\r\n')
+      return
+    }
+    // Tool calls
+    if (obj.type === 'tool_call' || obj.type === 'function_call') {
+      const name = obj.name || obj.function?.name || '?'
+      const args = obj.arguments || obj.function?.arguments || ''
+      this._write(`\x1b[43m\x1b[1m tool \x1b[0m \x1b[33m${name}\x1b[0m \x1b[90m${typeof args === 'string' ? args.slice(0, 80) : ''}\x1b[0m\r\n`)
+      return
+    }
+    // Tool results
+    if (obj.type === 'tool_result') {
+      const pf = obj.is_error ? '\x1b[41m error \x1b[0m' : '\x1b[42m\x1b[1m done \x1b[0m'
+      const txt = typeof obj.content === 'string' ? obj.content : JSON.stringify(obj.content)
+      this._write(`${pf} \x1b[90m${(txt||'').slice(0, 200)}\x1b[0m\r\n`)
+      return
+    }
+  }
+
+  _write(text) {
+    this.emitEvent({ type: 'terminal', data: text })
+    this._scheduleStatsUpdate()
+  }
+
+  _scheduleStatsUpdate() {
+    if (this._statsTimer) clearTimeout(this._statsTimer)
+    this._statsTimer = setTimeout(() => this._extractStats(), 2000)
+  }
+
+  _extractStats() {
+    const cliSessionId = this.session.cliSessionId
+    const path = cliSessionId ? this._findTranscript(cliSessionId) : this._findLatestTranscript()
+    if (!path) return
+    try {
+      const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
+      const stats = parseCodexTranscriptStats(lines)
+      if (stats.cliSessionId && !this.session.cliSessionId) {
+        this.session.cliSessionId = stats.cliSessionId
+        this.emitEvent({ type: 'init', cliSessionId: stats.cliSessionId, model: stats.lastModel })
+      }
+      const inputTokens = stats.inputTokens
+      const outputTokens = stats.outputTokens
+      if (inputTokens !== this._lastStatsTokens.input || outputTokens !== this._lastStatsTokens.output || stats.lastModel !== this._lastModel) {
+        this._lastStatsTokens = { input: inputTokens, output: outputTokens }
+        this._lastModel = stats.lastModel
+        this.emitEvent({
+          type: 'stats_update',
+          usage: {
+            inputTokens,
+            outputTokens,
+            cachedInputTokens: stats.cachedInputTokens,
+            reasoningOutputTokens: stats.reasoningOutputTokens,
+            totalTokens: stats.totalTokens
+          },
+          costUsd: 0,
+          turns: stats.turnsCount,
+          model: stats.lastModel,
+          contextWindow: stats.contextWindow
+        })
+      }
+    } catch { /* ignore */ }
+  }
+
+  /** Public: replay transcript history to the terminal. */
+  replayHistory() {
+    this._replayHistory()
   }
 
   async start() {
-    this.proc = spawn('codex', ['app-server', '--listen', 'stdio://'], {
-      cwd: this.session.cwd,
-      shell: true,
-      env: { ...process.env, UCLI_SESSION_ID: this.session.id }
-    })
-    this.proc.stdout.setEncoding('utf8')
-    this.proc.stdout.on('data', (chunk) => this._onStdout(chunk))
-    this.proc.stderr.setEncoding('utf8')
-    this.proc.stderr.on('data', (chunk) => {
-      const s = chunk.toString().trim()
-      if (s) this.emitEvent({ type: 'command_output', stream: 'stderr', text: s })
-    })
-    // Flip the card to idle as soon as the process is alive (before the
-    // initialize/thread/start handshake completes).
-    this.proc.on('spawn', () => this.emitEvent({ type: 'ready' }))
-    this.proc.on('exit', (code, signal) => this.emitEvent({ type: 'exit', code, signal }))
-    this.proc.on('error', (err) =>
-      this.emitEvent({ type: 'error', message: 'spawn failed: ' + (err?.message || String(err)) })
-    )
+    this._disposed = false
+    this._startedAt = Date.now()
+    if (!pty) {
+      this._write('\x1b[31mnode-pty 未加载，无法启动 Codex 终端模式\x1b[0m\r\n')
+      this.emitEvent({ type: 'error', message: 'node-pty not available' })
+      return
+    }
 
-    // JSON-RPC handshake, then open a thread.
+    this._replayHistory()
+
+    const args = []
+    if (this.session.cliSessionId) {
+      // codex uses `resume` subcommand, not `--resume` flag
+      args.push('resume', this.session.cliSessionId)
+    }
+    if (this.session.model) args.push('--model', this.session.model)
+
+    const env = {
+      ...process.env,
+      UCLI_SESSION_ID: this.session.id,
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor'
+    }
+
     try {
-      await this._request('initialize', {
-        clientInfo: { name: 'ucli', version: '0.1.0' }
-      })
-      this._initialized = true
-      const res = await this._request('thread/start', {
+      // Use cmd.exe to resolve the codex.cmd shim on Windows
+      const shell = process.platform === 'win32' ? 'cmd.exe' : 'codex'
+      const shellArgs = process.platform === 'win32'
+        ? ['/c', 'codex', ...args]
+        : args
+
+      this.ptyProc = pty.spawn(shell, shellArgs, {
+        name: 'xterm-256color',
+        cols: 120,
+        rows: 40,
         cwd: this.session.cwd,
-        model: this.session.model || undefined,
-        sandbox: 'workspace-write',
-        approvalPolicy: 'untrusted',
-        approvalsReviewer: 'user'
+        env
       })
-      this._threadId = res?.thread?.id || res?.threadId || res?.id
+
+      this.ptyProc.onData((data) => {
+        this._write(data)
+      })
+
+      this.ptyProc.onExit(({ exitCode }) => {
+        this._write(`\r\n\x1b[90mCodex process exited (code ${exitCode})\x1b[0m\r\n`)
+        this.emitEvent({ type: 'exit', code: exitCode })
+      })
+
       this.emitEvent({
-        type: 'init',
-        cliSessionId: this._threadId,
-        model: this.session.model,
-        cwd: this.session.cwd
+        type: 'stats_update',
+        usage: { inputTokens: 0, outputTokens: 0 },
+        costUsd: 0,
+        turns: 0,
+        model: this.session.model || null
       })
+      this.emitEvent({ type: 'ready' })
     } catch (err) {
-      this.emitEvent({ type: 'error', message: 'codex init failed: ' + (err?.message || String(err)) })
+      this._write(`\x1b[31mCodex PTY spawn failed: ${err?.message}\x1b[0m\r\n`)
+      this.emitEvent({ type: 'error', message: 'Codex PTY spawn failed: ' + (err?.message || String(err)) })
     }
   }
 
-  // ---- JSON-RPC transport ----
-
-  _request(method, params) {
-    const id = this._nextId++
-    const msg = { jsonrpc: '2.0', id, method, params: params || {} }
-    return new Promise((resolve, reject) => {
-      this._pending.set(id, { resolve, reject })
-      this.proc.stdin.write(JSON.stringify(msg) + '\n')
-      setTimeout(() => {
-        if (this._pending.has(id)) {
-          this._pending.delete(id)
-          reject(new Error('timeout waiting for response to ' + method))
-        }
-      }, 60000)
-    })
+  writeInput(data) {
+    if (this.ptyProc) {
+      try { this.ptyProc.write(data); return true } catch {}
+    }
+    return false
   }
 
-  _notify(method, params) {
-    const msg = { jsonrpc: '2.0', method, params: params || {} }
-    this.proc?.stdin?.write(JSON.stringify(msg) + '\n')
-  }
-
-  _respond(id, result) {
-    const msg = { jsonrpc: '2.0', id, result }
-    this.proc?.stdin?.write(JSON.stringify(msg) + '\n')
-  }
-
-  _onStdout(chunk) {
-    this._buffer += chunk
-    let nl
-    while ((nl = this._buffer.indexOf('\n')) >= 0) {
-      const line = this._buffer.slice(0, nl).trim()
-      this._buffer = this._buffer.slice(nl + 1)
-      if (line) {
-        try {
-          this._handleMessage(JSON.parse(line))
-        } catch {
-          this.emitEvent({ type: 'command_output', stream: 'stdout', text: line })
-        }
-      }
+  resize(cols, rows) {
+    if (this.ptyProc) {
+      try { this.ptyProc.resize(cols, rows) } catch {}
     }
   }
-
-  _handleMessage(msg) {
-    if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
-      // Response to a ClientRequest we sent.
-      const p = this._pending.get(msg.id)
-      if (p) {
-        this._pending.delete(msg.id)
-        if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error)))
-        else p.resolve(msg.result)
-      }
-      return
-    }
-    if (msg.id !== undefined && msg.method) {
-      // Server→client request (approval). Must respond by id.
-      this._handleServerRequest(msg.id, msg.method, msg.params || {}).catch((err) => {
-        this._respond(msg.id, { decision: 'decline' })
-        this.emitEvent({ type: 'error', message: 'approval handling failed: ' + (err?.message || err) })
-      })
-      return
-    }
-    if (msg.method) {
-      // Server→client notification.
-      this._handleNotification(msg.method, msg.params || {})
-    }
-  }
-
-  // ---- notifications ----
-
-  _handleNotification(method, params) {
-    switch (method) {
-      case 'thread/started':
-        if (!this._threadId && params.thread?.id) this._threadId = params.thread.id
-        break
-      case 'thread/tokenUsage/updated': {
-        const tu = params.tokenUsage || {}
-        const total = tu.total || {}
-        this.emitEvent({
-          type: 'token_usage',
-          usage: {
-            inputTokens: total.inputTokens || 0,
-            outputTokens: total.outputTokens || 0,
-            cacheCreationInputTokens: 0,
-            cacheReadInputTokens: total.cachedInputTokens || 0,
-            reasoningOutputTokens: total.reasoningOutputTokens || 0
-          },
-          costUsd: null,
-          contextWindow: tu.modelContextWindow || null,
-          cumulative: true
-        })
-        break
-      }
-      case 'item/agentMessage/delta':
-        if (params.delta) this.emitEvent({ type: 'message', role: 'assistant', text: params.delta, partial: true })
-        break
-      case 'item/reasoning/summaryTextDelta':
-      case 'item/reasoning/textDelta':
-        if (params.delta) this.emitEvent({ type: 'reasoning', text: params.delta, partial: true })
-        break
-      case 'item/commandExecution/outputDelta':
-      case 'item/fileChange/outputDelta':
-        if (params.delta) this.emitEvent({ type: 'command_output', stream: 'stdout', text: decodeB64(params.delta) })
-        break
-      case 'item/fileChange/patchUpdated':
-        this.emitEvent({ type: 'file_diff', path: params.path || '', diff: params.patch || params.diff || '' })
-        break
-      case 'item/started':
-        this._emitItemEvent(params.item || params, 'started')
-        break
-      case 'item/completed':
-        this._emitItemEvent(params.item || params, 'completed')
-        break
-      case 'turn/completed':
-        this.emitEvent({
-          type: 'turn_complete',
-          result: extractFinalText(params.turn || params),
-          status: params.turn?.status || params.status,
-          isError: (params.turn?.status || params.status) === 'failed'
-        })
-        break
-      default:
-        break
-    }
-  }
-
-  _emitItemEvent(item, phase) {
-    if (!item) return
-    // Defensive tag detection — codex item shapes are a tagged union.
-    if (item.command || item.type === 'commandExecution' || item.type === 'command_execution') {
-      if (phase === 'started') {
-        this.emitEvent({ type: 'tool_call', toolUseId: item.id || item.itemId, tool: 'Bash', input: { command: item.command, cwd: item.cwd } })
-      } else {
-        this.emitEvent({
-          type: 'tool_result',
-          toolUseId: item.id || item.itemId,
-          content: item.aggregatedOutput || item.aggregated_output || '',
-          isError: item.exitCode ? item.exitCode !== 0 : false
-        })
-      }
-    } else if (item.changes || item.type === 'fileChange' || item.type === 'file_change') {
-      const changes = item.changes || []
-      for (const c of changes) {
-        if (phase === 'started') {
-          this.emitEvent({ type: 'tool_call', toolUseId: item.id || item.itemId, tool: 'Edit', input: { file_path: c.path, path: c.path } })
-        }
-        this.emitEvent({ type: 'file_diff', path: c.path, diff: c.diff || '' })
-      }
-      if (phase === 'completed') {
-        this.emitEvent({ type: 'tool_result', toolUseId: item.id || item.itemId, content: changes.map((c) => c.path).join(', '), isError: false })
-      }
-    } else if (item.type === 'agentMessage' || item.type === 'agent_message' || (item.text && item.phase)) {
-      // Finalize the streamed assistant message (deltas arrived as partials).
-      if (phase === 'completed') {
-        this.emitEvent({ type: 'message', role: 'assistant', text: item.text || '' })
-      }
-    }
-  }
-
-  // ---- approval server requests ----
-
-  async _handleServerRequest(id, method, params) {
-    let tool = 'Bash'
-    let callInput = {}
-    if (method === 'item/commandExecution/requestApproval') {
-      tool = 'Bash'
-      callInput = { command: params.command, cwd: params.cwd }
-    } else if (method === 'item/fileChange/requestApproval') {
-      tool = 'Edit'
-      callInput = { path: params.grantRoot || params.path || '' }
-    } else if (method === 'item/permissions/requestApproval') {
-      tool = 'Permissions'
-      callInput = { permissions: params.permissions }
-    } else {
-      // Unknown request type — decline safely.
-      this._respond(id, { decision: 'decline' })
-      return
-    }
-
-    const verdict = await this.decide({ tool, input: callInput, cwd: params.cwd })
-    // allow → accept, deny → decline (agent continues the turn).
-    const decision = verdict.verdict === 'allow' ? 'accept' : 'decline'
-    // Surface the tool call in the UI stream regardless.
-    this.emitEvent({
-      type: 'tool_call',
-      toolUseId: params.itemId,
-      tool,
-      input: callInput,
-      approval: { requestId: id, decision, classification: verdict.classification, reason: verdict.reason }
-    })
-    this._respond(id, { decision })
-  }
-
-  // ---- session ops ----
 
   async sendTurn(text) {
-    if (!this._threadId) throw new Error('codex thread not started')
-    await this._request('turn/start', {
-      threadId: this._threadId,
-      input: [{ type: 'text', text }]
-    })
+    this.writeInput(text + '\r')
   }
 
   async interrupt() {
-    if (this._threadId) {
-      try {
-        await this._request('turn/interrupt', { threadId: this._threadId })
-      } catch {
-        // fall through to hard kill
-      }
-    }
-    if (this.proc && process.platform === 'win32') {
-      spawn('taskkill', ['/PID', String(this.proc.pid), '/T', '/F'], { shell: true })
-    }
+    this.writeInput('\x03')
   }
 
-  async resume(cliSessionId) {
-    // codex threads are server-side state; reopen by thread id.
-    this._threadId = cliSessionId
-    this.emitEvent({ type: 'init', cliSessionId, model: this.session.model, cwd: this.session.cwd })
+  async resume(_cliSessionId) {
+    // Codex has no --resume; just restart fresh
+    await this.dispose()
+    await this.start()
   }
 
   async dispose() {
     this._disposed = true
-    await this.interrupt().catch(() => {})
-    this.proc = null
+    if (this.ptyProc) {
+      try { this.ptyProc.kill() } catch {}
+      this.ptyProc = null
+    }
+    if (this._settingsDir) {
+      rmSync(this._settingsDir, { recursive: true, force: true })
+      this._settingsDir = null
+    }
     super.dispose()
   }
-}
-
-function decodeB64(s) {
-  try {
-    return Buffer.from(s, 'base64').toString('utf8')
-  } catch {
-    return s
-  }
-}
-
-function extractFinalText(turn) {
-  const items = turn?.items || []
-  for (let i = items.length - 1; i >= 0; i--) {
-    const it = items[i]
-    if (it.type === 'agentMessage' || it.type === 'agent_message' || it.text) {
-      if (it.phase === 'final_answer' || it.phase === 'finalAnswer' || it.text) return it.text || ''
-    }
-  }
-  return ''
 }
 
 export const codexDescriptor = {
   id: 'codex',
   displayName: DISPLAY_NAME,
   icon: ICON,
-  models: ['gpt-5', 'gpt-5.5', 'o3'],
+  models: ['default', 'gpt-5', 'gpt-5.1', 'gpt-5.5'],
   create: (opts) => new CodexAdapter(opts)
 }

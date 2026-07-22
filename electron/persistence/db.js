@@ -144,7 +144,7 @@ class Db {
   }
 
   updateSession(sessionId, fields) {
-    const allowed = ['native_session_id', 'name', 'task_note', 'status']
+    const allowed = ['native_session_id', 'name', 'task_note', 'status', 'model']
     const sets = []
     const vals = []
     for (const k of allowed) {

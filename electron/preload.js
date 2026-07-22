@@ -19,6 +19,7 @@ const api = {
   // ---- dialog ----
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
   scanClaudeSessions: (cwd) => ipcRenderer.invoke('session:scan-claude', cwd),
+  discoverSessions: (cwd) => ipcRenderer.invoke('session:discover', cwd),
 
   // ---- session lifecycle ----
   createSession: (config) => ipcRenderer.invoke('session:create', config),

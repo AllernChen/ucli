@@ -1,4 +1,3 @@
-import { spawn } from 'child_process'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -15,6 +14,61 @@ try {
   pty = require('node-pty')
 } catch (err) {
   console.error('Failed to load node-pty:', err.message)
+}
+
+export function parseClaudeTranscriptStats(lines) {
+  let inputTokens = 0
+  let outputTokens = 0
+  let turnsCount = 0
+  let costUsd = 0
+  let lastModel = null
+  const modelUsageMap = {}
+
+  for (const line of lines) {
+    let obj
+    try { obj = typeof line === 'string' ? JSON.parse(line) : line } catch { continue }
+    if (obj.type === 'assistant' && obj.message?.usage) {
+      const usage = obj.message.usage
+      inputTokens +=
+        (usage.input_tokens || 0) +
+        (usage.cache_creation_input_tokens || 0) +
+        (usage.cache_read_input_tokens || 0)
+      outputTokens += usage.output_tokens || 0
+    }
+    if (obj.type === 'assistant' && obj.message?.model) {
+      lastModel = obj.message.model
+    }
+    if (obj.type === 'user' && obj.message?.content) {
+      for (const b of obj.message.content) {
+        if (b.type === 'text') { turnsCount += 1; break }
+      }
+    }
+    if (obj.type === 'result') {
+      if (obj.total_cost_usd) costUsd = Math.max(costUsd, obj.total_cost_usd)
+      if (obj.num_turns) turnsCount = Math.max(turnsCount, obj.num_turns)
+      if (obj.modelUsage) {
+        for (const [model, mu] of Object.entries(obj.modelUsage)) {
+          if (!modelUsageMap[model]) modelUsageMap[model] = { inputTokens: 0, outputTokens: 0, costUsd: 0 }
+          modelUsageMap[model].inputTokens += mu.inputTokens || 0
+          modelUsageMap[model].outputTokens += mu.outputTokens || 0
+          if (mu.costUSD) modelUsageMap[model].costUsd = Math.max(modelUsageMap[model].costUsd, mu.costUSD)
+          lastModel = model
+        }
+      }
+    }
+  }
+
+  const modelBreakdown = Object.entries(modelUsageMap).map(([model, mu]) => ({
+    model,
+    inputTokens: mu.inputTokens,
+    outputTokens: mu.outputTokens,
+    costUsd: mu.costUsd
+  }))
+  if (modelBreakdown.length) {
+    inputTokens = modelBreakdown.reduce((sum, m) => sum + m.inputTokens, 0)
+    outputTokens = modelBreakdown.reduce((sum, m) => sum + m.outputTokens, 0)
+  }
+  return { inputTokens, outputTokens, turnsCount, costUsd, lastModel, modelBreakdown }
 }
 
 function buildSettings(hookRunnerPath) {
@@ -51,6 +105,7 @@ export class ClaudeAdapter extends BaseAdapter {
     this._settingsDir = null
     this._statsTimer = null
     this._lastStatsTokens = { input: 0, output: 0 }
+    this._lastModel = null
   }
 
   /** Shared: return the matched ~/.claude/projects/<hash> directory, or null. */
@@ -86,6 +141,12 @@ export class ClaudeAdapter extends BaseAdapter {
       } catch {}
     }
     return newest
+  }
+
+  /** Public: replay transcript history to the terminal. Called when a
+   *  running session is attached to a new pane. */
+  replayHistory() {
+    this._replayHistory()
   }
 
   _replayHistory() {
@@ -143,45 +204,11 @@ export class ClaudeAdapter extends BaseAdapter {
     if (!path) return
     try {
       const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
-      let inputTokens = 0, outputTokens = 0, turnsCount = 0, costUsd = 0, lastModel = null
-      // Collect per-model usage across all result messages
-      const modelUsageMap = {} // model -> {inputTokens, outputTokens, costUsd}
-      for (const line of lines) {
-        let obj
-        try { obj = JSON.parse(line) } catch { continue }
-        if (obj.type === 'assistant' && obj.message?.usage) {
-          inputTokens += obj.message.usage.input_tokens || 0
-          outputTokens += obj.message.usage.output_tokens || 0
-        }
-        if (obj.type === 'assistant' && obj.message?.model) {
-          lastModel = obj.message.model
-        }
-        if (obj.type === 'user' && obj.message?.content) {
-          for (const b of obj.message.content) {
-            if (b.type === 'text') { turnsCount += 1; break }
-          }
-        }
-        if (obj.type === 'result') {
-          if (obj.total_cost_usd) costUsd = Math.max(costUsd, obj.total_cost_usd)
-          // Extract per-model breakdown from result.modelUsage
-          if (obj.modelUsage) {
-            for (const [m, mu] of Object.entries(obj.modelUsage)) {
-              if (!modelUsageMap[m]) modelUsageMap[m] = { inputTokens: 0, outputTokens: 0, costUsd: 0 }
-              modelUsageMap[m].inputTokens += mu.inputTokens || 0
-              modelUsageMap[m].outputTokens += mu.outputTokens || 0
-              if (mu.costUSD) modelUsageMap[m].costUsd = Math.max(modelUsageMap[m].costUsd, mu.costUSD)
-              lastModel = m // last model in modelUsage is the most recent
-            }
-          }
-        }
-      }
-      // Build modelBreakdown array for per-model DB stats
-      const modelBreakdown = Object.entries(modelUsageMap).map(([model, mu]) => ({
-        model, inputTokens: mu.inputTokens, outputTokens: mu.outputTokens, costUsd: mu.costUsd
-      }))
-      // Only emit if stats actually changed
-      if (inputTokens !== this._lastStatsTokens.input || outputTokens !== this._lastStatsTokens.output) {
+      const { inputTokens, outputTokens, turnsCount, costUsd, lastModel, modelBreakdown } = parseClaudeTranscriptStats(lines)
+      // Emit if stats or model changed
+      if (inputTokens !== this._lastStatsTokens.input || outputTokens !== this._lastStatsTokens.output || lastModel !== this._lastModel) {
         this._lastStatsTokens = { input: inputTokens, output: outputTokens }
+        this._lastModel = lastModel
         this.emitEvent({
           type: 'stats_update',
           usage: { inputTokens, outputTokens },
@@ -275,13 +302,11 @@ export class ClaudeAdapter extends BaseAdapter {
     }
 
     try {
-      // node-pty needs a real executable. `claude` on Windows is a .ps1 shim,
-      // so we spawn it through powershell. We must single-quote each arg
-      // because PowerShell's -Command joins all args into one string and
-      // re-parses — bare paths with spaces (e.g. "John Doe") get split.
-      const shell = process.platform === 'win32' ? 'powershell.exe' : 'claude'
+      // On Windows, use cmd.exe to resolve the claude.cmd shim. Avoid
+      // PowerShell — its -Command re-parsing can mangle paths with spaces.
+      const shell = process.platform === 'win32' ? 'cmd.exe' : 'claude'
       const shellArgs = process.platform === 'win32'
-        ? ['-NoProfile', '-Command', '& claude ' + args.map(a => `'${a.replace(/'/g, "''")}'`).join(' ')]
+        ? ['/c', 'claude', ...args]
         : args
 
       this.ptyProc = pty.spawn(shell, shellArgs, {
@@ -301,6 +326,14 @@ export class ClaudeAdapter extends BaseAdapter {
         this.emitEvent({ type: 'exit', code: exitCode })
       })
 
+      // Emit initial empty stats so the UI shows 0 tokens / model
+      this.emitEvent({
+        type: 'stats_update',
+        usage: { inputTokens: 0, outputTokens: 0 },
+        costUsd: 0,
+        turns: 0,
+        model: this.session.model || null
+      })
       this.emitEvent({ type: 'ready' })
     } catch (err) {
       this._write(`\x1b[31mPTY spawn failed: ${err?.message}\x1b[0m\r\n`)
