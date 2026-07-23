@@ -1,4 +1,4 @@
-import { app, ipcMain, dialog } from 'electron'
+import { app, ipcMain, dialog, Notification } from 'electron'
 import { join } from 'path'
 import { readFileSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
@@ -12,6 +12,15 @@ import { TIER } from './adapters/cliAdapter.js'
 import { openDb, getDb } from './persistence/db.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { annotateImportedSessions, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
+import {
+  advanceSessionNotification,
+  advanceTaskCompletion,
+  describeApprovalNotification,
+  describeSessionAttentionNotification,
+  describeTaskCompletionNotification,
+  operationTypeForTool,
+  shouldShowApprovalNotification
+} from './approvalNotification.js'
 
 const DEFAULT_RULESET = {
   id: 'default',
@@ -46,6 +55,9 @@ export function createOrchestrator() {
   let mainWindow = null
   let rulesets = { default: structuredClone(DEFAULT_RULESET) }
   let settings = { ...DEFAULT_SETTINGS }
+  let persistenceRecovery = null
+  const approvalNotifications = new Map()
+  const completionNotifications = new Set()
 
   // ---- DB init (async — callers must await) ----
   const dbPath = join(app.getPath('userData'), 'ucli.db')
@@ -62,6 +74,7 @@ export function createOrchestrator() {
       console.error('Persistence not available — running without saving data')
       return // app continues without DB (stats work from in-memory sessions)
     }
+    persistenceRecovery = db.recoveryInfo || null
 
     // Migrate old JSON files if they exist
     const configPath = join(app.getPath('userData'), 'ucli-config.json')
@@ -146,7 +159,9 @@ export function createOrchestrator() {
         lastActivity: '已离线',
         createdAt: s.createdAt || Date.now(),
         _dirtyStats: null,
-        _lastCumTokens: null
+        _lastCumTokens: null,
+        _lastCompletedTurns: null,
+        _lastNotification: null
       }
       sessions.set(s.id, entry)
       engine.setSession(s.id, { tier: s.tier, rulesetId: 'default', ruleset: rulesets['default'] })
@@ -161,8 +176,14 @@ export function createOrchestrator() {
 
   // ---- permission engine ----
   const engine = new PermissionEngine({
-    onApprovalRequest(req) { send('session:approval-request', req) },
-    onApprovalResolved(req) { send('session:approval-resolved', req) },
+    onApprovalRequest(req) {
+      send('session:approval-request', req)
+      showApprovalNotification(req)
+    },
+    onApprovalResolved(req) {
+      dismissApprovalNotification(req.requestId)
+      send('session:approval-resolved', req)
+    },
     onDecision(d) {
       const s = sessions.get(d.sessionId)
       if (!s) return
@@ -184,6 +205,15 @@ export function createOrchestrator() {
       const result = await engine.decide(payload.sessionId, {
         tool: payload.tool, input: payload.input, cwd: payload.cwd
       })
+      if (
+        result.verdict === 'allow' &&
+        ['AskUserQuestion', 'ExitPlanMode'].includes(payload.tool)
+      ) {
+        showSessionAttentionNotification(payload.sessionId, {
+          kind: 'approval',
+          operation: operationTypeForTool(payload.tool)
+        })
+      }
       return { verdict: result.verdict, reason: result.reason }
     })
     return srv
@@ -193,6 +223,74 @@ export function createOrchestrator() {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
   }
   function setMainWindow(win) { mainWindow = win }
+
+  function focusMainWindow() {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+    mainWindow.flashFrame(false)
+  }
+
+  function showApprovalNotification(request) {
+    if (!shouldShowApprovalNotification(mainWindow)) return
+    mainWindow.flashFrame(true)
+    if (!Notification.isSupported()) return
+
+    const entry = sessions.get(request.sessionId)
+    const notification = new Notification(
+      describeApprovalNotification(request, entry?.session)
+    )
+    approvalNotifications.set(request.requestId, notification)
+    notification.on('click', () => {
+      focusMainWindow()
+      send('session:focus-session', { sessionId: request.sessionId })
+      notification.close()
+    })
+    notification.on('close', () => {
+      approvalNotifications.delete(request.requestId)
+    })
+    notification.show()
+  }
+
+  function dismissApprovalNotification(requestId) {
+    const notification = approvalNotifications.get(requestId)
+    if (notification) notification.close()
+    approvalNotifications.delete(requestId)
+    if (!approvalNotifications.size && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.flashFrame(false)
+    }
+  }
+
+  function showTaskCompletionNotification(sessionId, session) {
+    showSessionAttentionNotification(sessionId, {
+      kind: 'complete',
+      operation: '任务完成'
+    }, describeTaskCompletionNotification(session))
+  }
+
+  function showSessionAttentionNotification(sessionId, attention, description = null) {
+    const entry = sessions.get(sessionId)
+    if (!entry) return
+    const key = `${attention.kind}:${attention.operation}`
+    const next = advanceSessionNotification(entry._lastNotification, key)
+    entry._lastNotification = next.state
+    if (!next.deliver || !shouldShowApprovalNotification(mainWindow)) return
+    mainWindow.flashFrame(true)
+    if (!Notification.isSupported()) return
+
+    const notification = new Notification(
+      description || describeSessionAttentionNotification(attention, entry.session)
+    )
+    completionNotifications.add(notification)
+    notification.on('click', () => {
+      focusMainWindow()
+      send('session:focus-session', { sessionId })
+      notification.close()
+    })
+    notification.on('close', () => completionNotifications.delete(notification))
+    notification.show()
+  }
 
   // ---- session lifecycle ----
   function createSession(config) {
@@ -222,7 +320,9 @@ export function createOrchestrator() {
       lastActivity: '启动中…',
       createdAt: Date.now(),
       _dirtyStats: null,
-      _lastCumTokens: null
+      _lastCumTokens: null,
+      _lastCompletedTurns: session.cliSessionId ? null : 0,
+      _lastNotification: null
     }
     sessions.set(sessionId, entry)
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
@@ -270,10 +370,27 @@ export function createOrchestrator() {
         send('session:terminal-output', { sessionId, data: evt.data })
         entry.status = 'running'
         break
+      case 'attention':
+        showSessionAttentionNotification(sessionId, {
+          kind: evt.kind,
+          operation: evt.operation
+        })
+        if (evt.kind === 'approval') {
+          entry.status = 'waiting'
+          entry.lastActivity = `等待用户操作：${evt.operation}`
+        }
+        break
       case 'stats_update':
         entry.stats.tokens = { input: evt.usage.inputTokens, output: evt.usage.outputTokens }
         if (evt.costUsd != null) entry.stats.costUsd = evt.costUsd
         if (evt.turns != null) entry.stats.turns = evt.turns
+        if (evt.completedTurns != null) {
+          const completion = advanceTaskCompletion(entry._lastCompletedTurns, evt.completedTurns)
+          entry._lastCompletedTurns = completion.turns
+          if (completion.completed) {
+            showTaskCompletionNotification(sessionId, entry.session)
+          }
+        }
         if (evt.contextWindow) entry.session.contextWindow = evt.contextWindow
         if (evt.model && evt.model !== entry.session.model) {
           entry.session.model = evt.model
@@ -636,6 +753,8 @@ export function createOrchestrator() {
     entry.status = 'starting'
     entry._dirtyStats = null
     entry._lastCumTokens = null
+    entry._lastCompletedTurns = entry.session.cliSessionId ? null : 0
+    entry._lastNotification = null
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
     adapter.hookPort = hookPort
     await adapter.start()
@@ -854,6 +973,10 @@ export function createOrchestrator() {
         clearTimeout(flushTimer)
         flushTimer = null
       }
+      for (const notification of approvalNotifications.values()) notification.close()
+      approvalNotifications.clear()
+      for (const notification of completionNotifications) notification.close()
+      completionNotifications.clear()
       const db = getDb()
       for (const [id, entry] of sessions) {
         if (entry.adapter) {
@@ -875,5 +998,12 @@ export function createOrchestrator() {
     return shutdownPromise
   }
 
-  return { registerIpc, setMainWindow, hookReady, initPersistence, shutdown }
+  return {
+    registerIpc,
+    setMainWindow,
+    hookReady,
+    initPersistence,
+    shutdown,
+    getPersistenceRecovery: () => persistenceRecovery
+  }
 }

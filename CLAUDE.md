@@ -120,3 +120,17 @@ node test/headless-codex.mjs            # codex JSON-RPC 审批验证
 ## 验证
 
 详见 `docs/protocol-reference.md` 的协议事实与计划文件中的验证方案。
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues for this repository. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default five-role triage label vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository using the root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.

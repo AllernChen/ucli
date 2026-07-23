@@ -1,10 +1,11 @@
-import { app, BrowserWindow, Menu, Tray, nativeImage, shell } from 'electron'
+import { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog } from 'electron'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { dirname } from 'path'
 import { mkdirSync } from 'fs'
 import { createOrchestrator } from './orchestrator.js'
 import { getDb } from './persistence/db.js'
+import { describeDatabaseRecovery } from './persistence/recoveryMessage.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -26,6 +27,7 @@ const sessionDataPath = join(app.getPath('temp'), 'ucli', app.isPackaged ? 'elec
 mkdirSync(sessionDataPath, { recursive: true })
 app.setPath('sessionData', sessionDataPath)
 app.commandLine.appendSwitch('disk-cache-dir', join(sessionDataPath, 'Cache'))
+if (process.platform === 'win32') app.setAppUserModelId('com.ucli.app')
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null
@@ -125,6 +127,12 @@ app.whenReady().then(async () => {
   }
   createWindow()
   orchestrator.setMainWindow(mainWindow)
+  const recoveryInfo = orchestrator.getPersistenceRecovery()
+  if (recoveryInfo) {
+    const recoveryDialog = describeDatabaseRecovery(recoveryInfo)
+    dialog.showMessageBox(mainWindow, recoveryDialog)
+      .catch((error) => console.error('Failed to show database recovery message:', error))
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

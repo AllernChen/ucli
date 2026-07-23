@@ -1,4 +1,7 @@
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'fs'
+import {
+  closeSync, existsSync, fsyncSync, openSync, readFileSync,
+  renameSync, unlinkSync, writeSync
+} from 'fs'
 import { join } from 'path'
 
 /**
@@ -38,10 +41,87 @@ export async function openDb(dbPath) {
   if (existsSync(dbPath)) {
     buffer = readFileSync(dbPath)
   }
-  const instance = new SQL.Database(buffer)
-  const db = new Db(instance, dbPath)
-  db._ensureSchema()
-  return db
+  let instance
+  try {
+    instance = new SQL.Database(buffer)
+    const db = new Db(instance, dbPath)
+    db._ensureSchema()
+    _db = db
+    return db
+  } catch (error) {
+    try { instance?.close() } catch { /* invalid database, best effort */ }
+    if (!buffer || !isInvalidDatabaseError(error)) throw error
+
+    const backupPath = quarantineInvalidDatabase(dbPath)
+    const lastValidBackupPath = `${dbPath}.bak`
+    let restoredFromBackup = false
+    let db = null
+
+    if (existsSync(lastValidBackupPath)) {
+      try {
+        instance = new SQL.Database(readFileSync(lastValidBackupPath))
+        db = new Db(instance, dbPath)
+        db._ensureSchema()
+        restoredFromBackup = true
+      } catch {
+        try { instance?.close() } catch { /* unusable backup, best effort */ }
+        instance = null
+        db = null
+      }
+    }
+
+    if (!db) {
+      instance = new SQL.Database()
+      db = new Db(instance, dbPath)
+      db._ensureSchema()
+    }
+    db.recoveryInfo = { reason: 'invalid-database', backupPath, restoredFromBackup }
+    _db = db
+    return db
+  }
+}
+
+function isInvalidDatabaseError(error) {
+  return /file is not a database|database disk image is malformed|malformed database schema/i
+    .test(error?.message || '')
+}
+
+function quarantineInvalidDatabase(dbPath) {
+  let backupPath = `${dbPath}.corrupt-${Date.now()}.bak`
+  let suffix = 1
+  while (existsSync(backupPath)) {
+    backupPath = `${dbPath}.corrupt-${Date.now()}-${suffix}.bak`
+    suffix += 1
+  }
+  renameSync(dbPath, backupPath)
+  return backupPath
+}
+
+const SQLITE_HEADER = Buffer.from('SQLite format 3\0')
+
+function hasSqliteHeader(data) {
+  return data.length >= SQLITE_HEADER.length && data.subarray(0, SQLITE_HEADER.length).equals(SQLITE_HEADER)
+}
+
+function replaceFileAtomically(targetPath, data) {
+  const tempPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`
+  let handle = null
+  try {
+    handle = openSync(tempPath, 'wx')
+    let offset = 0
+    while (offset < data.length) {
+      offset += writeSync(handle, data, offset, data.length - offset)
+    }
+    fsyncSync(handle)
+    closeSync(handle)
+    handle = null
+    renameSync(tempPath, targetPath)
+  } finally {
+    if (handle !== null) {
+      try { closeSync(handle) } catch { /* best effort */ }
+    }
+    try { if (existsSync(tempPath)) unlinkSync(tempPath) } catch { /* best effort */ }
+  }
 }
 
 // singleton — set by orchestrator after openDb
@@ -49,10 +129,10 @@ let _db = null
 export function getDb() { return _db }
 
 class Db {
-  constructor(sql, path) {
+  constructor(sql, path, recoveryInfo = null) {
     this.sql = sql
     this.path = path
-    _db = this
+    this.recoveryInfo = recoveryInfo
   }
 
   // ---- schema ----
@@ -366,7 +446,15 @@ class Db {
   flush() {
     try {
       const data = Buffer.from(this.sql.export())
-      writeFileSync(this.path, data)
+      if (!hasSqliteHeader(data)) throw new Error('Refusing to persist an invalid SQLite export.')
+
+      if (existsSync(this.path)) {
+        const previous = readFileSync(this.path)
+        if (hasSqliteHeader(previous)) {
+          replaceFileAtomically(`${this.path}.bak`, previous)
+        }
+      }
+      replaceFileAtomically(this.path, data)
     } catch { /* best effort */ }
   }
 

@@ -7,6 +7,9 @@ import { findClaudeProjectDirectory } from '../sessionDiscovery.js'
 
 const DISPLAY_NAME = 'Claude Code'
 const ICON = '🟣'
+const STATS_IDLE_DELAY_MS = 2000
+const STATS_MAX_WAIT_MS = 30000
+const STATS_FALLBACK_INTERVAL_MS = 30000
 
 // node-pty is a CJS native module — use createRequire in ESM context
 const require = createRequire(import.meta.url)
@@ -21,6 +24,7 @@ export function parseClaudeTranscriptStats(lines) {
   let inputTokens = 0
   let outputTokens = 0
   let turnsCount = 0
+  let completedTurnsCount = 0
   let costUsd = 0
   let lastModel = null
   const modelUsageMap = {}
@@ -38,6 +42,9 @@ export function parseClaudeTranscriptStats(lines) {
     }
     if (obj.type === 'assistant' && obj.message?.model) {
       lastModel = obj.message.model
+    }
+    if (obj.type === 'assistant' && obj.message?.stop_reason === 'end_turn') {
+      completedTurnsCount += 1
     }
     if (obj.type === 'user' && obj.message?.content) {
       for (const b of obj.message.content) {
@@ -69,7 +76,7 @@ export function parseClaudeTranscriptStats(lines) {
     inputTokens = modelBreakdown.reduce((sum, m) => sum + m.inputTokens, 0)
     outputTokens = modelBreakdown.reduce((sum, m) => sum + m.outputTokens, 0)
   }
-  return { inputTokens, outputTokens, turnsCount, costUsd, lastModel, modelBreakdown }
+  return { inputTokens, outputTokens, turnsCount, completedTurnsCount, costUsd, lastModel, modelBreakdown }
 }
 
 function buildSettings(hookRunnerPath) {
@@ -105,8 +112,12 @@ export class ClaudeAdapter extends BaseAdapter {
     this.ptyProc = null
     this._settingsDir = null
     this._statsTimer = null
+    this._statsMaxTimer = null
+    this._statsFallbackTimer = null
+    this._lastStatsScanAt = 0
     this._lastStatsTokens = { input: 0, output: 0 }
     this._lastModel = null
+    this._lastCompletedTurns = -1
   }
 
   /** Shared: return the matched ~/.claude/projects/<hash> directory, or null. */
@@ -183,10 +194,32 @@ export class ClaudeAdapter extends BaseAdapter {
   /** Debounced: read transcript 2s after last PTY output to extract stats */
   _scheduleStatsUpdate() {
     if (this._statsTimer) clearTimeout(this._statsTimer)
-    this._statsTimer = setTimeout(() => this._extractStats(), 2000)
+    this._statsTimer = setTimeout(() => this._runStatsUpdate(), STATS_IDLE_DELAY_MS)
+    if (!this._statsMaxTimer) {
+      this._statsMaxTimer = setTimeout(() => this._runStatsUpdate(), STATS_MAX_WAIT_MS)
+    }
+  }
+
+  _runStatsUpdate() {
+    if (this._statsTimer) clearTimeout(this._statsTimer)
+    if (this._statsMaxTimer) clearTimeout(this._statsMaxTimer)
+    this._statsTimer = null
+    this._statsMaxTimer = null
+    this._extractStats()
+  }
+
+  _startStatsFallback() {
+    if (this._statsFallbackTimer) clearInterval(this._statsFallbackTimer)
+    this._statsFallbackTimer = setInterval(() => {
+      if (Date.now() - this._lastStatsScanAt >= STATS_FALLBACK_INTERVAL_MS) {
+        this._extractStats()
+      }
+    }, STATS_FALLBACK_INTERVAL_MS)
+    this._statsFallbackTimer.unref?.()
   }
 
   _extractStats() {
+    this._lastStatsScanAt = Date.now()
     const cliSessionId = this.session.cliSessionId
     // If no cliSessionId yet (new session), try to find the most recent transcript
     // in the project directory that matches our cwd
@@ -199,16 +232,23 @@ export class ClaudeAdapter extends BaseAdapter {
     if (!path) return
     try {
       const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
-      const { inputTokens, outputTokens, turnsCount, costUsd, lastModel, modelBreakdown } = parseClaudeTranscriptStats(lines)
+      const { inputTokens, outputTokens, turnsCount, completedTurnsCount, costUsd, lastModel, modelBreakdown } = parseClaudeTranscriptStats(lines)
       // Emit if stats or model changed
-      if (inputTokens !== this._lastStatsTokens.input || outputTokens !== this._lastStatsTokens.output || lastModel !== this._lastModel) {
+      if (
+        inputTokens !== this._lastStatsTokens.input ||
+        outputTokens !== this._lastStatsTokens.output ||
+        lastModel !== this._lastModel ||
+        completedTurnsCount !== this._lastCompletedTurns
+      ) {
         this._lastStatsTokens = { input: inputTokens, output: outputTokens }
         this._lastModel = lastModel
+        this._lastCompletedTurns = completedTurnsCount
         this.emitEvent({
           type: 'stats_update',
           usage: { inputTokens, outputTokens },
           costUsd,
           turns: turnsCount,
+          completedTurns: completedTurnsCount,
           model: lastModel,
           modelBreakdown
         })
@@ -321,6 +361,8 @@ export class ClaudeAdapter extends BaseAdapter {
         this.emitEvent({ type: 'exit', code: exitCode })
       })
 
+      this._startStatsFallback()
+
       // Emit initial empty stats so the UI shows 0 tokens / model
       this.emitEvent({
         type: 'stats_update',
@@ -366,6 +408,8 @@ export class ClaudeAdapter extends BaseAdapter {
   async dispose() {
     this._disposed = true
     if (this._statsTimer) { clearTimeout(this._statsTimer); this._statsTimer = null }
+    if (this._statsMaxTimer) { clearTimeout(this._statsMaxTimer); this._statsMaxTimer = null }
+    if (this._statsFallbackTimer) { clearInterval(this._statsFallbackTimer); this._statsFallbackTimer = null }
     if (this.ptyProc) {
       try { this.ptyProc.kill() } catch {}
       this.ptyProc = null

@@ -78,6 +78,13 @@ test('Codex resume args override the provider selected for this UCLI session', (
     model: null,
     provider: 'openai'
   }), [
+    '--no-alt-screen',
+    '-c',
+    'tui.notifications=true',
+    '-c',
+    'tui.notification_method="osc9"',
+    '-c',
+    'tui.notification_condition="always"',
     'resume',
     '019f217c-5274-7280-87b2-ffb4b8728f8b',
     '-c',

@@ -2,6 +2,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { nextSessionPaneIndex } from '../src/workbenchKeyboard.js'
+import {
+  reconcileSessionPanes,
+  resolveSessionFocusPane,
+  resolveWorkbenchFullscreenTarget,
+  toggleElementFullscreen
+} from '../src/workbenchLayout.js'
 
 const panes = [
   { sessionId: 'claude-a' },
@@ -24,4 +30,71 @@ test('Shift+Tab cycles assigned session panes in reverse', () => {
 test('a single already-active session leaves Tab to the CLI', () => {
   assert.equal(nextSessionPaneIndex([{ sessionId: 'claude-a' }], 0), null)
   assert.equal(nextSessionPaneIndex([{ sessionId: null }], 0), null)
+})
+
+test('changing split count preserves existing terminal pane instances', () => {
+  const terminal = { id: 'terminal-a' }
+  const current = [
+    { id: 'pane-0', sessionId: 'claude-a', term: terminal },
+    { id: 'pane-1', sessionId: 'codex-b', term: { id: 'terminal-b' } }
+  ]
+
+  const expanded = reconcileSessionPanes(current, 4, (index) => index === 2 ? 'claude-c' : null)
+  assert.equal(expanded.panes[0], current[0])
+  assert.equal(expanded.panes[1], current[1])
+  assert.equal(expanded.panes[0].term, terminal)
+  assert.deepEqual(expanded.panes[2], { id: 'pane-2', sessionId: 'claude-c' })
+  assert.deepEqual(expanded.removed, [])
+
+  const reduced = reconcileSessionPanes(expanded.panes, 1)
+  assert.equal(reduced.panes[0], current[0])
+  assert.deepEqual(reduced.removed, expanded.panes.slice(1))
+})
+
+test('pane fullscreen enters and exits through the document fullscreen API', async () => {
+  const pane = {
+    async requestFullscreen() {
+      documentMock.fullscreenElement = pane
+    }
+  }
+  const documentMock = {
+    fullscreenElement: null,
+    async exitFullscreen() {
+      this.fullscreenElement = null
+    }
+  }
+
+  assert.equal(await toggleElementFullscreen(documentMock, pane), true)
+  assert.equal(documentMock.fullscreenElement, pane)
+  assert.equal(await toggleElementFullscreen(documentMock, pane), false)
+  assert.equal(documentMock.fullscreenElement, null)
+})
+
+test('fullscreen target distinguishes the entire split grid from a single pane', () => {
+  const grid = { id: 'grid' }
+  const pane0 = { id: 'pane-0' }
+  const pane1 = { id: 'pane-1' }
+  const paneRoots = { 0: pane0, 1: pane1 }
+
+  assert.deepEqual(resolveWorkbenchFullscreenTarget(grid, grid, paneRoots), {
+    grid: true,
+    paneIndex: null
+  })
+  assert.deepEqual(resolveWorkbenchFullscreenTarget(pane1, grid, paneRoots), {
+    grid: false,
+    paneIndex: 1
+  })
+  assert.deepEqual(resolveWorkbenchFullscreenTarget(null, grid, paneRoots), {
+    grid: false,
+    paneIndex: null
+  })
+})
+
+test('notification focus uses the existing session pane before an empty pane', () => {
+  assert.equal(resolveSessionFocusPane(panes, 'codex-b', 0), 2)
+  assert.equal(resolveSessionFocusPane(panes, 'new-session', 2), 1)
+  assert.equal(resolveSessionFocusPane([
+    { sessionId: 'a' },
+    { sessionId: 'b' }
+  ], 'new-session', 1), 1)
 })

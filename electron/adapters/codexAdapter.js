@@ -9,6 +9,7 @@ const STATS_IDLE_DELAY_MS = 2000
 const STATS_MAX_WAIT_MS = 30000
 const STATS_FALLBACK_INTERVAL_MS = 30000
 const ICON = '🟢'
+const OSC9_PREFIX = '\x1b]9;'
 
 const require = createRequire(import.meta.url)
 let pty
@@ -25,6 +26,7 @@ export function parseCodexTranscriptStats(lines) {
   let totalTokens = 0
   let contextWindow = null
   let turnsCount = 0
+  let completedTurnsCount = 0
   let lastModel = null
 
   for (const line of lines) {
@@ -53,6 +55,11 @@ export function parseCodexTranscriptStats(lines) {
       continue
     }
 
+    if (obj.type === 'event_msg' && obj.payload?.type === 'task_complete') {
+      completedTurnsCount += 1
+      continue
+    }
+
     if (obj.usage) {
       inputTokens = Math.max(inputTokens, obj.usage.input_tokens || obj.usage.inputTokens || 0)
       outputTokens = Math.max(outputTokens, obj.usage.output_tokens || obj.usage.outputTokens || 0)
@@ -74,12 +81,75 @@ export function parseCodexTranscriptStats(lines) {
     totalTokens,
     contextWindow,
     turnsCount,
+    completedTurnsCount,
     lastModel
   }
 }
 
+function trailingPrefixFragment(text) {
+  const max = Math.min(text.length, OSC9_PREFIX.length - 1)
+  for (let length = max; length > 0; length--) {
+    const suffix = text.slice(-length)
+    if (OSC9_PREFIX.startsWith(suffix)) return suffix
+  }
+  return ''
+}
+
+export function consumeOsc9Notifications(pending, chunk) {
+  const text = String(pending || '') + String(chunk || '')
+  const messages = []
+  let cursor = 0
+
+  while (cursor < text.length) {
+    const start = text.indexOf(OSC9_PREFIX, cursor)
+    if (start < 0) {
+      return { pending: trailingPrefixFragment(text.slice(cursor)), messages }
+    }
+    const bodyStart = start + OSC9_PREFIX.length
+    const bellEnd = text.indexOf('\x07', bodyStart)
+    const stringEnd = text.indexOf('\x1b\\', bodyStart)
+    let end = -1
+    let terminatorLength = 1
+    if (bellEnd >= 0 && (stringEnd < 0 || bellEnd < stringEnd)) {
+      end = bellEnd
+    } else if (stringEnd >= 0) {
+      end = stringEnd
+      terminatorLength = 2
+    }
+    if (end < 0) {
+      return { pending: text.slice(start, start + 2048), messages }
+    }
+    const message = text.slice(bodyStart, end).trim()
+    if (message) messages.push(message)
+    cursor = end + terminatorLength
+  }
+
+  return { pending: '', messages }
+}
+
+export function classifyCodexTerminalNotification(message) {
+  if (message.startsWith('Approval requested:')) {
+    return { kind: 'approval', operation: '执行命令' }
+  }
+  if (message.startsWith('Codex wants to edit')) {
+    return { kind: 'approval', operation: '修改文件' }
+  }
+  if (message.startsWith('Plan mode prompt:')) {
+    return { kind: 'approval', operation: '确认执行方案' }
+  }
+  if (message.startsWith('Approval requested by')) {
+    return { kind: 'approval', operation: '外部工具确认' }
+  }
+  return { kind: 'complete', operation: '任务完成' }
+}
+
 export function buildCodexArgs(session) {
-  const args = []
+  const args = [
+    '--no-alt-screen',
+    '-c', 'tui.notifications=true',
+    '-c', 'tui.notification_method="osc9"',
+    '-c', 'tui.notification_condition="always"'
+  ]
   if (session.cliSessionId) args.push('resume', session.cliSessionId)
   if (session.provider && isSafeProviderName(session.provider)) {
     args.push('-c', `model_provider=${session.provider}`)
@@ -108,7 +178,9 @@ export class CodexAdapter extends BaseAdapter {
     this._lastStatsScanAt = 0
     this._lastStatsTokens = { input: 0, output: 0 }
     this._lastModel = null
+    this._lastCompletedTurns = -1
     this._startedAt = Date.now()
+    this._osc9Pending = ''
   }
 
   _findTranscript(cliSessionId) {
@@ -235,6 +307,14 @@ export class CodexAdapter extends BaseAdapter {
   }
 
   _write(text) {
+    const parsed = consumeOsc9Notifications(this._osc9Pending, text)
+    this._osc9Pending = parsed.pending
+    for (const message of parsed.messages) {
+      this.emitEvent({
+        type: 'attention',
+        ...classifyCodexTerminalNotification(message)
+      })
+    }
     this.emitEvent({ type: 'terminal', data: text })
     this._scheduleStatsUpdate()
   }
@@ -285,9 +365,15 @@ export class CodexAdapter extends BaseAdapter {
       }
       const inputTokens = stats.inputTokens
       const outputTokens = stats.outputTokens
-      if (inputTokens !== this._lastStatsTokens.input || outputTokens !== this._lastStatsTokens.output || stats.lastModel !== this._lastModel) {
+      if (
+        inputTokens !== this._lastStatsTokens.input ||
+        outputTokens !== this._lastStatsTokens.output ||
+        stats.lastModel !== this._lastModel ||
+        stats.completedTurnsCount !== this._lastCompletedTurns
+      ) {
         this._lastStatsTokens = { input: inputTokens, output: outputTokens }
         this._lastModel = stats.lastModel
+        this._lastCompletedTurns = stats.completedTurnsCount
         this.emitEvent({
           type: 'stats_update',
           usage: {
@@ -299,6 +385,7 @@ export class CodexAdapter extends BaseAdapter {
           },
           costUsd: 0,
           turns: stats.turnsCount,
+          completedTurns: stats.completedTurnsCount,
           model: stats.lastModel,
           contextWindow: stats.contextWindow
         })
@@ -408,6 +495,7 @@ export class CodexAdapter extends BaseAdapter {
     this._statsTimer = null
     this._statsMaxTimer = null
     this._statsFallbackTimer = null
+    this._osc9Pending = ''
     if (this.ptyProc) {
       try { this.ptyProc.kill() } catch {}
       this.ptyProc = null

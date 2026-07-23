@@ -1,7 +1,15 @@
 <template>
   <a-layout class="app-layout">
-    <a-layout-sider width="184" class="sider" :collapsed="false">
-      <div class="logo"><img :src="ucliLogo" alt="" />UCLI</div>
+    <a-layout-sider
+      width="184"
+      :collapsed-width="64"
+      class="sider"
+      :collapsed="navCollapsed"
+    >
+      <div :class="['logo', { collapsed: navCollapsed }]">
+        <img :src="ucliLogo" alt="" />
+        <span v-if="!navCollapsed">UCLI</span>
+      </div>
       <a-menu
         v-model:selectedKeys="selectedKeys"
         mode="inline"
@@ -29,14 +37,26 @@
           <span>设置</span>
         </a-menu-item>
       </a-menu>
-      <div class="sider-footer">
-        <a-tag v-if="waitingCount > 0" color="orange">待确认 {{ waitingCount }}</a-tag>
-        <span class="version">v0.2.0</span>
+      <div :class="['sider-footer', { collapsed: navCollapsed }]">
+        <a-badge v-if="navCollapsed && waitingCount > 0" :count="waitingCount" />
+        <a-tag v-else-if="waitingCount > 0" color="orange">待确认 {{ waitingCount }}</a-tag>
+        <span v-if="!navCollapsed" class="version">v0.2.1</span>
       </div>
     </a-layout-sider>
     <a-layout class="main-layout">
       <a-layout-header class="header">
-        <span>{{ title }}</span>
+        <div class="header-main">
+          <a-button
+            size="small"
+            type="text"
+            :title="navCollapsed ? '展开菜单导航' : '收缩菜单导航'"
+            @click="navCollapsed = !navCollapsed"
+          >
+            <MenuUnfoldOutlined v-if="navCollapsed" />
+            <MenuFoldOutlined v-else />
+          </a-button>
+          <span>{{ title }}</span>
+        </div>
         <a-space size="small">
           <a-tag color="purple">Claude Code</a-tag>
           <a-tag color="green">Codex</a-tag>
@@ -50,15 +70,25 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { AppstoreOutlined, DesktopOutlined, BarChartOutlined, SafetyOutlined, SettingOutlined } from '@ant-design/icons-vue'
+import {
+  AppstoreOutlined,
+  DesktopOutlined,
+  BarChartOutlined,
+  SafetyOutlined,
+  SettingOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined
+} from '@ant-design/icons-vue'
 import { useSessionsStore } from './stores/sessions.js'
+import { ipc } from './ipc.js'
 import ucliLogo from '../resources/icons/ucli.png'
 
 const route = useRoute()
 const router = useRouter()
 const sessions = useSessionsStore()
+const navCollapsed = ref(false)
 
 const selectedKeys = ref([route.path])
 watch(() => route.path, (p) => {
@@ -78,6 +108,15 @@ const title = computed(() => {
 function onMenuClick({ key }) {
   router.push(key)
 }
+
+let stopSessionFocus = null
+onMounted(() => {
+  stopSessionFocus = ipc.on('session:focus-session', ({ sessionId }) => {
+    sessions.pendingAssign = sessionId
+    router.push('/session')
+  })
+})
+onBeforeUnmount(() => stopSessionFocus?.())
 </script>
 
 <style scoped>
@@ -89,7 +128,10 @@ function onMenuClick({ key }) {
   align-items: center;
   justify-content: space-between;
 }
+.sider-footer.collapsed { justify-content: center; padding: 10px 0; }
 .version { font-size: 11px; color: #bfbfbf; }
 .logo img { width: 30px; height: 30px; object-fit: contain; margin-right: 8px; }
+.logo.collapsed img { margin-right: 0; }
+.header-main { display: flex; align-items: center; gap: 8px; }
 :deep(.ant-layout-sider-children) { display: flex; flex-direction: column; }
 </style>

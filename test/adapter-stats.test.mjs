@@ -1,8 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { parseClaudeTranscriptStats } from '../electron/adapters/claudeAdapter.js'
-import { CodexAdapter, parseCodexTranscriptStats } from '../electron/adapters/codexAdapter.js'
+import { ClaudeAdapter, parseClaudeTranscriptStats } from '../electron/adapters/claudeAdapter.js'
+import {
+  buildCodexArgs,
+  classifyCodexTerminalNotification,
+  CodexAdapter,
+  consumeOsc9Notifications,
+  parseCodexTranscriptStats
+} from '../electron/adapters/codexAdapter.js'
 
 test('parses Claude transcript stats from assistant usage and result modelUsage', () => {
   const stats = parseClaudeTranscriptStats([
@@ -10,6 +16,7 @@ test('parses Claude transcript stats from assistant usage and result modelUsage'
       type: 'assistant',
       message: {
         model: 'deepseek-v4-pro',
+        stop_reason: 'end_turn',
         usage: {
           input_tokens: 100,
           cache_read_input_tokens: 200,
@@ -35,6 +42,7 @@ test('parses Claude transcript stats from assistant usage and result modelUsage'
   assert.equal(stats.inputTokens, 310)
   assert.equal(stats.outputTokens, 45)
   assert.equal(stats.turnsCount, 2)
+  assert.equal(stats.completedTurnsCount, 1)
   assert.equal(stats.costUsd, 0.0123)
   assert.equal(stats.lastModel, 'gpt-5.5')
   assert.deepEqual(stats.modelBreakdown, [
@@ -75,6 +83,7 @@ test('parses Codex token_count events and session metadata', () => {
         }
       }
     }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
     JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user' } })
   ])
 
@@ -86,6 +95,7 @@ test('parses Codex token_count events and session metadata', () => {
   assert.equal(stats.totalTokens, 787606)
   assert.equal(stats.contextWindow, 258400)
   assert.equal(stats.turnsCount, 1)
+  assert.equal(stats.completedTurnsCount, 1)
   assert.equal(stats.lastModel, 'gpt-5.5')
 })
 
@@ -124,4 +134,60 @@ test('Codex transcript scan still runs quickly after terminal output becomes idl
   t.mock.timers.tick(1)
   assert.equal(scans, 1)
   await adapter.dispose()
+})
+
+test('Claude transcript scan has a max wait during continuous TUI output', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const adapter = new ClaudeAdapter({
+    session: { id: 'ucli-session', cwd: 'F:\\projects\\ucli', cliSessionId: null },
+    engine: null,
+    settings: {}
+  })
+  let scans = 0
+  adapter._extractStats = () => { scans += 1 }
+
+  for (let second = 0; second < 30; second++) {
+    adapter._scheduleStatsUpdate()
+    t.mock.timers.tick(1000)
+  }
+
+  assert.equal(scans, 1)
+  await adapter.dispose()
+})
+
+test('Codex enables OSC 9 notifications for approvals and completed turns', () => {
+  const args = buildCodexArgs({ cliSessionId: null, provider: null, model: null })
+  assert.deepEqual(args.slice(0, 7), [
+    '--no-alt-screen',
+    '-c', 'tui.notifications=true',
+    '-c', 'tui.notification_method="osc9"',
+    '-c', 'tui.notification_condition="always"'
+  ])
+})
+
+test('OSC 9 parser handles notification sequences split across PTY chunks', () => {
+  const first = consumeOsc9Notifications('', '\u001b]9;Approval req')
+  assert.deepEqual(first.messages, [])
+  const second = consumeOsc9Notifications(first.pending, 'uested: npm test\u0007rest')
+  assert.deepEqual(second.messages, ['Approval requested: npm test'])
+  assert.equal(second.pending, '')
+})
+
+test('Codex terminal notification distinguishes approvals from completion', () => {
+  assert.deepEqual(classifyCodexTerminalNotification('Approval requested: npm test'), {
+    kind: 'approval',
+    operation: '执行命令'
+  })
+  assert.deepEqual(classifyCodexTerminalNotification('Codex wants to edit 2 files'), {
+    kind: 'approval',
+    operation: '修改文件'
+  })
+  assert.deepEqual(classifyCodexTerminalNotification('Plan mode prompt: Implement this plan?'), {
+    kind: 'approval',
+    operation: '确认执行方案'
+  })
+  assert.deepEqual(classifyCodexTerminalNotification('Finished implementing the feature'), {
+    kind: 'complete',
+    operation: '任务完成'
+  })
 })

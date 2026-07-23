@@ -4,6 +4,15 @@
     <div class="detail-header">
       <a-button size="small" @click="$router.push('/')"><ArrowLeftOutlined /> 返回</a-button>
       <span class="title">🖥️ 会话工作台</span>
+      <a-button
+        size="small"
+        type="text"
+        :title="sessionListHidden ? '显示会话列表' : '隐藏会话列表'"
+        @click="sessionListHidden = !sessionListHidden"
+      >
+        <MenuUnfoldOutlined v-if="sessionListHidden" />
+        <MenuFoldOutlined v-else />
+      </a-button>
       <span class="spacer"></span>
       <a-space size="small">
         <a-button size="small" @click="showImport = true">📥 导入</a-button>
@@ -14,12 +23,20 @@
           <a-radio-button :value="2">2</a-radio-button>
           <a-radio-button :value="4">4</a-radio-button>
         </a-radio-group>
+        <a-button
+          v-if="splitCount > 1"
+          size="small"
+          @click="toggleWorkbenchFullscreen"
+          title="整个分屏工作台全屏"
+        >
+          <FullscreenOutlined /> 分屏全屏
+        </a-button>
       </a-space>
     </div>
 
     <div class="detail-layout">
       <!-- Left sidebar: session list -->
-      <div class="sidebar">
+      <div v-if="!sessionListHidden" class="sidebar">
         <div class="sidebar-toolbar">
           <a-input-search
             v-model:value="filter.search"
@@ -71,10 +88,20 @@
       </div>
 
       <!-- Right: split panes -->
-      <div :class="['pane-grid', `split-${splitCount}`]">
+      <div ref="paneGridRef" :class="['pane-grid', `split-${splitCount}`]">
+        <a-button
+          v-if="gridFullscreen"
+          class="grid-fullscreen-exit"
+          size="small"
+          @click.stop="toggleWorkbenchFullscreen"
+          title="退出分屏全屏"
+        >
+          <FullscreenExitOutlined /> 退出全屏
+        </a-button>
         <div
           v-for="(pane, i) in panes"
           :key="pane.id"
+          :ref="el => setPaneRootRef(i, el)"
           :class="['pane', activePane === i ? 'pane-active' : '']"
           @click="activatePane(i)"
         >
@@ -87,6 +114,16 @@
             </span>
             <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
             <a-space size="small">
+              <a-button
+                v-if="pane.sessionId && !gridFullscreen"
+                size="small"
+                type="text"
+                @click.stop="togglePaneFullscreen(i)"
+                :title="fullscreenPane === i ? '退出全屏' : '全屏显示当前会话'"
+              >
+                <FullscreenExitOutlined v-if="fullscreenPane === i" />
+                <FullscreenOutlined v-else />
+              </a-button>
               <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="openNote(i)" title="备注">📝</a-button>
               <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="interruptPane(i)" title="中断">⏹</a-button>
               <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="stopPane(i)" title="停止 CLI 进程并保留会话">停止</a-button>
@@ -184,10 +221,22 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { ArrowLeftOutlined } from '@ant-design/icons-vue'
+import {
+  ArrowLeftOutlined,
+  FullscreenOutlined,
+  FullscreenExitOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined
+} from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { ipc } from '../ipc.js'
 import { nextSessionPaneIndex } from '../workbenchKeyboard.js'
+import {
+  reconcileSessionPanes,
+  resolveSessionFocusPane,
+  resolveWorkbenchFullscreenTarget,
+  toggleElementFullscreen
+} from '../workbenchLayout.js'
 
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -195,6 +244,10 @@ import '@xterm/xterm/css/xterm.css'
 
 const router = useRouter()
 const sessions = useSessionsStore()
+const sessionListHidden = ref(false)
+const fullscreenPane = ref(null)
+const gridFullscreen = ref(false)
+const paneGridRef = ref(null)
 
 // Split mode — backed by store so it survives route changes
 const splitCount = computed({
@@ -213,7 +266,15 @@ const panes = ref([])
 const assignedPaneCount = computed(() => panes.value.filter((pane) => pane.sessionId).length)
 // Refs storage for pane terminal containers
 const paneRefs = {}
-function setPaneRef(i, el) { if (el) paneRefs[i] = el }
+const paneRootRefs = {}
+function setPaneRef(i, el) {
+  if (el) paneRefs[i] = el
+  else delete paneRefs[i]
+}
+function setPaneRootRef(i, el) {
+  if (el) paneRootRefs[i] = el
+  else delete paneRootRefs[i]
+}
 
 // IPC unsubscribers per pane
 const unsubs = {}
@@ -241,24 +302,30 @@ function fmtNum(n) { return n ? n.toLocaleString() : '0' }
 
 // --- Pane management ---
 function createPanes(count) {
-  // Dispose old terminals
-  for (let i = 0; i < panes.value.length; i++) {
+  const currentPanes = panes.value
+  // Only dispose panes that are actually removed. Existing pane instances keep
+  // their xterm scrollback when switching between 1/2/4 pane layouts.
+  for (let i = count; i < currentPanes.length; i++) {
     destroyPaneTerminal(i)
-    if (i >= count) unsubscribePane(i)
+    unsubscribePane(i)
   }
-  panes.value = Array.from({ length: count }, (_, i) => ({
-    id: `pane-${i}`,
-    sessionId: panes.value[i]?.sessionId || (sessions.byId(sessions.workbench.paneSessionIds[i]) ? sessions.workbench.paneSessionIds[i] : null)
-  }))
+  panes.value = reconcileSessionPanes(currentPanes, count, (i) => {
+    const savedId = sessions.workbench.paneSessionIds[i]
+    return sessions.byId(savedId) ? savedId : null
+  }).panes
   if (activePane.value >= count) activePane.value = count - 1
-  // Re-initialize terminals for all panes
+  // Initialize only new panes. ResizeObserver refits retained terminals after
+  // the grid changes size.
   nextTick(() => {
     for (let i = 0; i < count; i++) {
-      initPaneTerminal(i)
+      const needsInit = !panes.value[i]?.term
+      if (needsInit) initPaneTerminal(i)
       const sessionId = panes.value[i]?.sessionId
-      if (sessionId) {
+      if (needsInit && sessionId) {
         if (!unsubs[i]) subscribePaneTerminal(i, sessionId)
         ipc.attachTerminal(sessionId)
+      } else {
+        try { panes.value[i]?.fitAddon?.fit() } catch {}
       }
     }
   })
@@ -356,6 +423,42 @@ function activatePane(i) {
   nextTick(() => panes.value[i]?.term?.focus())
 }
 
+async function togglePaneFullscreen(i) {
+  try {
+    await toggleElementFullscreen(document, paneRootRefs[i])
+  } catch (e) {
+    message.error('切换全屏失败：' + (e?.message || e))
+  }
+}
+
+async function toggleWorkbenchFullscreen() {
+  try {
+    await toggleElementFullscreen(document, paneGridRef.value)
+  } catch (e) {
+    message.error('切换分屏全屏失败：' + (e?.message || e))
+  }
+}
+
+function onFullscreenChange() {
+  const target = resolveWorkbenchFullscreenTarget(
+    document.fullscreenElement,
+    paneGridRef.value,
+    paneRootRefs
+  )
+  gridFullscreen.value = target.grid
+  fullscreenPane.value = target.paneIndex
+  nextTick(() => {
+    const targets = target.grid || !document.fullscreenElement
+      ? panes.value
+      : [panes.value[fullscreenPane.value ?? activePane.value]]
+    for (const pane of targets) {
+      try { pane?.fitAddon?.fit() } catch {}
+    }
+    const i = fullscreenPane.value ?? activePane.value
+    panes.value[i]?.term?.focus()
+  })
+}
+
 function switchSessionPane(direction = 1) {
   const next = nextSessionPaneIndex(panes.value, activePane.value, direction)
   if (next === null) return false
@@ -409,6 +512,23 @@ function assignToPane(sessionId) {
     ipc.attachTerminal(sessionId)
   }
 }
+
+function focusSessionFromNotification(sessionId) {
+  if (!sessionId || !panes.value.length) return false
+  const target = resolveSessionFocusPane(panes.value, sessionId, activePane.value)
+  activePane.value = target
+  if (panes.value[target]?.sessionId === sessionId) {
+    activatePane(target)
+  } else {
+    assignToPane(sessionId)
+  }
+  sessions.pendingAssign = null
+  return true
+}
+
+watch(() => sessions.pendingAssign, (sessionId) => {
+  if (sessionId) focusSessionFromNotification(sessionId)
+})
 
 async function openInNewPane(sessionId) {
   // Open in a different pane if possible, otherwise same as click
@@ -577,6 +697,7 @@ function unsubscribePane(i) {
 // --- Lifecycle ---
 onMounted(async () => {
   window.addEventListener('keydown', onWorkbenchKeydown)
+  document.addEventListener('fullscreenchange', onFullscreenChange)
   await sessions.init()
   const savedIds = sessions.workbench.paneSessionIds
   const count = sessions.workbench.splitCount || 1
@@ -585,10 +706,7 @@ onMounted(async () => {
 
   // If navigated from card click, put pending session in first empty pane
   if (sessions.pendingAssign) {
-    activePane.value = panes.value.findIndex(p => !p.sessionId)
-    if (activePane.value < 0) activePane.value = 0
-    assignToPane(sessions.pendingAssign)
-    sessions.pendingAssign = null
+    focusSessionFromNotification(sessions.pendingAssign)
   }
 
   // Restore remaining saved pane assignments (skip deleted sessions)
@@ -604,6 +722,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onWorkbenchKeydown)
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
   for (let i = 0; i < panes.value.length; i++) {
     destroyPaneTerminal(i)
     unsubscribePane(i)
@@ -657,15 +776,26 @@ onBeforeUnmount(() => {
 .status-dot.error { background: #ff4d4f; }
 
 /* Pane grid */
-.pane-grid { flex: 1; display: grid; gap: 6px; min-height: 0; }
+.pane-grid { flex: 1; display: grid; gap: 6px; min-height: 0; position: relative; }
 .pane-grid.split-1 { grid-template-columns: 1fr; grid-template-rows: 1fr; }
 .pane-grid.split-2 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
 .pane-grid.split-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.pane-grid:fullscreen {
+  width: 100vw; height: 100vh; padding: 6px; box-sizing: border-box;
+  background: #0b1021;
+}
+.grid-fullscreen-exit {
+  position: absolute; top: 8px; right: 12px; z-index: 10;
+}
 
 .pane {
   display: flex; flex-direction: column; min-height: 0;
   border-radius: 8px; overflow: hidden;
   border: 2px solid #d9d9d9;
+}
+.pane:fullscreen {
+  width: 100vw; height: 100vh; border: 0; border-radius: 0;
+  background: #0b1021;
 }
 .pane-active { border-color: #1677ff; }
 .shortcut-hint { color: #8c8c8c; font-size: 12px; white-space: nowrap; }
