@@ -13,6 +13,9 @@ import { contextBridge, ipcRenderer } from 'electron'
  *   'session:exit'              { sessionId, code }
  */
 const api = {
+  // ---- logging ----
+  log: (level, ...args) => ipcRenderer.invoke('log:write', level, ...args),
+
   // ---- adapters / discovery ----
   listAdapters: () => ipcRenderer.invoke('adapters:list'),
   listCliTools: () => ipcRenderer.invoke('cli-tools:list'),
@@ -55,6 +58,10 @@ const api = {
   // ---- settings ----
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSettings: (s) => ipcRenderer.invoke('settings:update', s),
+
+  // ---- workbench ----
+  getWorkbench: () => ipcRenderer.invoke('workbench:get'),
+  saveWorkbench: (state) => ipcRenderer.invoke('workbench:save', state),
 
   // ---- events ----
   on: (channel, handler) => {

@@ -113,18 +113,55 @@ export const useSessionsStore = defineStore('sessions', {
     },
 
     // Workbench state persistence
+    async loadWorkbench() {
+      try {
+        const wb = await ipc.getWorkbench()
+        ipc.log('info', 'loadWorkbench received:', JSON.stringify(wb))
+        if (wb?.paneSessionIds) {
+          this.workbench.splitCount = wb.splitCount || 1
+          this.workbench.activePane = wb.activePane || 0
+          this.workbench.paneSessionIds = wb.paneSessionIds
+          ipc.log('info', 'loadWorkbench — restored workbench state')
+        } else {
+          ipc.log('info', 'loadWorkbench — no saved workbench, using defaults')
+        }
+      } catch (err) {
+        ipc.log('error', 'loadWorkbench failed:', err?.message || err)
+        /* no saved workbench */
+      }
+    },
+    async saveWorkbench() {
+      const payload = {
+        splitCount: this.workbench.splitCount,
+        activePane: this.workbench.activePane,
+        paneSessionIds: [...this.workbench.paneSessionIds] // plain array, not Vue Proxy
+      }
+      ipc.log('info', 'saveWorkbench called, payload:', JSON.stringify(payload))
+      try {
+        const result = await ipc.saveWorkbench(payload)
+        ipc.log('info', 'saveWorkbench completed, result:', result)
+      } catch (err) {
+        ipc.log('error', 'saveWorkbench FAILED:', err?.message || err)
+        console.error('[saveWorkbench]', err)
+      }
+    },
     setWorkbenchSplit(count) {
+      ipc.log('info', 'setWorkbenchSplit', count)
       this.workbench.splitCount = count
-      // Extend paneSessionIds if needed
       while (this.workbench.paneSessionIds.length < count) {
         this.workbench.paneSessionIds.push(null)
       }
+      this.saveWorkbench()
     },
     setWorkbenchPane(index, sessionId) {
+      ipc.log('info', 'setWorkbenchPane', index, sessionId)
       this.workbench.paneSessionIds[index] = sessionId
+      this.saveWorkbench()
     },
     setWorkbenchActivePane(index) {
+      ipc.log('info', 'setWorkbenchActivePane', index)
       this.workbench.activePane = index
+      this.saveWorkbench()
     },
 
     _upsertSummary(s) {

@@ -69,7 +69,21 @@
           >
             <div class="item-head">
               <span class="item-icon">{{ s.icon }}</span>
-              <span class="item-name">{{ s.displayName || s.adapterId }}</span>
+              <span v-if="nameEditId !== s.id" class="item-name-wrap">
+                <span class="item-name">{{ s.displayName || s.adapterId }}</span>
+                <EditOutlined class="item-name-edit-icon" @click.stop="startNameEdit(s)" title="重命名" />
+              </span>
+              <a-input
+                v-else
+                ref="nameEditRef"
+                v-model:value="nameEditDraft"
+                size="small"
+                class="item-name-input"
+                @click.stop
+                @press-enter="saveNameEdit"
+                @blur="saveNameEdit"
+                @keydown.escape.prevent="cancelNameEdit"
+              />
               <span :class="['status-dot', s.status]"></span>
             </div>
             <div class="item-path" :title="s.cwd">📁 {{ s.cwd || '—' }}</div>
@@ -226,7 +240,8 @@ import {
   FullscreenOutlined,
   FullscreenExitOutlined,
   MenuFoldOutlined,
-  MenuUnfoldOutlined
+  MenuUnfoldOutlined,
+  EditOutlined
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { ipc } from '../ipc.js'
@@ -279,6 +294,29 @@ function setPaneRootRef(i, el) {
 // IPC unsubscribers per pane
 const unsubs = {}
 
+// Inline name editing
+const nameEditId = ref(null)
+const nameEditDraft = ref('')
+const nameEditRef = ref(null)
+function startNameEdit(s) {
+  nameEditId.value = s.id
+  nameEditDraft.value = s.displayName || ''
+  nextTick(() => nameEditRef.value?.focus())
+}
+async function saveNameEdit() {
+  const id = nameEditId.value
+  if (!id) return
+  const name = nameEditDraft.value.trim()
+  if (name && name !== sessions.byId(id)?.displayName) {
+    await sessions.updateName(id, name)
+  }
+  nameEditId.value = null
+}
+function cancelNameEdit() {
+  nameEditId.value = null
+  nameEditDraft.value = ''
+}
+
 // Filters
 const filter = ref({ search: '', status: [] })
 
@@ -323,7 +361,12 @@ function createPanes(count) {
       const sessionId = panes.value[i]?.sessionId
       if (needsInit && sessionId) {
         if (!unsubs[i]) subscribePaneTerminal(i, sessionId)
-        ipc.attachTerminal(sessionId)
+        const s = sessions.byId(sessionId)
+        if (s?.status === 'offline') {
+          sessions.restart(sessionId).catch(e => message.error('重启失败：' + (e?.message || e)))
+        } else {
+          ipc.attachTerminal(sessionId)
+        }
       } else {
         try { panes.value[i]?.fitAddon?.fit() } catch {}
       }
@@ -699,6 +742,7 @@ onMounted(async () => {
   window.addEventListener('keydown', onWorkbenchKeydown)
   document.addEventListener('fullscreenchange', onFullscreenChange)
   await sessions.init()
+  await sessions.loadWorkbench()
   const savedIds = sessions.workbench.paneSessionIds
   const count = sessions.workbench.splitCount || 1
   createPanes(count)
@@ -710,7 +754,11 @@ onMounted(async () => {
   }
 
   // Restore remaining saved pane assignments (skip deleted sessions)
+  // Clear stale pane IDs that reference deleted sessions
   for (let i = 0; i < Math.min(count, savedIds.length); i++) {
+    if (savedIds[i] && !sessions.byId(savedIds[i])) sessions.setWorkbenchPane(i, null)
+  }
+  for (let i = 0; i < Math.min(count, sessions.workbench.paneSessionIds.length); i++) {
     if (!panes.value[i].sessionId && savedIds[i] && sessions.byId(savedIds[i])) {
       activePane.value = i
       assignToPane(savedIds[i])
@@ -757,7 +805,12 @@ onBeforeUnmount(() => {
 .session-item.assigned { background: #e6f4ff; border-color: #1677ff; }
 .item-head { display: flex; align-items: center; gap: 4px; }
 .item-icon { font-size: 14px; }
-.item-name { font-size: 12px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-name-wrap { display: inline-flex; align-items: center; gap: 2px; flex: 1; overflow: hidden; }
+.item-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-name-edit-icon { font-size: 11px; color: #bfbfbf; cursor: pointer; flex-shrink: 0; opacity: 0; transition: opacity .12s; }
+.item-name-wrap:hover .item-name-edit-icon { opacity: 1; }
+.item-name-edit-icon:hover { color: #1677ff; }
+.item-name-input { width: auto; min-width: 80px; max-width: 160px; font-size: 12px; font-weight: 600; }
 .item-path { font-size: 10px; color: #8c8c8c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 .item-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 1px; }
 .item-id { font-size: 10px; color: #bfbfbf; font-family: monospace; }
