@@ -1,17 +1,19 @@
 <template>
   <div class="workbench">
     <div class="toolbar">
-      <a-space>
-        <a-button type="primary" @click="openNew">
-          <PlusOutlined /> 新建会话
-        </a-button>
-        <a-select v-model:value="filterTier" style="width: 140px" allowClear placeholder="按模式筛选">
-          <a-select-option value="always-agree">一直同意</a-select-option>
-          <a-select-option value="safety-rules">安全规则</a-select-option>
-          <a-select-option value="ask-everything">逐次确认</a-select-option>
-        </a-select>
-      </a-space>
-      <span class="count">共 {{ filtered.length }} 个会话</span>
+      <a-button size="small" @click="openNew">
+        <PlusOutlined /> 新建
+      </a-button>
+      <a-select v-model:value="filterTier" size="small" style="width: 100px" allowClear placeholder="筛选">
+        <a-select-option value="always-agree">一直同意</a-select-option>
+        <a-select-option value="safety-rules">安全规则</a-select-option>
+        <a-select-option value="ask-everything">逐次确认</a-select-option>
+      </a-select>
+      <span class="spacer"></span>
+      <span class="count">{{ filtered.length }} 个会话</span>
+      <a-button size="small" class="goto-btn" @click="$router.push('/session')" title="工作台">
+        <AppstoreOutlined />
+      </a-button>
     </div>
 
     <div v-if="filtered.length" class="card-grid">
@@ -102,7 +104,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { PlusOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, AppstoreOutlined } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
 import SessionCard from '../components/SessionCard.vue'
@@ -261,8 +263,12 @@ async function newSession(adapter) {
 </script>
 
 <style scoped>
-.toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
-.count { color: #8c8c8c; font-size: 13px; }
+.toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.spacer { flex: 1; }
+.count { color: #bfbfbf; font-size: 12px; }
+.goto-btn { color: #8c8c8c; }
+
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 
 .new-section { margin-bottom: 16px; }
 .section-title { font-weight: 600; font-size: 13px; margin-bottom: 8px; color: #262626; }

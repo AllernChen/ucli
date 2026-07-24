@@ -3,7 +3,21 @@
     <template #title>
       <div class="card-title">
         <span class="icon">{{ session.icon }}</span>
-        <span class="name">{{ session.displayName }}</span>
+        <span v-if="editingId !== session.id" class="name-wrap">
+          <span class="name">{{ session.displayName }}</span>
+          <EditOutlined class="name-edit-icon" @click.stop="startEdit" title="重命名" />
+        </span>
+        <a-input
+          v-else
+          ref="nameInputRef"
+          v-model:value="editDraft"
+          size="small"
+          class="name-input"
+          @click.stop
+          @press-enter="saveEdit"
+          @blur="saveEdit"
+          @keydown.escape.prevent="cancelEdit"
+        />
         <span :class="['status-badge', statusCls]">{{ statusText }}</span>
       </div>
     </template>
@@ -13,6 +27,7 @@
 
     <div class="cwd" :title="session.cwd">
       <FolderOpenOutlined /> {{ session.cwd || '(未设置目录)' }}
+      <span v-if="session.startedAt" class="sep">·</span>
       <span v-if="session.startedAt" class="started-at">{{ fmtShort(session.startedAt) }}</span>
     </div>
     <div class="last-activity">{{ session.lastActivity || '空闲' }}</div>
@@ -22,20 +37,45 @@
     </div>
 
     <div class="card-footer">
-      <span class="token-mini sid">{{ session.id.slice(0, 8) }}</span>
-      <span class="token-mini">↑{{ session.stats.tokens.input.toLocaleString() }} ↓{{ session.stats.tokens.output.toLocaleString() }}</span>
-      <span class="token-mini">{{ session.stats.turns }} 轮</span>
-      <span v-if="session.stats.costUsd" class="token-mini">${{ session.stats.costUsd.toFixed(4) }}</span>
+      <span class="stat">↑{{ session.stats.tokens.input.toLocaleString() }}</span>
+      <span class="stat">↓{{ session.stats.tokens.output.toLocaleString() }}</span>
+      <span class="stat">{{ session.stats.turns }} 轮</span>
+      <span v-if="session.stats.costUsd" class="stat">${{ session.stats.costUsd.toFixed(4) }}</span>
     </div>
   </a-card>
 </template>
 
 <script setup>
-import { computed } from 'vue'
-import { FolderOpenOutlined } from '@ant-design/icons-vue'
+import { computed, ref, nextTick } from 'vue'
+import { FolderOpenOutlined, EditOutlined } from '@ant-design/icons-vue'
+import { useSessionsStore } from '../stores/sessions.js'
 
 const props = defineProps({ session: { type: Object, required: true } })
-defineEmits(['open'])
+const emit = defineEmits(['open'])
+const sessions = useSessionsStore()
+
+const editingId = ref(null)
+const editDraft = ref('')
+const nameInputRef = ref(null)
+
+function startEdit() {
+  editingId.value = props.session.id
+  editDraft.value = props.session.displayName || ''
+  nextTick(() => nameInputRef.value?.focus())
+}
+async function saveEdit() {
+  const id = editingId.value
+  if (!id) return
+  const name = editDraft.value.trim()
+  if (name && name !== props.session.displayName) {
+    await sessions.updateName(id, name)
+  }
+  editingId.value = null
+}
+function cancelEdit() {
+  editingId.value = null
+  editDraft.value = ''
+}
 
 const isWaiting = computed(() => props.session.status === 'waiting')
 
@@ -67,11 +107,18 @@ function fmtShort(ts) {
 .session-card.waiting { border-color: #faad14; box-shadow: 0 0 0 2px rgba(250,173,20,.25); }
 .card-title { display: flex; align-items: center; gap: 6px; }
 .card-title .icon { font-size: 16px; }
+.card-title .name-wrap { display: inline-flex; align-items: center; gap: 2px; }
 .card-title .name { font-weight: 600; }
+.card-title .name-edit-icon { font-size: 12px; color: #bfbfbf; cursor: pointer; opacity: 0; transition: opacity .15s; }
+.card-title .name-wrap:hover .name-edit-icon { opacity: 1; }
+.card-title .name-edit-icon:hover { color: #1677ff; }
+.card-title .name-input { width: auto; min-width: 120px; max-width: 240px; font-weight: 600; }
 .card-title .status-badge { margin-left: auto; }
-.cwd { font-size: 12px; color: #595959; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
-.started-at { font-size: 10px; color: #8c8c8c; flex-shrink: 0; }
-.last-activity { font-size: 13px; color: #262626; min-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.waiting-bar { margin-top: 8px; padding: 4px 8px; background: #fffbe6; border-radius: 4px; font-size: 12px; color: #ad6800; }
-.card-footer { margin-top: 10px; display: flex; justify-content: space-between; gap: 8px; border-top: 1px dashed #f0f0f0; padding-top: 8px; }
+.cwd { font-size: 12px; color: #8c8c8c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 4px; }
+.sep { color: #d9d9d9; }
+.started-at { font-size: 11px; color: #bfbfbf; flex-shrink: 0; }
+.last-activity { font-size: 12px; color: #595959; min-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.waiting-bar { margin-top: 6px; padding: 3px 8px; background: #fffbe6; border-radius: 4px; font-size: 12px; color: #ad6800; }
+.card-footer { margin-top: 6px; display: flex; gap: 10px; }
+.stat { font-size: 11px; color: #8c8c8c; white-space: nowrap; }
 </style>

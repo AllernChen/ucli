@@ -6,6 +6,9 @@
 const u = window.ucli
 
 export const ipc = {
+  // logging
+  log: (level, ...args) => u.log(level, ...args),
+
   // adapters
   listAdapters: () => u.listAdapters(),
   listCliTools: () => u.listCliTools(),
@@ -40,6 +43,9 @@ export const ipc = {
   // settings
   getSettings: () => u.getSettings(),
   updateSettings: (s) => u.updateSettings(s),
+  // workbench
+  getWorkbench: () => u.getWorkbench(),
+  saveWorkbench: (state) => u.saveWorkbench(state),
   // events
   on: (channel, handler) => u.on(channel, handler)
 }

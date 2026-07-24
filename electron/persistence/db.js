@@ -394,6 +394,20 @@ class Db {
     this.sql.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)', ['app', JSON.stringify(settings)])
   }
 
+  // ---- workbench ----
+  getWorkbench() {
+    const r = this.sql.exec("SELECT value FROM settings WHERE key='workbench'")
+    const vals = rows(r)
+    if (vals.length) {
+      try { return JSON.parse(vals[0].value) } catch { return null }
+    }
+    return null
+  }
+
+  saveWorkbench(state) {
+    this.sql.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)', ['workbench', JSON.stringify(state)])
+  }
+
   // ---- migration ----
   migrateFromJson(rulesets, settings, sessionsObj) {
     if (rulesets) {

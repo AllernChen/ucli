@@ -40,7 +40,7 @@
       <div :class="['sider-footer', { collapsed: navCollapsed }]">
         <a-badge v-if="navCollapsed && waitingCount > 0" :count="waitingCount" />
         <a-tag v-else-if="waitingCount > 0" color="orange">待确认 {{ waitingCount }}</a-tag>
-        <span v-if="!navCollapsed" class="version">v0.2.1</span>
+        <span v-if="!navCollapsed" class="version">v0.3.1</span>
       </div>
     </a-layout-sider>
     <a-layout class="main-layout">
@@ -110,7 +110,15 @@ function onMenuClick({ key }) {
 }
 
 let stopSessionFocus = null
-onMounted(() => {
+onMounted(async () => {
+  // Load persisted workbench state to decide initial route
+  await sessions.init()
+  await sessions.loadWorkbench()
+  const hasSavedPanes = sessions.workbench.paneSessionIds.some(id => id != null)
+  if (hasSavedPanes) {
+    router.replace('/session')
+  }
+
   stopSessionFocus = ipc.on('session:focus-session', ({ sessionId }) => {
     sessions.pendingAssign = sessionId
     router.push('/session')

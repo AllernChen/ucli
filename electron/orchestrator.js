@@ -10,6 +10,7 @@ import { claudeDescriptor } from './adapters/claudeAdapter.js'
 import { codexDescriptor } from './adapters/codexAdapter.js'
 import { TIER } from './adapters/cliAdapter.js'
 import { openDb, getDb } from './persistence/db.js'
+import { initLogger, log } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { annotateImportedSessions, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
 import {
@@ -50,6 +51,8 @@ const DEFAULT_SETTINGS = {
 }
 
 export function createOrchestrator() {
+  initLogger()
+  log('createOrchestrator() — starting')
   const adapters = new Map([claudeDescriptor, codexDescriptor].map((d) => [d.id, d]))
   const sessions = new Map() // sessionId -> { adapter?, session, status, stats, lastActivity, createdAt, _dirtyStats, _lastCumTokens }
   let mainWindow = null
@@ -70,8 +73,10 @@ export function createOrchestrator() {
 
   async function initPersistence() {
     const db = await openDb(dbPath)
+    log('initPersistence — openDb returned:', !!db, 'path:', dbPath)
     if (!db) {
       console.error('Persistence not available — running without saving data')
+      log('initPersistence — DB is null, persistence disabled')
       return // app continues without DB (stats work from in-memory sessions)
     }
     persistenceRecovery = db.recoveryInfo || null
@@ -963,12 +968,38 @@ export function createOrchestrator() {
       const db = getDb(); if (db) { db.saveSettings(settings); scheduleFlush() }
       return true
     })
+
+    ipcMain.handle('log:write', (_e, level, ...args) => {
+      log(`[renderer/${level}]`, ...args)
+    })
+
+    ipcMain.handle('workbench:get', () => {
+      log('IPC workbench:get called')
+      const db = getDb()
+      const result = db ? db.getWorkbench() : null
+      log('IPC workbench:get result:', result)
+      return result
+    })
+    ipcMain.handle('workbench:save', (_e, state) => {
+      log('IPC workbench:save called with:', JSON.stringify(state))
+      const db = getDb()
+      if (db) {
+        db.saveWorkbench(state)
+        log('IPC workbench:save — db.saveWorkbench completed, calling db.flush()')
+        db.flush()
+        log('IPC workbench:save — db.flush completed')
+      } else {
+        log('IPC workbench:save — db is NULL, cannot save!')
+      }
+      return true
+    })
   }
 
   let shutdownPromise = null
   function shutdown() {
     if (shutdownPromise) return shutdownPromise
     shutdownPromise = (async () => {
+      log('shutdown() called')
       if (flushTimer) {
         clearTimeout(flushTimer)
         flushTimer = null
@@ -987,13 +1018,18 @@ export function createOrchestrator() {
         entry.status = 'offline'
         if (db) db.updateSession(id, { status: 'offline' })
       }
-      if (db) db.flush()
+      if (db) {
+        log('shutdown — calling db.flush()')
+        db.flush()
+        log('shutdown — db.flush() done')
+      }
       try {
         const server = hookServer || await hookReady
         await server?.close()
       } catch (error) {
         console.error('Failed to close permission hook server:', error)
       }
+      log('shutdown() complete')
     })()
     return shutdownPromise
   }
