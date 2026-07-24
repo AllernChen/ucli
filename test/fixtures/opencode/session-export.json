@@ -1,0 +1,156 @@
+{
+  "info": {
+    "id": "ses_fixture",
+    "slug": "fixture-session",
+    "projectID": "global",
+    "directory": "[redacted:session-directory:ses_fixture]",
+    "path": "tmp/ucli-opencode-protocol",
+    "title": "[redacted:session-title:ses_fixture]",
+    "agent": "build",
+    "model": { "id": "glm-5.2", "providerID": "glm", "variant": "default" },
+    "version": "1.17.18",
+    "summary": { "additions": 0, "deletions": 0, "files": 0 },
+    "cost": 0,
+    "tokens": {
+      "input": 4512,
+      "output": 54,
+      "reasoning": 19,
+      "cache": { "read": 22272, "write": 0 }
+    },
+    "time": { "created": 1784893496105, "updated": 1784893555832 }
+  },
+  "messages": [
+    {
+      "info": {
+        "role": "user",
+        "id": "msg_user_1",
+        "sessionID": "ses_fixture",
+        "time": { "created": 1784893497005 }
+      },
+      "parts": [{ "type": "text", "text": "[redacted:text]" }]
+    },
+    {
+      "info": {
+        "role": "assistant",
+        "id": "msg_assistant_1",
+        "sessionID": "ses_fixture",
+        "modelID": "glm-5.2",
+        "providerID": "glm",
+        "cost": 0,
+        "tokens": {
+          "total": 8888,
+          "input": 4338,
+          "output": 6,
+          "reasoning": 0,
+          "cache": { "read": 4544, "write": 0 }
+        },
+        "finish": "stop",
+        "time": { "created": 1784893497058, "completed": 1784893502441 }
+      },
+      "parts": [
+        { "type": "step-start" },
+        { "type": "text", "text": "[redacted:text]" },
+        {
+          "type": "step-finish",
+          "reason": "stop",
+          "tokens": {
+            "total": 8888,
+            "input": 4338,
+            "output": 6,
+            "reasoning": 0,
+            "cache": { "read": 4544, "write": 0 }
+          },
+          "cost": 0
+        }
+      ]
+    },
+    {
+      "info": {
+        "role": "user",
+        "id": "msg_user_2",
+        "sessionID": "ses_fixture",
+        "time": { "created": 1784893551189 }
+      },
+      "parts": [{ "type": "text", "text": "[redacted:text]" }]
+    },
+    {
+      "info": {
+        "role": "assistant",
+        "id": "msg_assistant_2_tool",
+        "sessionID": "ses_fixture",
+        "modelID": "glm-5.2",
+        "providerID": "glm",
+        "cost": 0,
+        "tokens": {
+          "total": 8972,
+          "input": 89,
+          "output": 32,
+          "reasoning": 19,
+          "cache": { "read": 8832, "write": 0 }
+        },
+        "finish": "tool-calls",
+        "time": { "created": 1784893551846, "completed": 1784893554492 }
+      },
+      "parts": [
+        { "type": "step-start" },
+        { "type": "reasoning", "text": "[redacted:reasoning]" },
+        {
+          "type": "tool",
+          "tool": "write",
+          "state": {
+            "status": "completed",
+            "input": { "redacted": "tool-input" },
+            "output": "[redacted:tool-output]"
+          }
+        },
+        {
+          "type": "step-finish",
+          "reason": "tool-calls",
+          "tokens": {
+            "total": 8972,
+            "input": 89,
+            "output": 32,
+            "reasoning": 19,
+            "cache": { "read": 8832, "write": 0 }
+          },
+          "cost": 0
+        }
+      ]
+    },
+    {
+      "info": {
+        "role": "assistant",
+        "id": "msg_assistant_2_final",
+        "sessionID": "ses_fixture",
+        "modelID": "glm-5.2",
+        "providerID": "glm",
+        "cost": 0,
+        "tokens": {
+          "total": 8997,
+          "input": 85,
+          "output": 16,
+          "reasoning": 0,
+          "cache": { "read": 8896, "write": 0 }
+        },
+        "finish": "stop",
+        "time": { "created": 1784893554497, "completed": 1784893555809 }
+      },
+      "parts": [
+        { "type": "step-start" },
+        { "type": "text", "text": "[redacted:text]" },
+        {
+          "type": "step-finish",
+          "reason": "stop",
+          "tokens": {
+            "total": 8997,
+            "input": 85,
+            "output": 16,
+            "reasoning": 0,
+            "cache": { "read": 8896, "write": 0 }
+          },
+          "cost": 0
+        }
+      ]
+    }
+  ]
+}

@@ -100,6 +100,15 @@ shell:true spawn 的子进程是 cmd.exe，`child.kill()` 只杀 cmd。用 `task
 
 UCLI 按规范化后的 `directory` 精确匹配工作目录；空输出代表没有历史会话。
 
+### 会话导出与逐会话用量
+
+- `opencode export <sessionID> --sanitize` 输出单个源会话的 JSON；`--sanitize` 会脱敏目录、标题、提示词、工具输入输出和 reasoning，适合保留为测试 fixture。
+- 顶层 `info` 给出会话累计 `cost` 与 `tokens`（`input`、`output`、`reasoning`、`cache.read`、`cache.write`），以及当前模型 `model.id` / `model.providerID`。
+- 每条 assistant message 的 `info` 也有本消息的 `cost`、`tokens`、`modelID`、`providerID` 与 `finish`。其 `parts[type=step-finish]` 是同一消息用量的重复表示，解析时不能和 `message.info.tokens` 双重累计。
+- `finish: "stop"` 表示完成用户可见的一轮；`finish: "tool-calls"` 是工具调用后的中间消息，不单独作为完成轮次。
+- 会话累计顶层 `info.tokens` 等于各 assistant message `info.tokens` 的字段和。适配器优先使用顶层累计值；模型拆分和完成轮次从 assistant messages 读取。
+- `opencode stats --project <cwd>` 在 `projectID: "global"` 的会话上可以返回 0，因此它只能作为聚合展示，不能用来归属 UCLI 的单个会话。
+
 ### 权限
 
 - `OPENCODE_PERMISSION`：内联 JSON 权限配置，动作是 `allow` / `ask` / `deny`。
