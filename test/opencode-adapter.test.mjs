@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   buildOpenCodeArgs,
+  buildOpenCodeConfigContent,
   buildOpenCodePermission,
   classifyOpenCodeNotification,
   OpenCodeAdapter,
@@ -60,6 +61,46 @@ test('OpenCode Windows launch bypasses the npm cmd shim for ConPTY', () => {
   assert.deepEqual(launch, {
     file: 'F:\\soft\\nvm\\nodejs\\node_modules\\opencode-ai\\bin\\opencode.exe',
     prefixArgs: []
+  })
+})
+
+test('OpenCode asks for non-blacklisted tools in ask-everything mode', () => {
+  const permission = buildOpenCodePermission('ask-everything')
+  assert.equal(permission['*'], 'ask')
+  assert.equal(permission.bash['rm -rf /*'], 'deny')
+})
+
+test('OpenCode safely falls back to ask for an untranslatable risky regex', () => {
+  const permission = buildOpenCodePermission('safety-rules', {
+    highRisk: ['Bash(re:curl\\s.*\\|\\s*(sh|bash))']
+  })
+  assert.equal(permission.bash['*'], 'ask')
+})
+
+test('OpenCode uses inline config content so permissions override project config', () => {
+  const config = JSON.parse(buildOpenCodeConfigContent('safety-rules', {
+    allow: ['Bash(git status:*)'],
+    highRisk: ['Bash(git push:*)']
+  }))
+
+  assert.deepEqual(config.permission.bash, {
+    '*': 'allow',
+    'git status*': 'allow',
+    'git push*': 'ask',
+    'rm -rf /': 'deny',
+    'rm -rf /*': 'deny',
+    'rm -rf ~*': 'deny',
+    'rm -rf $HOME*': 'deny',
+    'rm --no-preserve-root*': 'deny',
+    'mkfs*': 'deny',
+    'format *': 'deny',
+    'diskpart*clean*': 'deny',
+    'dd *of=/dev/*': 'deny',
+    'chmod -R 777 /*': 'deny',
+    'del /s*C:\\Windows*': 'deny',
+    'del /s*C:\\Users*': 'deny',
+    'rmdir /s*C:\\Windows*': 'deny',
+    'rmdir /s*C:\\Program Files*': 'deny'
   })
 })
 

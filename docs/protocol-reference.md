@@ -111,10 +111,10 @@ UCLI 按规范化后的 `directory` 精确匹配工作目录；空输出代表�
 
 ### 权限
 
-- `OPENCODE_PERMISSION`：内联 JSON 权限配置，动作是 `allow` / `ask` / `deny`。
+- `OPENCODE_CONFIG_CONTENT`：内联 JSON 配置。UCLI 用其中的 `permission` 字段传入会话级权限，动作是 `allow` / `ask` / `deny`；它在项目配置之后加载，因此不会修改用户文件，也不会被项目配置覆盖。
 - OpenCode 使用简单通配符且最后匹配规则生效；UCLI 按 allow → high-risk → deny → 硬黑名单的顺序生成规则。
 - OpenCode 不执行正则权限模式。无法无损转换的高风险/拒绝正则会回退为对相应工具逐次确认，避免静默放行。
-- `OPENCODE_TUI_CONFIG` 指向 UCLI 临时 TUI 配置，启用 attention 通知并关闭额外声音。
+- UCLI 解析 OpenCode 输出中的 OSC 9 attention 序列；完成通知同时以累计会话导出的 `finish:"stop"` 轮次为准，避免依赖单一终端提示。
 
 ### Windows PTY
 

@@ -1,6 +1,5 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { existsSync } from 'fs'
 import { dirname, join } from 'path'
-import { tmpdir } from 'os'
 import { createRequire } from 'module'
 import { spawnSync } from 'child_process'
 import { BaseAdapter, TIER } from './cliAdapter.js'
@@ -128,6 +127,13 @@ export function buildOpenCodePermission(tier, ruleset = {}) {
   return permission
 }
 
+// OPENCODE_CONFIG_CONTENT is loaded after both global and project config.
+// This lets UCLI enforce the active session's safety tier without mutating
+// the user's OpenCode files or letting a project config silently override it.
+export function buildOpenCodeConfigContent(tier, ruleset = {}) {
+  return JSON.stringify({ permission: buildOpenCodePermission(tier, ruleset) })
+}
+
 export function buildOpenCodeArgs(session) {
   const args = []
   if (session.model && session.model !== 'default') args.push('--model', session.model)
@@ -182,7 +188,6 @@ export class OpenCodeAdapter extends BaseAdapter {
     super({ id: 'opencode', displayName: DISPLAY_NAME, session, engine })
     this.ruleset = settings.ruleset || {}
     this.ptyProc = null
-    this._settingsDir = null
     this._sessionDiscoveryTimer = null
     this._startedAt = Date.now()
     this._osc9Pending = ''
@@ -276,21 +281,12 @@ export class OpenCodeAdapter extends BaseAdapter {
       return
     }
 
-    this._settingsDir = mkdtempSync(join(tmpdir(), 'ucli-opencode-'))
-    const tuiConfigFile = join(this._settingsDir, 'tui.json')
-    writeFileSync(tuiConfigFile, JSON.stringify({
-      attention: { enabled: true, notifications: true, sound: false }
-    }))
-
     const args = buildOpenCodeArgs(this.session)
     const env = {
       ...process.env,
       UCLI_SESSION_ID: this.session.id,
       OPENCODE_CLIENT: 'ucli',
-      OPENCODE_PERMISSION: JSON.stringify(
-        buildOpenCodePermission(this.session.tier, this.ruleset)
-      ),
-      OPENCODE_TUI_CONFIG: tuiConfigFile,
+      OPENCODE_CONFIG_CONTENT: buildOpenCodeConfigContent(this.session.tier, this.ruleset),
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor'
     }
@@ -363,10 +359,6 @@ export class OpenCodeAdapter extends BaseAdapter {
     if (this.ptyProc) {
       try { this.ptyProc.kill() } catch {}
       this.ptyProc = null
-    }
-    if (this._settingsDir) {
-      rmSync(this._settingsDir, { recursive: true, force: true })
-      this._settingsDir = null
     }
     await super.dispose()
   }
