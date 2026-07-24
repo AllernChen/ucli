@@ -8,11 +8,13 @@ import { describeBlacklist } from './permission/blacklist.js'
 import { classify, toClassifierInput, parsePattern } from './permission/classifier.js'
 import { claudeDescriptor } from './adapters/claudeAdapter.js'
 import { codexDescriptor } from './adapters/codexAdapter.js'
+import { openCodeDescriptor } from './adapters/openCodeAdapter.js'
 import { TIER } from './adapters/cliAdapter.js'
 import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { annotateImportedSessions, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
+import { listOpenCodeSessions } from './openCodeSessions.js'
 import {
   advanceSessionNotification,
   advanceTaskCompletion,
@@ -53,7 +55,7 @@ const DEFAULT_SETTINGS = {
 export function createOrchestrator() {
   initLogger()
   log('createOrchestrator() — starting')
-  const adapters = new Map([claudeDescriptor, codexDescriptor].map((d) => [d.id, d]))
+  const adapters = new Map([claudeDescriptor, codexDescriptor, openCodeDescriptor].map((d) => [d.id, d]))
   const sessions = new Map() // sessionId -> { adapter?, session, status, stats, lastActivity, createdAt, _dirtyStats, _lastCumTokens }
   let mainWindow = null
   let rulesets = { default: structuredClone(DEFAULT_RULESET) }
@@ -317,7 +319,11 @@ export function createOrchestrator() {
       taskNote: ''
     }
     engine.setSession(sessionId, { tier, rulesetId, ruleset: rulesets[rulesetId] })
-    const adapter = descriptor.create({ session, engine, settings: { hookRunnerPath, hookPort: null } })
+    const adapter = descriptor.create({
+      session,
+      engine,
+      settings: { hookRunnerPath, hookPort: null, ruleset: rulesets[rulesetId] }
+    })
     const entry = {
       adapter, session,
       status: 'starting', // not yet started — renderer calls start-adapter when pane is ready
@@ -650,66 +656,6 @@ export function createOrchestrator() {
     } catch { return [] }
   }
 
-  /** Discover OpenCode sessions from ~/.opencode/sessions/.
-   *  OpenCode stores each session as a directory with a session.json or
-   *  session meta file. If not installed, returns empty array.
-   *  Returns array of { sessionId, name, startedAt }. */
-  function listOpenCodeSessions(cwd) {
-    try {
-      const opencodeDir = join(home, '.opencode')
-      if (!existsSync(opencodeDir)) return []
-      const sessionsDir = join(opencodeDir, 'sessions')
-      if (!existsSync(sessionsDir)) return []
-
-      const normCwd = cwd ? (cwd || '').replace(/\\/g, '/').toLowerCase() : null
-      const found = []
-
-      for (const entry of readdirSync(sessionsDir)) {
-        const entryPath = join(sessionsDir, entry)
-        let stat
-        try { stat = statSync(entryPath) } catch { continue }
-
-        // OpenCode sessions are typically named directories
-        if (!stat.isDirectory()) continue
-
-        // Try to read session metadata
-        let meta = null
-        for (const metaFile of ['session.json', 'meta.json', 'session_meta.json']) {
-          const mp = join(entryPath, metaFile)
-          if (!existsSync(mp)) continue
-          try {
-            meta = JSON.parse(readFileSync(mp, 'utf8'))
-            break
-          } catch { /* try next */ }
-        }
-
-        if (!meta) {
-          // No metadata file — use directory name as sessionId, dir mtime as timestamp
-          found.push({
-            sessionId: entry,
-            name: null,
-            startedAt: stat.birthtimeMs
-          })
-          continue
-        }
-
-        const sessionId = meta.session_id || meta.id || meta.sessionId || entry
-        if (normCwd) {
-          const metaCwd = (meta.cwd || meta.working_directory || '').replace(/\\/g, '/').toLowerCase()
-          if (metaCwd !== normCwd) continue
-        }
-
-        found.push({
-          sessionId,
-          name: meta.name || meta.thread_name || null,
-          startedAt: meta.startedAt || meta.timestamp ? new Date(meta.startedAt || meta.timestamp).getTime() : stat.birthtimeMs
-        })
-      }
-
-      return found.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
-    } catch { return [] }
-  }
-
   /** Find the session closest to `createdAt` in `cwd`. */
   function findClaudeSessionIndex(cwd, nearTs) {
     const found = listClaudeSessionsByCwd(cwd)
@@ -753,7 +699,15 @@ export function createOrchestrator() {
     const descriptor = adapters.get(entry.session.adapterId)
     if (!descriptor) throw new Error('unknown adapter: ' + entry.session.adapterId)
     engine.setSession(sessionId, { tier: entry.session.tier, rulesetId: entry.session.rulesetId, ruleset: rulesets[entry.session.rulesetId] })
-    const adapter = descriptor.create({ session: entry.session, engine, settings: { hookRunnerPath, hookPort: null } })
+    const adapter = descriptor.create({
+      session: entry.session,
+      engine,
+      settings: {
+        hookRunnerPath,
+        hookPort: null,
+        ruleset: rulesets[entry.session.rulesetId]
+      }
+    })
     entry.adapter = adapter
     entry.status = 'starting'
     entry._dirtyStats = null
@@ -782,8 +736,8 @@ export function createOrchestrator() {
     })
 
     // Discover all CLI sessions for a cwd, grouped by adapter type.
-    // Returns { claude: [...], codex: [...] }
-    ipcMain.handle('session:discover', (_e, cwd) => {
+    // Returns { claude: [...], codex: [...], opencode: [...] }
+    ipcMain.handle('session:discover', async (_e, cwd) => {
       const imported = new Set()
       for (const e of sessions.values()) {
         if (e.session.cliSessionId) imported.add(e.session.cliSessionId)
@@ -792,10 +746,11 @@ export function createOrchestrator() {
         .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
         .slice(0, 30)
 
+      const openCode = await listOpenCodeSessions(cwd)
       return {
         claude: decorate(listClaudeSessionsByCwd(cwd)),
         codex: decorate(listCodexSessions(cwd)),
-        opencode: decorate(listOpenCodeSessions(cwd))
+        opencode: decorate(openCode)
       }
     })
 

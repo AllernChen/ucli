@@ -16,4 +16,5 @@ UCLI 是一个 Windows 优先的桌面工作台与本地代理。它不替换 Cl
 
 - 桌面端负责工作台、目录选择、会话管理、规则、设置和统计。
 - 终端窗格保持 AI CLI 原生交互体验。
-- 发布版当前支持 Claude Code 与 Codex；其他适配器按统一 adapter 接口扩展。
+- 当前支持 Claude Code、Codex 与 OpenCode；其他适配器按统一 adapter 接口扩展。
+- OpenCode 保持原生 TUI，通过官方 `--session` 恢复源会话，并通过 `OPENCODE_PERMISSION` 映射 UCLI 三档安全模式。

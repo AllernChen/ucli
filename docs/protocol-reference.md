@@ -1,6 +1,6 @@
 # 协议事实参考
 
-本机验证（2026-07-02）。claude 2.1.198、codex-cli 0.142.0、Node 24.9、Windows 10 LTSC 2021。
+本机验证（2026-07-23）。claude 2.1.198、codex-cli 0.142.0、OpenCode 1.17.18、Node 24.9、Windows 10 LTSC 2021。
 
 ## Claude Code（`claude`）
 
@@ -71,6 +71,45 @@ shell:true spawn 的子进程是 cmd.exe，`child.kill()` 只杀 cmd。用 `task
 
 ### 配置
 `$CODEX_HOME/config.toml`（默认 `~/.codex/config.toml`）。`-c key=value` 覆盖。`-s/--sandbox` 取值 `read-only` `workspace-write` `danger-full-access`。`--skip-git-repo-check` 允许在非 git 目录运行。
+
+## OpenCode（`opencode`）
+
+### 原生 TUI 与恢复
+
+- `opencode`：在当前工作目录启动原生 TUI。
+- `--session <ses_...>` / `-s <ses_...>`：恢复指定源会话。
+- `--model <provider/model>` / `-m <provider/model>`：按 provider/model 选择模型。
+- UCLI 只通过 PTY 转发输入输出，不重做 OpenCode 交互页面。
+
+### 历史发现
+
+`opencode session list --format json --max-count 200` 返回：
+
+```json
+[
+  {
+    "id": "ses_...",
+    "title": "会话标题",
+    "created": 0,
+    "updated": 0,
+    "projectId": "...",
+    "directory": "F:\\projects\\ucli"
+  }
+]
+```
+
+UCLI 按规范化后的 `directory` 精确匹配工作目录；空输出代表没有历史会话。
+
+### 权限
+
+- `OPENCODE_PERMISSION`：内联 JSON 权限配置，动作是 `allow` / `ask` / `deny`。
+- OpenCode 使用简单通配符且最后匹配规则生效；UCLI 按 allow → high-risk → deny → 硬黑名单的顺序生成规则。
+- OpenCode 不执行正则权限模式。无法无损转换的高风险/拒绝正则会回退为对相应工具逐次确认，避免静默放行。
+- `OPENCODE_TUI_CONFIG` 指向 UCLI 临时 TUI 配置，启用 attention 通知并关闭额外声音。
+
+### Windows PTY
+
+npm 安装生成的 `opencode.cmd` 在 `cmd.exe` + ConPTY 链路中会无输出且无法干净退出。UCLI 从 shim 所在目录解析 `node_modules/opencode-ai/bin/opencode.exe` 并直接交给 `node-pty`；Scoop/Chocolatey 等直接提供 EXE 的安装方式优先使用 PATH 中的 EXE。
 
 ## 统一适配器事件（归一化）
 `init` `message`(partial/final) `reasoning` `tool_call` `tool_result` `command_output` `file_diff` `token_usage`(cumulative) `turn_complete` `error` `exit`。适配器把上述原生消息翻译成这套形状，UI 渲染器只认这套。

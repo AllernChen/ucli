@@ -2,6 +2,16 @@
 
 本项目的重要变更记录在此文件中。
 
+## [Unreleased]
+
+### Added
+
+- 新增 OpenCode 原生 TUI 适配器，支持新建、停止、恢复和多窗格交互。
+- 设置页支持检测、安装和升级 OpenCode。
+- 通过 `opencode session list --format json` 按工作目录发现并导入 OpenCode 历史会话。
+- 将 UCLI 三档安全模式和规则映射到 OpenCode 原生权限配置，并继续强制危险命令黑名单。
+- 新增 Windows OpenCode PTY 冒烟测试；npm 安装场景会绕过在 ConPTY 中阻塞的 `opencode.cmd`，直接启动真实 EXE。
+
 ## [0.3.1] - 2026-07-24
 
 ### Added

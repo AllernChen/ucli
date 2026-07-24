@@ -4,9 +4,11 @@ import { inspectCliTool, listCliToolDefinitions, runCliToolAction } from '../ele
 
 test('CLI catalog exposes only fixed install and upgrade commands', () => {
   const tools = listCliToolDefinitions()
-  assert.deepEqual(tools.map((tool) => tool.id), ['claude', 'codex'])
+  assert.deepEqual(tools.map((tool) => tool.id), ['claude', 'codex', 'opencode'])
   assert.equal(tools[0].installCommand, 'npm install -g @anthropic-ai/claude-code')
   assert.equal(tools[1].installCommand, 'npm install -g @openai/codex')
+  assert.equal(tools[2].installCommand, 'npm install -g opencode-ai')
+  assert.equal(tools[2].upgradeCommand, 'opencode upgrade')
 })
 
 test('CLI inspection parses path and version', async () => {

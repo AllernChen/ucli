@@ -14,6 +14,13 @@ const CLI_TOOLS = {
     executable: 'codex',
     installCommand: 'npm install -g @openai/codex',
     upgradeCommand: 'codex --upgrade'
+  },
+  opencode: {
+    id: 'opencode',
+    displayName: 'OpenCode',
+    executable: 'opencode',
+    installCommand: 'npm install -g opencode-ai',
+    upgradeCommand: 'opencode upgrade'
   }
 }
 export function listCliToolDefinitions() {

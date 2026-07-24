@@ -121,7 +121,7 @@ const discoverError = ref('')
 const filterTier = ref(undefined)
 
 const form = ref({ adapterId: 'claude', cwd: '', model: undefined, tier: 'safety-rules' })
-const discovered = ref({ claude: [], codex: [] })
+const discovered = ref({ claude: [], codex: [], opencode: [] })
 const selectedSessions = ref({})
 
 const filtered = computed(() =>
@@ -129,7 +129,7 @@ const filtered = computed(() =>
 )
 
 const hasAnySessions = computed(() =>
-  discovered.value.claude.length > 0 || discovered.value.codex.length > 0
+  Object.values(discovered.value).some((items) => items.length > 0)
 )
 
 const totalSelected = computed(() => {
@@ -162,7 +162,7 @@ onMounted(async () => {
 
 function openNew() {
   selectedSessions.value = {}
-  discovered.value = { claude: [], codex: [] }
+  discovered.value = { claude: [], codex: [], opencode: [] }
   if (form.value.cwd) discover(form.value.cwd)
   showNew.value = true
 }
@@ -189,12 +189,12 @@ async function discover(cwd) {
   if (!cwd) return
   discovering.value = true
   discoverError.value = ''
-  discovered.value = { claude: [], codex: [] }
+  discovered.value = { claude: [], codex: [], opencode: [] }
   selectedSessions.value = {}
   try {
     discovered.value = await ipc.discoverSessions(cwd)
   } catch (e) {
-    discovered.value = { claude: [], codex: [] }
+    discovered.value = { claude: [], codex: [], opencode: [] }
     discoverError.value = e?.message || String(e)
   } finally {
     discovering.value = false
