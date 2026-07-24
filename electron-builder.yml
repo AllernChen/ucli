@@ -5,6 +5,10 @@ electronDist: node_modules/electron/dist
 directories:
   output: dist
   buildResources: build
+publish:
+  provider: github
+  owner: AllernChen
+  repo: ucli
 # Skip native module rebuild — node-pty ships prebuilds for all platforms.
 # electron-rebuild tries to recompile via node-gyp which fails without Python
 # and breaks on paths with spaces.

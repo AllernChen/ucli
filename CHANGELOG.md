@@ -16,6 +16,11 @@
 - OpenCode 安全规则改为官方 `OPENCODE_CONFIG_CONTENT` 覆盖，项目配置不能绕过当前会话的安全档位。
 - OpenCode 历史发现兼容 Windows 路径大小写、分隔符、中文目录与异常输出，并限制为最近 30 条。
 
+### Release artifacts
+
+- `UCLI-Setup-0.4.0-x64.exe` — SHA-256: `D393388E7AC867C91AEC029CEEC1F10F31424A52854FC39AC7E39EC7DD708A34`
+- `UCLI-Portable-0.4.0-x64.exe` — SHA-256: `A5DF275763C58C4C8E6C5A1DA5CEE084FB75928DD5AA72AF36A078B34B37B983`
+
 ### Added
 
 - 新增 OpenCode 原生 TUI 适配器，支持新建、停止、恢复和多窗格交互。
