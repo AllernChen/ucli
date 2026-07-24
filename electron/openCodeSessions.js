@@ -33,6 +33,7 @@ export function parseOpenCodeSessionList(stdout, cwd) {
       updatedAt: timestamp(row.updated)
     }))
     .sort((a, b) => (b.updatedAt || b.startedAt) - (a.updatedAt || a.startedAt))
+    .slice(0, 30)
 }
 
 export function listOpenCodeSessions(cwd, timeoutMs = 15_000) {

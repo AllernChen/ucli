@@ -31,3 +31,28 @@ test('OpenCode session list is filtered by Windows working directory', () => {
 test('OpenCode session discovery accepts empty CLI output', () => {
   assert.deepEqual(parseOpenCodeSessionList('', 'F:\\projects\\ucli'), [])
 })
+
+test('OpenCode session discovery normalizes Chinese Windows paths and rejects malformed output', () => {
+  const result = parseOpenCodeSessionList(JSON.stringify([{
+    id: 'ses_chinese', title: '中文目录', created: '2026-07-24T12:00:00Z', updated: '2026-07-24T13:00:00Z',
+    directory: 'f:/Projects/示例项目\\'
+  }]), 'F:\\PROJECTS\\示例项目\\')
+
+  assert.equal(result[0].sessionId, 'ses_chinese')
+  assert.deepEqual(parseOpenCodeSessionList('{not json}', 'F:\\projects\\ucli'), [])
+})
+
+test('OpenCode session discovery keeps the 30 most recently updated sessions', () => {
+  const source = Array.from({ length: 35 }, (_, index) => ({
+    id: `ses_${index}`,
+    title: `Session ${index}`,
+    created: index,
+    updated: index,
+    directory: 'F:/projects/ucli'
+  }))
+
+  const result = parseOpenCodeSessionList(JSON.stringify(source), 'F:\\projects\\ucli')
+  assert.equal(result.length, 30)
+  assert.equal(result[0].sessionId, 'ses_34')
+  assert.equal(result.at(-1).sessionId, 'ses_5')
+})
