@@ -7,10 +7,13 @@ import { BaseAdapter, TIER } from './cliAdapter.js'
 import { consumeOsc9Notifications } from './codexAdapter.js'
 import { parsePattern } from '../permission/classifier.js'
 import { listOpenCodeSessions } from '../openCodeSessions.js'
+import { loadOpenCodeSessionStats, OpenCodeStatsScheduler } from '../openCodeStats.js'
 
 const DISPLAY_NAME = 'OpenCode'
 const ICON = '🔵'
 const SESSION_DISCOVERY_DELAY_MS = 1500
+const STATS_IDLE_DELAY_MS = 2000
+const STATS_MAX_WAIT_MS = 30000
 
 const require = createRequire(import.meta.url)
 let pty
@@ -183,6 +186,19 @@ export class OpenCodeAdapter extends BaseAdapter {
     this._sessionDiscoveryTimer = null
     this._startedAt = Date.now()
     this._osc9Pending = ''
+    this.statsReader = settings.statsReader || ((sessionId) => {
+      const launch = resolveOpenCodeLaunch()
+      return loadOpenCodeSessionStats(sessionId, {
+        executable: launch.file,
+        prefixArgs: launch.prefixArgs
+      })
+    })
+    this._lastStats = null
+    this._statsScheduler = new OpenCodeStatsScheduler({
+      onRun: () => this._extractStats(),
+      idleDelayMs: STATS_IDLE_DELAY_MS,
+      maxWaitMs: STATS_MAX_WAIT_MS
+    })
   }
 
   _write(text) {
@@ -194,6 +210,7 @@ export class OpenCodeAdapter extends BaseAdapter {
     }
     this.emitEvent({ type: 'terminal', data: text })
     this._scheduleSessionDiscovery()
+    this._statsScheduler.schedule()
   }
 
   _scheduleSessionDiscovery() {
@@ -208,8 +225,46 @@ export class OpenCodeAdapter extends BaseAdapter {
       this.session.cliSessionId = match.sessionId
       if (!this.session.name && match.name) this.session.name = match.name
       this.emitEvent({ type: 'init', cliSessionId: match.sessionId })
+      this._statsScheduler.schedule()
     }, SESSION_DISCOVERY_DELAY_MS)
     this._sessionDiscoveryTimer.unref?.()
+  }
+
+  async _extractStats() {
+    if (this._disposed || !this.session.cliSessionId) return
+    let stats
+    try {
+      stats = await this.statsReader(this.session.cliSessionId)
+    } catch {
+      return
+    }
+    if (!stats || this._disposed) return
+
+    const next = {
+      inputTokens: stats.inputTokens,
+      outputTokens: stats.outputTokens,
+      model: stats.lastModel,
+      completedTurns: stats.completedTurnsCount,
+      costUsd: stats.costUsd,
+      costAvailable: stats.costAvailable
+    }
+    if (JSON.stringify(next) === JSON.stringify(this._lastStats)) return
+    this._lastStats = next
+    this.emitEvent({
+      type: 'stats_update',
+      usage: {
+        inputTokens: stats.inputTokens,
+        outputTokens: stats.outputTokens,
+        cachedInputTokens: stats.cachedInputTokens,
+        reasoningOutputTokens: stats.reasoningOutputTokens
+      },
+      costUsd: stats.costUsd,
+      costAvailable: stats.costAvailable,
+      turns: stats.turnsCount,
+      completedTurns: stats.completedTurnsCount,
+      model: stats.lastModel,
+      modelBreakdown: stats.modelBreakdown
+    })
   }
 
   async start() {
@@ -257,7 +312,8 @@ export class OpenCodeAdapter extends BaseAdapter {
       this.emitEvent({
         type: 'stats_update',
         usage: { inputTokens: 0, outputTokens: 0 },
-        costUsd: 0,
+        costUsd: null,
+        costAvailable: false,
         turns: 0,
         model: this.session.model || null
       })
@@ -301,6 +357,8 @@ export class OpenCodeAdapter extends BaseAdapter {
     this._disposed = true
     if (this._sessionDiscoveryTimer) clearTimeout(this._sessionDiscoveryTimer)
     this._sessionDiscoveryTimer = null
+    this._statsScheduler.dispose()
+    this._lastStats = null
     this._osc9Pending = ''
     if (this.ptyProc) {
       try { this.ptyProc.kill() } catch {}

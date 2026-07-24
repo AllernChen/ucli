@@ -4,6 +4,7 @@ import {
   buildOpenCodeArgs,
   buildOpenCodePermission,
   classifyOpenCodeNotification,
+  OpenCodeAdapter,
   resolveOpenCodeLaunch
 } from '../electron/adapters/openCodeAdapter.js'
 
@@ -60,4 +61,41 @@ test('OpenCode Windows launch bypasses the npm cmd shim for ConPTY', () => {
     file: 'F:\\soft\\nvm\\nodejs\\node_modules\\opencode-ai\\bin\\opencode.exe',
     prefixArgs: []
   })
+})
+
+test('OpenCode adapter emits cumulative exported session statistics', async () => {
+  const adapter = new OpenCodeAdapter({
+    session: { id: 'ucli_opencode', cwd: 'F:\\projects\\sample', cliSessionId: 'ses_fixture', model: 'default' },
+    engine: {},
+    settings: {
+      ruleset: {},
+      statsReader: async () => ({
+        inputTokens: 4512,
+        outputTokens: 54,
+        cachedInputTokens: 22272,
+        reasoningOutputTokens: 19,
+        turnsCount: 2,
+        completedTurnsCount: 2,
+        costUsd: 0,
+        costAvailable: true,
+        lastModel: 'glm/glm-5.2',
+        modelBreakdown: [{ model: 'glm/glm-5.2', inputTokens: 4512, outputTokens: 54, costUsd: 0, costAvailable: true }]
+      })
+    }
+  })
+  const events = []
+  adapter.on('event', (event) => events.push(event))
+
+  await adapter._extractStats()
+
+  assert.deepEqual(events.map(({ ts, sessionId, ...event }) => event), [{
+    type: 'stats_update',
+    usage: { inputTokens: 4512, outputTokens: 54, cachedInputTokens: 22272, reasoningOutputTokens: 19 },
+    costUsd: 0,
+    costAvailable: true,
+    turns: 2,
+    completedTurns: 2,
+    model: 'glm/glm-5.2',
+    modelBreakdown: [{ model: 'glm/glm-5.2', inputTokens: 4512, outputTokens: 54, costUsd: 0, costAvailable: true }]
+  }])
 })

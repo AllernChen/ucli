@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { parseOpenCodeSessionStats } from '../electron/openCodeStats.js'
+import { loadOpenCodeSessionStats, parseOpenCodeSessionStats } from '../electron/openCodeStats.js'
 
 const fixture = JSON.parse(readFileSync(
   new URL('./fixtures/opencode/session-export.json', import.meta.url),
@@ -109,4 +109,36 @@ test('returns zero usage for an empty export', () => {
     lastModel: null,
     modelBreakdown: []
   })
+})
+
+test('loads a sanitized official export before parsing session statistics', async () => {
+  const calls = []
+  const stats = await loadOpenCodeSessionStats('ses_fixture', {
+    execFileFn(file, args, options, callback) {
+      calls.push({ file, args, options })
+      callback(null, JSON.stringify(fixture), '')
+    }
+  })
+
+  assert.deepEqual(calls, [{
+    file: 'opencode',
+    args: ['export', 'ses_fixture', '--sanitize'],
+    options: { encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024 }
+  }])
+  assert.equal(stats.inputTokens, 4512)
+  assert.equal(stats.completedTurnsCount, 2)
+})
+
+test('uses the resolved Windows executable for an official export', async () => {
+  const calls = []
+  await loadOpenCodeSessionStats('ses_fixture', {
+    executable: 'F:\\soft\\nvm\\nodejs\\node_modules\\opencode-ai\\bin\\opencode.exe',
+    execFileFn(file, args, options, callback) {
+      calls.push({ file, args, options })
+      callback(null, JSON.stringify(fixture), '')
+    }
+  })
+
+  assert.equal(calls[0].file, 'F:\\soft\\nvm\\nodejs\\node_modules\\opencode-ai\\bin\\opencode.exe')
+  assert.deepEqual(calls[0].args, ['export', 'ses_fixture', '--sanitize'])
 })
