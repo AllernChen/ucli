@@ -9,7 +9,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "test": "node --test test/adapter-stats.test.mjs test/approval-notification.test.mjs test/db-retention.test.mjs test/db-recovery.test.mjs test/db-recovery-message.test.mjs test/cli-tools.test.mjs test/session-discovery.test.mjs test/opencode-adapter.test.mjs test/opencode-sessions.test.mjs test/hook-server.test.mjs test/workbench-keyboard.test.mjs test/release-verification.test.mjs",
+    "test": "node --test test/adapter-stats.test.mjs test/approval-notification.test.mjs test/db-retention.test.mjs test/db-recovery.test.mjs test/db-recovery-message.test.mjs test/cli-tools.test.mjs test/session-discovery.test.mjs test/opencode-adapter.test.mjs test/opencode-sessions.test.mjs test/opencode-stats.test.mjs test/hook-server.test.mjs test/workbench-keyboard.test.mjs test/release-verification.test.mjs",
     "verify:release": "node scripts/verify-release.mjs",
     "dist": "electron-vite build && electron-builder --win",
     "schema:codex": "codex app-server generate-json-schema --out .codex-schema",
