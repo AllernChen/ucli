@@ -24,6 +24,9 @@ electron/
     cliAdapter.js      BaseAdapter + TIER 枚举 + 归一化事件契约
     claudeAdapter.js   claude --output-format stream-json --input-format stream-json --verbose
     codexAdapter.js    codex app-server --listen stdio://（JSON-RPC 2.0）
+    openCodeAdapter.js OpenCode 原生 TUI、`--session` 恢复、会话级权限配置
+  openCodeSessions.js  OpenCode 历史会话发现与 Windows 路径归一化
+  openCodeStats.js     OpenCode `export --sanitize` 用量解析与节流扫描
   permission/
     engine.js          三档决策 + ask-user 流程（onApprovalRequest/respondApproval）
     classifier.js      规则模式解析与匹配（Bash(prefix)/re/glob/host）

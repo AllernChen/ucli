@@ -4,7 +4,7 @@
 
 # UCLI
 
-UCLI 是一个 Windows 优先的本地 AI CLI 工作台。它在用户与已安装的 Claude Code、Codex 之间转发终端输入输出，保留原生 CLI 交互，同时提供多会话编排、安全确认、历史恢复和使用统计。
+UCLI 是一个 Windows 优先的本地 AI CLI 工作台。它在用户与已安装的 Claude Code、Codex、OpenCode 之间转发终端输入输出，保留原生 CLI 交互，同时提供多会话编排、安全确认、历史恢复和使用统计。
 
 ## 主要功能
 
@@ -19,7 +19,7 @@ UCLI 是一个 Windows 优先的本地 AI CLI 工作台。它在用户与已安�
 - CLI 管理：在设置页检测、安装和升级受支持的 AI CLI。
 - Windows 桌面体验：单实例、关闭到托盘、后台审批/任务完成提醒、托盘恢复和退出清理。
 
-当前适配 Claude Code、Codex 和 OpenCode。OpenCode 已支持原生 TUI、新建/恢复会话、按目录发现历史以及三档权限映射；其逐会话 Token/Cost 统计仍在继续完善。其他 CLI 可按统一 adapter 接口继续扩展。
+当前适配 Claude Code、Codex 和 OpenCode。OpenCode 支持原生 TUI、新建/恢复会话、按目录发现历史、三档权限映射，以及逐会话模型、Token、轮次统计；官方导出未提供费用时会显示“不可用”，不会误报为 `$0`。其他 CLI 可按统一 adapter 接口继续扩展。
 
 ## 下载与安装
 
