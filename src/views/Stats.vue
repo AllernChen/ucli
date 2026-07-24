@@ -8,7 +8,7 @@
     <a-row :gutter="14">
       <a-col :span="6"><a-card><a-statistic title="输入 Tokens" :value="stats.total.input" /></a-card></a-col>
       <a-col :span="6"><a-card><a-statistic title="输出 Tokens" :value="stats.total.output" /></a-card></a-col>
-      <a-col :span="6"><a-card><a-statistic title="累计费用" :value="stats.total.costUsd" :precision="4" prefix="$" /></a-card></a-col>
+      <a-col :span="6"><a-card><a-statistic title="已知累计费用" :value="stats.total.costUsd" :precision="4" prefix="$" /><div v-if="stats.total.costUnavailableCount" class="cost-hint">{{ stats.total.costUnavailableCount }} 个会话费用不可用</div></a-card></a-col>
       <a-col :span="6"><a-card><a-statistic title="总轮次" :value="stats.total.turns" /></a-card></a-col>
     </a-row>
 
@@ -25,7 +25,7 @@
       <a-table :dataSource="models" :columns="modelColumns" rowKey="model" :pagination="false" size="small">
         <template #bodyCell="{ column, record }">
           <template v-if="column.dataIndex === 'costUsd'">
-            {{ record.costUsd ? '$' + record.costUsd.toFixed(4) : '—' }}
+            {{ formatCost(record) }}
           </template>
         </template>
       </a-table>
@@ -40,7 +40,7 @@
             <span class="cwd-cell" :title="record.cwd">{{ record.cwd }}</span>
           </template>
           <template v-else-if="column.dataIndex === 'costUsd'">
-            {{ record.costUsd ? '$' + record.costUsd.toFixed(4) : '—' }}
+            {{ formatCost(record) }}
           </template>
         </template>
       </a-table>
@@ -63,7 +63,7 @@
             <span class="cwd-cell" :title="record.cwd">{{ record.cwd }}</span>
           </template>
           <template v-else-if="column.dataIndex === 'costUsd'">
-            {{ record.costUsd ? '$' + record.costUsd.toFixed(4) : '—' }}
+            {{ formatCost(record) }}
           </template>
           <template v-else-if="column.dataIndex === 'approvals'">
             <a-tag color="green">放行 {{ record.autoAllowed }}</a-tag>
@@ -125,6 +125,7 @@ const rows = computed(() => {
     status: s.status,
     input: s.tokens.input, output: s.tokens.output,
     costUsd: s.costUsd,
+    costAvailable: s.costAvailable,
     turns: s.turns,
     autoAllowed: s.approvals.autoAllowed || 0, confirmed: s.approvals.confirmed || 0, denied: s.approvals.denied || 0
   }))
@@ -136,6 +137,7 @@ const models = computed(() =>
     input: m.input_tokens,
     output: m.output_tokens,
     costUsd: m.cost_usd,
+    costUnavailableCount: m.cost_unavailable_count || 0,
     turns: '—',
     count: m.session_count
   }))
@@ -145,15 +147,22 @@ const projects = computed(() => {
   const map = {}
   for (const s of Object.values(stats.perSession)) {
     const key = s.cwd || '(未设置)'
-    if (!map[key]) map[key] = { cwd: key, input: 0, output: 0, costUsd: 0, turns: 0, count: 0 }
+    if (!map[key]) map[key] = { cwd: key, input: 0, output: 0, costUsd: 0, costUnavailableCount: 0, turns: 0, count: 0 }
     map[key].input += s.tokens.input
     map[key].output += s.tokens.output
-    map[key].costUsd += s.costUsd || 0
+    if (s.costAvailable === false) map[key].costUnavailableCount += 1
+    else map[key].costUsd += s.costUsd || 0
     map[key].turns += s.turns || 0
     map[key].count += 1
   }
   return Object.values(map)
 })
+
+function formatCost(record) {
+  if (record.costAvailable === false) return '不可用'
+  const known = `$${(record.costUsd ?? 0).toFixed(4)}`
+  return record.costUnavailableCount ? `${known}（${record.costUnavailableCount} 项不可用）` : known
+}
 
 onMounted(load)
 const route = useRoute()
@@ -169,4 +178,5 @@ async function load() {
 .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .hint { color: #8c8c8c; font-size: 12px; }
 .cwd-cell { max-width: 200px; display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cost-hint { color: #8c8c8c; font-size: 12px; margin-top: 4px; }
 </style>

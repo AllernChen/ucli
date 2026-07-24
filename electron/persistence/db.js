@@ -179,12 +179,19 @@ class Db {
         input_tokens  INTEGER DEFAULT 0,
         output_tokens INTEGER DEFAULT 0,
         cost_usd      REAL DEFAULT 0,
+        cost_available INTEGER NOT NULL DEFAULT 1,
         turns_count   INTEGER DEFAULT 0,
         auto_allowed  INTEGER DEFAULT 0,
         confirmed     INTEGER DEFAULT 0,
         denied        INTEGER DEFAULT 0
       )
     `)
+    // Cost was historically stored as a number only. Keep old records as
+    // available so upgrading does not silently rewrite their semantics.
+    const sessionStatsColumns = rows(this.sql.exec('PRAGMA table_info(session_stats)'))
+    if (!sessionStatsColumns.some((column) => column.name === 'cost_available')) {
+      this.sql.run('ALTER TABLE session_stats ADD COLUMN cost_available INTEGER NOT NULL DEFAULT 1')
+    }
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS model_stats (
         session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -192,9 +199,14 @@ class Db {
         input_tokens  INTEGER DEFAULT 0,
         output_tokens INTEGER DEFAULT 0,
         cost_usd      REAL DEFAULT 0,
+        cost_available INTEGER NOT NULL DEFAULT 1,
         PRIMARY KEY (session_id, model)
       )
     `)
+    const modelStatsColumns = rows(this.sql.exec('PRAGMA table_info(model_stats)'))
+    if (!modelStatsColumns.some((column) => column.name === 'cost_available')) {
+      this.sql.run('ALTER TABLE model_stats ADD COLUMN cost_available INTEGER NOT NULL DEFAULT 1')
+    }
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS rules (
         id      TEXT PRIMARY KEY,
@@ -261,7 +273,7 @@ class Db {
     const where = includeRemoved ? '' : 'WHERE s.removed_at IS NULL'
     const r = this.sql.exec(
       `SELECT s.*,
-              st.input_tokens, st.output_tokens, st.cost_usd, st.turns_count,
+              st.input_tokens, st.output_tokens, st.cost_usd, st.cost_available, st.turns_count,
               st.auto_allowed, st.confirmed, st.denied
        FROM sessions s
        LEFT JOIN session_stats st ON st.session_id = s.id
@@ -274,7 +286,7 @@ class Db {
   getSession(id) {
     const r = this.sql.exec(
       `SELECT s.*,
-              st.input_tokens, st.output_tokens, st.cost_usd, st.turns_count,
+              st.input_tokens, st.output_tokens, st.cost_usd, st.cost_available, st.turns_count,
               st.auto_allowed, st.confirmed, st.denied
        FROM sessions s
        LEFT JOIN session_stats st ON st.session_id = s.id
@@ -290,17 +302,18 @@ class Db {
     // approval counts from onDecision), not deltas. Use absolute-value
     // semantics to avoid double-counting on repeated calls.
     this.sql.run(
-      `INSERT INTO session_stats (session_id, input_tokens, output_tokens, cost_usd, turns_count, auto_allowed, confirmed, denied)
-       VALUES (?,?,?,?,?,?,?,?)
+      `INSERT INTO session_stats (session_id, input_tokens, output_tokens, cost_usd, cost_available, turns_count, auto_allowed, confirmed, denied)
+       VALUES (?,?,?,?,?,?,?,?,?)
        ON CONFLICT(session_id) DO UPDATE SET
          input_tokens  = excluded.input_tokens,
          output_tokens = excluded.output_tokens,
-         cost_usd      = max(cost_usd, excluded.cost_usd),
+         cost_usd      = excluded.cost_usd,
+         cost_available = excluded.cost_available,
          turns_count   = excluded.turns_count,
          auto_allowed  = excluded.auto_allowed,
          confirmed     = excluded.confirmed,
          denied        = excluded.denied`,
-      [sessionId, stats.inputTokens || 0, stats.outputTokens || 0, stats.costUsd || 0,
+      [sessionId, stats.inputTokens || 0, stats.outputTokens || 0, stats.costUsd ?? 0, stats.costAvailable === false ? 0 : 1,
        stats.turnsDelta || 0, stats.autoAllowed || 0, stats.confirmed || 0, stats.denied || 0]
     )
   }
@@ -311,13 +324,14 @@ class Db {
     // not deltas. Use absolute-value semantics to avoid double-counting on
     // repeated extractions.
     this.sql.run(
-      `INSERT INTO model_stats (session_id, model, input_tokens, output_tokens, cost_usd)
-       VALUES (?,?,?,?,?)
+      `INSERT INTO model_stats (session_id, model, input_tokens, output_tokens, cost_usd, cost_available)
+       VALUES (?,?,?,?,?,?)
        ON CONFLICT(session_id, model) DO UPDATE SET
          input_tokens  = excluded.input_tokens,
          output_tokens = excluded.output_tokens,
-         cost_usd      = MAX(cost_usd, excluded.cost_usd)`,
-      [sessionId, model, stats.inputTokens || 0, stats.outputTokens || 0, stats.costUsd || 0]
+         cost_usd      = excluded.cost_usd,
+         cost_available = excluded.cost_available`,
+      [sessionId, model, stats.inputTokens || 0, stats.outputTokens || 0, stats.costUsd ?? 0, stats.costAvailable === false ? 0 : 1]
     )
   }
 
@@ -326,7 +340,8 @@ class Db {
       `SELECT model,
               SUM(input_tokens)  AS input_tokens,
               SUM(output_tokens) AS output_tokens,
-              SUM(cost_usd)      AS cost_usd,
+              SUM(CASE WHEN cost_available = 1 THEN cost_usd ELSE 0 END) AS cost_usd,
+              SUM(CASE WHEN cost_available = 0 THEN 1 ELSE 0 END) AS cost_unavailable_count,
               COUNT(DISTINCT session_id) AS session_count
        FROM model_stats
        GROUP BY model
@@ -337,7 +352,7 @@ class Db {
 
   getModelStatsForSession(sessionId) {
     const r = this.sql.exec(
-      'SELECT model, input_tokens, output_tokens, cost_usd FROM model_stats WHERE session_id=?', [sessionId]
+      'SELECT model, input_tokens, output_tokens, cost_usd, cost_available FROM model_stats WHERE session_id=?', [sessionId]
     )
     return rows(r)
   }
@@ -348,7 +363,8 @@ class Db {
       `SELECT s.project_path, s.adapter_id,
               SUM(st.input_tokens)  AS input_tokens,
               SUM(st.output_tokens) AS output_tokens,
-              SUM(st.cost_usd)      AS cost_usd,
+              SUM(CASE WHEN st.cost_available = 1 THEN st.cost_usd ELSE 0 END) AS cost_usd,
+              SUM(CASE WHEN st.cost_available = 0 THEN 1 ELSE 0 END) AS cost_unavailable_count,
               SUM(st.turns_count)   AS turns_count,
               SUM(st.auto_allowed)  AS auto_allowed,
               SUM(st.confirmed)     AS confirmed,
@@ -432,12 +448,13 @@ class Db {
         })
         if (s.stats) {
           this.sql.run(
-            `INSERT INTO session_stats (session_id, input_tokens, output_tokens, cost_usd, turns_count, auto_allowed, confirmed, denied)
-             VALUES (?,?,?,?,?,?,?,?)
+            `INSERT INTO session_stats (session_id, input_tokens, output_tokens, cost_usd, cost_available, turns_count, auto_allowed, confirmed, denied)
+             VALUES (?,?,?,?,?,?,?,?,?)
              ON CONFLICT(session_id) DO UPDATE SET
                input_tokens = excluded.input_tokens,
                output_tokens = excluded.output_tokens,
                cost_usd = excluded.cost_usd,
+               cost_available = excluded.cost_available,
                turns_count = excluded.turns_count,
                auto_allowed = excluded.auto_allowed,
                confirmed = excluded.confirmed,
@@ -445,7 +462,8 @@ class Db {
             [id,
              s.stats?.tokens?.input || s.stats?.input_tokens || 0,
              s.stats?.tokens?.output || s.stats?.output_tokens || 0,
-             s.stats?.costUsd || s.stats?.cost_usd || 0,
+             s.stats?.costUsd ?? s.stats?.cost_usd ?? 0,
+             s.stats?.costAvailable === false ? 0 : 1,
              s.stats?.turns || s.stats?.turns_count || 0,
              s.stats?.approvals?.autoAllowed || s.stats?.auto_allowed || 0,
              s.stats?.approvals?.confirmed || s.stats?.confirmed || 0,
@@ -510,7 +528,8 @@ function rowToSession(row) {
     removedAt: row.removed_at || null,
     stats: {
       tokens: { input: row.input_tokens || 0, output: row.output_tokens || 0 },
-      costUsd: row.cost_usd || 0,
+      costUsd: row.cost_available === 0 ? null : (row.cost_usd ?? 0),
+      costAvailable: row.cost_available !== 0,
       turns: row.turns_count || 0,
       approvals: {
         autoAllowed: row.auto_allowed || 0,

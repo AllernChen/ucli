@@ -40,7 +40,8 @@
       <span class="stat">↑{{ session.stats.tokens.input.toLocaleString() }}</span>
       <span class="stat">↓{{ session.stats.tokens.output.toLocaleString() }}</span>
       <span class="stat">{{ session.stats.turns }} 轮</span>
-      <span v-if="session.stats.costUsd" class="stat">${{ session.stats.costUsd.toFixed(4) }}</span>
+      <span v-if="session.stats.costAvailable === false" class="stat">费用不可用</span>
+      <span v-else class="stat">${{ (session.stats.costUsd ?? 0).toFixed(4) }}</span>
     </div>
   </a-card>
 </template>

@@ -6,7 +6,7 @@ let refreshTimer = null
 
 export const useStatsStore = defineStore('stats', {
   state: () => ({
-    total: { input: 0, output: 0, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } },
+    total: { input: 0, output: 0, costUsd: 0, costUnavailableCount: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } },
     perSession: {},
     modelStats: [],
     loaded: false
@@ -22,7 +22,8 @@ export const useStatsStore = defineStore('stats', {
           cwd: '',
           status: evt.status,
           tokens: { input: 0, output: 0 },
-          costUsd: 0,
+          costUsd: null,
+          costAvailable: false,
           turns: 0,
           approvals: { autoAllowed: 0, confirmed: 0, denied: 0 }
         }
@@ -34,7 +35,8 @@ export const useStatsStore = defineStore('stats', {
             input: evt.usage?.inputTokens || 0,
             output: evt.usage?.outputTokens || 0
           },
-          costUsd: evt.costUsd ?? existing.costUsd,
+          costAvailable: evt.costAvailable ?? (evt.costUsd != null ? true : existing.costAvailable),
+          costUsd: evt.costAvailable === false ? null : (evt.costUsd ?? existing.costUsd),
           turns: evt.turns ?? existing.turns
         }
         this.perSession = { ...this.perSession, [evt.sessionId]: next }
@@ -47,7 +49,7 @@ export const useStatsStore = defineStore('stats', {
     async refresh() {
       try {
         const s = await ipc.getStats()
-        this.total = s.total || { input: 0, output: 0, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } }
+        this.total = s.total || { input: 0, output: 0, costUsd: 0, costUnavailableCount: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } }
         this.perSession = s.perSession || {}
         this.modelStats = s.modelStats || []
         this.loaded = true
@@ -58,11 +60,12 @@ export const useStatsStore = defineStore('stats', {
     },
 
     _recomputeTotal() {
-      const total = { input: 0, output: 0, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } }
+      const total = { input: 0, output: 0, costUsd: 0, costUnavailableCount: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } }
       for (const s of Object.values(this.perSession)) {
         total.input += s.tokens?.input || 0
         total.output += s.tokens?.output || 0
-        total.costUsd += s.costUsd || 0
+        if (s.costAvailable === false) total.costUnavailableCount += 1
+        else total.costUsd += s.costUsd || 0
         total.turns += s.turns || 0
         for (const k of Object.keys(total.approvals)) {
           total.approvals[k] += s.approvals?.[k] || 0
@@ -80,7 +83,8 @@ export const useStatsStore = defineStore('stats', {
               model: evt.model,
               inputTokens: sessionStats.tokens?.input || 0,
               outputTokens: sessionStats.tokens?.output || 0,
-              costUsd: sessionStats.costUsd || 0
+              costUsd: sessionStats.costUsd,
+              costAvailable: sessionStats.costAvailable
             }]
           : []
 
@@ -90,7 +94,8 @@ export const useStatsStore = defineStore('stats', {
           model: update.model,
           input_tokens: update.inputTokens || 0,
           output_tokens: update.outputTokens || 0,
-          cost_usd: update.costUsd || 0,
+          cost_usd: update.costUsd ?? 0,
+          cost_unavailable_count: update.costAvailable === false ? 1 : 0,
           session_count: idx >= 0 ? rows[idx].session_count : 1
         }
         if (idx >= 0) rows[idx] = { ...rows[idx], ...next }

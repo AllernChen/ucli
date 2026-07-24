@@ -327,7 +327,13 @@ export function createOrchestrator() {
     const entry = {
       adapter, session,
       status: 'starting', // not yet started — renderer calls start-adapter when pane is ready
-      stats: { tokens: { input: 0, output: 0 }, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } },
+      stats: {
+        tokens: { input: 0, output: 0 },
+        costUsd: adapterId === 'opencode' ? null : 0,
+        costAvailable: adapterId !== 'opencode',
+        turns: 0,
+        approvals: { autoAllowed: 0, confirmed: 0, denied: 0 }
+      },
       lastActivity: '启动中…',
       createdAt: Date.now(),
       _dirtyStats: null,
@@ -393,7 +399,13 @@ export function createOrchestrator() {
         break
       case 'stats_update':
         entry.stats.tokens = { input: evt.usage.inputTokens, output: evt.usage.outputTokens }
-        if (evt.costUsd != null) entry.stats.costUsd = evt.costUsd
+        if (evt.costAvailable === false) {
+          entry.stats.costAvailable = false
+          entry.stats.costUsd = null
+        } else if (evt.costUsd != null) {
+          entry.stats.costAvailable = true
+          entry.stats.costUsd = evt.costUsd
+        }
         if (evt.turns != null) entry.stats.turns = evt.turns
         if (evt.completedTurns != null) {
           const completion = advanceTaskCompletion(entry._lastCompletedTurns, evt.completedTurns)
@@ -415,6 +427,7 @@ export function createOrchestrator() {
               inputTokens: entry.stats.tokens.input,
               outputTokens: entry.stats.tokens.output,
               costUsd: entry.stats.costUsd,
+              costAvailable: entry.stats.costAvailable,
               turnsDelta: entry.stats.turns,
               autoAllowed: entry.stats.approvals.autoAllowed,
               confirmed: entry.stats.approvals.confirmed,
@@ -427,7 +440,12 @@ export function createOrchestrator() {
           const db = getDb()
           if (db) {
             for (const mb of evt.modelBreakdown) {
-              db.upsertModelStats(sessionId, mb.model, { inputTokens: mb.inputTokens, outputTokens: mb.outputTokens, costUsd: mb.costUsd })
+              db.upsertModelStats(sessionId, mb.model, {
+                inputTokens: mb.inputTokens,
+                outputTokens: mb.outputTokens,
+                costUsd: mb.costUsd,
+                costAvailable: mb.costAvailable
+              })
             }
           }
         } else if (evt.model) {
@@ -436,7 +454,8 @@ export function createOrchestrator() {
             db.upsertModelStats(sessionId, evt.model, {
               inputTokens: entry.stats.tokens.input,
               outputTokens: entry.stats.tokens.output,
-              costUsd: entry.stats.costUsd
+              costUsd: entry.stats.costUsd,
+              costAvailable: entry.stats.costAvailable
             })
           }
         }
@@ -875,6 +894,7 @@ export function createOrchestrator() {
             inputTokens: e.stats.tokens.input,
             outputTokens: e.stats.tokens.output,
             costUsd: e.stats.costUsd,
+            costAvailable: e.stats.costAvailable,
             turnsDelta: e.stats.turns,
             autoAllowed: e.stats.approvals.autoAllowed,
             confirmed: e.stats.approvals.confirmed,
@@ -904,11 +924,12 @@ export function createOrchestrator() {
       }
 
       const perSession = Object.fromEntries(source)
-      const total = { input: 0, output: 0, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } }
+      const total = { input: 0, output: 0, costUsd: 0, costUnavailableCount: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } }
       for (const row of source.values()) {
         total.input += row.tokens.input
         total.output += row.tokens.output
-        total.costUsd += row.costUsd
+        if (row.costAvailable === false) total.costUnavailableCount += 1
+        else total.costUsd += row.costUsd || 0
         total.turns += row.turns
         for (const k of Object.keys(total.approvals)) total.approvals[k] += row.approvals[k] || 0
       }
