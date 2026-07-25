@@ -246,6 +246,7 @@ import {
 import { useSessionsStore } from '../stores/sessions.js'
 import { ipc } from '../ipc.js'
 import { nextSessionPaneIndex } from '../workbenchKeyboard.js'
+import { isClipboardPasteShortcut, shouldSendClipboardPaste } from '../terminalKeybindings.js'
 import {
   reconcileSessionPanes,
   resolveSessionFocusPane,
@@ -408,17 +409,15 @@ function initPaneTerminal(i) {
       if (sel) { navigator.clipboard.writeText(sel).catch(() => {}) }
       return false
     }
-    if ((e.ctrlKey && e.shiftKey && e.key === 'V')) {
-      navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
-      return false
-    }
     if (e.ctrlKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) {
       const sel = term.getSelection()
       if (sel) { navigator.clipboard.writeText(sel).catch(() => {}); term.clearSelection(); return false }
       return true
     }
-    if (e.ctrlKey && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
-      navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
+    if (isClipboardPasteShortcut(e)) {
+      if (shouldSendClipboardPaste(e)) {
+        navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
+      }
       return false
     }
     return true
