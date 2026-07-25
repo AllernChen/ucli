@@ -141,6 +141,14 @@ export function createOrchestrator() {
           db.updateSession(s.id, { native_session_id: cliSessionId, name: sessionName })
         }
       }
+      if (!cliSessionId && s.cwd && s.adapterId === 'opencode') {
+        const found = await findOpenCodeSessionIndex(s.cwd, s.createdAt)
+        if (found) {
+          cliSessionId = found.sessionId
+          sessionName = sessionName || found.name
+          db.updateSession(s.id, { native_session_id: cliSessionId, name: sessionName })
+        }
+      }
       if (cliSessionId && s.cwd && s.adapterId === 'codex' && !provider) {
         const found = listCodexSessions(s.cwd).find((item) => item.sessionId === cliSessionId)
         if (found) {
@@ -686,6 +694,21 @@ export function createOrchestrator() {
       if (dist < bestDist) { bestDist = dist; best = s }
     }
     return best
+  }
+
+  /** Recover a blank UCLI OpenCode record only from a nearby native session. */
+  async function findOpenCodeSessionIndex(cwd, nearTs) {
+    if (!nearTs) return null
+    const found = await listOpenCodeSessions(cwd)
+    if (!found.length) return null
+    let best = null
+    let bestDist = Infinity
+    for (const session of found) {
+      const dist = Math.abs((session.startedAt || session.updatedAt || 0) - nearTs)
+      if (dist < bestDist) { bestDist = dist; best = session }
+    }
+    // Prevent binding an old UCLI session to an unrelated OpenCode record.
+    return bestDist <= 10 * 60 * 1000 ? best : null
   }
 
   function listSessions() {

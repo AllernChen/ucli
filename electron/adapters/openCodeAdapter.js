@@ -11,6 +11,8 @@ import { loadOpenCodeSessionStats, OpenCodeStatsScheduler } from '../openCodeSta
 const DISPLAY_NAME = 'OpenCode'
 const ICON = '🔵'
 const SESSION_DISCOVERY_DELAY_MS = 1500
+const SESSION_DISCOVERY_RETRY_MS = 2000
+const SESSION_DISCOVERY_MAX_ATTEMPTS = 10
 const STATS_IDLE_DELAY_MS = 2000
 const STATS_MAX_WAIT_MS = 30000
 
@@ -189,6 +191,11 @@ export class OpenCodeAdapter extends BaseAdapter {
     this.ruleset = settings.ruleset || {}
     this.ptyProc = null
     this._sessionDiscoveryTimer = null
+    this._sessionDiscoveryAttempts = 0
+    this.sessionFinder = listOpenCodeSessions
+    this.sessionDiscoveryDelayMs = SESSION_DISCOVERY_DELAY_MS
+    this.sessionDiscoveryRetryMs = SESSION_DISCOVERY_RETRY_MS
+    this.sessionDiscoveryMaxAttempts = SESSION_DISCOVERY_MAX_ATTEMPTS
     this._startedAt = Date.now()
     this._osc9Pending = ''
     this.statsReader = settings.statsReader || ((sessionId) => {
@@ -218,20 +225,32 @@ export class OpenCodeAdapter extends BaseAdapter {
     this._statsScheduler.schedule()
   }
 
-  _scheduleSessionDiscovery() {
-    if (this.session.cliSessionId || this._sessionDiscoveryTimer) return
+  _scheduleSessionDiscovery(delayMs = this.sessionDiscoveryDelayMs) {
+    if (this._disposed || this.session.cliSessionId || this._sessionDiscoveryTimer) return
     this._sessionDiscoveryTimer = setTimeout(async () => {
       this._sessionDiscoveryTimer = null
-      const sessions = await listOpenCodeSessions(this.session.cwd)
+      if (this._disposed || this.session.cliSessionId) return
+      let sessions = []
+      try {
+        sessions = await this.sessionFinder(this.session.cwd)
+      } catch {
+        sessions = []
+      }
       const match = sessions.find((item) =>
         (item.startedAt || item.updatedAt || 0) >= this._startedAt - 5000
       )
-      if (!match || this.session.cliSessionId) return
-      this.session.cliSessionId = match.sessionId
-      if (!this.session.name && match.name) this.session.name = match.name
-      this.emitEvent({ type: 'init', cliSessionId: match.sessionId })
-      this._statsScheduler.schedule()
-    }, SESSION_DISCOVERY_DELAY_MS)
+      if (match && !this.session.cliSessionId) {
+        this.session.cliSessionId = match.sessionId
+        if (!this.session.name && match.name) this.session.name = match.name
+        this.emitEvent({ type: 'init', cliSessionId: match.sessionId })
+        this._statsScheduler.schedule()
+        return
+      }
+      if (!this._disposed && !this.session.cliSessionId && this._sessionDiscoveryAttempts < this.sessionDiscoveryMaxAttempts) {
+        this._sessionDiscoveryAttempts += 1
+        this._scheduleSessionDiscovery(this.sessionDiscoveryRetryMs)
+      }
+    }, delayMs)
     this._sessionDiscoveryTimer.unref?.()
   }
 
@@ -275,6 +294,7 @@ export class OpenCodeAdapter extends BaseAdapter {
   async start() {
     this._disposed = false
     this._startedAt = Date.now()
+    this._sessionDiscoveryAttempts = 0
     if (!pty) {
       this._write('\x1b[31mnode-pty 未加载，无法启动 OpenCode 终端模式\x1b[0m\r\n')
       this.emitEvent({ type: 'error', message: 'node-pty not available' })
@@ -314,6 +334,9 @@ export class OpenCodeAdapter extends BaseAdapter {
         model: this.session.model || null
       })
       this.emitEvent({ type: 'ready' })
+      // OpenCode can write its native record after the TUI becomes visible.
+      // Start discovery independently of terminal output and retry if needed.
+      this._scheduleSessionDiscovery()
     } catch (err) {
       this._write(`\x1b[31mOpenCode PTY spawn failed: ${err?.message}\x1b[0m\r\n`)
       this.emitEvent({ type: 'error', message: 'OpenCode PTY spawn failed: ' + (err?.message || String(err)) })

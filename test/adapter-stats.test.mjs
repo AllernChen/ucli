@@ -9,6 +9,7 @@ import {
   consumeOsc9Notifications,
   parseCodexTranscriptStats
 } from '../electron/adapters/codexAdapter.js'
+import { OpenCodeAdapter } from '../electron/adapters/openCodeAdapter.js'
 
 test('parses Claude transcript stats from assistant usage and result modelUsage', () => {
   const stats = parseClaudeTranscriptStats([
@@ -133,6 +134,70 @@ test('Codex transcript scan still runs quickly after terminal output becomes idl
   assert.equal(scans, 0)
   t.mock.timers.tick(1)
   assert.equal(scans, 1)
+  await adapter.dispose()
+})
+
+test('Codex history replay unwraps current response_item message events', async () => {
+  const adapter = new CodexAdapter({
+    session: { id: 'ucli-session', cwd: 'F:\\projects\\ucli', cliSessionId: 'thread-1' },
+    engine: null,
+    settings: {}
+  })
+  const output = []
+  adapter._write = (text) => output.push(text)
+
+  adapter._formatEvent({
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'restore this user message' }]
+    }
+  })
+  adapter._formatEvent({
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'restore this assistant message' }]
+    }
+  })
+
+  assert.match(output.join(''), /restore this user message/)
+  assert.match(output.join(''), /restore this assistant message/)
+  await adapter.dispose()
+})
+
+test('Codex resume adopts the requested native session ID', async () => {
+  const session = { id: 'ucli-session', cwd: 'F:\\projects\\ucli', cliSessionId: 'old-thread' }
+  const adapter = new CodexAdapter({ session, engine: null, settings: {} })
+  adapter.dispose = async () => {}
+  adapter.start = async () => {}
+
+  await adapter.resume('new-thread')
+  assert.equal(session.cliSessionId, 'new-thread')
+})
+
+test('OpenCode retries native session discovery until its session is listed', async () => {
+  const adapter = new OpenCodeAdapter({
+    session: { id: 'ucli-session', cwd: 'F:\\tmp\\ucli-no-session', cliSessionId: null },
+    engine: null,
+    settings: {}
+  })
+  let scans = 0
+  adapter.sessionDiscoveryDelayMs = 1
+  adapter.sessionDiscoveryRetryMs = 1
+  adapter.sessionDiscoveryMaxAttempts = 2
+  adapter.sessionFinder = async () => {
+    scans += 1
+    return scans === 1 ? [] : [{ sessionId: 'ses_recovered', name: 'Recovered', startedAt: Date.now() }]
+  }
+
+  adapter._scheduleSessionDiscovery()
+  await new Promise((resolve) => setTimeout(resolve, 30))
+
+  assert.equal(scans, 2)
+  assert.equal(adapter.session.cliSessionId, 'ses_recovered')
   await adapter.dispose()
 })
 

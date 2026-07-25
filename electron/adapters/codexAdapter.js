@@ -158,6 +158,22 @@ export function buildCodexArgs(session) {
   return args
 }
 
+function transcriptText(content) {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part
+        if (!part || typeof part !== 'object') return ''
+        return part.text || part.content || part.message || ''
+      })
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (content == null) return ''
+  return JSON.stringify(content)
+}
+
 /**
  * CodexAdapter — PTY terminal mode, like ClaudeAdapter.
  *
@@ -277,15 +293,26 @@ export class CodexAdapter extends BaseAdapter {
       this._write(`\x1b[90mcwd: ${p.cwd||'—'}  ·  cli: ${p.cli_version||'—'}\x1b[0m\r\n\r\n`)
       return
     }
+    // Current Codex JSONL nests transcript records in response_item/event_msg
+    // payloads. Normalize them before rendering so replay mirrors resume.
+    const payload = obj.payload && typeof obj.payload === 'object' ? obj.payload : null
+    const message = obj.type === 'response_item' && payload?.type === 'message'
+      ? { role: payload.role, content: payload.content }
+      : obj.type === 'event_msg' && payload?.type === 'user_message'
+        ? { role: 'user', content: payload.message || payload.content }
+        : obj.type === 'event_msg' && (payload?.type === 'assistant_message' || payload?.type === 'agent_message')
+          ? { role: 'assistant', content: payload.message || payload.content }
+          : { role: obj.role, content: obj.content, type: obj.type }
+
     // User messages
-    if (obj.role === 'user' || obj.type === 'user_message') {
-      const text = typeof obj.content === 'string' ? obj.content : JSON.stringify(obj.content)
+    if (message.role === 'user' || message.type === 'user_message') {
+      const text = transcriptText(message.content)
       this._write(`\x1b[32m> ${text}\x1b[0m\r\n\r\n`)
       return
     }
     // Assistant messages
-    if (obj.role === 'assistant' || obj.type === 'assistant_message') {
-      const text = typeof obj.content === 'string' ? obj.content : JSON.stringify(obj.content)
+    if (message.role === 'assistant' || message.type === 'assistant_message') {
+      const text = transcriptText(message.content)
       for (const l of text.split('\n')) this._write(`\x1b[36m│\x1b[0m ${l}\r\n`)
       this._write('\r\n')
       return
@@ -481,8 +508,9 @@ export class CodexAdapter extends BaseAdapter {
     this.writeInput('\x03')
   }
 
-  async resume(_cliSessionId) {
-    // Codex has no --resume; just restart fresh
+  async resume(cliSessionId) {
+    // Codex resumes through the `resume <thread-id>` startup form.
+    if (cliSessionId) this.session.cliSessionId = cliSessionId
     await this.dispose()
     await this.start()
   }
