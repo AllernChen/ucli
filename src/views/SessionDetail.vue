@@ -626,17 +626,115 @@ async function openInNewPane(sessionId) {
 }
 
 function clearPane(i) {
-  panes.value[i].sessionId = null
-  panes.value[i].term?.clear()
-  sessions.setWorkbenchPane(i, null)
-  unsubscribePane(i)
-  // Auto-resize: avoid empty black panes
-  const filled = panes.value.filter(p => p.sessionId).length
-  if (splitCount.value === 4 && filled < 3) {
-    splitCount.value = filled >= 2 ? 2 : 1
-  } else if (splitCount.value === 2 && filled < 2) {
-    splitCount.value = 1
+  const oldSid = panes.value[i]?.sessionId
+  if (!oldSid) return
+
+  // Collect remaining sessions in pane order
+  const remaining = []
+  for (let j = 0; j < panes.value.length; j++) {
+    if (j !== i && panes.value[j].sessionId) remaining.push(panes.value[j].sessionId)
   }
+  const filled = remaining.length
+  if (filled === 0) return
+
+  const newCount = filled >= 3 ? 4 : filled >= 2 ? 2 : 1
+  const splitChanged = newCount !== panes.value.length
+  const oldCount = panes.value.length
+
+  // FLIP: capture old pane positions
+  const oldRects = []
+  for (let j = 0; j < oldCount; j++) {
+    const el = paneRootRefs[j]
+    oldRects[j] = el?.getBoundingClientRect() || null
+  }
+
+  // Unsubscribe all current subscriptions
+  for (let j = 0; j < oldCount; j++) {
+    if (panes.value[j]?.sessionId) unsubscribePane(j)
+  }
+
+  // Clear all session IDs and terminals
+  for (let j = 0; j < oldCount; j++) {
+    panes.value[j].sessionId = null
+    panes.value[j].term?.clear()
+    sessions.setWorkbenchPane(j, null)
+  }
+
+  // Update workbench pane IDs for the compacted layout
+  for (let j = 0; j < newCount; j++) {
+    sessions.workbench.paneSessionIds[j] = j < filled ? remaining[j] : null
+  }
+  sessions.workbench.splitCount = newCount
+  sessions.saveWorkbench()
+
+  // Assign sessions in compacted order to existing pane objects
+  for (let j = 0; j < filled; j++) {
+    panes.value[j].sessionId = remaining[j]
+  }
+
+  // splitCount computed already reacted via watch → createPanes above
+  // For same-split, trim trailing panes manually.
+  if (!splitChanged && panes.value.length > newCount) {
+    for (let j = newCount; j < panes.value.length; j++) {
+      destroyPaneTerminal(j)
+      unsubscribePane(j)
+    }
+    panes.value.length = newCount
+  }
+
+  if (activePane.value >= newCount) activePane.value = 0
+
+  // After DOM flush, subscribe terminals + FLIP animate
+  nextTick(() => {
+    for (let j = 0; j < filled; j++) {
+      subscribePaneTerminal(j, remaining[j])
+      const s = sessions.byId(remaining[j])
+      if (s?.status === 'offline') {
+        sessions.restart(remaining[j]).catch(() => {})
+      } else if (s?.status === 'starting') {
+        ipc.startAdapter(remaining[j])
+      } else {
+        ipc.attachTerminal(remaining[j])
+      }
+    }
+
+    // FLIP animation: panes slide from old position to new position
+    for (let j = 0; j < newCount; j++) {
+      const el = paneRootRefs[j]
+      if (el && oldRects[j]) {
+        const nr = el.getBoundingClientRect()
+        const dx = oldRects[j].left - nr.left
+        const dy = oldRects[j].top - nr.top
+        if (dx !== 0 || dy !== 0) {
+          el.style.setProperty('transition', 'none', 'important')
+          el.style.transform = `translate(${dx}px, ${dy}px)`
+          el.style.willChange = 'transform'
+          el.dataset.animating = '1'
+        }
+      }
+    }
+    // Force reflow then animate to identity
+    void document.body.offsetHeight
+    for (let j = 0; j < newCount; j++) {
+      const el = paneRootRefs[j]
+      if (el?.dataset.animating) {
+        el.style.transition = 'transform 0.4s cubic-bezier(0.2, 0, 0, 1)'
+        el.style.transform = 'translate(0, 0)'
+        delete el.dataset.animating
+      }
+    }
+    // Clean up transition style
+    setTimeout(() => {
+      for (let j = 0; j < newCount; j++) {
+        const el = paneRootRefs[j]
+        if (el) {
+          el.style.transition = ''
+          el.style.transform = ''
+          el.style.willChange = ''
+        }
+      }
+    }, 450)
+  })
 }
 async function deleteSessionById(id) {
   if (!id) return
