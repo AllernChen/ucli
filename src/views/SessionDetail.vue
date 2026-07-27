@@ -431,20 +431,16 @@ function initPaneTerminal(i) {
     provideLinks: (bufferLineNumber, cb) => {
       const line = term.buffer.active.getLine(bufferLineNumber)
       if (!line) { cb(undefined); return }
-      // Build the full line text from buffer cells
-      let text = ''
-      for (let x = 0; x < line.length; x++) {
-        const cell = line.getCell(x)
-        if (cell) text += cell.getChars()
-      }
+      const text = line.translateToString()
       const re = /https?:\/\/[^\s<>"']+/g
       const links = []
       let m
       while ((m = re.exec(text)) !== null) {
+        // range uses 1-based inclusive coordinates (xterm convention)
         links.push({
           range: {
             start: { x: m.index + 1, y: bufferLineNumber + 1 },
-            end:   { x: m.index + m[0].length + 1, y: bufferLineNumber + 1 }
+            end:   { x: m.index + m[0].length, y: bufferLineNumber + 1 }
           },
           text: m[0],
           activate: (_e, uri) => ipc.openExternal(uri),
