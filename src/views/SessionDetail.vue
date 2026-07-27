@@ -699,51 +699,30 @@ function clearPane(i) {
     }
   })
 
-  // FLIP animation: defer to rAF so browser fully lays out the new grid,
-  // then measure new positions, jump to old positions, and animate to new.
+  // FLIP animation: use Web Animations API for reliable slide effect.
   requestAnimationFrame(() => {
-    const deltas = []
     for (let j = 0; j < newCount; j++) {
       const el = paneRootRefs[j]
       if (el && oldRects[j]) {
         const nr = el.getBoundingClientRect()
-        deltas[j] = { dx: oldRects[j].left - nr.left, dy: oldRects[j].top - nr.top }
-      } else {
-        deltas[j] = null
-      }
-    }
-    // Inverse transform: snap elements to their old visual position
-    for (let j = 0; j < newCount; j++) {
-      const d = deltas[j]
-      if (d && (d.dx !== 0 || d.dy !== 0)) {
-        const el = paneRootRefs[j]
-        el.style.setProperty('transition', 'none', 'important')
-        el.style.transform = `translate(${d.dx}px, ${d.dy}px)`
-        el.style.willChange = 'transform'
-      }
-    }
-    // Force reflow so the inverse transforms are applied before we animate
-    void document.body.offsetHeight
-    // Animate to identity — browser interpolates the slide
-    for (let j = 0; j < newCount; j++) {
-      const d = deltas[j]
-      if (d && (d.dx !== 0 || d.dy !== 0)) {
-        const el = paneRootRefs[j]
-        el.style.transition = 'transform 0.4s cubic-bezier(0.2, 0, 0, 1)'
-        el.style.transform = 'translate(0, 0)'
-      }
-    }
-    // Clean up inline styles after animation
-    setTimeout(() => {
-      for (let j = 0; j < newCount; j++) {
-        const el = paneRootRefs[j]
-        if (el) {
-          el.style.transition = ''
-          el.style.transform = ''
-          el.style.willChange = ''
+        const dx = oldRects[j].left - nr.left
+        const dy = oldRects[j].top - nr.top
+        if (dx !== 0 || dy !== 0) {
+          window.ucli?.log('info', `[FLIP] pane[${j}] dx=${dx} dy=${dy}`)
+          el.animate([
+            { transform: `translate(${dx}px, ${dy}px)` },
+            { transform: 'translate(0, 0)' }
+          ], {
+            duration: 400,
+            easing: 'cubic-bezier(0.2, 0, 0, 1)'
+          })
+        } else {
+          window.ucli?.log('info', `[FLIP] pane[${j}] dx=0 dy=0 — no movement`)
         }
+      } else {
+        window.ucli?.log('info', `[FLIP] pane[${j}] el=${!!el} oldRect=${!!oldRects[j]}`)
       }
-    }, 450)
+    }
   })
 }
 async function deleteSessionById(id) {
