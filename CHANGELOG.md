@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-07-27
+
+### Fixed
+
+- OpenCode 历史会话恢复改为仅传递源会话 ID 启动原生 TUI，不再覆盖历史会话的模型与供应商配置；TUI 内仍可使用 `/session` 手动切换。
+- 修复 OpenCode 1.18.x 因 `permission.webfetch`、`permission.websearch` 被生成为模式对象而报 `ConfigInvalid`；不支持细粒度模式的网络权限现在映射为整个工具的动作值。
+- 修复 Windows 下从命令行或其他父进程启动 UCLI 后，父进程关闭输出管道会触发 `EPIPE: broken pipe` 并导致 Electron 主进程退出的问题。
+
 ## [0.4.4] - 2026-07-27
 
 ### Changed

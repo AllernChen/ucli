@@ -37,6 +37,8 @@ const TOOL_NAMES = {
   grep: 'grep'
 }
 
+const ACTION_ONLY_TOOLS = new Set(['webfetch', 'websearch'])
+
 const HARD_DENY_COMMANDS = [
   'rm -rf /', 'rm -rf /*', 'rm -rf ~*', 'rm -rf $HOME*',
   'rm --no-preserve-root*', 'mkfs*', 'format *', 'diskpart*clean*',
@@ -82,6 +84,13 @@ function applyRule(permission, raw, action) {
   if (!parsed) return
 
   const tool = TOOL_NAMES[parsed.tool.toLowerCase()]
+  if (tool && ACTION_ONLY_TOOLS.has(tool)) {
+    // OpenCode models these permissions as one action for the whole tool;
+    // unlike bash/read/edit, host or glob rule objects are rejected by the
+    // configuration schema.
+    permission[tool] = action
+    return
+  }
   const patterns = mappedPatterns(parsed)
   if (tool && patterns.length) {
     for (const pattern of patterns) setLast(toolRules(permission, tool), pattern, action)
@@ -143,9 +152,11 @@ export function buildOpenCodeConfigContent(tier, ruleset = {}) {
 }
 
 export function buildOpenCodeArgs(session) {
+  // Let OpenCode load the provider/model recorded in the source session.
+  // Passing --model here would override that historical configuration.
+  if (session.cliSessionId) return ['--session', session.cliSessionId]
   const args = []
   if (session.model && session.model !== 'default') args.push('--model', session.model)
-  if (session.cliSessionId) args.push('--session', session.cliSessionId)
   return args
 }
 

@@ -7,6 +7,7 @@
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
+import { safeConsoleError } from './brokenPipeGuard.js'
 
 let logPath = null
 let initialized = false
@@ -48,7 +49,7 @@ export function log(...args) {
     appendFileSync(logPath, line)
   } catch { /* best effort — can't log about logging failure */ }
   // Also write to stderr so it shows in terminal / devtools
-  console.error(`[LOG] ${msg}`)
+  safeConsoleError(console, `[LOG] ${msg}`)
 }
 
 export function getLogPath() {

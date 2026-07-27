@@ -9,15 +9,23 @@ import {
   resolveOpenCodeLaunch
 } from '../electron/adapters/openCodeAdapter.js'
 
-test('OpenCode args preserve native TUI and resume the selected source session', () => {
+test('OpenCode resume targets the source session without overriding its historical model', () => {
   assert.deepEqual(buildOpenCodeArgs({
     model: 'anthropic/claude-sonnet-4-5',
     cliSessionId: 'ses_123'
   }), [
-    '--model',
-    'anthropic/claude-sonnet-4-5',
     '--session',
     'ses_123'
+  ])
+})
+
+test('OpenCode new sessions can still start with the selected model', () => {
+  assert.deepEqual(buildOpenCodeArgs({
+    model: 'anthropic/claude-sonnet-4-5',
+    cliSessionId: null
+  }), [
+    '--model',
+    'anthropic/claude-sonnet-4-5'
   ])
 })
 
@@ -33,6 +41,25 @@ test('OpenCode safety rules allow trusted commands and ask for risky commands', 
   assert.equal(permission.edit['~/.ssh/**'], 'deny')
   assert.equal(permission.bash['rm -rf /*'], 'deny')
   assert.deepEqual(permission.external_directory, { '*': 'allow' })
+})
+
+test('OpenCode network permissions use action values instead of pattern objects', () => {
+  const permission = buildOpenCodePermission('safety-rules', {
+    allow: ['WebFetch(*)', 'WebSearch(*)']
+  })
+
+  assert.equal(permission.webfetch, 'allow')
+  assert.equal(permission.websearch, 'allow')
+})
+
+test('OpenCode network permission fallback applies to the whole unsupported pattern tool', () => {
+  const permission = buildOpenCodePermission('safety-rules', {
+    allow: ['WebFetch(github.com)'],
+    highRisk: ['WebFetch(untrusted.example)', 'WebSearch(*)']
+  })
+
+  assert.equal(permission.webfetch, 'ask')
+  assert.equal(permission.websearch, 'ask')
 })
 
 test('OpenCode always-agree still enforces the hard blacklist', () => {

@@ -7,9 +7,11 @@ import { createOrchestrator } from './orchestrator.js'
 import { getDb } from './persistence/db.js'
 import { describeDatabaseRecovery } from './persistence/recoveryMessage.js'
 import { applyMacLoginPath } from './macEnvironment.js'
+import { installOutputErrorGuards } from './brokenPipeGuard.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
+installOutputErrorGuards()
 applyMacLoginPath()
 
 // Development builds must be able to run beside an installed UCLI instance.
