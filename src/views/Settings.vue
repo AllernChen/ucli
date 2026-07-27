@@ -113,7 +113,7 @@
 
     <a-card title="关于" class="settings-card">
       <p>UCLI — 多 CLI 编排工作台</p>
-      <p class="muted">集成 Claude Code 与 Codex 的卡片式编排 GUI，提供三档权限管控与 token 统计。</p>
+      <p class="muted">v{{ version }} · 集成 Claude Code 与 Codex 的卡片式编排 GUI，提供三档权限管控与 token 统计。</p>
     </a-card>
   </div>
 </template>
@@ -139,6 +139,8 @@ const lastCliOutput = computed(() => {
   if (!result) return ''
   return [result.stdout, result.stderr].filter(Boolean).join('\n').trim()
 })
+
+const version = ref('')
 
 // --- Keybinding configuration ---
 const capturingId = ref(null)
@@ -196,6 +198,7 @@ onMounted(async () => {
   await Promise.all([settings.load(), sessions.init(), loadCliTools()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
+  try { version.value = await ipc.getVersion() } catch {}
 })
 
 async function loadCliTools() {

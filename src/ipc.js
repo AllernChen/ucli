@@ -45,6 +45,7 @@ export const ipc = {
   // stats
   getStats: () => u.getStats(),
   // settings
+  getVersion: () => u.getVersion(),
   getSettings: () => u.getSettings(),
   updateSettings: (s) => u.updateSettings(s),
   // workbench

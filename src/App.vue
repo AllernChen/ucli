@@ -40,7 +40,7 @@
       <div :class="['sider-footer', { collapsed: navCollapsed }]">
         <a-badge v-if="navCollapsed && waitingCount > 0" :count="waitingCount" />
         <a-tag v-else-if="waitingCount > 0" color="orange">待确认 {{ waitingCount }}</a-tag>
-        <span v-if="!navCollapsed" class="version">v0.3.2</span>
+        <span v-if="!navCollapsed" class="version">v{{ version }}</span>
         <a-button size="small" type="text" class="sider-collapse-btn" @click="navCollapsed = !navCollapsed">
           <MenuFoldOutlined v-if="!navCollapsed" />
           <MenuUnfoldOutlined v-else />
@@ -92,6 +92,7 @@ watch(() => route.path, (p) => {
   else selectedKeys.value = [p]
 })
 
+const version = ref('')
 const waitingCount = computed(() => sessions.totalWaiting)
 const title = computed(() => {
   if (route.path.startsWith('/session')) return '会话工作台'
@@ -107,6 +108,7 @@ function onMenuClick({ key }) {
 
 let stopSessionFocus = null
 onMounted(async () => {
+  try { version.value = await ipc.getVersion() } catch {}
   // Load persisted workbench state to decide initial route
   await sessions.init()
   await sessions.loadWorkbench()

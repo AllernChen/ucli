@@ -60,6 +60,7 @@ const api = {
   getStats: () => ipcRenderer.invoke('stats:get'),
 
   // ---- settings ----
+  getVersion: () => ipcRenderer.invoke('app:version'),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSettings: (s) => ipcRenderer.invoke('settings:update', s),
 

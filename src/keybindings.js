@@ -59,7 +59,7 @@ export function matchesBinding(id, event, overrides = {}) {
   const b = getBinding(id, overrides)
   if (!b) return false
   const { key, ctrl, shift, alt, meta } = b.keys
-  if (key !== null && event.key !== key) return false
+  if (key !== null && event.key.toLowerCase() !== key.toLowerCase()) return false
   return (
     !!event.ctrlKey === !!ctrl &&
     !!event.shiftKey === !!shift &&

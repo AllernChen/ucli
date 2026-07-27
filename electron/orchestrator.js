@@ -1019,6 +1019,7 @@ export function createOrchestrator() {
       return result
     })
 
+    ipcMain.handle('app:version', () => app.getVersion())
     ipcMain.handle('settings:get', () => settings)
     ipcMain.handle('settings:update', (_e, s) => {
       settings = { ...settings, ...s }
