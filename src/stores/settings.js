@@ -9,6 +9,7 @@ export const useSettingsStore = defineStore('settings', {
     language: 'zh-CN',
     theme: 'light',
     workbench: { splitCount: 1, activePane: 0, paneSessionIds: [] },
+    keybindings: {},  // { 'pane.switchNext': { key: 'Tab', ctrl: false, shift: true, ... }, ... }
     loaded: false
   }),
   actions: {

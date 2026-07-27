@@ -14,7 +14,7 @@ export const ipc = {
   listCliTools: () => u.listCliTools(),
   runCliToolAction: (id, action) => u.runCliToolAction(id, action),
   // dialog
-  pickDirectory: () => u.pickDirectory(),
+  pickDirectory: (defaultPath) => u.pickDirectory(defaultPath),
   openFolder: (dirPath) => u.openFolder(dirPath),
   openExternal: (url) => u.openExternal(url),
   scanClaudeSessions: (cwd) => u.scanClaudeSessions(cwd),
@@ -35,6 +35,8 @@ export const ipc = {
   listSessions: () => u.listSessions(),
   updateSessionNote: (sessionId, note) => u.updateSessionNote(sessionId, note),
   updateSessionName: (sessionId, name) => u.updateSessionName(sessionId, name),
+  markSessionOpened: (sessionId) => u.markSessionOpened(sessionId),
+  updateSessionCwd: (sessionId, cwd) => u.updateSessionCwd(sessionId, cwd),
   // rules
   getRules: () => u.getRules(),
   updateRules: (config) => u.updateRules(config),

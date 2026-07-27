@@ -80,6 +80,37 @@
       </a-form>
     </a-card>
 
+    <a-card title="键盘快捷键" class="settings-card">
+      <div class="muted" style="margin-bottom: 12px">点击快捷键组合可重新设置，点击重置恢复默认</div>
+      <div class="shortcut-list">
+        <div v-for="b in bindingList" :key="b.id" class="shortcut-item">
+          <div class="shortcut-info">
+            <span class="shortcut-name">{{ b.name }}</span>
+            <span class="shortcut-context">{{ contextLabel(b.contexts) }}</span>
+          </div>
+          <div class="shortcut-actions">
+            <a-button
+              v-if="isOverridden(b.id)"
+              size="small"
+              type="link"
+              class="shortcut-reset-btn"
+              @mousedown.prevent="resetBinding(b.id)"
+            >重置</a-button>
+            <div
+              :class="['shortcut-keys', { capturing: capturingId === b.id }]"
+              tabindex="0"
+              :data-bind-id="b.id"
+              @mousedown.prevent="startCapture(b.id)"
+              @keydown="onCaptureKeydown"
+              @blur="cancelCapture"
+            >
+              {{ capturingId === b.id ? '按下新快捷键...' : formatKeys(b.effectiveKeys) }}
+            </div>
+          </div>
+        </div>
+      </div>
+    </a-card>
+
     <a-card title="关于" class="settings-card">
       <p>UCLI — 多 CLI 编排工作台</p>
       <p class="muted">集成 Claude Code 与 Codex 的卡片式编排 GUI，提供三档权限管控与 token 统计。</p>
@@ -88,10 +119,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, h } from 'vue'
+import { ref, computed, onMounted, h, nextTick } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useSettingsStore } from '../stores/settings.js'
 import { useSessionsStore } from '../stores/sessions.js'
+import { getAllBindings, formatKeys, getBinding, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 
 const settings = useSettingsStore()
@@ -107,6 +139,58 @@ const lastCliOutput = computed(() => {
   if (!result) return ''
   return [result.stdout, result.stderr].filter(Boolean).join('\n').trim()
 })
+
+// --- Keybinding configuration ---
+const capturingId = ref(null)
+
+const bindingList = computed(() => {
+  const overrides = settings.keybindings || {}
+  return getAllBindings().map(b => ({
+    ...b,
+    effectiveKeys: getBinding(b.id, overrides).keys
+  }))
+})
+
+function isOverridden(id) {
+  return !!(settings.keybindings && id in settings.keybindings)
+}
+
+function contextLabel(contexts) {
+  return (contexts || []).join('、')
+}
+
+function startCapture(id) {
+  capturingId.value = id
+  nextTick(() => {
+    const el = document.querySelector(`[data-bind-id="${id}"]`)
+    el?.focus()
+  })
+}
+
+function onCaptureKeydown(event) {
+  if (!capturingId.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (event.key === 'Escape') {
+    capturingId.value = null
+    return
+  }
+  const keys = eventToKeys(event)
+  if (!keys.key) return
+  const keybindings = { ...(settings.keybindings || {}), [capturingId.value]: keys }
+  settings.save({ keybindings })
+  capturingId.value = null
+}
+
+function cancelCapture() {
+  capturingId.value = null
+}
+
+function resetBinding(id) {
+  const keybindings = { ...(settings.keybindings || {}) }
+  delete keybindings[id]
+  settings.save({ keybindings })
+}
 
 onMounted(async () => {
   await Promise.all([settings.load(), sessions.init(), loadCliTools()])
@@ -177,4 +261,29 @@ async function save() {
 .result-command, :global(.confirm-command) { font-family: 'Cascadia Code', Consolas, monospace; }
 .result-command { margin-bottom: 6px; color: #262626; }
 .result-output { margin: 0; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
+
+.shortcut-list { display: flex; flex-direction: column; gap: 2px; }
+.shortcut-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 4px; border-radius: 6px; transition: background .12s;
+}
+.shortcut-item:hover { background: #fafafa; }
+.shortcut-item.capturing { background: #e6f4ff; }
+.shortcut-info { display: flex; flex-direction: column; gap: 2px; }
+.shortcut-name { font-size: 13px; color: #262626; }
+.shortcut-context { font-size: 11px; color: #8c8c8c; }
+.shortcut-actions { display: flex; align-items: center; gap: 8px; }
+.shortcut-reset-btn { font-size: 11px; padding: 0; }
+.shortcut-keys {
+  display: inline-flex; align-items: center; padding: 2px 10px;
+  border: 1px solid #d9d9d9; border-radius: 4px; font-size: 12px;
+  font-family: 'Cascadia Code', Consolas, monospace; cursor: pointer;
+  min-width: 90px; justify-content: center; user-select: none;
+  background: #fff; transition: border-color .12s, background .12s;
+}
+.shortcut-keys:hover { border-color: #1677ff; color: #1677ff; }
+.shortcut-keys.capturing {
+  border-color: #1677ff; background: #e6f4ff; color: #1677ff;
+  outline: 2px solid #1677ff; outline-offset: 1px;
+}
 </style>

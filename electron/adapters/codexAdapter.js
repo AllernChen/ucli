@@ -210,7 +210,7 @@ export class CodexAdapter extends BaseAdapter {
     const home = process.env.HOME || process.env.USERPROFILE || '~'
     const sessionsDir = join(home, '.codex', 'sessions')
     if (!existsSync(sessionsDir)) return null
-    const normCwd = (this.session.cwd || '').replace(/\\/g, '/').toLowerCase()
+    const normCwd = ((this.session.originalProjectPath || this.session.cwd) || '').replace(/\\/g, '/').toLowerCase()
     let newest = null
     let newestMtime = 0
     for (const year of readdirSync(sessionsDir)) {

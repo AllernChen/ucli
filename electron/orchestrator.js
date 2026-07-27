@@ -1,6 +1,6 @@
 import { app, ipcMain, dialog, Notification, shell } from 'electron'
 import { join } from 'path'
-import { readFileSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
+import { readFileSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync, mkdirSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { PermissionEngine } from './permission/engine.js'
 import { startHookServer } from './permission/hookServer.js'
@@ -12,7 +12,7 @@ import { TIER } from './adapters/cliAdapter.js'
 import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
-import { annotateImportedSessions, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
+import { annotateImportedSessions, claudeProjectHash, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
 import {
   advanceSessionNotification,
   advanceTaskCompletion,
@@ -152,6 +152,7 @@ export function createOrchestrator() {
         session: {
           id: s.id, adapterId: s.adapterId,
           cwd: s.cwd || s.projectPath,
+          originalProjectPath: s.originalProjectPath || s.projectPath,
           model: s.model, tier: s.tier, rulesetId: 'default',
           provider,
           sourceProvider,
@@ -337,7 +338,7 @@ export function createOrchestrator() {
     if (db) {
       db.touchProject(cwd, session.name || cwd.split(/[\\/]/).pop() || cwd)
       db.insertSession({
-        id: sessionId, project_path: cwd, adapter_id: adapterId,
+        id: sessionId, project_path: cwd, original_project_path: cwd, adapter_id: adapterId,
         native_session_id: session.cliSessionId, name: session.name, task_note: '', tier, model: session.model,
         provider: session.provider, source_provider: session.sourceProvider,
         status: 'starting', created_at: entry.createdAt
@@ -364,8 +365,12 @@ export function createOrchestrator() {
         }
         break
       case 'exit':
-        entry.status = 'exited'
+        entry.status = 'offline'
         entry.lastActivity = `进程退出 (${evt.code})`
+        if (entry.adapter) {
+          entry.adapter.dispose()
+          entry.adapter = null
+        }
         break
       case 'error':
         entry.status = 'error'
@@ -776,8 +781,8 @@ export function createOrchestrator() {
     ipcMain.handle('cli-tools:list', () => inspectCliTools())
     ipcMain.handle('cli-tools:run', (_e, id, action) => runCliToolAction(id, action))
 
-    ipcMain.handle('dialog:pick-directory', async () => {
-      const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
+    ipcMain.handle('dialog:pick-directory', async (_e, defaultPath) => {
+      const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'], defaultPath: defaultPath || undefined })
       return result.canceled ? null : result.filePaths[0]
     })
     ipcMain.handle('shell:open-folder', async (_e, dirPath) => {
@@ -905,6 +910,44 @@ export function createOrchestrator() {
     ipcMain.handle('session:update-name', (_e, sessionId, name) => {
       const e = sessions.get(sessionId)
       if (e) { e.session.name = name; const db = getDb(); if (db) { db.updateSession(sessionId, { name }); scheduleFlush() } }
+      return true
+    })
+    ipcMain.handle('session:update-cwd', (_e, sessionId, cwd) => {
+      const e = sessions.get(sessionId)
+      if (e) {
+        const oldCwd = e.session.cwd
+        if (!e.session.originalProjectPath) {
+          e.session.originalProjectPath = oldCwd
+          const db = getDb()
+          if (db) { db.sql.run('UPDATE sessions SET original_project_path=? WHERE id=?', [e.session.originalProjectPath, sessionId]) }
+        }
+        e.session.cwd = cwd
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { project_path: cwd }); scheduleFlush() }
+        // Copy transcript to new hash directory so claude --resume still works
+        const cliSessionId = e.session.cliSessionId
+        if (cliSessionId && oldCwd && oldCwd !== cwd) {
+          try {
+            const home = process.env.HOME || process.env.USERPROFILE || '~'
+            const projectsRoot = join(home, '.claude', 'projects')
+            const oldHash = claudeProjectHash(oldCwd).toLowerCase()
+            const newHash = claudeProjectHash(cwd).toLowerCase()
+            if (oldHash !== newHash) {
+              const srcPath = join(projectsRoot, oldHash, cliSessionId + '.jsonl')
+              const dstDir = join(projectsRoot, newHash)
+              if (existsSync(srcPath)) {
+                if (!existsSync(dstDir)) mkdirSync(dstDir, { recursive: true })
+                writeFileSync(join(dstDir, cliSessionId + '.jsonl'), readFileSync(srcPath))
+              }
+            }
+          } catch { /* transcript copy is best-effort */ }
+        }
+      }
+      return true
+    })
+    ipcMain.handle('session:mark-opened', (_e, sessionId) => {
+      const db = getDb()
+      if (db) { db.sql.run('UPDATE sessions SET last_opened_at=? WHERE id=?', [Date.now(), sessionId]); scheduleFlush() }
       return true
     })
 

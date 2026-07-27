@@ -23,9 +23,7 @@ extraResources:
 win:
   icon: resources/icons/ucli.png
   target:
-    - nsis
-    - portable
-  sign: false
+    - dir
   forceCodeSigning: false
 nsis:
   artifactName: ${productName}-Setup-${version}-${arch}.${ext}

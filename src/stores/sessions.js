@@ -113,6 +113,11 @@ export const useSessionsStore = defineStore('sessions', {
       if (row) row.displayName = name
       await ipc.updateSessionName(id, name)
     },
+    async updateCwd(id, cwd) {
+      const row = this.sessions.find((s) => s.id === id)
+      if (row) row.cwd = cwd
+      await ipc.updateSessionCwd(id, cwd)
+    },
 
     // Workbench state persistence
     async loadWorkbench() {
@@ -193,6 +198,7 @@ export const useSessionsStore = defineStore('sessions', {
           startedAt: s.startedAt || null,
           lastActivity: isImport ? ('📋 已离线 · ' + fmtShort(s.startedAt)) : '已离线',
           lastActivityTs: Date.now(),
+          lastOpenedAt: s.lastOpenedAt || null,
           taskNote: s.taskNote || '', contextWindow: s.contextWindow || null, maxOutputTokens: s.maxOutputTokens || null
         }
         this.sessions.push(row)

@@ -173,6 +173,12 @@ class Db {
     if (!sessionColumns.some((column) => column.name === 'source_provider')) {
       this.sql.run('ALTER TABLE sessions ADD COLUMN source_provider TEXT')
     }
+    if (!sessionColumns.some((column) => column.name === 'original_project_path')) {
+      this.sql.run('ALTER TABLE sessions ADD COLUMN original_project_path TEXT')
+    }
+    if (!sessionColumns.some((column) => column.name === 'last_opened_at')) {
+      this.sql.run('ALTER TABLE sessions ADD COLUMN last_opened_at INTEGER')
+    }
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS session_stats (
         session_id    TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
@@ -227,11 +233,11 @@ class Db {
   // ---- sessions ----
   insertSession(s) {
     this.sql.run(
-      `INSERT INTO sessions (id, project_path, adapter_id, native_session_id, name, task_note, tier, model, provider, source_provider, status, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [s.id, s.project_path, s.adapter_id, s.native_session_id || null, s.name || null,
+      `INSERT INTO sessions (id, project_path, original_project_path, adapter_id, native_session_id, name, task_note, tier, model, provider, source_provider, status, created_at, updated_at, last_opened_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [s.id, s.project_path, s.original_project_path || s.project_path, s.adapter_id, s.native_session_id || null, s.name || null,
        s.task_note || '', s.tier, s.model || null, s.provider || null, s.source_provider || null,
-       s.status, s.created_at, Date.now()]
+       s.status, s.created_at, Date.now(), Date.now()]
     )
     this.sql.run(
       `INSERT OR IGNORE INTO session_stats (session_id) VALUES (?)`, [s.id]
@@ -266,7 +272,7 @@ class Db {
        FROM sessions s
        LEFT JOIN session_stats st ON st.session_id = s.id
        ${where}
-       ORDER BY s.updated_at DESC`
+       ORDER BY s.last_opened_at DESC`
     )
     return rows(r).map(rowToSession)
   }
@@ -505,8 +511,10 @@ function rowToSession(row) {
     provider: row.provider || null,
     sourceProvider: row.source_provider || null,
     status: row.status,
+    originalProjectPath: row.original_project_path || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    lastOpenedAt: row.last_opened_at || null,
     removedAt: row.removed_at || null,
     stats: {
       tokens: { input: row.input_tokens || 0, output: row.output_tokens || 0 },

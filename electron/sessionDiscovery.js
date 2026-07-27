@@ -33,9 +33,16 @@ export function findClaudeProjectDirectory(home, cwd) {
     return null
   }
 
-  const expected = claudeProjectHash(cwd).toLowerCase()
-  const direct = directories.find((entry) => entry.name.toLowerCase() === expected)
-  if (direct) return join(projectsRoot, direct.name)
+  const hash = claudeProjectHash(cwd).toLowerCase()
+  // Newer claude versions preserve underscores in hashes (eval_platform → I--project-eval_platform).
+  // Older versions replace them with hyphens (eval_platform → I--project-eval-platform).
+  // Try both variants to handle version differences.
+  const hashWithUnderscore = String(cwd || '').replace(/[^a-zA-Z0-9_]/g, '-').toLowerCase()
+  const variants = hashWithUnderscore !== hash ? [hash, hashWithUnderscore] : [hash]
+  for (const variant of variants) {
+    const direct = directories.find((entry) => entry.name.toLowerCase() === variant)
+    if (direct) return join(projectsRoot, direct.name)
+  }
 
   const targetCwd = normalizeCwd(cwd)
   for (const directory of directories) {

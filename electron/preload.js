@@ -22,7 +22,7 @@ const api = {
   runCliToolAction: (id, action) => ipcRenderer.invoke('cli-tools:run', id, action),
 
   // ---- dialog ----
-  pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
+  pickDirectory: (defaultPath) => ipcRenderer.invoke('dialog:pick-directory', defaultPath),
   openFolder: (dirPath) => ipcRenderer.invoke('shell:open-folder', dirPath),
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   scanClaudeSessions: (cwd) => ipcRenderer.invoke('session:scan-claude', cwd),
@@ -46,6 +46,8 @@ const api = {
   listSessions: () => ipcRenderer.invoke('session:list'),
   updateSessionNote: (sessionId, note) => ipcRenderer.invoke('session:update-note', sessionId, note),
   updateSessionName: (sessionId, name) => ipcRenderer.invoke('session:update-name', sessionId, name),
+  markSessionOpened: (sessionId) => ipcRenderer.invoke('session:mark-opened', sessionId),
+  updateSessionCwd: (sessionId, cwd) => ipcRenderer.invoke('session:update-cwd', sessionId, cwd),
 
   // ---- rules / permission ----
   getRules: () => ipcRenderer.invoke('rules:get'),

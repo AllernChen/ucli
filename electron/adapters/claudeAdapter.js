@@ -1,9 +1,10 @@
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, statSync } from 'fs'
-import { join } from 'path'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, statSync, copyFileSync, mkdirSync } from 'fs'
+import { join, dirname, basename } from 'path'
 import { tmpdir } from 'os'
 import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
 import { findClaudeProjectDirectory } from '../sessionDiscovery.js'
+import { log } from '../logger.js'
 
 const DISPLAY_NAME = 'Claude Code'
 const ICON = '🟣'
@@ -123,14 +124,31 @@ export class ClaudeAdapter extends BaseAdapter {
   /** Shared: return the matched ~/.claude/projects/<hash> directory, or null. */
   _projectDir() {
     const home = process.env.HOME || process.env.USERPROFILE || '~'
-    return findClaudeProjectDirectory(home, this.session.cwd)
+    const lookup = this.session.originalProjectPath || this.session.cwd
+    const dir = findClaudeProjectDirectory(home, lookup)
+    log(`[ClaudeAdapter] _projectDir lookup="${lookup}" origProjectPath="${this.session.originalProjectPath}" cwd="${this.session.cwd}" → ${dir || 'null'}`)
+    return dir
   }
 
   _findTranscript(cliSessionId) {
+    if (!cliSessionId) return null
+    // Closest to claude's own lookup: check the path claude uses first.
+    // This ensures stats read the latest data even after claude has written
+    // new turns to the transcript at its expected path.
+    const claudePath = this._claudeTranscriptPath(cliSessionId)
+    if (claudePath && existsSync(claudePath)) {
+      log(`[ClaudeAdapter] _findTranscript claudePath="${claudePath}" exists=true`)
+      return claudePath
+    }
     const dir = this._projectDir()
-    if (!dir) return null
+    if (!dir) {
+      log(`[ClaudeAdapter] _findTranscript: no projectDir for cliSessionId=${cliSessionId}`)
+      return null
+    }
     const exact = join(dir, cliSessionId + '.jsonl')
-    return existsSync(exact) ? exact : null
+    const exists = existsSync(exact)
+    log(`[ClaudeAdapter] _findTranscript path="${exact}" exists=${exists}`)
+    return exists ? exact : null
   }
 
   /** Find the most recent transcript in the project directory (for new sessions without cliSessionId) */
@@ -149,6 +167,34 @@ export class ClaudeAdapter extends BaseAdapter {
     return newest
   }
 
+  /** Compute the path where claude itself will look for the transcript.
+   *  claude 2.1.x replaces all non-alphanumeric chars (including _) with
+   *  hyphens and lowercases the result. */
+  _claudeTranscriptPath(cliSessionId) {
+    if (!cliSessionId) return null
+    const home = process.env.HOME || process.env.USERPROFILE || '~'
+    const cwd = this.session.originalProjectPath || this.session.cwd
+    if (!cwd) return null
+    const hash = String(cwd).replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()
+    return join(home, '.claude', 'projects', hash, cliSessionId + '.jsonl')
+  }
+
+  /** Ensure the transcript exists at claude's expected path so --resume works.
+   *  Returns the path that claude will use. */
+  _ensureTranscriptAtClaudePath(cliSessionId) {
+    const claudePath = this._claudeTranscriptPath(cliSessionId)
+    if (!claudePath || existsSync(claudePath)) return claudePath
+    const dir = this._projectDir()
+    if (!dir) return null
+    const actualFile = join(dir, cliSessionId + '.jsonl')
+    if (!existsSync(actualFile) || actualFile === claudePath) return null
+    const parent = dirname(claudePath)
+    if (!existsSync(parent)) mkdirSync(parent, { recursive: true })
+    copyFileSync(actualFile, claudePath)
+    log(`[ClaudeAdapter] _ensureTranscriptAtClaudePath copied "${basename(actualFile)}" → "${parent}"`)
+    return claudePath
+  }
+
   /** Public: replay transcript history to the terminal. Called when a
    *  running session is attached to a new pane. */
   replayHistory() {
@@ -157,10 +203,15 @@ export class ClaudeAdapter extends BaseAdapter {
 
   _replayHistory() {
     const cliSessionId = this.session.cliSessionId
-    if (!cliSessionId) return
+    log(`[ClaudeAdapter] _replayHistory called cliSessionId="${cliSessionId}"`)
+    if (!cliSessionId) {
+      log(`[ClaudeAdapter] _replayHistory: no cliSessionId, returning silently`)
+      return
+    }
     const path = this._findTranscript(cliSessionId)
     if (!path) {
       this._write('\x1b[90m(未找到历史记录)\x1b[0m\r\n\r\n')
+      log(`[ClaudeAdapter] _replayHistory: transcript NOT FOUND for cliSessionId=${cliSessionId}`)
       return
     }
     try {
@@ -317,6 +368,11 @@ export class ClaudeAdapter extends BaseAdapter {
     // Replay history before starting
     this._replayHistory()
 
+    // Ensure transcript exists at claude's expected path (for --resume)
+    if (this.session.cliSessionId) {
+      this._ensureTranscriptAtClaudePath(this.session.cliSessionId)
+    }
+
     this._settingsDir = mkdtempSync(join(tmpdir(), 'ucli-claude-'))
     const settingsFile = join(this._settingsDir, 'settings.json')
     writeFileSync(settingsFile, JSON.stringify(buildSettings(this.hookRunnerPath)))
@@ -352,12 +408,21 @@ export class ClaudeAdapter extends BaseAdapter {
         env
       })
 
+      log(`[ClaudeAdapter] PTY spawned pid=${this.ptyProc.pid} sessionId=${this.session.id} cliSessionId=${this.session.cliSessionId} cwd=${this.session.cwd}`)
+
+      let _dataLogged = false
       this.ptyProc.onData((data) => {
+        if (!_dataLogged) {
+          _dataLogged = true
+          log(`[ClaudeAdapter] PTY onData FIRST sessionId=${this.session.id} len=${data.length} head="${data.slice(0, 120).replace(/\x1b\[/g, 'ESC[')}"`)
+        }
         this._write(data)
       })
 
-      this.ptyProc.onExit(({ exitCode }) => {
+      this.ptyProc.onExit(({ exitCode, signal }) => {
+        log(`[ClaudeAdapter] PTY onExit pid=${this.ptyProc?.pid} code=${exitCode} signal=${signal}`)
         this._write(`\r\n\x1b[90mprocess exited (code ${exitCode})\x1b[0m\r\n`)
+        this.ptyProc = null
         this.emitEvent({ type: 'exit', code: exitCode })
       })
 
@@ -373,6 +438,7 @@ export class ClaudeAdapter extends BaseAdapter {
       })
       this.emitEvent({ type: 'ready' })
     } catch (err) {
+      log(`[ClaudeAdapter] PTY spawn FAILED: ${err?.message}`)
       this._write(`\x1b[31mPTY spawn failed: ${err?.message}\x1b[0m\r\n`)
       this.emitEvent({ type: 'error', message: 'PTY spawn failed: ' + (err?.message || String(err)) })
     }
@@ -380,7 +446,15 @@ export class ClaudeAdapter extends BaseAdapter {
 
   writeInput(data) {
     if (this.ptyProc) {
-      try { this.ptyProc.write(data); return true } catch {}
+      try {
+        log(`[ClaudeAdapter] writeInput sessionId=${this.session.id} data="${data.replace(/\x1b\[/g, 'ESC[').replace(/\r/g, '\\r').replace(/\n/g, '\\n').slice(0, 80)}"`)
+        this.ptyProc.write(data)
+        return true
+      } catch (err) {
+        log(`[ClaudeAdapter] writeInput FAILED: ${err?.message}`)
+      }
+    } else {
+      log(`[ClaudeAdapter] writeInput SKIPPED — no ptyProc sessionId=${this.session.id}`)
     }
     return false
   }
@@ -406,6 +480,22 @@ export class ClaudeAdapter extends BaseAdapter {
   }
 
   async dispose() {
+    // Sync transcript back from claude's path to original if newer
+    try {
+      if (this.session.cliSessionId) {
+        const cp = this._claudeTranscriptPath(this.session.cliSessionId)
+        if (cp && existsSync(cp)) {
+          const dir = this._projectDir()
+          if (dir) {
+            const orig = join(dir, this.session.cliSessionId + '.jsonl')
+            if (orig !== cp && existsSync(orig) && statSync(cp).mtimeMs > statSync(orig).mtimeMs) {
+              copyFileSync(cp, orig)
+              log(`[ClaudeAdapter] dispose synced back "${basename(cp)}" → "${dir}"`)
+            }
+          }
+        }
+      }
+    } catch { /* best-effort sync */ }
     this._disposed = true
     if (this._statsTimer) { clearTimeout(this._statsTimer); this._statsTimer = null }
     if (this._statsMaxTimer) { clearTimeout(this._statsMaxTimer); this._statsMaxTimer = null }

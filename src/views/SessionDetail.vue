@@ -66,7 +66,7 @@
             v-for="s in filteredSessions"
             :key="s.id"
             :class="['session-item', activePane !== null && panes[activePane]?.sessionId === s.id ? 'assigned' : '']"
-            @click="assignToPane(s.id)"
+            @click="handleSessionClick(s.id, $event)"
             @dblclick="openInNewPane(s.id)"
           >
             <div class="item-head">
@@ -98,7 +98,7 @@
             <div class="item-path" :title="s.cwd">📁 {{ s.cwd || '—' }}</div>
             <div class="item-meta">
               <span class="item-id">{{ s.id.slice(0,8) }}</span>
-              <span class="item-time">{{ fmtTime(s.createdAt || s.startedAt) }}</span>
+              <span class="item-time" :title="s.lastOpenedAt ? ('最近打开: ' + fmtTime(s.lastOpenedAt)) : ''">{{ fmtTime(s.createdAt || s.startedAt) }}</span>
             </div>
             <div class="item-stats" v-if="s.stats">
               ↑{{ fmtNum(s.stats.tokens.input) }} ↓{{ fmtNum(s.stats.tokens.output) }}
@@ -261,8 +261,10 @@ import {
   EditOutlined
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
+import { useSettingsStore } from '../stores/settings.js'
 import { ipc } from '../ipc.js'
 import { nextSessionPaneIndex } from '../workbenchKeyboard.js'
+import { matchesBinding, getAllBindings } from '../keybindings.js'
 import {
   reconcileSessionPanes,
   resolveSessionFocusPane,
@@ -277,6 +279,7 @@ import '@xterm/xterm/css/xterm.css'
 
 const router = useRouter()
 const sessions = useSessionsStore()
+const settings = useSettingsStore()
 const sessionListHidden = ref(sessions.workbench.sessionListHidden)
 watch(sessionListHidden, (v) => sessions.setSessionListHidden(v))
 const fullscreenPane = ref(null)
@@ -435,7 +438,8 @@ function initPaneTerminal(i) {
 
   // Custom key handler for copy/paste
   term.attachCustomKeyEventHandler((e) => {
-    if (e.type === 'keydown' && e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    const overrides = settings.keybindings || {}
+    if (e.type === 'keydown' && matchesBinding('pane.switchNext', e, overrides)) {
       const switched = switchSessionPane(e.shiftKey ? -1 : 1)
       if (switched) {
         e.preventDefault()
@@ -443,7 +447,7 @@ function initPaneTerminal(i) {
       }
       return !switched
     }
-    if ((e.ctrlKey && e.shiftKey && e.key === 'C') || (e.ctrlKey && e.key === 'Insert')) {
+    if ((matchesBinding('terminal.copy', e, overrides)) || (matchesBinding('terminal.copyAlt', e, overrides))) {
       const sel = term.getSelection()
       if (sel) { navigator.clipboard.writeText(sel).catch(() => {}) }
       return false
@@ -453,9 +457,8 @@ function initPaneTerminal(i) {
       if (sel) { navigator.clipboard.writeText(sel).catch(() => {}); term.clearSelection(); return false }
       return true
     }
-    // Ctrl+V / Ctrl+Shift+V: let the capture-phase paste handler below
-    // handle it so we avoid triple-sending (xterm native paste + electron menu + this handler)
-    if ((e.ctrlKey && (e.key === 'v' || e.key === 'V'))) {
+    // Paste: suppress native xterm paste (handled by capture-phase handler)
+    if (matchesBinding('terminal.paste', e, overrides)) {
       return false
     }
     return true
@@ -550,17 +553,69 @@ function switchSessionPane(direction = 1) {
 }
 
 function onWorkbenchKeydown(event) {
-  if (event.defaultPrevented || event.key !== 'Tab' || event.ctrlKey || event.altKey || event.metaKey) return
+  if (event.defaultPrevented) return
+  const overrides = settings.keybindings || {}
+  const isNext = matchesBinding('pane.switchNext', event, overrides)
+  const isPrev = matchesBinding('pane.switchPrev', event, overrides)
+  if (!isNext && !isPrev) return
   const target = event.target
   if (target instanceof Element && !target.closest('.xterm') && target.closest('button, a, input, textarea, select, [contenteditable="true"], [role="button"], .ant-select')) return
-  if (switchSessionPane(event.shiftKey ? -1 : 1)) {
+  if (switchSessionPane(isPrev ? -1 : 1)) {
     event.preventDefault()
     event.stopPropagation()
   }
 }
 
 // --- Assign sessions to panes ---
+function handleSessionClick(sessionId, event) {
+  const overrides = settings.keybindings || {}
+  const matched = matchesBinding('session.addPane', event, overrides)
+  console.log('[sessionClick]', sessionId.slice(0,8), 'ctrlKey:', event?.ctrlKey, 'matched:', matched, 'overrides:', overrides)
+  if (matched || event.ctrlKey || event.metaKey) {
+    addPaneForSession(sessionId)
+  } else {
+    assignToPane(sessionId)
+  }
+}
+
+async function addPaneForSession(sessionId) {
+  // If already in a pane, just focus it
+  for (let i = 0; i < panes.value.length; i++) {
+    if (panes.value[i].sessionId === sessionId) {
+      activatePane(i)
+      return
+    }
+  }
+  // First try an empty pane
+  for (let i = 0; i < panes.value.length; i++) {
+    if (!panes.value[i].sessionId) {
+      activePane.value = i
+      assignToPane(sessionId)
+      return
+    }
+  }
+  // All occupied — increase split count
+  if (panes.value.length >= 4) {
+    message.warning('最多4个分屏')
+    return
+  }
+  const nextSplit = panes.value.length < 2 ? 2 : 4
+  splitCount.value = nextSplit
+  // Wait for watch → createPanes → nextTick to complete
+  await nextTick()
+  await nextTick()
+  // Assign to the first empty pane
+  for (let i = 0; i < panes.value.length; i++) {
+    if (!panes.value[i].sessionId) {
+      activePane.value = i
+      assignToPane(sessionId)
+      return
+    }
+  }
+}
+
 function assignToPane(sessionId) {
+  ipc.markSessionOpened(sessionId)
   if (activePane.value === null || activePane.value >= panes.value.length) {
     activePane.value = 0
   }
