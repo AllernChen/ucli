@@ -6,7 +6,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { verifyReleaseArtifacts } from '../scripts/releaseVerification.mjs'
+import { verifyReleaseArtifacts as verifyReleaseArtifactsForPlatform } from '../scripts/releaseVerification.mjs'
+
+function verifyReleaseArtifacts({ rootDir }) {
+  return verifyReleaseArtifactsForPlatform({ rootDir, platform: 'win32', arch: 'x64' })
+}
 
 async function createReleaseFixture() {
   const rootDir = await mkdtemp(path.join(os.tmpdir(), 'ucli-release-'))
@@ -130,8 +134,11 @@ test('release verification returns the verified artifact names', async (t) => {
 
   assert.deepEqual(result, {
     version: '0.2.0',
-    installerName,
-    portableName: 'UCLI-Portable-0.2.0-x64.exe'
+    platform: 'win32',
+    artifactNames: [
+      installerName,
+      'UCLI-Portable-0.2.0-x64.exe'
+    ]
   })
 })
 
@@ -225,8 +232,44 @@ test('release verification CLI reports the verified release version', async (t) 
   await writeFile(path.join(fixture.distDir, 'latest.yml'), `version: 0.2.0\npath: ${installerName}\nsha512: ${installerChecksum}\n`)
 
   const cliPath = fileURLToPath(new URL('../scripts/verify-release.mjs', import.meta.url))
-  const result = spawnSync(process.execPath, [cliPath], { cwd: fixture.rootDir, encoding: 'utf8' })
+  const result = spawnSync(
+    process.execPath,
+    [cliPath, '--platform', 'win32', '--arch', 'x64'],
+    { cwd: fixture.rootDir, encoding: 'utf8' }
+  )
 
   assert.equal(result.status, 0, result.stderr)
-  assert.match(result.stdout, /Release artifacts verified for v0\.2\.0/)
+  assert.match(result.stdout, /Release artifacts verified for v0\.2\.0 \(win32\)/)
+})
+
+test('release verification accepts macOS DMG and ZIP artifacts', async (t) => {
+  const fixture = await createReleaseFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  await writeFile(
+    path.join(fixture.rootDir, 'electron-builder.yml'),
+    'productName: UCLI\nmac:\n  target:\n    - dmg\n    - zip\n  artifactName: ${productName}-${version}-${arch}.${ext}\n'
+  )
+  const installerName = 'UCLI-0.2.0-arm64.dmg'
+  const archiveName = 'UCLI-0.2.0-arm64.zip'
+  const archiveContent = 'archive bytes'
+  const archiveChecksum = createHash('sha512').update(archiveContent).digest('base64')
+  await writeFile(path.join(fixture.distDir, installerName), '')
+  await writeFile(path.join(fixture.distDir, archiveName), archiveContent)
+  await writeFile(path.join(fixture.distDir, `${archiveName}.blockmap`), '')
+  await writeFile(
+    path.join(fixture.distDir, 'latest-mac.yml'),
+    `version: 0.2.0\npath: ${archiveName}\nsha512: ${archiveChecksum}\n`
+  )
+
+  const result = await verifyReleaseArtifactsForPlatform({
+    rootDir: fixture.rootDir,
+    platform: 'darwin',
+    arch: 'arm64'
+  })
+
+  assert.deepEqual(result, {
+    version: '0.2.0',
+    platform: 'darwin',
+    artifactNames: [archiveName, installerName]
+  })
 })

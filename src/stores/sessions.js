@@ -13,7 +13,7 @@ function newActId() {
 export const useSessionsStore = defineStore('sessions', {
   state: () => ({
     adapters: [],
-    sessions: [], // summary cards: {id, adapterId, displayName, icon, cwd, model, tier, status, stats, cliSessionId, lastActivity, lastActivityTs, taskNote, contextWindow, maxOutputTokens}
+    sessions: [], // summary cards: {id, adapterId, displayName, icon, cwd, model, tier, status, stats, cliSessionId, lastActivity, lastActivityTs, updatedAt, taskNote, contextWindow, maxOutputTokens}
     activities: {}, // sessionId -> [activityItem]
     pendingApprovals: {}, // sessionId -> [approvalReq]
     pendingAssign: null, // sessionId to auto-assign on SessionDetail load
@@ -64,6 +64,7 @@ export const useSessionsStore = defineStore('sessions', {
         tier: config.tier,
         status: 'starting',
         createdAt: Date.now(),
+        updatedAt: Date.now(),
         startedAt: config.startedAt || null,
         stats: { tokens: { input: 0, output: 0 }, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } },
         cliSessionId: config.cliSessionId || null,
@@ -178,7 +179,8 @@ export const useSessionsStore = defineStore('sessions', {
           stats: s.stats, cliSessionId: s.cliSessionId || s.nativeSessionId || null,
           startedAt: s.startedAt || null,
           lastActivity: isImport ? ('📋 已离线 · ' + fmtShort(s.startedAt)) : '已离线',
-          lastActivityTs: Date.now(),
+          lastActivityTs: s.updatedAt || s.createdAt || s.startedAt || 0,
+          updatedAt: s.updatedAt || s.createdAt || null,
           taskNote: s.taskNote || '', contextWindow: s.contextWindow || null, maxOutputTokens: s.maxOutputTokens || null
         }
         this.sessions.push(row)
@@ -191,6 +193,10 @@ export const useSessionsStore = defineStore('sessions', {
         if (s.lastActivity) row.lastActivity = s.lastActivity
         if (s.taskNote != null) row.taskNote = s.taskNote
         if (s.createdAt) row.createdAt = s.createdAt
+        if (s.updatedAt) {
+          row.updatedAt = s.updatedAt
+          row.lastActivityTs = s.updatedAt
+        }
       }
     },
 
@@ -216,6 +222,7 @@ export const useSessionsStore = defineStore('sessions', {
           row.lastActivity = `↑${evt.usage.inputTokens.toLocaleString()} ↓${evt.usage.outputTokens.toLocaleString()}`
         }
         row.lastActivityTs = evt.ts || Date.now()
+        row.updatedAt = row.lastActivityTs
       }
       this._appendActivity(evt)
     },

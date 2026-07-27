@@ -1,5 +1,5 @@
 import { existsSync } from 'fs'
-import { dirname, join } from 'path'
+import { win32 } from 'path'
 import { createRequire } from 'module'
 import { spawnSync } from 'child_process'
 import { BaseAdapter, TIER } from './cliAdapter.js'
@@ -165,7 +165,7 @@ export function resolveOpenCodeLaunch(
   if (direct) return { file: direct, prefixArgs: [] }
 
   for (const shim of paths.filter((path) => path.toLowerCase().endsWith('.cmd'))) {
-    const npmExecutable = join(dirname(shim), 'node_modules', 'opencode-ai', 'bin', 'opencode.exe')
+    const npmExecutable = win32.join(win32.dirname(shim), 'node_modules', 'opencode-ai', 'bin', 'opencode.exe')
     if (pathExists(npmExecutable)) return { file: npmExecutable, prefixArgs: [] }
   }
   return { file: 'cmd.exe', prefixArgs: ['/c', 'opencode'] }

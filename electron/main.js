@@ -6,8 +6,11 @@ import { mkdirSync } from 'fs'
 import { createOrchestrator } from './orchestrator.js'
 import { getDb } from './persistence/db.js'
 import { describeDatabaseRecovery } from './persistence/recoveryMessage.js'
+import { applyMacLoginPath } from './macEnvironment.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+
+applyMacLoginPath()
 
 // Development builds must be able to run beside an installed UCLI instance.
 // Give them a separate identity and data directory so their single-instance
@@ -53,6 +56,7 @@ function createTray() {
   if (tray) return tray
   const icon = nativeImage.createFromPath(iconPath('ucli-tray.png'))
   if (icon.isEmpty()) throw new Error('UCLI tray icon could not be loaded')
+  if (process.platform === 'darwin') icon.setTemplateImage(true)
   tray = new Tray(icon)
   tray.setToolTip(app.isPackaged ? 'UCLI' : 'UCLI Dev')
   tray.setContextMenu(Menu.buildFromTemplate([

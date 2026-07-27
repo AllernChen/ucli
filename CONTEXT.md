@@ -1,6 +1,6 @@
 # UCLI Domain Context
 
-UCLI 是一个 Windows 优先的桌面工作台与本地代理。它不替换 Claude Code、Codex 等 AI CLI 的交互方式，而是在用户与已安装 CLI 之间转发终端输入输出，并提供多会话编排、安全确认和使用留痕。
+UCLI 是一个支持 macOS 与 Windows 的桌面工作台与本地代理。它不替换 Claude Code、Codex 等 AI CLI 的交互方式，而是在用户与已安装 CLI 之间转发终端输入输出，并提供多会话编排、安全确认和使用留痕。
 
 ## 核心术语
 

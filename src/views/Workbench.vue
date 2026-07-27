@@ -10,14 +10,42 @@
         <a-select-option value="ask-everything">逐次确认</a-select-option>
       </a-select>
       <span class="spacer"></span>
-      <span class="count">{{ filtered.length }} 个会话</span>
+      <a-button v-if="filtered.length" size="small" type="text" @click="expandAll">全部展开</a-button>
+      <a-button v-if="filtered.length" size="small" type="text" @click="collapseAll">全部收起</a-button>
+      <span class="count">{{ groupedSessions.length }} 个项目 · {{ filtered.length }} 个会话</span>
       <a-button size="small" class="goto-btn" @click="$router.push('/session')" title="工作台">
         <AppstoreOutlined />
       </a-button>
     </div>
 
-    <div v-if="filtered.length" class="card-grid">
-      <SessionCard v-for="s in filtered" :key="s.id" :session="s" @open="openSession" />
+    <div v-if="filtered.length" class="project-list">
+      <section v-for="project in groupedSessions" :key="project.key" class="project-group">
+        <button type="button" class="project-header" @click="toggleProject(project.key)">
+          <DownOutlined v-if="!collapsedProjects.has(project.key)" />
+          <RightOutlined v-else />
+          <FolderOpenOutlined class="project-icon" />
+          <span class="project-heading">
+            <span class="project-name">{{ project.name }}</span>
+            <span class="project-path" :title="project.path">{{ project.path || '未设置工作目录' }}</span>
+          </span>
+          <span class="group-count">{{ project.count }} 个会话</span>
+        </button>
+
+        <div v-show="!collapsedProjects.has(project.key)" class="project-content">
+          <section v-for="cli in project.cliGroups" :key="cli.key" class="adapter-group">
+            <button type="button" class="adapter-header" @click="toggleCli(cli.key)">
+              <DownOutlined v-if="!collapsedClis.has(cli.key)" />
+              <RightOutlined v-else />
+              <span class="adapter-icon">{{ cli.icon }}</span>
+              <span class="adapter-name">{{ cli.displayName }}</span>
+              <span class="group-count">{{ cli.count }} 个会话</span>
+            </button>
+            <div v-show="!collapsedClis.has(cli.key)" class="card-grid">
+              <SessionCard v-for="s in cli.sessions" :key="s.id" :session="s" @open="openSession" />
+            </div>
+          </section>
+        </div>
+      </section>
     </div>
     <a-empty v-else description="还没有会话，点击「新建会话」开始" style="margin-top: 60px" />
 
@@ -104,10 +132,17 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { PlusOutlined, AppstoreOutlined } from '@ant-design/icons-vue'
+import {
+  PlusOutlined,
+  AppstoreOutlined,
+  DownOutlined,
+  RightOutlined,
+  FolderOpenOutlined
+} from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
 import SessionCard from '../components/SessionCard.vue'
+import { groupSessionsByProject } from '../sessionGrouping.js'
 import { ipc } from '../ipc.js'
 
 const router = useRouter()
@@ -127,6 +162,9 @@ const selectedSessions = ref({})
 const filtered = computed(() =>
   filterTier.value ? sessions.sessions.filter((s) => s.tier === filterTier.value) : sessions.sessions
 )
+const groupedSessions = computed(() => groupSessionsByProject(filtered.value, sessions.adapters))
+const collapsedProjects = ref(new Set())
+const collapsedClis = ref(new Set())
 
 const hasAnySessions = computed(() =>
   Object.values(discovered.value).some((items) => items.length > 0)
@@ -170,6 +208,32 @@ function openNew() {
 function openSession(id) {
   sessions.pendingAssign = id
   router.push('/session')
+}
+
+function toggleProject(key) {
+  const next = new Set(collapsedProjects.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  collapsedProjects.value = next
+}
+
+function toggleCli(key) {
+  const next = new Set(collapsedClis.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  collapsedClis.value = next
+}
+
+function expandAll() {
+  collapsedProjects.value = new Set()
+  collapsedClis.value = new Set()
+}
+
+function collapseAll() {
+  collapsedProjects.value = new Set(groupedSessions.value.map((project) => project.key))
+  collapsedClis.value = new Set(
+    groupedSessions.value.flatMap((project) => project.cliGroups.map((cli) => cli.key))
+  )
 }
 
 async function pickDir() {
@@ -268,6 +332,32 @@ async function newSession(adapter) {
 .count { color: #bfbfbf; font-size: 12px; }
 .goto-btn { color: #8c8c8c; }
 
+.project-list { display: flex; flex-direction: column; gap: 12px; }
+.project-group { overflow: hidden; background: #fff; border: 1px solid #e8e8e8; border-radius: 8px; }
+.project-header, .adapter-header {
+  width: 100%;
+  border: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  text-align: left;
+  color: #262626;
+  font: inherit;
+}
+.project-header { gap: 8px; padding: 12px 14px; background: #fff; }
+.project-header:hover { background: #fafafa; }
+.project-icon { color: #d48806; font-size: 17px; }
+.project-heading { min-width: 0; display: flex; align-items: baseline; gap: 10px; }
+.project-name { flex-shrink: 0; font-size: 14px; font-weight: 600; }
+.project-path { overflow: hidden; color: #8c8c8c; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.group-count { margin-left: auto; color: #8c8c8c; font-size: 11px; white-space: nowrap; }
+.project-content { padding: 0 12px 12px; }
+.adapter-group { padding-top: 8px; border-top: 1px solid #f0f0f0; }
+.adapter-group + .adapter-group { margin-top: 10px; }
+.adapter-header { gap: 6px; padding: 0 2px 8px; background: transparent; }
+.adapter-header:hover .adapter-name { color: #1677ff; }
+.adapter-icon { font-size: 15px; }
+.adapter-name { font-size: 12px; font-weight: 600; }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 
 .new-section { margin-bottom: 16px; }

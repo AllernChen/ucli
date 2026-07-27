@@ -1,7 +1,15 @@
 export function isClipboardPasteShortcut(event) {
   return Boolean(
-    event?.ctrlKey &&
+    (event?.ctrlKey || event?.metaKey) &&
     (event.key === 'v' || event.key === 'V')
+  )
+}
+
+export function isClipboardCopyShortcut(event) {
+  return Boolean(
+    event?.metaKey &&
+    !event.altKey &&
+    (event.key === 'c' || event.key === 'C')
   )
 }
 

@@ -63,7 +63,11 @@
         </a-space>
       </a-layout-header>
       <a-layout-content class="content">
-        <router-view />
+        <router-view v-slot="{ Component }">
+          <keep-alive include="SessionDetail">
+            <component :is="Component" />
+          </keep-alive>
+        </router-view>
       </a-layout-content>
     </a-layout>
   </a-layout>

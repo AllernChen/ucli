@@ -173,6 +173,7 @@ export function createOrchestrator() {
         stats: s.stats,
         lastActivity: '已离线',
         createdAt: s.createdAt || Date.now(),
+        updatedAt: s.updatedAt || s.createdAt || Date.now(),
         _dirtyStats: null,
         _lastCumTokens: null,
         _lastCompletedTurns: null,
@@ -344,6 +345,7 @@ export function createOrchestrator() {
       },
       lastActivity: '启动中…',
       createdAt: Date.now(),
+      updatedAt: Date.now(),
       _dirtyStats: null,
       _lastCumTokens: null,
       _lastCompletedTurns: session.cliSessionId ? null : 0,
@@ -370,6 +372,7 @@ export function createOrchestrator() {
   async function handleAdapterEvent(sessionId, evt) {
     const entry = sessions.get(sessionId)
     if (!entry) return
+    entry.updatedAt = evt.ts || Date.now()
     switch (evt.type) {
       case 'ready':
         entry.status = 'idle'
@@ -729,7 +732,8 @@ export function createOrchestrator() {
       contextWindow: e.session.contextWindow || null,
       lastActivity: e.lastActivity || '',
       startedAt: e.createdAt || null,
-      createdAt: e.createdAt
+      createdAt: e.createdAt,
+      updatedAt: e.updatedAt || e.createdAt
     }))
   }
 

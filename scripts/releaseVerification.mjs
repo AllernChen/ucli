@@ -33,9 +33,7 @@ function readBuilderSectionValue(content, section, key) {
   return undefined
 }
 
-export async function verifyReleaseArtifacts({ rootDir }) {
-  const version = await readPackageVersion(rootDir)
-  const builderContent = await readFile(path.join(rootDir, 'electron-builder.yml'), 'utf8')
+function validateWindowsBuilderConfig(builderContent) {
   if (!hasBuilderTarget(builderContent, 'portable')) {
     throw new Error('electron-builder.yml does not configure the portable target.')
   }
@@ -50,16 +48,68 @@ export async function verifyReleaseArtifacts({ rootDir }) {
   if (readBuilderSectionValue(builderContent, 'portable', 'artifactName') !== portableTemplate) {
     throw new Error(`electron-builder.yml portable artifactName must be ${portableTemplate}.`)
   }
-  const installerName = `UCLI-Setup-${version}-x64.exe`
-  const portableName = `UCLI-Portable-${version}-x64.exe`
-  const artifactNames = [
-    portableName,
-    installerName,
-    'latest.yml',
-    `UCLI-Setup-${version}-x64.exe.blockmap`
-  ]
+}
 
-  for (const artifactName of artifactNames) {
+function validateMacBuilderConfig(builderContent) {
+  if (!hasBuilderTarget(builderContent, 'dmg')) {
+    throw new Error('electron-builder.yml does not configure the macOS DMG target.')
+  }
+  if (!hasBuilderTarget(builderContent, 'zip')) {
+    throw new Error('electron-builder.yml does not configure the macOS ZIP target.')
+  }
+  const artifactTemplate = '${productName}-${version}-${arch}.${ext}'
+  if (readBuilderSectionValue(builderContent, 'mac', 'artifactName') !== artifactTemplate) {
+    throw new Error(`electron-builder.yml macOS artifactName must be ${artifactTemplate}.`)
+  }
+}
+
+function releaseArtifacts(platform, version, arch) {
+  if (platform === 'win32') {
+    const installerName = `UCLI-Setup-${version}-${arch}.exe`
+    const portableName = `UCLI-Portable-${version}-${arch}.exe`
+    return {
+      primaryName: installerName,
+      secondaryName: portableName,
+      metadataName: 'latest.yml',
+      requiredNames: [
+        portableName,
+        installerName,
+        'latest.yml',
+        `${installerName}.blockmap`
+      ]
+    }
+  }
+  if (platform === 'darwin') {
+    const installerName = `UCLI-${version}-${arch}.dmg`
+    const archiveName = `UCLI-${version}-${arch}.zip`
+    return {
+      primaryName: archiveName,
+      secondaryName: installerName,
+      metadataName: 'latest-mac.yml',
+      requiredNames: [
+        installerName,
+        archiveName,
+        'latest-mac.yml',
+        `${archiveName}.blockmap`
+      ]
+    }
+  }
+  throw new Error(`Release verification does not support platform ${platform}.`)
+}
+
+export async function verifyReleaseArtifacts({
+  rootDir,
+  platform = process.platform,
+  arch = process.arch
+}) {
+  const version = await readPackageVersion(rootDir)
+  const builderContent = await readFile(path.join(rootDir, 'electron-builder.yml'), 'utf8')
+  if (platform === 'win32') validateWindowsBuilderConfig(builderContent)
+  else if (platform === 'darwin') validateMacBuilderConfig(builderContent)
+
+  const artifacts = releaseArtifacts(platform, version, arch)
+
+  for (const artifactName of artifacts.requiredNames) {
     try {
       await access(path.join(rootDir, 'dist', artifactName))
     } catch {
@@ -68,28 +118,28 @@ export async function verifyReleaseArtifacts({ rootDir }) {
   }
 
   const distDir = path.join(rootDir, 'dist')
-  const latestPath = path.join(distDir, 'latest.yml')
+  const latestPath = path.join(distDir, artifacts.metadataName)
   const latestContent = await readFile(latestPath, 'utf8')
   const latestVersion = readYamlScalar(latestContent, 'version')
   if (latestVersion !== version) {
-    throw new Error(`latest.yml version ${latestVersion ?? 'missing'} does not match package version ${version}.`)
+    throw new Error(`${artifacts.metadataName} version ${latestVersion ?? 'missing'} does not match package version ${version}.`)
   }
 
   const latestPathValue = readYamlScalar(latestContent, 'path')
-  if (latestPathValue !== installerName) {
-    throw new Error(`latest.yml path ${latestPathValue ?? 'missing'} does not match ${installerName}.`)
+  if (latestPathValue !== artifacts.primaryName) {
+    throw new Error(`${artifacts.metadataName} path ${latestPathValue ?? 'missing'} does not match ${artifacts.primaryName}.`)
   }
 
   const latestChecksum = readYamlScalar(latestContent, 'sha512')
-  const installerContent = await readFile(path.join(distDir, installerName))
-  const installerChecksum = createHash('sha512').update(installerContent).digest('base64')
+  const primaryContent = await readFile(path.join(distDir, artifacts.primaryName))
+  const installerChecksum = createHash('sha512').update(primaryContent).digest('base64')
   if (latestChecksum !== installerChecksum) {
-    throw new Error(`latest.yml sha512 does not match ${installerName}.`)
+    throw new Error(`${artifacts.metadataName} sha512 does not match ${artifacts.primaryName}.`)
   }
 
   return {
     version,
-    installerName,
-    portableName
+    platform,
+    artifactNames: [artifacts.primaryName, artifacts.secondaryName]
   }
 }

@@ -58,45 +58,75 @@
             <a-select-option value="offline">已离线</a-select-option>
             <a-select-option value="exited">已退出</a-select-option>
           </a-select>
+          <div class="sidebar-group-actions">
+            <span>{{ groupedSessions.length }} 个项目 · {{ filteredSessions.length }} 个会话</span>
+            <a-button size="small" type="link" @click="expandAllGroups">展开</a-button>
+            <a-button size="small" type="link" @click="collapseAllGroups">收起</a-button>
+          </div>
         </div>
         <div class="session-list">
-          <div
-            v-for="s in filteredSessions"
-            :key="s.id"
-            :class="['session-item', activePane !== null && panes[activePane]?.sessionId === s.id ? 'assigned' : '']"
-            @click="assignToPane(s.id)"
-            @dblclick="openInNewPane(s.id)"
-          >
-            <div class="item-head">
-              <span class="item-icon">{{ s.icon }}</span>
-              <span v-if="nameEditId !== s.id" class="item-name-wrap">
-                <span class="item-name">{{ s.displayName || s.adapterId }}</span>
-                <EditOutlined class="item-name-edit-icon" @click.stop="startNameEdit(s)" title="重命名" />
+          <section v-for="project in groupedSessions" :key="project.key" class="sidebar-project">
+            <button type="button" class="sidebar-project-header" @click="toggleProjectGroup(project.key)">
+              <DownOutlined v-if="!collapsedProjects.has(project.key)" />
+              <RightOutlined v-else />
+              <FolderOpenOutlined class="sidebar-project-icon" />
+              <span class="sidebar-project-heading">
+                <span class="sidebar-project-name">{{ project.name }}</span>
+                <span class="sidebar-project-path" :title="project.path">{{ project.path || '未设置工作目录' }}</span>
               </span>
-              <a-input
-                v-else
-                ref="nameEditRef"
-                v-model:value="nameEditDraft"
-                size="small"
-                class="item-name-input"
-                @click.stop
-                @press-enter="saveNameEdit"
-                @blur="saveNameEdit"
-                @keydown.escape.prevent="cancelNameEdit"
-              />
-              <span :class="['status-dot', s.status]"></span>
+              <span class="sidebar-count">{{ project.count }}</span>
+            </button>
+
+            <div v-show="!collapsedProjects.has(project.key)" class="sidebar-project-content">
+              <section v-for="cli in project.cliGroups" :key="cli.key" class="sidebar-cli">
+                <button type="button" class="sidebar-cli-header" @click="toggleCliGroup(cli.key)">
+                  <DownOutlined v-if="!collapsedClis.has(cli.key)" />
+                  <RightOutlined v-else />
+                  <span>{{ cli.icon }}</span>
+                  <span class="sidebar-cli-name">{{ cli.displayName }}</span>
+                  <span class="sidebar-count">{{ cli.count }}</span>
+                </button>
+
+                <div v-show="!collapsedClis.has(cli.key)">
+                  <div
+                    v-for="s in cli.sessions"
+                    :key="s.id"
+                    :class="['session-item', activePane !== null && panes[activePane]?.sessionId === s.id ? 'assigned' : '']"
+                    @click="assignToPane(s.id)"
+                    @dblclick="openInNewPane(s.id)"
+                  >
+                    <div class="item-head">
+                      <span v-if="nameEditId !== s.id" class="item-name-wrap">
+                        <span class="item-name">{{ s.displayName || s.adapterId }}</span>
+                        <EditOutlined class="item-name-edit-icon" @click.stop="startNameEdit(s)" title="重命名" />
+                      </span>
+                      <a-input
+                        v-else
+                        ref="nameEditRef"
+                        v-model:value="nameEditDraft"
+                        size="small"
+                        class="item-name-input"
+                        @click.stop
+                        @press-enter="saveNameEdit"
+                        @blur="saveNameEdit"
+                        @keydown.escape.prevent="cancelNameEdit"
+                      />
+                      <span :class="['status-dot', s.status]"></span>
+                    </div>
+                    <div class="item-meta">
+                      <span class="item-id">{{ s.id.slice(0,8) }}</span>
+                      <span class="item-time">{{ fmtTime(s.createdAt || s.startedAt) }}</span>
+                    </div>
+                    <div class="item-stats" v-if="s.stats">
+                      ↑{{ fmtNum(s.stats.tokens.input) }} ↓{{ fmtNum(s.stats.tokens.output) }}
+                      <span v-if="s.stats.turns"> · {{ s.stats.turns }}轮</span>
+                    </div>
+                    <div class="item-note" v-if="s.taskNote" :title="s.taskNote">📝 {{ s.taskNote.slice(0,30) }}{{ s.taskNote.length > 30 ? '…' : '' }}</div>
+                  </div>
+                </div>
+              </section>
             </div>
-            <div class="item-path" :title="s.cwd">📁 {{ s.cwd || '—' }}</div>
-            <div class="item-meta">
-              <span class="item-id">{{ s.id.slice(0,8) }}</span>
-              <span class="item-time">{{ fmtTime(s.createdAt || s.startedAt) }}</span>
-            </div>
-            <div class="item-stats" v-if="s.stats">
-              ↑{{ fmtNum(s.stats.tokens.input) }} ↓{{ fmtNum(s.stats.tokens.output) }}
-              <span v-if="s.stats.turns"> · {{ s.stats.turns }}轮</span>
-            </div>
-            <div class="item-note" v-if="s.taskNote" :title="s.taskNote">📝 {{ s.taskNote.slice(0,30) }}{{ s.taskNote.length > 30 ? '…' : '' }}</div>
-          </div>
+          </section>
           <a-empty v-if="!filteredSessions.length" description="无匹配会话" :imageStyle="{height:36}" />
         </div>
       </div>
@@ -232,7 +262,16 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import {
+  ref,
+  computed,
+  watch,
+  nextTick,
+  onMounted,
+  onBeforeUnmount,
+  onActivated,
+  onDeactivated
+} from 'vue'
 import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import {
@@ -241,12 +280,16 @@ import {
   FullscreenExitOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
-  EditOutlined
+  EditOutlined,
+  DownOutlined,
+  RightOutlined,
+  FolderOpenOutlined
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { ipc } from '../ipc.js'
+import { groupSessionsByProject } from '../sessionGrouping.js'
 import { nextSessionPaneIndex } from '../workbenchKeyboard.js'
-import { isClipboardPasteShortcut, shouldSendClipboardPaste } from '../terminalKeybindings.js'
+import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldSendClipboardPaste } from '../terminalKeybindings.js'
 import {
   reconcileSessionPanes,
   resolveSessionFocusPane,
@@ -257,6 +300,8 @@ import {
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
+
+defineOptions({ name: 'SessionDetail' })
 
 const router = useRouter()
 const sessions = useSessionsStore()
@@ -336,6 +381,35 @@ const filteredSessions = computed(() => {
   }
   return list
 })
+const groupedSessions = computed(() => groupSessionsByProject(filteredSessions.value, sessions.adapters))
+const collapsedProjects = ref(new Set())
+const collapsedClis = ref(new Set())
+
+function toggleProjectGroup(key) {
+  const next = new Set(collapsedProjects.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  collapsedProjects.value = next
+}
+
+function toggleCliGroup(key) {
+  const next = new Set(collapsedClis.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  collapsedClis.value = next
+}
+
+function expandAllGroups() {
+  collapsedProjects.value = new Set()
+  collapsedClis.value = new Set()
+}
+
+function collapseAllGroups() {
+  collapsedProjects.value = new Set(groupedSessions.value.map((project) => project.key))
+  collapsedClis.value = new Set(
+    groupedSessions.value.flatMap((project) => project.cliGroups.map((cli) => cli.key))
+  )
+}
 
 function fmtNum(n) { return n ? n.toLocaleString() : '0' }
 
@@ -384,7 +458,7 @@ function initPaneTerminal(i) {
     cursorBlink: true,
     disableStdin: false,
     fontSize: 13,
-    fontFamily: "'Cascadia Code', Consolas, 'Courier New', monospace",
+    fontFamily: "Menlo, Monaco, 'Cascadia Code', Consolas, 'Courier New', monospace",
     allowProposedApi: true,
     scrollback: 5000,
     theme: { background: '#0b1021', foreground: '#d4d4d4', cursor: '#d4d4d4', selectionBackground: '#264f78' }
@@ -407,6 +481,11 @@ function initPaneTerminal(i) {
     if ((e.ctrlKey && e.shiftKey && e.key === 'C') || (e.ctrlKey && e.key === 'Insert')) {
       const sel = term.getSelection()
       if (sel) { navigator.clipboard.writeText(sel).catch(() => {}) }
+      return false
+    }
+    if (isClipboardCopyShortcut(e)) {
+      const sel = term.getSelection()
+      if (sel) navigator.clipboard.writeText(sel).catch(() => {})
       return false
     }
     if (e.ctrlKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) {
@@ -737,9 +816,26 @@ function unsubscribePane(i) {
 }
 
 // --- Lifecycle ---
-onMounted(async () => {
+function activateWorkbench() {
   window.addEventListener('keydown', onWorkbenchKeydown)
   document.addEventListener('fullscreenchange', onFullscreenChange)
+  nextTick(() => {
+    for (const pane of panes.value) {
+      try { pane?.fitAddon?.fit() } catch {}
+    }
+    panes.value[activePane.value]?.term?.focus()
+  })
+}
+
+function deactivateWorkbench() {
+  window.removeEventListener('keydown', onWorkbenchKeydown)
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+}
+
+onActivated(activateWorkbench)
+onDeactivated(deactivateWorkbench)
+
+onMounted(async () => {
   await sessions.init()
   await sessions.loadWorkbench()
   const savedIds = sessions.workbench.paneSessionIds
@@ -768,8 +864,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onWorkbenchKeydown)
-  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  deactivateWorkbench()
   for (let i = 0; i < panes.value.length; i++) {
     destroyPaneTerminal(i)
     unsubscribePane(i)
@@ -791,26 +886,43 @@ onBeforeUnmount(() => {
 
 /* Sidebar */
 .sidebar {
-  width: 240px; flex-shrink: 0; display: flex; flex-direction: column;
+  width: 268px; flex-shrink: 0; display: flex; flex-direction: column;
   background: #fff; border: 1px solid #f0f0f0; border-radius: 8px; overflow: hidden;
 }
 .sidebar-toolbar { padding: 8px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid #f0f0f0; }
 .session-list { flex: 1; overflow-y: auto; padding: 4px; }
+.sidebar-group-actions { min-height: 22px; display: flex; align-items: center; color: #8c8c8c; font-size: 10px; }
+.sidebar-group-actions :deep(.ant-btn) { height: 22px; padding: 0 3px; font-size: 11px; }
+.sidebar-group-actions :deep(.ant-btn:first-of-type) { margin-left: auto; }
+.sidebar-project + .sidebar-project { border-top: 1px solid #f0f0f0; }
+.sidebar-project-header, .sidebar-cli-header {
+  width: 100%; border: 0; cursor: pointer; display: flex; align-items: center; text-align: left; font: inherit;
+}
+.sidebar-project-header { gap: 5px; padding: 8px 6px; background: #fff; }
+.sidebar-project-header:hover { background: #fafafa; }
+.sidebar-project-icon { color: #d48806; flex-shrink: 0; }
+.sidebar-project-heading { min-width: 0; display: flex; flex: 1; flex-direction: column; }
+.sidebar-project-name { overflow: hidden; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-project-path { overflow: hidden; color: #8c8c8c; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-project-content { padding-left: 8px; }
+.sidebar-cli { border-left: 1px solid #f0f0f0; }
+.sidebar-cli-header { gap: 5px; padding: 5px 7px; background: #fafafa; color: #595959; }
+.sidebar-cli-header:hover .sidebar-cli-name { color: #1677ff; }
+.sidebar-cli-name { overflow: hidden; flex: 1; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-count { margin-left: auto; color: #bfbfbf; font-size: 10px; }
 .session-item {
-  padding: 8px 10px; cursor: pointer; border-radius: 6px; margin-bottom: 2px;
+  padding: 7px 8px 7px 19px; cursor: pointer; border-radius: 6px; margin-bottom: 2px;
   transition: background .12s; border: 1px solid transparent;
 }
 .session-item:hover { background: #f5f5f5; }
 .session-item.assigned { background: #e6f4ff; border-color: #1677ff; }
 .item-head { display: flex; align-items: center; gap: 4px; }
-.item-icon { font-size: 14px; }
 .item-name-wrap { display: inline-flex; align-items: center; gap: 2px; flex: 1; overflow: hidden; }
 .item-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item-name-edit-icon { font-size: 11px; color: #bfbfbf; cursor: pointer; flex-shrink: 0; opacity: 0; transition: opacity .12s; }
 .item-name-wrap:hover .item-name-edit-icon { opacity: 1; }
 .item-name-edit-icon:hover { color: #1677ff; }
 .item-name-input { width: auto; min-width: 80px; max-width: 160px; font-size: 12px; font-weight: 600; }
-.item-path { font-size: 10px; color: #8c8c8c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 .item-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 1px; }
 .item-id { font-size: 10px; color: #bfbfbf; font-family: monospace; }
 .item-time { font-size: 10px; color: #bfbfbf; }

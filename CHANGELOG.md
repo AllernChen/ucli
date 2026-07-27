@@ -4,6 +4,31 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-07-26
+
+### Fixed
+
+- 修复离开工作台页面后 xterm 实例被销毁、返回时对话内容消失；工作台现在跨路由保留终端滚动区，并在返回时重新适配窗格尺寸。
+
+## [0.4.2] - 2026-07-26
+
+### Fixed
+
+- 修复 macOS 产物中的 `node-pty` `spawn-helper` 缺少可执行权限，导致新建 Codex、Claude Code 或 OpenCode 会话时报 `posix_spawnp failed`。
+- macOS GUI 启动时恢复登录 Shell 的 `PATH`，使打包应用可以发现 `~/.npm-global/bin` 等终端配置中的 CLI 安装目录。
+
+## [0.4.1] - 2026-07-26
+
+### Added
+
+- 新增 macOS DMG/ZIP 打包目标、平台对应的发布产物校验，以及本地构建说明。
+- macOS 终端支持 `Command+C`/`Command+V`，并使用系统等宽字体作为首选。
+
+### Changed
+
+- `npm run dist` 改为构建当前操作系统产物，并保留 `dist:win`、`dist:mac` 显式命令。
+- macOS 菜单栏托盘图标使用模板图像，以适配浅色和深色外观。
+
 ## [0.4.0] - 2026-07-24
 
 ### Added

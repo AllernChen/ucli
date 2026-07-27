@@ -13,6 +13,7 @@ publish:
 # electron-rebuild tries to recompile via node-gyp which fails without Python
 # and breaks on paths with spaces.
 npmRebuild: false
+afterPack: scripts/fix-node-pty-permissions.cjs
 files:
   - out/**/*
   - resources/**/*
@@ -31,6 +32,14 @@ win:
     - portable
   sign: false
   forceCodeSigning: false
+mac:
+  icon: resources/icons/ucli.png
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  identity: null
 nsis:
   artifactName: ${productName}-Setup-${version}-${arch}.${ext}
   oneClick: false
