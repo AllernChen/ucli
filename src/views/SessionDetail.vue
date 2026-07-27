@@ -417,6 +417,14 @@ function initPaneTerminal(i) {
   term.open(el)
   fitAddon.fit()
 
+  // Capture paste at root to suppress xterm's native handler + Electron menu
+  // double-fire. We read clipboard and send to PTY manually — see key handler above.
+  term.element.addEventListener('paste', (e) => {
+    e.preventDefault()
+    e.stopImmediatePropagation()
+    navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
+  }, { capture: true })
+
   // Custom key handler for copy/paste
   term.attachCustomKeyEventHandler((e) => {
     if (e.type === 'keydown' && e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -432,17 +440,14 @@ function initPaneTerminal(i) {
       if (sel) { navigator.clipboard.writeText(sel).catch(() => {}) }
       return false
     }
-    if ((e.ctrlKey && e.shiftKey && e.key === 'V')) {
-      navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
-      return false
-    }
     if (e.ctrlKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) {
       const sel = term.getSelection()
       if (sel) { navigator.clipboard.writeText(sel).catch(() => {}); term.clearSelection(); return false }
       return true
     }
-    if (e.ctrlKey && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
-      navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
+    // Ctrl+V / Ctrl+Shift+V: let the capture-phase paste handler below
+    // handle it so we avoid triple-sending (xterm native paste + electron menu + this handler)
+    if ((e.ctrlKey && (e.key === 'v' || e.key === 'V'))) {
       return false
     }
     return true
