@@ -277,7 +277,8 @@ import '@xterm/xterm/css/xterm.css'
 
 const router = useRouter()
 const sessions = useSessionsStore()
-const sessionListHidden = ref(false)
+const sessionListHidden = ref(sessions.workbench.sessionListHidden)
+watch(sessionListHidden, (v) => sessions.setSessionListHidden(v))
 const fullscreenPane = ref(null)
 const gridFullscreen = ref(false)
 const paneGridRef = ref(null)
@@ -785,6 +786,7 @@ onMounted(async () => {
   document.addEventListener('fullscreenchange', onFullscreenChange)
   await sessions.init()
   await sessions.loadWorkbench()
+  sessionListHidden.value = sessions.workbench.sessionListHidden // sync after load
   const savedIds = sessions.workbench.paneSessionIds
   const count = sessions.workbench.splitCount || 1
   createPanes(count)
