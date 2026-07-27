@@ -13,25 +13,36 @@
         <MenuUnfoldOutlined v-if="sessionListHidden" />
         <MenuFoldOutlined v-else />
       </a-button>
+      <a-button
+        v-if="activeSessionId"
+        size="small"
+        type="text"
+        title="打开工作目录"
+        @click="openWorkspaceFolder"
+      >
+        <FolderOpenOutlined />
+      </a-button>
       <span class="spacer"></span>
-      <a-space size="small">
-        <a-button size="small" @click="showImport = true">📥 导入</a-button>
-        <a-button size="small" @click="$router.push('/')">➕ 新建</a-button>
-        <span v-if="assignedPaneCount > 1" class="shortcut-hint"><kbd>Tab</kbd> 切换会话</span>
-        <a-radio-group v-model:value="splitCount" size="small" button-style="solid">
-          <a-radio-button :value="1">1</a-radio-button>
-          <a-radio-button :value="2">2</a-radio-button>
-          <a-radio-button :value="4">4</a-radio-button>
-        </a-radio-group>
-        <a-button
-          v-if="splitCount > 1"
-          size="small"
-          @click="toggleWorkbenchFullscreen"
-          title="整个分屏工作台全屏"
-        >
-          <FullscreenOutlined /> 分屏全屏
-        </a-button>
-      </a-space>
+      <div class="header-actions">
+        <a-space size="small">
+          <a-button size="small" @click="showImport = true">📥 导入</a-button>
+          <a-button size="small" @click="$router.push('/')">➕ 新建</a-button>
+          <span v-if="assignedPaneCount > 1" class="shortcut-hint"><kbd>Tab</kbd> 切换会话</span>
+          <a-radio-group v-model:value="splitCount" size="small" button-style="solid">
+            <a-radio-button :value="1">1</a-radio-button>
+            <a-radio-button :value="2">2</a-radio-button>
+            <a-radio-button :value="4">4</a-radio-button>
+          </a-radio-group>
+          <a-button
+            v-if="splitCount > 1"
+            size="small"
+            @click="toggleWorkbenchFullscreen"
+            title="整个分屏工作台全屏"
+          >
+            <FullscreenOutlined /> 分屏全屏
+          </a-button>
+        </a-space>
+      </div>
     </div>
 
     <div class="detail-layout">
@@ -237,6 +248,7 @@ import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import {
   ArrowLeftOutlined,
+  FolderOpenOutlined,
   FullscreenOutlined,
   FullscreenExitOutlined,
   MenuFoldOutlined,
@@ -279,6 +291,16 @@ const activePane = computed({
 // Each pane: { id, sessionId, term, fitAddon, resizeObserver }
 const panes = ref([])
 const assignedPaneCount = computed(() => panes.value.filter((pane) => pane.sessionId).length)
+
+// Active session in the current pane
+const activeSessionId = computed(() => panes.value[activePane.value]?.sessionId || null)
+
+function openWorkspaceFolder() {
+  const sid = activeSessionId.value
+  if (!sid) return
+  const s = sessions.byId(sid)
+  if (s?.cwd) ipc.openFolder(s.cwd)
+}
 // Refs storage for pane terminal containers
 const paneRefs = {}
 const paneRootRefs = {}
@@ -787,6 +809,8 @@ onBeforeUnmount(() => {
 }
 .detail-header .title { font-weight: 600; }
 .spacer { flex: 1; }
+.header-actions { opacity: 0; transition: opacity .15s; }
+.detail-header:hover .header-actions { opacity: 1; }
 
 .detail-layout { flex: 1; display: flex; gap: 8px; min-height: 0; }
 

@@ -1,4 +1,4 @@
-import { app, ipcMain, dialog, Notification } from 'electron'
+import { app, ipcMain, dialog, Notification, shell } from 'electron'
 import { join } from 'path'
 import { readFileSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
@@ -779,6 +779,13 @@ export function createOrchestrator() {
     ipcMain.handle('dialog:pick-directory', async () => {
       const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
       return result.canceled ? null : result.filePaths[0]
+    })
+    ipcMain.handle('shell:open-folder', async (_e, dirPath) => {
+      if (!dirPath) return false
+      try {
+        await shell.openPath(dirPath)
+        return true
+      } catch { return false }
     })
 
     // Discover all CLI sessions for a cwd, grouped by adapter type.

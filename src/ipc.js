@@ -15,6 +15,7 @@ export const ipc = {
   runCliToolAction: (id, action) => u.runCliToolAction(id, action),
   // dialog
   pickDirectory: () => u.pickDirectory(),
+  openFolder: (dirPath) => u.openFolder(dirPath),
   scanClaudeSessions: (cwd) => u.scanClaudeSessions(cwd),
   discoverSessions: (cwd) => u.discoverSessions(cwd),
   // sessions
