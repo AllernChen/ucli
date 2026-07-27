@@ -272,6 +272,7 @@ import {
 
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 
 const router = useRouter()
@@ -425,32 +426,11 @@ function initPaneTerminal(i) {
     navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
   }, { capture: true })
 
-  // Clickable links: detect http/https URLs and open in default browser.
-  // Uses registerLinkProvider (v6 API) — registerLinkMatcher was removed in @xterm/xterm.
-  const linkProviderDisposable = term.registerLinkProvider({
-    provideLinks: (bufferLineNumber, cb) => {
-      const line = term.buffer.active.getLine(bufferLineNumber)
-      if (!line) { cb(undefined); return }
-      const text = line.translateToString()
-      const re = /https?:\/\/[^\s<>"']+/g
-      const links = []
-      let m
-      while ((m = re.exec(text)) !== null) {
-        // range uses 1-based inclusive coordinates (xterm convention)
-        links.push({
-          range: {
-            start: { x: m.index + 1, y: bufferLineNumber + 1 },
-            end:   { x: m.index + m[0].length, y: bufferLineNumber + 1 }
-          },
-          text: m[0],
-          activate: (_e, uri) => ipc.openExternal(uri),
-          hover:    (_e, uri) => { term.element.title = uri },
-          leave:    ()        => { term.element.title = '' }
-        })
-      }
-      cb(links.length ? links : undefined)
-    }
+  // Clickable links via official addon — handles coordinate mapping correctly
+  const webLinksAddon = new WebLinksAddon((e, uri) => {
+    if (e.ctrlKey || e.metaKey) ipc.openExternal(uri)
   })
+  term.loadAddon(webLinksAddon)
 
   // Custom key handler for copy/paste
   term.attachCustomKeyEventHandler((e) => {
@@ -499,19 +479,19 @@ function initPaneTerminal(i) {
   panes.value[i].term = term
   panes.value[i].fitAddon = fitAddon
   panes.value[i].resizeObserver = resizeObserver
-  panes.value[i].linkProviderDisposable = linkProviderDisposable
+  panes.value[i].webLinksAddon = webLinksAddon
 }
 
 function destroyPaneTerminal(i) {
   const p = panes.value[i]
   p?.resizeObserver?.disconnect()
-  p?.linkProviderDisposable?.dispose()
+  p?.webLinksAddon?.dispose()
   if (p?.term) {
     p.term.dispose()
     p.term = null
     p.fitAddon = null
     p.resizeObserver = null
-    p.linkProviderDisposable = null
+    p.webLinksAddon = null
   }
 }
 
