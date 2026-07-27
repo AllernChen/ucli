@@ -40,21 +40,16 @@
       <div :class="['sider-footer', { collapsed: navCollapsed }]">
         <a-badge v-if="navCollapsed && waitingCount > 0" :count="waitingCount" />
         <a-tag v-else-if="waitingCount > 0" color="orange">待确认 {{ waitingCount }}</a-tag>
-        <span v-if="!navCollapsed" class="version">v0.4.0</span>
+        <span v-if="!navCollapsed" class="version">v0.3.2</span>
+        <a-button size="small" type="text" class="sider-collapse-btn" @click="navCollapsed = !navCollapsed">
+          <MenuFoldOutlined v-if="!navCollapsed" />
+          <MenuUnfoldOutlined v-else />
+        </a-button>
       </div>
     </a-layout-sider>
     <a-layout class="main-layout">
       <a-layout-header class="header">
         <div class="header-main">
-          <a-button
-            size="small"
-            type="text"
-            :title="navCollapsed ? '展开菜单导航' : '收缩菜单导航'"
-            @click="navCollapsed = !navCollapsed"
-          >
-            <MenuUnfoldOutlined v-if="navCollapsed" />
-            <MenuFoldOutlined v-else />
-          </a-button>
           <span>{{ title }}</span>
         </div>
         <a-space size="small">
@@ -136,10 +131,13 @@ onBeforeUnmount(() => stopSessionFocus?.())
   align-items: center;
   justify-content: space-between;
 }
-.sider-footer.collapsed { justify-content: center; padding: 10px 0; }
+.sider-footer.collapsed { justify-content: center; padding: 10px 0; flex-direction: column; gap: 4px; }
+.version { font-size: 11px; color: #bfbfbf; }
 .version { font-size: 11px; color: #bfbfbf; }
 .logo img { width: 30px; height: 30px; object-fit: contain; margin-right: 8px; }
 .logo.collapsed img { margin-right: 0; }
 .header-main { display: flex; align-items: center; gap: 8px; }
 :deep(.ant-layout-sider-children) { display: flex; flex-direction: column; }
+.sider-collapse-btn { font-size: 13px; color: #8c8c8c; flex-shrink: 0; }
+.sider-collapse-btn:hover { color: #1677ff; }
 </style>

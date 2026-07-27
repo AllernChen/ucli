@@ -13,15 +13,6 @@
         <MenuUnfoldOutlined v-if="sessionListHidden" />
         <MenuFoldOutlined v-else />
       </a-button>
-      <a-button
-        v-if="activeSessionId"
-        size="small"
-        type="text"
-        title="打开工作目录"
-        @click="openWorkspaceFolder"
-      >
-        <FolderOpenOutlined />
-      </a-button>
       <span class="spacer"></span>
       <div class="header-actions">
         <a-space size="small">
@@ -96,6 +87,13 @@
                 @keydown.escape.prevent="cancelNameEdit"
               />
               <span :class="['status-dot', s.status]"></span>
+              <a-popconfirm
+                title="从 UCLI 移除会话？源会话和用量统计会保留。"
+                @confirm.stop="deleteSessionById(s.id)"
+                @click.stop
+              >
+                <DeleteOutlined class="item-delete-btn" title="移除 UCLI 记录" />
+              </a-popconfirm>
             </div>
             <div class="item-path" :title="s.cwd">📁 {{ s.cwd || '—' }}</div>
             <div class="item-meta">
@@ -138,25 +136,31 @@
               <span :class="['status-dot', sessions.byId(pane.sessionId)?.status]"></span>
             </span>
             <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
-            <a-space size="small">
-              <a-button
-                v-if="pane.sessionId && !gridFullscreen"
-                size="small"
-                type="text"
-                @click.stop="togglePaneFullscreen(i)"
-                :title="fullscreenPane === i ? '退出全屏' : '全屏显示当前会话'"
-              >
-                <FullscreenExitOutlined v-if="fullscreenPane === i" />
-                <FullscreenOutlined v-else />
-              </a-button>
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="openNote(i)" title="备注">📝</a-button>
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="interruptPane(i)" title="中断">⏹</a-button>
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="stopPane(i)" title="停止 CLI 进程并保留会话">停止</a-button>
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="clearPane(i)" title="仅关闭窗格，会话继续运行">关闭</a-button>
-              <a-popconfirm v-if="pane.sessionId" title="从 UCLI 移除会话？源会话和用量统计会保留。" @confirm="deletePane(i)" @click.stop>
-                <a-button size="small" type="text" danger title="移除 UCLI 记录">移除</a-button>
-              </a-popconfirm>
-            </a-space>
+            <span class="pane-actions">
+              <a-space size="small">
+                <a-button
+                  v-if="pane.sessionId"
+                  size="small"
+                  type="text"
+                  @click.stop="openFolderForPane(i)"
+                  title="打开工作目录"
+                >
+                  <FolderOpenOutlined />
+                </a-button>
+                <a-button
+                  v-if="pane.sessionId && !gridFullscreen"
+                  size="small"
+                  type="text"
+                  @click.stop="togglePaneFullscreen(i)"
+                  :title="fullscreenPane === i ? '退出全屏' : '全屏显示当前会话'"
+                >
+                  <FullscreenExitOutlined v-if="fullscreenPane === i" />
+                  <FullscreenOutlined v-else />
+                </a-button>
+                <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="openNote(i)" title="备注">📝</a-button>
+                <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="clearPane(i)" title="仅关闭窗格，会话继续运行">关闭</a-button>
+              </a-space>
+            </span>
           </div>
           <!-- Pane info bar -->
           <div v-if="pane.sessionId" class="pane-info">
@@ -248,6 +252,7 @@ import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import {
   ArrowLeftOutlined,
+  DeleteOutlined,
   FolderOpenOutlined,
   FullscreenOutlined,
   FullscreenExitOutlined,
@@ -292,11 +297,8 @@ const activePane = computed({
 const panes = ref([])
 const assignedPaneCount = computed(() => panes.value.filter((pane) => pane.sessionId).length)
 
-// Active session in the current pane
-const activeSessionId = computed(() => panes.value[activePane.value]?.sessionId || null)
-
-function openWorkspaceFolder() {
-  const sid = activeSessionId.value
+function openFolderForPane(i) {
+  const sid = panes.value[i]?.sessionId
   if (!sid) return
   const s = sessions.byId(sid)
   if (s?.cwd) ipc.openFolder(s.cwd)
@@ -613,11 +615,19 @@ function clearPane(i) {
   sessions.setWorkbenchPane(i, null)
   unsubscribePane(i)
 }
-async function stopPane(i) {
-  const sid = panes.value[i]?.sessionId
-  if (!sid) return
-  await sessions.stop(sid)
-  message.success('会话已离线保存')
+async function deleteSessionById(id) {
+  if (!id) return
+  for (let i = 0; i < panes.value.length; i++) {
+    if (panes.value[i]?.sessionId === id) {
+      panes.value[i].sessionId = null
+      panes.value[i].term?.clear()
+      sessions.setWorkbenchPane(i, null)
+      unsubscribePane(i)
+      break
+    }
+  }
+  await sessions.deleteSession(id)
+  message.success('会话已从 UCLI 移除，源会话和用量统计已保留')
 }
 async function deletePane(i) {
   const sid = panes.value[i]?.sessionId
@@ -628,11 +638,6 @@ async function deletePane(i) {
   sessions.setWorkbenchPane(i, null)
   unsubscribePane(i)
   message.success('会话已从 UCLI 移除，源会话和用量统计已保留')
-}
-
-function interruptPane(i) {
-  const sid = panes.value[i]?.sessionId
-  if (sid) sessions.interrupt(sid)
 }
 
 let noteVisible = ref(false)
@@ -809,8 +814,6 @@ onBeforeUnmount(() => {
 }
 .detail-header .title { font-weight: 600; }
 .spacer { flex: 1; }
-.header-actions { opacity: 0; transition: opacity .15s; }
-.detail-header:hover .header-actions { opacity: 1; }
 
 .detail-layout { flex: 1; display: flex; gap: 8px; min-height: 0; }
 
@@ -834,6 +837,9 @@ onBeforeUnmount(() => {
 .item-name-edit-icon { font-size: 11px; color: #bfbfbf; cursor: pointer; flex-shrink: 0; opacity: 0; transition: opacity .12s; }
 .item-name-wrap:hover .item-name-edit-icon { opacity: 1; }
 .item-name-edit-icon:hover { color: #1677ff; }
+.item-delete-btn { font-size: 11px; color: #bfbfbf; cursor: pointer; flex-shrink: 0; opacity: 0; transition: opacity .12s; margin-left: auto; }
+.session-item:hover .item-delete-btn { opacity: 1; }
+.item-delete-btn:hover { color: #ff4d4f; }
 .item-name-input { width: auto; min-width: 80px; max-width: 160px; font-size: 12px; font-weight: 600; }
 .item-path { font-size: 10px; color: #8c8c8c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 .item-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 1px; }
@@ -885,6 +891,8 @@ onBeforeUnmount(() => {
 }
 .pane-session { font-size: 12px; font-weight: 500; display: flex; align-items: center; gap: 4px; }
 .pane-session.empty { color: #bfbfbf; }
+.pane-actions { opacity: 0; transition: opacity .15s; }
+.pane-header:hover .pane-actions { opacity: 1; }
 
 .pane-info {
   display: flex; gap: 10px; padding: 2px 8px; background: #fff; font-size: 11px;
