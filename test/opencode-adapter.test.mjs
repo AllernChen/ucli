@@ -32,7 +32,7 @@ test('OpenCode safety rules allow trusted commands and ask for risky commands', 
   assert.equal(permission.bash['git push*'], 'ask')
   assert.equal(permission.edit['~/.ssh/**'], 'deny')
   assert.equal(permission.bash['rm -rf /*'], 'deny')
-  assert.equal(permission.external_directory, 'ask')
+  assert.equal(permission.external_directory, 'allow')
 })
 
 test('OpenCode always-agree still enforces the hard blacklist', () => {
@@ -72,9 +72,24 @@ test('OpenCode asks for non-blacklisted tools in ask-everything mode', () => {
 
 test('OpenCode safely falls back to ask for an untranslatable risky regex', () => {
   const permission = buildOpenCodePermission('safety-rules', {
-    highRisk: ['Bash(re:curl\\s.*\\|\\s*(sh|bash))']
+    highRisk: ['Bash(re:powershell\\s+.*iex)']
   })
   assert.equal(permission.bash['*'], 'ask')
+})
+
+test('OpenCode translates trusted network-pipe risk rules without asking for every Bash command', () => {
+  const permission = buildOpenCodePermission('safety-rules', {
+    highRisk: [
+      'Bash(re:curl\\s.*\\|\\s*(sh|bash))',
+      'Bash(re:wget\\s.*\\|\\s*(sh|bash))'
+    ]
+  })
+
+  assert.equal(permission.bash['*'], 'allow')
+  assert.equal(permission.bash['curl *|*sh*'], 'ask')
+  assert.equal(permission.bash['curl *|*bash*'], 'ask')
+  assert.equal(permission.bash['wget *|*sh*'], 'ask')
+  assert.equal(permission.bash['wget *|*bash*'], 'ask')
 })
 
 test('OpenCode uses inline config content so permissions override project config', () => {

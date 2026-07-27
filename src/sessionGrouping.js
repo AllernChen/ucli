@@ -1,7 +1,5 @@
-function sessionTimestamp(session) {
+function sessionCreatedTimestamp(session) {
   return Number(
-    session.lastActivityTs ||
-    session.updatedAt ||
     session.createdAt ||
     session.startedAt ||
     0
@@ -72,7 +70,7 @@ export function groupSessionsByProject(sessions = [], adapters = []) {
       project.cliById.set(adapterId, cli)
     }
 
-    const latestAt = sessionTimestamp(session)
+    const latestAt = sessionCreatedTimestamp(session)
     project.count += 1
     project.latestAt = Math.max(project.latestAt, latestAt)
     cli.sessions.push({ session, latestAt, order: sessionOrder })

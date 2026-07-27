@@ -6,6 +6,7 @@ import { PermissionEngine } from './permission/engine.js'
 import { startHookServer } from './permission/hookServer.js'
 import { describeBlacklist } from './permission/blacklist.js'
 import { classify, toClassifierInput, parsePattern } from './permission/classifier.js'
+import { DEFAULT_RULESET, upgradeDefaultRuleset } from './permission/defaultRules.js'
 import { claudeDescriptor } from './adapters/claudeAdapter.js'
 import { codexDescriptor } from './adapters/codexAdapter.js'
 import { openCodeDescriptor } from './adapters/openCodeAdapter.js'
@@ -24,25 +25,6 @@ import {
   operationTypeForTool,
   shouldShowApprovalNotification
 } from './approvalNotification.js'
-
-const DEFAULT_RULESET = {
-  id: 'default',
-  name: '默认规则集',
-  deny: [],
-  highRisk: [
-    'Bash(rm:*)', 'Bash(rmdir:*)', 'Bash(git push:*)', 'Bash(git reset --hard:*)',
-    'Bash(git clean -fd:*)', 'Bash(npm publish:*)', 'Bash(docker rm:*)', 'Bash(docker rmi:*)',
-    'Bash(docker system prune:*)', 'Bash(sudo:*)', 'Bash(chmod:*)',
-    'Bash(re:curl\\s.*\\|\\s*(sh|bash))', 'Bash(re:wget\\s.*\\|\\s*(sh|bash))',
-    'Write(.env*)', 'Edit(.env*)', 'Write(~/.ssh/**)', 'Edit(~/.ssh/**)',
-    'Write(~/.aws/**)', 'Edit(~/.gitconfig)'
-  ],
-  allow: [
-    'Bash(ls:*)', 'Bash(cat:*)', 'Bash(pwd:*)', 'Bash(git status:*)',
-    'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(echo:*)',
-    'Read(*)'
-  ]
-}
 
 const DEFAULT_SETTINGS = {
   defaultTier: TIER.SAFETY_RULES,
@@ -115,6 +97,11 @@ export function createOrchestrator() {
     const dbRules = db.getRules()
     if (Object.keys(dbRules).length) {
       rulesets = dbRules
+      const upgradedDefault = upgradeDefaultRuleset(rulesets.default)
+      if (upgradedDefault !== rulesets.default) {
+        rulesets = { ...rulesets, default: upgradedDefault }
+        db.saveRules(rulesets)
+      }
     } else {
       db.saveRules(rulesets)
     }

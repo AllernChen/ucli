@@ -24,9 +24,9 @@ test('normalizes equivalent project paths without merging case-sensitive Unix pa
 
 test('groups sessions by project and adapter in configured adapter order', () => {
   const groups = groupSessionsByProject([
-    { id: 'codex-1', adapterId: 'codex', cwd: 'F:\\Projects\\UCLI', updatedAt: 20 },
-    { id: 'claude-1', adapterId: 'claude', cwd: 'f:/projects/ucli/', updatedAt: 10 },
-    { id: 'other-1', adapterId: 'custom', cwd: '/work/other', updatedAt: 30 }
+    { id: 'codex-1', adapterId: 'codex', cwd: 'F:\\Projects\\UCLI', createdAt: 20 },
+    { id: 'claude-1', adapterId: 'claude', cwd: 'f:/projects/ucli/', createdAt: 10 },
+    { id: 'other-1', adapterId: 'custom', cwd: '/work/other', createdAt: 30 }
   ], adapters)
 
   assert.deepEqual(groups.map((group) => [group.name, group.count]), [
@@ -37,11 +37,11 @@ test('groups sessions by project and adapter in configured adapter order', () =>
   assert.equal(groups[0].cliGroups[0].displayName, 'custom')
 })
 
-test('sorts projects and sessions by their most recent available activity', () => {
+test('sorts projects and sessions by creation time without reacting to activity updates', () => {
   const groups = groupSessionsByProject([
-    { id: 'old', adapterId: 'claude', cwd: '/work/a', lastActivityTs: 10, updatedAt: 100 },
-    { id: 'new', adapterId: 'claude', cwd: '/work/a', updatedAt: 20 },
-    { id: 'recent-project', adapterId: 'codex', cwd: '/work/b', createdAt: 30 },
+    { id: 'old', adapterId: 'claude', cwd: '/work/a', createdAt: 10, lastActivityTs: 1000, updatedAt: 1000 },
+    { id: 'new', adapterId: 'claude', cwd: '/work/a', createdAt: 20, updatedAt: 20 },
+    { id: 'recent-project', adapterId: 'codex', cwd: '/work/b', createdAt: 30, lastActivityTs: 1 },
     { id: 'no-project', adapterId: 'codex', cwd: '', startedAt: 5 }
   ], adapters)
 
