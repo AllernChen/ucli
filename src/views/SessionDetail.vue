@@ -630,6 +630,13 @@ function clearPane(i) {
   panes.value[i].term?.clear()
   sessions.setWorkbenchPane(i, null)
   unsubscribePane(i)
+  // Auto-resize: avoid empty black panes
+  const filled = panes.value.filter(p => p.sessionId).length
+  if (splitCount.value === 4 && filled < 3) {
+    splitCount.value = filled >= 2 ? 2 : 1
+  } else if (splitCount.value === 2 && filled < 2) {
+    splitCount.value = 1
+  }
 }
 async function deleteSessionById(id) {
   if (!id) return
