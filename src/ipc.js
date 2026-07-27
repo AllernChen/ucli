@@ -16,6 +16,7 @@ export const ipc = {
   // dialog
   pickDirectory: () => u.pickDirectory(),
   openFolder: (dirPath) => u.openFolder(dirPath),
+  openExternal: (url) => u.openExternal(url),
   scanClaudeSessions: (cwd) => u.scanClaudeSessions(cwd),
   discoverSessions: (cwd) => u.discoverSessions(cwd),
   // sessions

@@ -787,6 +787,13 @@ export function createOrchestrator() {
         return true
       } catch { return false }
     })
+    ipcMain.handle('shell:open-external', async (_e, url) => {
+      if (!url) return false
+      try {
+        await shell.openExternal(url)
+        return true
+      } catch { return false }
+    })
 
     // Discover all CLI sessions for a cwd, grouped by adapter type.
     // Returns { claude: [...], codex: [...] }

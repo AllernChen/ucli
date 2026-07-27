@@ -425,6 +425,37 @@ function initPaneTerminal(i) {
     navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
   }, { capture: true })
 
+  // Clickable links: detect http/https URLs and open in default browser.
+  // Uses registerLinkProvider (v6 API) — registerLinkMatcher was removed in @xterm/xterm.
+  const linkProviderDisposable = term.registerLinkProvider({
+    provideLinks: (bufferLineNumber, cb) => {
+      const line = term.buffer.active.getLine(bufferLineNumber)
+      if (!line) { cb(undefined); return }
+      // Build the full line text from buffer cells
+      let text = ''
+      for (let x = 0; x < line.length; x++) {
+        const cell = line.getCell(x)
+        if (cell) text += cell.getChars()
+      }
+      const re = /https?:\/\/[^\s<>"']+/g
+      const links = []
+      let m
+      while ((m = re.exec(text)) !== null) {
+        links.push({
+          range: {
+            start: { x: m.index + 1, y: bufferLineNumber + 1 },
+            end:   { x: m.index + m[0].length + 1, y: bufferLineNumber + 1 }
+          },
+          text: m[0],
+          activate: (_e, uri) => ipc.openExternal(uri),
+          hover:    (_e, uri) => { term.element.title = uri },
+          leave:    ()        => { term.element.title = '' }
+        })
+      }
+      cb(links.length ? links : undefined)
+    }
+  })
+
   // Custom key handler for copy/paste
   term.attachCustomKeyEventHandler((e) => {
     if (e.type === 'keydown' && e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -472,16 +503,19 @@ function initPaneTerminal(i) {
   panes.value[i].term = term
   panes.value[i].fitAddon = fitAddon
   panes.value[i].resizeObserver = resizeObserver
+  panes.value[i].linkProviderDisposable = linkProviderDisposable
 }
 
 function destroyPaneTerminal(i) {
   const p = panes.value[i]
   p?.resizeObserver?.disconnect()
+  p?.linkProviderDisposable?.dispose()
   if (p?.term) {
     p.term.dispose()
     p.term = null
     p.fitAddon = null
     p.resizeObserver = null
+    p.linkProviderDisposable = null
   }
 }
 
