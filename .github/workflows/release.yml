@@ -16,7 +16,7 @@ jobs:
       matrix:
         include:
           - platform: macOS
-            os: macos-13
+            os: macos-15-intel
             dist_command: npm run dist:mac
             verify_command: npm run verify:release -- --platform darwin --arch x64
             artifact_name: release-macos
