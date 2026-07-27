@@ -88,7 +88,7 @@ function matchOne(parsed, { tool, command, path, host }) {
   if (parsed.kind === 'prefix') {
     if (!command) return false
     // Match if the command starts with the prefix (as a leading command fragment).
-    return command.trim().startsWith(parsed.spec)
+    return command.trim().toLowerCase().startsWith(parsed.spec.toLowerCase())
   }
   if (parsed.kind === 'regex') {
     const re = new RegExp(parsed.spec, 'i')
@@ -101,7 +101,7 @@ function matchOne(parsed, { tool, command, path, host }) {
   if (parsed.kind === 'glob') {
     if (!path) return false
     const normalized = expandHome(path).replace(/\\/g, '/')
-    const re = globToRegex(parsed.spec)
+    const re = globToRegex(expandHome(parsed.spec))
     const base = normalized.split('/').pop()
     // Match against the full path (for ~/... style globs) or the basename
     // (for relative globs like `.env*` or `Read(*)`).

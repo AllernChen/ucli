@@ -64,11 +64,17 @@ function toolRules(permission, tool) {
   return rules
 }
 
-function mappedPattern(parsed) {
-  if (parsed.kind === 'prefix') return `${parsed.spec}*`
-  if (parsed.kind === 'glob') return parsed.spec.replace(/\\/g, '/')
-  if (parsed.kind === 'host') return `*${parsed.spec}*`
-  return null
+const REGEX_GLOB_TRANSLATIONS = new Map([
+  ['curl\\s.*\\|\\s*(sh|bash)', ['curl *|*sh*', 'curl *|*bash*']],
+  ['wget\\s.*\\|\\s*(sh|bash)', ['wget *|*sh*', 'wget *|*bash*']]
+])
+
+function mappedPatterns(parsed) {
+  if (parsed.kind === 'prefix') return [`${parsed.spec}*`]
+  if (parsed.kind === 'glob') return [parsed.spec.replace(/\\/g, '/')]
+  if (parsed.kind === 'host') return [`*${parsed.spec}*`]
+  if (parsed.kind === 'regex') return REGEX_GLOB_TRANSLATIONS.get(parsed.spec) || []
+  return []
 }
 
 function applyRule(permission, raw, action) {
@@ -76,15 +82,15 @@ function applyRule(permission, raw, action) {
   if (!parsed) return
 
   const tool = TOOL_NAMES[parsed.tool.toLowerCase()]
-  const pattern = mappedPattern(parsed)
-  if (tool && pattern) {
-    setLast(toolRules(permission, tool), pattern, action)
+  const patterns = mappedPatterns(parsed)
+  if (tool && patterns.length) {
+    for (const pattern of patterns) setLast(toolRules(permission, tool), pattern, action)
     return
   }
 
-  if (parsed.tool === '*' && pattern) {
+  if (parsed.tool === '*' && patterns.length) {
     for (const name of ['read', 'edit']) {
-      setLast(toolRules(permission, name), pattern, action)
+      for (const pattern of patterns) setLast(toolRules(permission, name), pattern, action)
     }
     return
   }
@@ -118,7 +124,7 @@ export function buildOpenCodePermission(tier, ruleset = {}) {
   }
 
   if (tier === TIER.SAFETY_RULES) {
-    permission.external_directory = 'ask'
+    permission.external_directory = 'allow'
     permission.doom_loop = 'ask'
     for (const rule of ruleset.allow || []) applyRule(permission, rule, 'allow')
     for (const rule of ruleset.highRisk || []) applyRule(permission, rule, 'ask')
