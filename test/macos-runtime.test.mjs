@@ -44,7 +44,9 @@ test('macOS GUI keeps its current PATH if login shell discovery fails', () => {
   assert.equal(env.PATH, '/usr/bin:/bin')
 })
 
-test('macOS packaging makes node-pty spawn helpers executable', async (t) => {
+test('macOS packaging makes node-pty spawn helpers executable', {
+  skip: process.platform !== 'darwin'
+}, async (t) => {
   const appRoot = await mkdtemp(path.join(os.tmpdir(), 'ucli-node-pty-'))
   t.after(() => rm(appRoot, { recursive: true, force: true }))
   const helper = path.join(
