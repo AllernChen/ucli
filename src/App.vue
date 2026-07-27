@@ -83,7 +83,8 @@ import ucliLogo from '../resources/icons/ucli.png'
 const route = useRoute()
 const router = useRouter()
 const sessions = useSessionsStore()
-const navCollapsed = ref(false)
+const navCollapsed = ref(sessions.workbench.navCollapsed)
+watch(navCollapsed, (v) => sessions.setNavCollapsed(v))
 
 const selectedKeys = ref([route.path])
 watch(() => route.path, (p) => {
@@ -109,6 +110,7 @@ onMounted(async () => {
   // Load persisted workbench state to decide initial route
   await sessions.init()
   await sessions.loadWorkbench()
+  navCollapsed.value = sessions.workbench.navCollapsed // sync after load
   const hasSavedPanes = sessions.workbench.paneSessionIds.some(id => id != null)
   if (hasSavedPanes) {
     router.replace('/session')
