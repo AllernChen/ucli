@@ -458,13 +458,6 @@ function initPaneTerminal(i) {
     if ((e.ctrlKey && (e.key === 'v' || e.key === 'V'))) {
       return false
     }
-    // Ctrl+Z: send readline undo (Ctrl+/) to revert the last edit in the
-    // current input line — e.g. undo a paste or a bulk deletion.
-    if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) {
-      const sid = panes.value[i]?.sessionId
-      if (sid) window.ucli.sendTerminalInput(sid, '\x1f')
-      return false
-    }
     return true
   })
 
