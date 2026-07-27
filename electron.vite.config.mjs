@@ -1,6 +1,9 @@
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
+import { readFileSync } from 'fs'
+
+const packageVersion = JSON.parse(readFileSync(resolve('package.json'), 'utf8')).version
 
 // electron-vite builds three targets:
 //   main     -> out/main/index.js   (Node/Electron main process, bundled CJS)
@@ -25,6 +28,9 @@ export default defineConfig({
   },
   renderer: {
     root: resolve('src'),
+    define: {
+      __UCLI_VERSION__: JSON.stringify(packageVersion)
+    },
     build: {
       rollupOptions: {
         input: { index: resolve('src/index.html') }

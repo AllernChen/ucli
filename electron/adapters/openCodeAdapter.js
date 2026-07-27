@@ -124,7 +124,7 @@ export function buildOpenCodePermission(tier, ruleset = {}) {
   }
 
   if (tier === TIER.SAFETY_RULES) {
-    permission.external_directory = 'allow'
+    permission.external_directory = { '*': 'allow' }
     permission.doom_loop = 'ask'
     for (const rule of ruleset.allow || []) applyRule(permission, rule, 'allow')
     for (const rule of ruleset.highRisk || []) applyRule(permission, rule, 'ask')
