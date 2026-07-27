@@ -40,7 +40,7 @@
       <div :class="['sider-footer', { collapsed: navCollapsed }]">
         <a-badge v-if="navCollapsed && waitingCount > 0" :count="waitingCount" />
         <a-tag v-else-if="waitingCount > 0" color="orange">待确认 {{ waitingCount }}</a-tag>
-        <span v-if="!navCollapsed" class="version">v0.3.1</span>
+        <span v-if="!navCollapsed" class="version">v{{ appVersion }}</span>
       </div>
     </a-layout-sider>
     <a-layout class="main-layout">
@@ -93,6 +93,7 @@ const route = useRoute()
 const router = useRouter()
 const sessions = useSessionsStore()
 const navCollapsed = ref(false)
+const appVersion = __UCLI_VERSION__
 
 const selectedKeys = ref([route.path])
 watch(() => route.path, (p) => {

@@ -32,7 +32,7 @@ test('OpenCode safety rules allow trusted commands and ask for risky commands', 
   assert.equal(permission.bash['git push*'], 'ask')
   assert.equal(permission.edit['~/.ssh/**'], 'deny')
   assert.equal(permission.bash['rm -rf /*'], 'deny')
-  assert.equal(permission.external_directory, 'allow')
+  assert.deepEqual(permission.external_directory, { '*': 'allow' })
 })
 
 test('OpenCode always-agree still enforces the hard blacklist', () => {
