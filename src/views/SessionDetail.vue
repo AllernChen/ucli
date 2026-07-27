@@ -458,6 +458,12 @@ function initPaneTerminal(i) {
     if ((e.ctrlKey && (e.key === 'v' || e.key === 'V'))) {
       return false
     }
+    // Ctrl+Z: send /undo command to the AI CLI
+    if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) {
+      const sid = panes.value[i]?.sessionId
+      if (sid) window.ucli.sendTerminalInput(sid, '/undo\n')
+      return false
+    }
     return true
   })
 
