@@ -684,7 +684,7 @@ function clearPane(i) {
 
   if (activePane.value >= newCount) activePane.value = 0
 
-  // After DOM flush, subscribe terminals + FLIP animate
+  // Subscribe terminal output (doesn't affect layout)
   nextTick(() => {
     for (let j = 0; j < filled; j++) {
       subscribePaneTerminal(j, remaining[j])
@@ -697,33 +697,43 @@ function clearPane(i) {
         ipc.attachTerminal(remaining[j])
       }
     }
+  })
 
-    // FLIP animation: panes slide from old position to new position
+  // FLIP animation: defer to rAF so browser fully lays out the new grid,
+  // then measure new positions, jump to old positions, and animate to new.
+  requestAnimationFrame(() => {
+    const deltas = []
     for (let j = 0; j < newCount; j++) {
       const el = paneRootRefs[j]
       if (el && oldRects[j]) {
         const nr = el.getBoundingClientRect()
-        const dx = oldRects[j].left - nr.left
-        const dy = oldRects[j].top - nr.top
-        if (dx !== 0 || dy !== 0) {
-          el.style.setProperty('transition', 'none', 'important')
-          el.style.transform = `translate(${dx}px, ${dy}px)`
-          el.style.willChange = 'transform'
-          el.dataset.animating = '1'
-        }
+        deltas[j] = { dx: oldRects[j].left - nr.left, dy: oldRects[j].top - nr.top }
+      } else {
+        deltas[j] = null
       }
     }
-    // Force reflow then animate to identity
-    void document.body.offsetHeight
+    // Inverse transform: snap elements to their old visual position
     for (let j = 0; j < newCount; j++) {
-      const el = paneRootRefs[j]
-      if (el?.dataset.animating) {
+      const d = deltas[j]
+      if (d && (d.dx !== 0 || d.dy !== 0)) {
+        const el = paneRootRefs[j]
+        el.style.setProperty('transition', 'none', 'important')
+        el.style.transform = `translate(${d.dx}px, ${d.dy}px)`
+        el.style.willChange = 'transform'
+      }
+    }
+    // Force reflow so the inverse transforms are applied before we animate
+    void document.body.offsetHeight
+    // Animate to identity — browser interpolates the slide
+    for (let j = 0; j < newCount; j++) {
+      const d = deltas[j]
+      if (d && (d.dx !== 0 || d.dy !== 0)) {
+        const el = paneRootRefs[j]
         el.style.transition = 'transform 0.4s cubic-bezier(0.2, 0, 0, 1)'
         el.style.transform = 'translate(0, 0)'
-        delete el.dataset.animating
       }
     }
-    // Clean up transition style
+    // Clean up inline styles after animation
     setTimeout(() => {
       for (let j = 0; j < newCount; j++) {
         const el = paneRootRefs[j]
