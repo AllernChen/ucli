@@ -290,7 +290,7 @@ import { useSettingsStore } from '../stores/settings.js'
 import { matchesBinding } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { groupSessionsByProject } from '../sessionGrouping.js'
-import { nextSessionPaneIndex } from '../workbenchKeyboard.js'
+import { nextSessionPaneIndex, targetPaneForSessionAddition } from '../workbenchKeyboard.js'
 import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldSendClipboardPaste } from '../terminalKeybindings.js'
 import {
   reconcileSessionPanes,
@@ -473,6 +473,7 @@ function initPaneTerminal(i) {
 
   // Custom key handler for copy/paste and pane switching
   term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== 'keydown') return true
     const overrides = settings.keybindings || {}
 
     // Pane switching via configurable bindings
@@ -604,7 +605,7 @@ function switchSessionPane(direction = 1) {
 }
 
 function onWorkbenchKeydown(event) {
-  if (event.defaultPrevented) return
+  if (event.type !== 'keydown' || event.defaultPrevented) return
   const overrides = settings.keybindings || {}
   let direction = null
   if (matchesBinding('pane.switchNext', event, overrides)) direction = 1
@@ -694,24 +695,16 @@ function handleSessionClick(sessionId, event) {
 }
 
 async function addPaneForSession(sessionId) {
-  for (let i = 0; i < panes.value.length; i++) {
-    if (!panes.value[i].sessionId) {
-      activePane.value = i
-      assignToPane(sessionId)
-      return
-    }
+  let target = targetPaneForSessionAddition(panes.value, splitCount.value)
+  // Expand the layout only when no empty pane is available.
+  if (target.paneIndex < 0 && target.splitCount !== splitCount.value) {
+    splitCount.value = target.splitCount
+    await nextTick()
+    target = targetPaneForSessionAddition(panes.value, splitCount.value)
   }
-  // All panes full — expand layout
-  const next = splitCount.value === 1 ? 2 : 4
-  splitCount.value = next
-  await nextTick()
-  for (let i = 0; i < panes.value.length; i++) {
-    if (!panes.value[i].sessionId) {
-      activePane.value = i
-      assignToPane(sessionId)
-      return
-    }
-  }
+  if (target.paneIndex < 0) return
+  activePane.value = target.paneIndex
+  assignToPane(sessionId)
 }
 
 function clearPane(i) {

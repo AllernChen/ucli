@@ -46,6 +46,11 @@ test('matchesBinding returns false for non-matching key event', () => {
   assert.equal(matchesBinding('pane.switchNext', event), false)
 })
 
+test('matchesBinding safely rejects a keyboard binding without a key value', () => {
+  const event = { ctrlKey: false, shiftKey: false, altKey: false, metaKey: false }
+  assert.equal(matchesBinding('pane.switchNext', event), false)
+})
+
 test('matchesBinding is case-insensitive for key matching', () => {
   const event = { key: 'c', ctrlKey: true, shiftKey: true, altKey: false, metaKey: false }
   assert.equal(matchesBinding('terminal.copy', event), true)

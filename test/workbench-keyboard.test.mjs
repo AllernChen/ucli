@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { nextSessionPaneIndex } from '../src/workbenchKeyboard.js'
+import {
+  nextSessionPaneIndex,
+  targetPaneForSessionAddition
+} from '../src/workbenchKeyboard.js'
 import {
   reconcileSessionPanes,
   resolveSessionFocusPane,
@@ -30,6 +33,45 @@ test('Shift+Tab cycles assigned session panes in reverse', () => {
 test('a single already-active session leaves Tab to the CLI', () => {
   assert.equal(nextSessionPaneIndex([{ sessionId: 'claude-a' }], 0), null)
   assert.equal(nextSessionPaneIndex([{ sessionId: null }], 0), null)
+})
+
+test('session assignment uses an empty pane before expanding the layout', () => {
+  assert.deepEqual(targetPaneForSessionAddition([
+    { sessionId: 'claude-a' },
+    { sessionId: null }
+  ], 2), {
+    paneIndex: 1,
+    splitCount: 2
+  })
+})
+
+test('session assignment expands a full layout from one to two panes', () => {
+  assert.deepEqual(targetPaneForSessionAddition([{ sessionId: 'claude-a' }], 1), {
+    paneIndex: -1,
+    splitCount: 2
+  })
+})
+
+test('session assignment expands a full layout from two to four panes', () => {
+  assert.deepEqual(targetPaneForSessionAddition([
+    { sessionId: 'claude-a' },
+    { sessionId: 'codex-b' }
+  ], 2), {
+    paneIndex: -1,
+    splitCount: 4
+  })
+})
+
+test('session assignment does not expand a full four-pane layout', () => {
+  assert.deepEqual(targetPaneForSessionAddition([
+    { sessionId: 'a' },
+    { sessionId: 'b' },
+    { sessionId: 'c' },
+    { sessionId: 'd' }
+  ], 4), {
+    paneIndex: -1,
+    splitCount: 4
+  })
 })
 
 test('changing split count preserves existing terminal pane instances', () => {
