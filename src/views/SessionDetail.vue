@@ -747,7 +747,6 @@ function compactPanes(omitIndex) {
   sessions.workbench.activePane = 0
   sessions.saveWorkbench()
   panes.value = next.paneSessionIds.map((sessionId, index) => ({ id: `pane-${index}`, sessionId }))
-  activePane.value = 0
   nextTick(() => createPanes(next.splitCount))
 }
 
