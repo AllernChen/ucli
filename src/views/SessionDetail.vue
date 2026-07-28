@@ -299,6 +299,7 @@ import {
 
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 
 defineOptions({ name: 'SessionDetail' })
@@ -468,6 +469,12 @@ function initPaneTerminal(i) {
   term.open(el)
   fitAddon.fit()
 
+  // Clickable links — Ctrl+Click / Cmd+Click opens URL in default browser
+  const webLinksAddon = new WebLinksAddon((e, uri) => {
+    if (e.ctrlKey || e.metaKey) ipc.openExternal(uri)
+  })
+  term.loadAddon(webLinksAddon)
+
   // Custom key handler for copy/paste
   term.attachCustomKeyEventHandler((e) => {
     if (e.type === 'keydown' && e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -521,16 +528,19 @@ function initPaneTerminal(i) {
   panes.value[i].term = term
   panes.value[i].fitAddon = fitAddon
   panes.value[i].resizeObserver = resizeObserver
+  panes.value[i].webLinksAddon = webLinksAddon
 }
 
 function destroyPaneTerminal(i) {
   const p = panes.value[i]
+  p?.webLinksAddon?.dispose()
   p?.resizeObserver?.disconnect()
   if (p?.term) {
     p.term.dispose()
     p.term = null
     p.fitAddon = null
     p.resizeObserver = null
+    p.webLinksAddon = null
   }
 }
 

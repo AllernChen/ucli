@@ -1,4 +1,4 @@
-import { app, ipcMain, dialog, Notification } from 'electron'
+import { app, ipcMain, dialog, shell, Notification } from 'electron'
 import { join } from 'path'
 import { readFileSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
@@ -982,6 +982,16 @@ export function createOrchestrator() {
         log('IPC workbench:save — db is NULL, cannot save!')
       }
       return true
+    })
+
+    ipcMain.handle('shell:open-external', async (_e, url) => {
+      try {
+        await shell.openExternal(url)
+        return true
+      } catch (err) {
+        log('shell:open-external failed for', url, err)
+        return false
+      }
     })
   }
 
