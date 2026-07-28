@@ -20,6 +20,10 @@ const api = {
   listAdapters: () => ipcRenderer.invoke('adapters:list'),
   listCliTools: () => ipcRenderer.invoke('cli-tools:list'),
   runCliToolAction: (id, action) => ipcRenderer.invoke('cli-tools:run', id, action),
+  getUpdateState: () => ipcRenderer.invoke('update:get-state'),
+  checkForUpdates: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
   getDiagnostics: () => ipcRenderer.invoke('diagnostics:get'),
   exportDiagnostics: () => ipcRenderer.invoke('diagnostics:export'),
 

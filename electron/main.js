@@ -1,4 +1,5 @@
-import { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, screen } from 'electron'
+import { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, screen, ipcMain } from 'electron'
+import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { dirname } from 'path'
@@ -10,6 +11,7 @@ import { applyMacLoginPath } from './macEnvironment.js'
 import { installOutputErrorGuards } from './brokenPipeGuard.js'
 import { resolveWindowBounds } from './windowState.js'
 import { openAllowedExternalUrl } from './externalLinks.js'
+import { createUpdateService } from './updateService.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -43,6 +45,7 @@ let orchestrator = null
 let isQuitting = false
 let quitReady = false
 let shutdownPromise = null
+let updateService = null
 
 function iconPath(filename) {
   const root = app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources')
@@ -151,6 +154,25 @@ function createWindow() {
   }
 }
 
+function fallbackUpdateState() {
+  return {
+    status: 'unsupported',
+    currentVersion: app.getVersion(),
+    availableVersion: null,
+    releaseDate: null,
+    releaseNotes: '',
+    progressPercent: null,
+    error: ''
+  }
+}
+
+function registerUpdateIpc() {
+  ipcMain.handle('update:get-state', () => updateService?.getState() || fallbackUpdateState())
+  ipcMain.handle('update:check', () => updateService?.check() || fallbackUpdateState())
+  ipcMain.handle('update:download', () => updateService?.download() || fallbackUpdateState())
+  ipcMain.handle('update:install', () => updateService?.install() || false)
+}
+
 app.whenReady().then(async () => {
   // The orchestrator owns everything: permission engine, the localhost hook
   // server (that the bundled Claude PreToolUse runner calls back into), the
@@ -166,6 +188,16 @@ app.whenReady().then(async () => {
     console.error('Failed to create tray:', error)
   }
   createWindow()
+  updateService = createUpdateService({
+    updater: autoUpdater,
+    appVersion: app.getVersion(),
+    isPackaged: app.isPackaged,
+    isPortable: Boolean(process.env.PORTABLE_EXECUTABLE_FILE),
+    platform: process.platform,
+    onStateChange: (state) => mainWindow?.webContents.send('update:state', state)
+  })
+  registerUpdateIpc()
+  updateService.start(3000)
   orchestrator.setMainWindow(mainWindow)
   const recoveryInfo = orchestrator.getPersistenceRecovery()
   if (recoveryInfo) {
