@@ -9,6 +9,7 @@
 ### Added
 
 - Settings now provides a safe support-diagnostics report with UCLI runtime, AI CLI availability, and local persistence status.
+- Packaged installer builds can manually check, download, and install signed GitHub Release updates from Settings; portable and development builds remain manual-download only.
 
 ### Security
 
