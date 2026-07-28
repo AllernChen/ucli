@@ -16,9 +16,12 @@ test('rejects malformed and non-web external URLs', () => {
 
 test('does not invoke the external opener for a rejected URL', async () => {
   let calls = 0
-  const opened = await openAllowedExternalUrl('file:///C:/secret.txt', async () => { calls += 1 })
+  const openExternal = async () => { calls += 1 }
+  const opened = await openAllowedExternalUrl('file:///C:/secret.txt', openExternal)
+  const customProtocolOpened = await openAllowedExternalUrl('ucli://local-command', openExternal)
 
   assert.equal(opened, false)
+  assert.equal(customProtocolOpened, false)
   assert.equal(calls, 0)
 })
 
