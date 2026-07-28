@@ -46,6 +46,8 @@ export const ipc = {
   // workbench
   getWorkbench: () => u.getWorkbench(),
   saveWorkbench: (state) => u.saveWorkbench(state),
+  // shell
+  openExternal: (url) => u.openExternal(url),
   // events
   on: (channel, handler) => u.on(channel, handler)
 }

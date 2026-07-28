@@ -63,6 +63,9 @@ const api = {
   getWorkbench: () => ipcRenderer.invoke('workbench:get'),
   saveWorkbench: (state) => ipcRenderer.invoke('workbench:save', state),
 
+  // ---- shell ----
+  openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
+
   // ---- events ----
   on: (channel, handler) => {
     const wrapped = (_event, payload) => handler(payload)

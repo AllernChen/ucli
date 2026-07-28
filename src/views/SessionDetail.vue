@@ -292,6 +292,7 @@ import { ipc } from '../ipc.js'
 import { groupSessionsByProject } from '../sessionGrouping.js'
 import { nextSessionPaneIndex, targetPaneForSessionAddition } from '../workbenchKeyboard.js'
 import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldHandleTerminalPaste } from '../terminalKeybindings.js'
+import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import {
   reconcileSessionPanes,
   resolveSessionFocusPane,
@@ -301,6 +302,7 @@ import {
 
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 
 defineOptions({ name: 'SessionDetail' })
@@ -471,6 +473,12 @@ function initPaneTerminal(i) {
   term.open(el)
   fitAddon.fit()
 
+  // Clickable links — Ctrl+Click / Cmd+Click opens URL in default browser
+  const webLinksAddon = new WebLinksAddon((e, uri) => {
+    if (shouldOpenTerminalLink(e)) ipc.openExternal(uri)
+  })
+  term.loadAddon(webLinksAddon)
+
   // Custom key handler for copy/paste and pane switching
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true
@@ -536,16 +544,19 @@ function initPaneTerminal(i) {
   panes.value[i].term = term
   panes.value[i].fitAddon = fitAddon
   panes.value[i].resizeObserver = resizeObserver
+  panes.value[i].webLinksAddon = webLinksAddon
 }
 
 function destroyPaneTerminal(i) {
   const p = panes.value[i]
+  p?.webLinksAddon?.dispose()
   p?.resizeObserver?.disconnect()
   if (p?.term) {
     p.term.dispose()
     p.term = null
     p.fitAddon = null
     p.resizeObserver = null
+    p.webLinksAddon = null
   }
 }
 
