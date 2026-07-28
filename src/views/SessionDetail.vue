@@ -293,6 +293,7 @@ import { groupSessionsByProject } from '../sessionGrouping.js'
 import { nextSessionPaneIndex, targetPaneForSessionAddition } from '../workbenchKeyboard.js'
 import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldHandleTerminalPaste } from '../terminalKeybindings.js'
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
+import { compactPaneSessionIds } from '../paneCompaction.js'
 import {
   reconcileSessionPanes,
   resolveSessionFocusPane,
@@ -718,10 +719,8 @@ async function addPaneForSession(sessionId) {
 }
 
 function clearPane(i) {
-  panes.value[i].sessionId = null
-  panes.value[i].term?.clear()
-  sessions.setWorkbenchPane(i, null)
-  unsubscribePane(i)
+  if (!panes.value[i]?.sessionId) return
+  compactPanes(i)
 }
 async function stopPane(i) {
   const sid = panes.value[i]?.sessionId
@@ -733,11 +732,23 @@ async function deletePane(i) {
   const sid = panes.value[i]?.sessionId
   if (!sid) return
   await sessions.deleteSession(sid)
-  panes.value[i].sessionId = null
-  panes.value[i].term?.clear()
-  sessions.setWorkbenchPane(i, null)
-  unsubscribePane(i)
+  compactPanes(i)
   message.success('会话已从 UCLI 移除，源会话和用量统计已保留')
+}
+
+function compactPanes(omitIndex) {
+  const next = compactPaneSessionIds(panes.value.map((pane) => pane.sessionId), omitIndex)
+  for (let i = 0; i < panes.value.length; i++) {
+    unsubscribePane(i)
+    destroyPaneTerminal(i)
+  }
+  sessions.workbench.splitCount = next.splitCount
+  sessions.workbench.paneSessionIds = [...next.paneSessionIds]
+  sessions.workbench.activePane = 0
+  sessions.saveWorkbench()
+  panes.value = next.paneSessionIds.map((sessionId, index) => ({ id: `pane-${index}`, sessionId }))
+  activePane.value = 0
+  nextTick(() => createPanes(next.splitCount))
 }
 
 function interruptPane(i) {
