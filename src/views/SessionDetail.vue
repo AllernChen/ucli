@@ -306,6 +306,7 @@ defineOptions({ name: 'SessionDetail' })
 const router = useRouter()
 const sessions = useSessionsStore()
 const sessionListHidden = ref(false)
+watch(sessionListHidden, (v) => sessions.setSessionListHidden(v))
 const fullscreenPane = ref(null)
 const gridFullscreen = ref(false)
 const paneGridRef = ref(null)
@@ -838,6 +839,7 @@ onDeactivated(deactivateWorkbench)
 onMounted(async () => {
   await sessions.init()
   await sessions.loadWorkbench()
+  sessionListHidden.value = sessions.workbench.sessionListHidden // sync after load
   const savedIds = sessions.workbench.paneSessionIds
   const count = sessions.workbench.splitCount || 1
   createPanes(count)
