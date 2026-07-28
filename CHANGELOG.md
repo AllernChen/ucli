@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-07-28
+
+### Added
+
+- Configurable workbench and terminal keyboard shortcuts, including Tab / Shift+Tab pane switching and Ctrl-click session-to-new-pane.
+- Ctrl-click (Windows/Linux) or Command-click (macOS) terminal web links, with main-process HTTP(S)-only external URL protection.
+- Persisted window bounds, maximized state, navigation collapse, and workbench session-list visibility.
+
+### Fixed
+
+- Restoring a window saved on a disconnected display now falls back to a visible default window.
+- Closing or removing a workbench pane now compacts remaining sessions safely and clears the persisted ID for a lone closed pane.
+- Preserved macOS paste behavior and disabled/legacy-cleared shortcut compatibility.
+
 ## [0.4.5] - 2026-07-27
 
 ### Fixed
