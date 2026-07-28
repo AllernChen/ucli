@@ -8,6 +8,7 @@ import { getDb } from './persistence/db.js'
 import { describeDatabaseRecovery } from './persistence/recoveryMessage.js'
 import { applyMacLoginPath } from './macEnvironment.js'
 import { installOutputErrorGuards } from './brokenPipeGuard.js'
+import { openAllowedExternalUrl } from './externalLinks.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -105,7 +106,7 @@ function createWindow() {
   })
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    openAllowedExternalUrl(url, (allowedUrl) => shell.openExternal(allowedUrl)).catch(() => {})
     return { action: 'deny' }
   })
 
