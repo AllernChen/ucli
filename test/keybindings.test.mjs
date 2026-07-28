@@ -62,6 +62,16 @@ test('a legacy cleared keyboard shortcut stays disabled after upgrade', () => {
   assert.equal(getBinding('pane.switchNext', overrides), null)
 })
 
+test('a legacy cleared session add-pane shortcut stays disabled after upgrade', () => {
+  const overrides = {
+    'session.addPane': { key: null, ctrl: false, shift: false, alt: false, meta: false }
+  }
+  const plainClick = { ctrlKey: false, shiftKey: false, altKey: false, metaKey: false }
+
+  assert.equal(getBinding('session.addPane', overrides), null)
+  assert.equal(matchesBinding('session.addPane', plainClick, overrides), false)
+})
+
 test('session add-pane bindings remain modifier-only when an old override includes a key', () => {
   const overrides = { 'session.addPane': { key: 'C', ctrl: true } }
   const click = { ctrlKey: true, shiftKey: false, altKey: false, metaKey: false }

@@ -43,7 +43,6 @@ export function getBinding(id, overrides = {}) {
   const override = overrides[id]
   if (override?.disabled) return null
   if (
-    id !== 'session.addPane' &&
     override?.key === null &&
     !override.ctrl &&
     !override.shift &&
