@@ -20,6 +20,8 @@ const api = {
   listAdapters: () => ipcRenderer.invoke('adapters:list'),
   listCliTools: () => ipcRenderer.invoke('cli-tools:list'),
   runCliToolAction: (id, action) => ipcRenderer.invoke('cli-tools:run', id, action),
+  getDiagnostics: () => ipcRenderer.invoke('diagnostics:get'),
+  exportDiagnostics: () => ipcRenderer.invoke('diagnostics:export'),
 
   // ---- dialog ----
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
