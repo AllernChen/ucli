@@ -15,6 +15,7 @@ import { TIER } from './adapters/cliAdapter.js'
 import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
+import { createDiagnosticsService } from './diagnosticsService.js'
 import { annotateImportedSessions, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
 import { listOpenCodeSessions } from './openCodeSessions.js'
 import {
@@ -46,6 +47,20 @@ export function createOrchestrator() {
   let persistenceRecovery = null
   const approvalNotifications = new Map()
   const completionNotifications = new Set()
+  const diagnostics = createDiagnosticsService({
+    getRuntime: () => ({
+      generatedAt: new Date().toISOString(),
+      appVersion: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+      electronVersion: process.versions.electron,
+      nodeVersion: process.versions.node
+    }),
+    inspectCliTools,
+    getPersistence: () => ({ available: Boolean(getDb()), recoveryInfo: persistenceRecovery }),
+    showSaveDialog: (options) => dialog.showSaveDialog(mainWindow, options),
+    writeFile: writeFileSync
+  })
 
   // ---- DB init (async — callers must await) ----
   const dbPath = join(app.getPath('userData'), 'ucli.db')
@@ -763,6 +778,8 @@ export function createOrchestrator() {
     )
     ipcMain.handle('cli-tools:list', () => inspectCliTools())
     ipcMain.handle('cli-tools:run', (_e, id, action) => runCliToolAction(id, action))
+    ipcMain.handle('diagnostics:get', () => diagnostics.getReport())
+    ipcMain.handle('diagnostics:export', () => diagnostics.exportReport())
 
     ipcMain.handle('dialog:pick-directory', async () => {
       const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })

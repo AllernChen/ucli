@@ -105,6 +105,43 @@
       </a-modal>
     </a-card>
 
+    <a-card title="软件更新" class="settings-card">
+      <div class="update-toolbar">
+        <span class="muted">当前版本：v{{ updateState?.currentVersion || '—' }}</span>
+        <a-tag :color="updateState?.status === 'error' ? 'red' : updateState?.status === 'downloaded' ? 'green' : 'blue'">
+          {{ updateStatusLabel(updateState?.status) }}
+        </a-tag>
+      </div>
+      <p v-if="updateState?.availableVersion">可更新至：v{{ updateState.availableVersion }}</p>
+      <a-alert
+        v-if="updateState?.status === 'unsupported'"
+        type="info"
+        show-icon
+        message="当前版本不支持应用内更新，请从 GitHub Release 下载新版本。"
+      />
+      <pre v-if="updateState?.releaseNotes" class="release-notes">{{ visibleReleaseNotes(updateState.releaseNotes) }}</pre>
+      <a-space>
+        <a-button :loading="updateBusy" @click="checkForUpdates">检查更新</a-button>
+        <a-button v-if="updateState?.status === 'available'" type="primary" :loading="updateBusy" @click="downloadUpdate">下载更新</a-button>
+        <a-button v-if="updateState?.status === 'downloaded'" type="primary" :loading="updateBusy" @click="installUpdate">重启并安装</a-button>
+      </a-space>
+    </a-card>
+
+    <a-card title="支持诊断" class="settings-card">
+      <div class="diagnostics-toolbar">
+        <span class="muted">仅包含版本、CLI 可用性与本地数据状态，不包含对话内容或路径。</span>
+        <a-space>
+          <a-button size="small" :loading="diagnosticsLoading" @click="loadDiagnostics">刷新</a-button>
+          <a-button size="small" type="primary" :loading="diagnosticsExporting" @click="exportDiagnostics">导出 JSON</a-button>
+        </a-space>
+      </div>
+      <a-descriptions v-if="diagnostics" size="small" :column="1" bordered>
+        <a-descriptions-item label="UCLI">{{ diagnostics.application.version }}</a-descriptions-item>
+        <a-descriptions-item label="本地数据">{{ persistenceStatusLabel(diagnostics.persistence.status) }}</a-descriptions-item>
+        <a-descriptions-item label="CLI">{{ diagnosticCliSummary }}</a-descriptions-item>
+      </a-descriptions>
+    </a-card>
+
     <a-card title="关于" class="settings-card">
       <p>UCLI — 多 CLI 编排工作台</p>
       <p class="muted">集成 Claude Code、Codex 与 OpenCode 的卡片式编排 GUI，提供三档权限管控与使用统计。</p>
@@ -113,12 +150,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick, h } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, h } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useSettingsStore } from '../stores/settings.js'
 import { useSessionsStore } from '../stores/sessions.js'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
+import { formatCliDiagnosticSummary, persistenceStatusLabel } from '../diagnosticsPresentation.js'
+import { updateStatusLabel, visibleReleaseNotes } from '../updatePresentation.js'
 
 const settings = useSettingsStore()
 const sessions = useSessionsStore()
@@ -128,17 +167,27 @@ const cliTools = ref([])
 const detecting = ref(false)
 const runningTool = ref('')
 const lastCliResult = ref(null)
+const diagnostics = ref(null)
+const diagnosticsLoading = ref(false)
+const diagnosticsExporting = ref(false)
+const updateState = ref(null)
+const updateBusy = ref(false)
+let stopUpdateListener = null
 const lastCliOutput = computed(() => {
   const result = lastCliResult.value
   if (!result) return ''
   return [result.stdout, result.stderr].filter(Boolean).join('\n').trim()
 })
+const diagnosticCliSummary = computed(() => formatCliDiagnosticSummary(diagnostics.value?.cliTools || []))
 
 onMounted(async () => {
-  await Promise.all([settings.load(), sessions.init(), loadCliTools()])
+  stopUpdateListener = ipc.on('update:state', (state) => { updateState.value = state })
+  await Promise.all([settings.load(), sessions.init(), loadCliTools(), loadDiagnostics(), loadUpdateState()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
 })
+
+onUnmounted(() => stopUpdateListener?.())
 
 async function loadCliTools() {
   detecting.value = true
@@ -148,6 +197,68 @@ async function loadCliTools() {
     message.error('CLI 检测失败：' + (e?.message || e))
   } finally {
     detecting.value = false
+  }
+}
+
+async function loadDiagnostics() {
+  diagnosticsLoading.value = true
+  try {
+    diagnostics.value = await ipc.getDiagnostics()
+  } catch (e) {
+    message.error('读取诊断信息失败：' + (e?.message || e))
+  } finally {
+    diagnosticsLoading.value = false
+  }
+}
+
+async function loadUpdateState() {
+  try {
+    updateState.value = await ipc.getUpdateState()
+  } catch {
+    message.error('读取更新状态失败')
+  }
+}
+
+async function runUpdateAction(action, fallbackMessage) {
+  updateBusy.value = true
+  try {
+    updateState.value = await action()
+  } catch {
+    message.error(fallbackMessage)
+  } finally {
+    updateBusy.value = false
+  }
+}
+
+function checkForUpdates() {
+  return runUpdateAction(() => ipc.checkForUpdates(), '检查更新失败')
+}
+
+function downloadUpdate() {
+  return runUpdateAction(() => ipc.downloadUpdate(), '下载更新失败')
+}
+
+async function installUpdate() {
+  updateBusy.value = true
+  try {
+    const started = await ipc.installUpdate()
+    if (!started) message.error('更新尚未准备就绪')
+  } catch {
+    message.error('启动安装失败')
+  } finally {
+    updateBusy.value = false
+  }
+}
+
+async function exportDiagnostics() {
+  diagnosticsExporting.value = true
+  try {
+    const result = await ipc.exportDiagnostics()
+    if (!result.canceled) message.success('诊断报告已导出')
+  } catch (e) {
+    message.error('导出诊断报告失败：' + (e?.message || e))
+  } finally {
+    diagnosticsExporting.value = false
   }
 }
 
@@ -269,6 +380,9 @@ async function resetBinding(id) {
 .cli-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .cli-path { color: #8c8c8c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cli-error { color: #bfbfbf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diagnostics-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.update-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.release-notes { margin: 12px 0; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
 .result-command, :global(.confirm-command) { font-family: 'Cascadia Code', Consolas, monospace; }
 .result-command { margin-bottom: 6px; color: #262626; }
 .result-output { margin: 0; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; }

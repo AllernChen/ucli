@@ -13,6 +13,12 @@ export const ipc = {
   listAdapters: () => u.listAdapters(),
   listCliTools: () => u.listCliTools(),
   runCliToolAction: (id, action) => u.runCliToolAction(id, action),
+  getUpdateState: () => u.getUpdateState(),
+  checkForUpdates: () => u.checkForUpdates(),
+  downloadUpdate: () => u.downloadUpdate(),
+  installUpdate: () => u.installUpdate(),
+  getDiagnostics: () => u.getDiagnostics(),
+  exportDiagnostics: () => u.exportDiagnostics(),
   // dialog
   pickDirectory: () => u.pickDirectory(),
   scanClaudeSessions: (cwd) => u.scanClaudeSessions(cwd),
