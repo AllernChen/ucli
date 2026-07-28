@@ -668,6 +668,17 @@ function clearPane(i) {
   panes.value[i].term?.clear()
   sessions.setWorkbenchPane(i, null)
   unsubscribePane(i)
+  scheduleAutoReduce()
+}
+function scheduleAutoReduce() {
+  nextTick(() => {
+    const filled = panes.value.filter(p => p.sessionId).length
+    if (splitCount.value === 4 && filled <= 2) {
+      splitCount.value = 2
+    } else if (splitCount.value === 2 && filled <= 1) {
+      splitCount.value = 1
+    }
+  })
 }
 async function stopPane(i) {
   const sid = panes.value[i]?.sessionId
@@ -683,6 +694,7 @@ async function deletePane(i) {
   panes.value[i].term?.clear()
   sessions.setWorkbenchPane(i, null)
   unsubscribePane(i)
+  scheduleAutoReduce()
   message.success('会话已从 UCLI 移除，源会话和用量统计已保留')
 }
 
