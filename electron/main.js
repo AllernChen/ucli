@@ -1,13 +1,14 @@
-import { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog } from 'electron'
+import { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, screen } from 'electron'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { dirname } from 'path'
-import { mkdirSync } from 'fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { createOrchestrator } from './orchestrator.js'
 import { getDb } from './persistence/db.js'
 import { describeDatabaseRecovery } from './persistence/recoveryMessage.js'
 import { applyMacLoginPath } from './macEnvironment.js'
 import { installOutputErrorGuards } from './brokenPipeGuard.js'
+import { resolveWindowBounds } from './windowState.js'
 import { openAllowedExternalUrl } from './externalLinks.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -72,11 +73,31 @@ function createTray() {
   return tray
 }
 
+function windowStatePath() {
+  return join(app.getPath('userData'), 'window-state.json')
+}
+
+function loadWindowState() {
+  try {
+    return JSON.parse(readFileSync(windowStatePath(), 'utf8'))
+  } catch { return {} }
+}
+
+function saveWindowState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  try {
+    const maximized = mainWindow.isMaximized()
+    const bounds = mainWindow.getNormalBounds()
+    writeFileSync(windowStatePath(), JSON.stringify({ maximized, ...bounds }))
+  } catch {}
+}
+
 function createWindow() {
   const windowTitle = app.isPackaged ? 'UCLI' : 'UCLI Dev'
+  const saved = loadWindowState()
+  const bounds = resolveWindowBounds(saved, screen.getAllDisplays())
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 832,
+    ...bounds,
     minWidth: 960,
     minHeight: 600,
     show: false,
@@ -92,7 +113,19 @@ function createWindow() {
     }
   })
 
+  if (saved.maximized) mainWindow.maximize()
+
   mainWindow.on('ready-to-show', () => mainWindow?.show())
+  // Debounced window state persistence
+  let winStateTimer = null
+  function persistWinState() {
+    if (winStateTimer) clearTimeout(winStateTimer)
+    winStateTimer = setTimeout(saveWindowState, 300)
+  }
+  mainWindow.on('resize', persistWinState)
+  mainWindow.on('move', persistWinState)
+  mainWindow.on('maximize', saveWindowState)
+  mainWindow.on('unmaximize', saveWindowState)
   mainWindow.on('close', (event) => {
     if (!isQuitting && tray) {
       event.preventDefault()
@@ -165,6 +198,8 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   if (shutdownPromise) return
   shutdownPromise = (async () => {
+    try { saveWindowState() }
+    catch (error) { console.error('Window state save failed:', error) }
     try { await orchestrator?.shutdown() }
     catch (error) { console.error('UCLI shutdown failed:', error) }
     try { getDb()?.close() }
