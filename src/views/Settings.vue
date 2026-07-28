@@ -105,6 +105,21 @@
       </a-modal>
     </a-card>
 
+    <a-card title="支持诊断" class="settings-card">
+      <div class="diagnostics-toolbar">
+        <span class="muted">仅包含版本、CLI 可用性与本地数据状态，不包含对话内容或路径。</span>
+        <a-space>
+          <a-button size="small" :loading="diagnosticsLoading" @click="loadDiagnostics">刷新</a-button>
+          <a-button size="small" type="primary" :loading="diagnosticsExporting" @click="exportDiagnostics">导出 JSON</a-button>
+        </a-space>
+      </div>
+      <a-descriptions v-if="diagnostics" size="small" :column="1" bordered>
+        <a-descriptions-item label="UCLI">{{ diagnostics.application.version }}</a-descriptions-item>
+        <a-descriptions-item label="本地数据">{{ persistenceStatusLabel(diagnostics.persistence.status) }}</a-descriptions-item>
+        <a-descriptions-item label="CLI">{{ diagnosticCliSummary }}</a-descriptions-item>
+      </a-descriptions>
+    </a-card>
+
     <a-card title="关于" class="settings-card">
       <p>UCLI — 多 CLI 编排工作台</p>
       <p class="muted">集成 Claude Code、Codex 与 OpenCode 的卡片式编排 GUI，提供三档权限管控与使用统计。</p>
@@ -119,6 +134,7 @@ import { useSettingsStore } from '../stores/settings.js'
 import { useSessionsStore } from '../stores/sessions.js'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
+import { formatCliDiagnosticSummary, persistenceStatusLabel } from '../diagnosticsPresentation.js'
 
 const settings = useSettingsStore()
 const sessions = useSessionsStore()
@@ -128,14 +144,18 @@ const cliTools = ref([])
 const detecting = ref(false)
 const runningTool = ref('')
 const lastCliResult = ref(null)
+const diagnostics = ref(null)
+const diagnosticsLoading = ref(false)
+const diagnosticsExporting = ref(false)
 const lastCliOutput = computed(() => {
   const result = lastCliResult.value
   if (!result) return ''
   return [result.stdout, result.stderr].filter(Boolean).join('\n').trim()
 })
+const diagnosticCliSummary = computed(() => formatCliDiagnosticSummary(diagnostics.value?.cliTools || []))
 
 onMounted(async () => {
-  await Promise.all([settings.load(), sessions.init(), loadCliTools()])
+  await Promise.all([settings.load(), sessions.init(), loadCliTools(), loadDiagnostics()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
 })
@@ -148,6 +168,29 @@ async function loadCliTools() {
     message.error('CLI 检测失败：' + (e?.message || e))
   } finally {
     detecting.value = false
+  }
+}
+
+async function loadDiagnostics() {
+  diagnosticsLoading.value = true
+  try {
+    diagnostics.value = await ipc.getDiagnostics()
+  } catch (e) {
+    message.error('读取诊断信息失败：' + (e?.message || e))
+  } finally {
+    diagnosticsLoading.value = false
+  }
+}
+
+async function exportDiagnostics() {
+  diagnosticsExporting.value = true
+  try {
+    const result = await ipc.exportDiagnostics()
+    if (!result.canceled) message.success('诊断报告已导出')
+  } catch (e) {
+    message.error('导出诊断报告失败：' + (e?.message || e))
+  } finally {
+    diagnosticsExporting.value = false
   }
 }
 
@@ -269,6 +312,7 @@ async function resetBinding(id) {
 .cli-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .cli-path { color: #8c8c8c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cli-error { color: #bfbfbf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diagnostics-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .result-command, :global(.confirm-command) { font-family: 'Cascadia Code', Consolas, monospace; }
 .result-command { margin-bottom: 6px; color: #262626; }
 .result-output { margin: 0; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
