@@ -664,10 +664,11 @@ async function openInNewPane(sessionId) {
 }
 
 function clearPane(i) {
-  panes.value[i].sessionId = null
+  const sid = panes.value[i]?.sessionId
+  if (!sid) return
   panes.value[i].term?.clear()
-  sessions.setWorkbenchPane(i, null)
   unsubscribePane(i)
+  compactPanes(i)
 }
 async function stopPane(i) {
   const sid = panes.value[i]?.sessionId
@@ -679,11 +680,90 @@ async function deletePane(i) {
   const sid = panes.value[i]?.sessionId
   if (!sid) return
   await sessions.deleteSession(sid)
-  panes.value[i].sessionId = null
   panes.value[i].term?.clear()
-  sessions.setWorkbenchPane(i, null)
   unsubscribePane(i)
+  compactPanes(i)
   message.success('会话已从 UCLI 移除，源会话和用量统计已保留')
+}
+
+function compactPanes(omitIndex) {
+  const oldCount = panes.value.length
+  if (oldCount <= 1) return
+  const remaining = []
+  for (let j = 0; j < oldCount; j++) {
+    if (j !== omitIndex && panes.value[j]?.sessionId)
+      remaining.push(panes.value[j].sessionId)
+  }
+  const filled = remaining.length
+  if (filled === 0) return
+  const newCount = filled >= 3 ? 4 : filled >= 2 ? 2 : 1
+
+  // FLIP: capture old pane positions
+  const oldRects = []
+  for (let j = 0; j < oldCount; j++) {
+    const el = paneRootRefs[j]
+    oldRects[j] = el?.getBoundingClientRect() || null
+  }
+
+  // Unsubscribe all current subscriptions
+  for (let j = 0; j < oldCount; j++) {
+    if (panes.value[j]?.sessionId) unsubscribePane(j)
+  }
+
+  // Clear all session IDs and workbench assignments
+  for (let j = 0; j < oldCount; j++) {
+    panes.value[j].sessionId = null
+    sessions.setWorkbenchPane(j, null)
+  }
+
+  // Update workbench pane IDs for compacted layout
+  for (let j = 0; j < newCount; j++) {
+    sessions.workbench.paneSessionIds[j] = j < filled ? remaining[j] : null
+  }
+  sessions.workbench.splitCount = newCount
+  sessions.saveWorkbench()
+
+  // Compact: assign remaining sessions to first N panes
+  for (let j = 0; j < filled; j++) {
+    panes.value[j].sessionId = remaining[j]
+  }
+
+  // Destroy terminals for panes beyond newCount
+  for (let j = newCount; j < panes.value.length; j++) {
+    destroyPaneTerminal(j)
+  }
+  panes.value.length = newCount
+
+  if (activePane.value >= newCount) activePane.value = 0
+
+  // Subscribe terminals and FLIP animate after DOM settles
+  nextTick(() => {
+    for (let j = 0; j < filled; j++) {
+      subscribePaneTerminal(j, remaining[j])
+      const s = sessions.byId(remaining[j])
+      if (s?.status === 'offline') {
+        sessions.restart(remaining[j]).catch(() => {})
+      } else {
+        ipc.attachTerminal(remaining[j])
+      }
+    }
+    requestAnimationFrame(() => {
+      for (let j = 0; j < newCount; j++) {
+        const el = paneRootRefs[j]
+        if (el && oldRects[j]) {
+          const nr = el.getBoundingClientRect()
+          const dx = oldRects[j].left - nr.left
+          const dy = oldRects[j].top - nr.top
+          if (dx !== 0 || dy !== 0) {
+            el.animate([
+              { transform: `translate(${dx}px, ${dy}px)` },
+              { transform: 'translate(0, 0)' }
+            ], { duration: 300, easing: 'cubic-bezier(0.2, 0, 0, 1)' })
+          }
+        }
+      }
+    })
+  })
 }
 
 function interruptPane(i) {
