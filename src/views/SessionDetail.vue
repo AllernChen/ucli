@@ -291,7 +291,7 @@ import { matchesBinding } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { groupSessionsByProject } from '../sessionGrouping.js'
 import { nextSessionPaneIndex, targetPaneForSessionAddition } from '../workbenchKeyboard.js'
-import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldSendClipboardPaste } from '../terminalKeybindings.js'
+import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldHandleTerminalPaste } from '../terminalKeybindings.js'
 import {
   reconcileSessionPanes,
   resolveSessionFocusPane,
@@ -509,10 +509,8 @@ function initPaneTerminal(i) {
     }
 
     // Paste via configurable binding
-    if (matchesBinding('terminal.paste', e, overrides)) {
-      if (shouldSendClipboardPaste(e)) {
-        navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
-      }
+    if (shouldHandleTerminalPaste(e, matchesBinding('terminal.paste', e, overrides))) {
+      navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
       return false
     }
 
@@ -880,7 +878,7 @@ onActivated(activateWorkbench)
 onDeactivated(deactivateWorkbench)
 
 onMounted(async () => {
-  await sessions.init()
+  await Promise.all([sessions.init(), settings.load()])
   await sessions.loadWorkbench()
   const savedIds = sessions.workbench.paneSessionIds
   const count = sessions.workbench.splitCount || 1

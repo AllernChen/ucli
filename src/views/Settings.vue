@@ -117,7 +117,7 @@ import { ref, computed, onMounted, nextTick, h } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useSettingsStore } from '../stores/settings.js'
 import { useSessionsStore } from '../stores/sessions.js'
-import { getAllBindings, formatKeys, eventToKeys } from '../keybindings.js'
+import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 
 const settings = useSettingsStore()
@@ -196,9 +196,12 @@ const bindingsList = computed(() => {
   const all = getAllBindings()
   const overrides = settings.keybindings || {}
   return all.map(b => {
-    const o = overrides[b.id]
-    const keys = o ? { ...b.keys, ...o } : b.keys
-    return { ...b, display: formatKeys(keys), overridden: !!o }
+    const binding = getBinding(b.id, overrides)
+    return {
+      ...b,
+      display: binding ? formatKeys(binding.keys) : '(已禁用)',
+      overridden: Object.prototype.hasOwnProperty.call(overrides, b.id)
+    }
   })
 })
 
@@ -222,12 +225,13 @@ function onCaptureKey(event) {
   if (event.key === 'Escape') { cancelCapture(); return }
   if (event.key === 'Enter' && !capturedKeys.value) return
   capturedKeys.value = eventToKeys(event)
+  if (captureTarget.value?.id === 'session.addPane') capturedKeys.value.key = null
   capturedDisplay.value = formatKeys(capturedKeys.value)
 }
 
 function clearCapture() {
-  capturedKeys.value = { key: null, ctrl: false, shift: false, alt: false, meta: false }
-  capturedDisplay.value = '(无快捷键)'
+  capturedKeys.value = { disabled: true }
+  capturedDisplay.value = '(已禁用)'
   nextTick(() => captureRef.value?.focus())
 }
 

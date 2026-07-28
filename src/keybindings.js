@@ -40,7 +40,21 @@ const DEFAULTS = {
 export function getBinding(id, overrides = {}) {
   const def = DEFAULTS[id]
   if (!def) return null
-  if (overrides[id]) return { ...def, keys: { ...def.keys, ...overrides[id] } }
+  const override = overrides[id]
+  if (override?.disabled) return null
+  if (
+    id !== 'session.addPane' &&
+    override?.key === null &&
+    !override.ctrl &&
+    !override.shift &&
+    !override.alt &&
+    !override.meta
+  ) return null
+  if (override) {
+    const keys = { ...def.keys, ...override }
+    if (id === 'session.addPane') keys.key = null
+    return { ...def, keys }
+  }
   return def
 }
 

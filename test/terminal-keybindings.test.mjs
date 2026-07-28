@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { isClipboardCopyShortcut, shouldSendClipboardPaste } from '../src/terminalKeybindings.js'
+import {
+  isClipboardCopyShortcut,
+  shouldHandleTerminalPaste,
+  shouldSendClipboardPaste
+} from '../src/terminalKeybindings.js'
 
 test('clipboard paste shortcut is handled only once on keydown', () => {
   const shortcut = { ctrlKey: true, shiftKey: false, metaKey: false, key: 'v' }
@@ -21,6 +25,18 @@ test('Command+V is handled as the macOS clipboard paste shortcut', () => {
   assert.equal(shouldSendClipboardPaste({
     type: 'keydown', ctrlKey: false, shiftKey: false, metaKey: true, key: 'v'
   }), true)
+})
+
+test('Command+V remains a terminal paste shortcut when its configured binding changes', () => {
+  assert.equal(shouldHandleTerminalPaste({
+    type: 'keydown', ctrlKey: false, shiftKey: false, metaKey: true, key: 'v'
+  }, false), true)
+})
+
+test('a configured non-default shortcut is handled as terminal paste', () => {
+  assert.equal(shouldHandleTerminalPaste({
+    type: 'keydown', ctrlKey: false, shiftKey: false, metaKey: false, key: 'F2'
+  }, true), true)
 })
 
 test('Command+C is handled as the macOS clipboard copy shortcut', () => {

@@ -46,6 +46,30 @@ test('matchesBinding returns false for non-matching key event', () => {
   assert.equal(matchesBinding('pane.switchNext', event), false)
 })
 
+test('a cleared shortcut is disabled instead of becoming a modifier wildcard', () => {
+  const overrides = { 'pane.switchNext': { disabled: true } }
+  const event = { key: 'a', ctrlKey: false, shiftKey: false, altKey: false, metaKey: false }
+
+  assert.equal(getBinding('pane.switchNext', overrides), null)
+  assert.equal(matchesBinding('pane.switchNext', event, overrides), false)
+})
+
+test('a legacy cleared keyboard shortcut stays disabled after upgrade', () => {
+  const overrides = {
+    'pane.switchNext': { key: null, ctrl: false, shift: false, alt: false, meta: false }
+  }
+
+  assert.equal(getBinding('pane.switchNext', overrides), null)
+})
+
+test('session add-pane bindings remain modifier-only when an old override includes a key', () => {
+  const overrides = { 'session.addPane': { key: 'C', ctrl: true } }
+  const click = { ctrlKey: true, shiftKey: false, altKey: false, metaKey: false }
+
+  assert.equal(getBinding('session.addPane', overrides).keys.key, null)
+  assert.equal(matchesBinding('session.addPane', click, overrides), true)
+})
+
 test('matchesBinding safely rejects a keyboard binding without a key value', () => {
   const event = { ctrlKey: false, shiftKey: false, altKey: false, metaKey: false }
   assert.equal(matchesBinding('pane.switchNext', event), false)
