@@ -10,3 +10,13 @@ export function nextSessionPaneIndex(panes, activeIndex, direction = 1) {
   if (current < 0) return direction < 0 ? assigned.at(-1) : assigned[0]
   return assigned[(current + (direction < 0 ? -1 : 1) + assigned.length) % assigned.length]
 }
+
+export function targetPaneForSessionAddition(panes, splitCount) {
+  const paneIndex = panes.findIndex((pane) => !pane?.sessionId)
+  if (paneIndex >= 0) return { paneIndex, splitCount }
+
+  return {
+    paneIndex: -1,
+    splitCount: splitCount === 1 ? 2 : 4,
+  }
+}

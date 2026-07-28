@@ -80,6 +80,31 @@
       </a-form>
     </a-card>
 
+    <a-card title="快捷键" class="settings-card">
+      <a-list :data-source="bindingsList" item-layout="horizontal">
+        <template #renderItem="{ item }">
+          <a-list-item>
+            <template #actions>
+              <a-button size="small" @click="startCapture(item)">修改</a-button>
+              <a-button v-if="item.overridden" size="small" danger @click="resetBinding(item.id)">重置</a-button>
+            </template>
+            <a-list-item-meta :title="item.name">
+              <template #description>
+                <a-tag>{{ item.display }}</a-tag>
+                <span v-if="item.contexts" class="muted" style="margin-left:6px;font-size:11px;">{{ item.contexts.join(', ') }}</span>
+              </template>
+            </a-list-item-meta>
+          </a-list-item>
+        </template>
+      </a-list>
+
+      <a-modal v-model:open="captureVisible" title="修改快捷键" @ok="saveCapture" @cancel="cancelCapture" okText="保存" cancelText="取消">
+        <p>在下方框中按下新的快捷键组合：</p>
+        <div ref="captureRef" class="capture-box" tabindex="0" @keydown="onCaptureKey" @keyup.prevent>{{ capturedDisplay || '等待按键...' }}</div>
+        <a-button v-if="capturedKeys" size="small" @click="clearCapture" style="margin-top:8px;">清除快捷键</a-button>
+      </a-modal>
+    </a-card>
+
     <a-card title="关于" class="settings-card">
       <p>UCLI — 多 CLI 编排工作台</p>
       <p class="muted">集成 Claude Code、Codex 与 OpenCode 的卡片式编排 GUI，提供三档权限管控与使用统计。</p>
@@ -88,10 +113,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, h } from 'vue'
+import { ref, computed, onMounted, nextTick, h } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useSettingsStore } from '../stores/settings.js'
 import { useSessionsStore } from '../stores/sessions.js'
+import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 
 const settings = useSettingsStore()
@@ -164,6 +190,75 @@ async function save() {
   await settings.save(local.value)
   message.success('设置已保存')
 }
+
+// --- Keybinding config ---
+const bindingsList = computed(() => {
+  const all = getAllBindings()
+  const overrides = settings.keybindings || {}
+  return all.map(b => {
+    const binding = getBinding(b.id, overrides)
+    return {
+      ...b,
+      display: binding ? formatKeys(binding.keys) : '(已禁用)',
+      overridden: Object.prototype.hasOwnProperty.call(overrides, b.id)
+    }
+  })
+})
+
+const captureVisible = ref(false)
+const captureTarget = ref(null)
+const capturedKeys = ref(null)
+const capturedDisplay = ref('')
+const captureRef = ref(null)
+
+function startCapture(binding) {
+  captureTarget.value = binding
+  capturedKeys.value = null
+  capturedDisplay.value = ''
+  captureVisible.value = true
+  nextTick(() => captureRef.value?.focus())
+}
+
+function onCaptureKey(event) {
+  event.preventDefault()
+  event.stopPropagation()
+  if (event.key === 'Escape') { cancelCapture(); return }
+  if (event.key === 'Enter' && !capturedKeys.value) return
+  capturedKeys.value = eventToKeys(event)
+  if (captureTarget.value?.id === 'session.addPane') capturedKeys.value.key = null
+  capturedDisplay.value = formatKeys(capturedKeys.value)
+}
+
+function clearCapture() {
+  capturedKeys.value = { disabled: true }
+  capturedDisplay.value = '(已禁用)'
+  nextTick(() => captureRef.value?.focus())
+}
+
+async function saveCapture() {
+  if (!captureTarget.value) return
+  const id = captureTarget.value.id
+  const keybindings = { ...(settings.keybindings || {}) }
+  if (capturedKeys.value) {
+    keybindings[id] = capturedKeys.value
+  }
+  await settings.save({ keybindings })
+  message.success('快捷键已保存')
+  captureVisible.value = false
+}
+
+function cancelCapture() {
+  captureVisible.value = false
+  captureTarget.value = null
+  capturedKeys.value = null
+}
+
+async function resetBinding(id) {
+  const keybindings = { ...(settings.keybindings || {}) }
+  delete keybindings[id]
+  await settings.save({ keybindings })
+  message.success('快捷键已重置')
+}
 </script>
 
 <style scoped>
@@ -177,4 +272,11 @@ async function save() {
 .result-command, :global(.confirm-command) { font-family: 'Cascadia Code', Consolas, monospace; }
 .result-command { margin-bottom: 6px; color: #262626; }
 .result-output { margin: 0; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
+.capture-box {
+  border: 2px dashed #d9d9d9; border-radius: 8px; padding: 20px; text-align: center;
+  font-size: 18px; font-family: 'Cascadia Code', Consolas, monospace; cursor: text;
+  outline: none; user-select: none; background: #fafafa; min-height: 60px;
+  display: flex; align-items: center; justify-content: center; color: #595959;
+}
+.capture-box:focus { border-color: #1677ff; background: #fff; }
 </style>

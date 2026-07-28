@@ -92,7 +92,7 @@
                     v-for="s in cli.sessions"
                     :key="s.id"
                     :class="['session-item', activePane !== null && panes[activePane]?.sessionId === s.id ? 'assigned' : '']"
-                    @click="assignToPane(s.id)"
+                    @click="handleSessionClick(s.id, $event)"
                     @dblclick="openInNewPane(s.id)"
                   >
                     <div class="item-head">
@@ -286,10 +286,12 @@ import {
   FolderOpenOutlined
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
+import { useSettingsStore } from '../stores/settings.js'
+import { matchesBinding } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { groupSessionsByProject } from '../sessionGrouping.js'
-import { nextSessionPaneIndex } from '../workbenchKeyboard.js'
-import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldSendClipboardPaste } from '../terminalKeybindings.js'
+import { nextSessionPaneIndex, targetPaneForSessionAddition } from '../workbenchKeyboard.js'
+import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldHandleTerminalPaste } from '../terminalKeybindings.js'
 import {
   reconcileSessionPanes,
   resolveSessionFocusPane,
@@ -305,6 +307,7 @@ defineOptions({ name: 'SessionDetail' })
 
 const router = useRouter()
 const sessions = useSessionsStore()
+const settings = useSettingsStore()
 const sessionListHidden = ref(false)
 const fullscreenPane = ref(null)
 const gridFullscreen = ref(false)
@@ -468,37 +471,49 @@ function initPaneTerminal(i) {
   term.open(el)
   fitAddon.fit()
 
-  // Custom key handler for copy/paste
+  // Custom key handler for copy/paste and pane switching
   term.attachCustomKeyEventHandler((e) => {
-    if (e.type === 'keydown' && e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) {
-      const switched = switchSessionPane(e.shiftKey ? -1 : 1)
+    if (e.type !== 'keydown') return true
+    const overrides = settings.keybindings || {}
+
+    // Pane switching via configurable bindings
+    if (matchesBinding('pane.switchNext', e, overrides) || matchesBinding('pane.switchPrev', e, overrides)) {
+      const direction = matchesBinding('pane.switchNext', e, overrides) ? 1 : -1
+      const switched = switchSessionPane(direction)
       if (switched) {
         e.preventDefault()
         e.stopPropagation()
       }
       return !switched
     }
-    if ((e.ctrlKey && e.shiftKey && e.key === 'C') || (e.ctrlKey && e.key === 'Insert')) {
+
+    // Copy via configurable bindings
+    if (matchesBinding('terminal.copy', e, overrides) || matchesBinding('terminal.copyAlt', e, overrides)) {
       const sel = term.getSelection()
       if (sel) { navigator.clipboard.writeText(sel).catch(() => {}) }
       return false
     }
+
+    // Mac Cmd+C copy
     if (isClipboardCopyShortcut(e)) {
       const sel = term.getSelection()
       if (sel) navigator.clipboard.writeText(sel).catch(() => {})
       return false
     }
+
+    // Ctrl+C: copy selection if any, else pass to terminal
     if (e.ctrlKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) {
       const sel = term.getSelection()
       if (sel) { navigator.clipboard.writeText(sel).catch(() => {}); term.clearSelection(); return false }
       return true
     }
-    if (isClipboardPasteShortcut(e)) {
-      if (shouldSendClipboardPaste(e)) {
-        navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
-      }
+
+    // Paste via configurable binding
+    if (shouldHandleTerminalPaste(e, matchesBinding('terminal.paste', e, overrides))) {
+      navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
       return false
     }
+
     return true
   })
 
@@ -588,10 +603,15 @@ function switchSessionPane(direction = 1) {
 }
 
 function onWorkbenchKeydown(event) {
-  if (event.defaultPrevented || event.key !== 'Tab' || event.ctrlKey || event.altKey || event.metaKey) return
+  if (event.type !== 'keydown' || event.defaultPrevented) return
+  const overrides = settings.keybindings || {}
+  let direction = null
+  if (matchesBinding('pane.switchNext', event, overrides)) direction = 1
+  else if (matchesBinding('pane.switchPrev', event, overrides)) direction = -1
+  if (direction === null) return
   const target = event.target
   if (target instanceof Element && !target.closest('.xterm') && target.closest('button, a, input, textarea, select, [contenteditable="true"], [role="button"], .ant-select')) return
-  if (switchSessionPane(event.shiftKey ? -1 : 1)) {
+  if (switchSessionPane(direction)) {
     event.preventDefault()
     event.stopPropagation()
   }
@@ -660,6 +680,28 @@ async function openInNewPane(sessionId) {
       return
     }
   }
+  assignToPane(sessionId)
+}
+
+function handleSessionClick(sessionId, event) {
+  const overrides = settings.keybindings || {}
+  if (matchesBinding('session.addPane', event, overrides)) {
+    addPaneForSession(sessionId)
+  } else {
+    assignToPane(sessionId)
+  }
+}
+
+async function addPaneForSession(sessionId) {
+  let target = targetPaneForSessionAddition(panes.value, splitCount.value)
+  // Expand the layout only when no empty pane is available.
+  if (target.paneIndex < 0 && target.splitCount !== splitCount.value) {
+    splitCount.value = target.splitCount
+    await nextTick()
+    target = targetPaneForSessionAddition(panes.value, splitCount.value)
+  }
+  if (target.paneIndex < 0) return
+  activePane.value = target.paneIndex
   assignToPane(sessionId)
 }
 
@@ -836,7 +878,7 @@ onActivated(activateWorkbench)
 onDeactivated(deactivateWorkbench)
 
 onMounted(async () => {
-  await sessions.init()
+  await Promise.all([sessions.init(), settings.load()])
   await sessions.loadWorkbench()
   const savedIds = sessions.workbench.paneSessionIds
   const count = sessions.workbench.splitCount || 1

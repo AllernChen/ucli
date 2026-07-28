@@ -13,6 +13,10 @@ export function isClipboardCopyShortcut(event) {
   )
 }
 
+export function shouldHandleTerminalPaste(event, bindingMatches) {
+  return Boolean(bindingMatches || isClipboardPasteShortcut(event))
+}
+
 // xterm forwards keydown, keypress and keyup through the custom key handler.
 // Only the keydown event may read and forward clipboard data to the PTY.
 export function shouldSendClipboardPaste(event) {

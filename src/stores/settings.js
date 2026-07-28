@@ -8,6 +8,7 @@ export const useSettingsStore = defineStore('settings', {
     defaultCwd: '',
     language: 'zh-CN',
     theme: 'light',
+    keybindings: {},
     workbench: { splitCount: 1, activePane: 0, paneSessionIds: [] },
     loaded: false
   }),
