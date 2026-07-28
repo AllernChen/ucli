@@ -21,7 +21,9 @@ export const useSessionsStore = defineStore('sessions', {
     workbench: {
       splitCount: 1,
       activePane: 0,
-      paneSessionIds: [] // [sessionId|null, ...] — which session is in each pane
+      paneSessionIds: [], // [sessionId|null, ...] — which session is in each pane
+      navCollapsed: false,
+      sessionListHidden: false
     }
   }),
 
@@ -122,6 +124,8 @@ export const useSessionsStore = defineStore('sessions', {
           this.workbench.splitCount = wb.splitCount || 1
           this.workbench.activePane = wb.activePane || 0
           this.workbench.paneSessionIds = wb.paneSessionIds
+          if (wb.navCollapsed !== undefined) this.workbench.navCollapsed = wb.navCollapsed
+          if (wb.sessionListHidden !== undefined) this.workbench.sessionListHidden = wb.sessionListHidden
           ipc.log('info', 'loadWorkbench — restored workbench state')
         } else {
           ipc.log('info', 'loadWorkbench — no saved workbench, using defaults')
@@ -135,7 +139,9 @@ export const useSessionsStore = defineStore('sessions', {
       const payload = {
         splitCount: this.workbench.splitCount,
         activePane: this.workbench.activePane,
-        paneSessionIds: [...this.workbench.paneSessionIds] // plain array, not Vue Proxy
+        paneSessionIds: [...this.workbench.paneSessionIds], // plain array, not Vue Proxy
+        navCollapsed: this.workbench.navCollapsed,
+        sessionListHidden: this.workbench.sessionListHidden
       }
       ipc.log('info', 'saveWorkbench called, payload:', JSON.stringify(payload))
       try {
@@ -162,6 +168,14 @@ export const useSessionsStore = defineStore('sessions', {
     setWorkbenchActivePane(index) {
       ipc.log('info', 'setWorkbenchActivePane', index)
       this.workbench.activePane = index
+      this.saveWorkbench()
+    },
+    setNavCollapsed(v) {
+      this.workbench.navCollapsed = v
+      this.saveWorkbench()
+    },
+    setSessionListHidden(v) {
+      this.workbench.sessionListHidden = v
       this.saveWorkbench()
     },
 

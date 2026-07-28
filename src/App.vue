@@ -93,6 +93,7 @@ const route = useRoute()
 const router = useRouter()
 const sessions = useSessionsStore()
 const navCollapsed = ref(false)
+watch(navCollapsed, (v) => sessions.setNavCollapsed(v))
 const appVersion = __UCLI_VERSION__
 
 const selectedKeys = ref([route.path])
@@ -119,6 +120,7 @@ onMounted(async () => {
   // Load persisted workbench state to decide initial route
   await sessions.init()
   await sessions.loadWorkbench()
+  navCollapsed.value = sessions.workbench.navCollapsed
   const hasSavedPanes = sessions.workbench.paneSessionIds.some(id => id != null)
   if (hasSavedPanes) {
     router.replace('/session')
