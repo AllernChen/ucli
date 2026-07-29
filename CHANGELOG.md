@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-07-29
+
+### Fixed
+
+- Added visible software-update download progress, transfer details, and explicit installation handoff status.
+
 ## [0.4.9] - 2026-07-29
 
 ### Added
