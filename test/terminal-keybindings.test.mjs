@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   isClipboardCopyShortcut,
   shouldHandleTerminalPaste,
+  shouldBlockDuplicateClipboardPaste,
   shouldSendClipboardPaste
 } from '../src/terminalKeybindings.js'
 
@@ -13,6 +14,14 @@ test('clipboard paste shortcut is handled only once on keydown', () => {
   assert.equal(shouldSendClipboardPaste({ ...shortcut, type: 'keydown' }), true)
   assert.equal(shouldSendClipboardPaste({ ...shortcut, type: 'keypress' }), false)
   assert.equal(shouldSendClipboardPaste({ ...shortcut, type: 'keyup' }), false)
+})
+
+test('clipboard paste blocks the later keypress event after forwarding on keydown', () => {
+  const shortcut = { ctrlKey: true, shiftKey: false, metaKey: false, key: 'v' }
+
+  assert.equal(shouldBlockDuplicateClipboardPaste({ ...shortcut, type: 'keydown' }), false)
+  assert.equal(shouldBlockDuplicateClipboardPaste({ ...shortcut, type: 'keypress' }), true)
+  assert.equal(shouldBlockDuplicateClipboardPaste({ ...shortcut, type: 'keyup' }), false)
 })
 
 test('Ctrl+Shift+V is also a single clipboard paste shortcut', () => {
