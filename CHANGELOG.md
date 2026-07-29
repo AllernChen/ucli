@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- OpenCode complete-history views now use the local unsanitized export; statistics continue to use the sanitized export.
 - 修复全屏 TUI 使用 xterm alternate buffer 时无法依靠终端 scrollback 查看早期对话的问题。
 - 修复 OpenCode 恢复会话只显示当前 TUI 输出、未加载完整源会话历史的问题。
 - 修复 2/4 分屏首次启动以及侧栏、分屏和全屏切换后 PTY 尺寸同步滞后导致的内容裁剪和重绘不完整。

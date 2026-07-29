@@ -71,13 +71,16 @@ export function loadOpenCodeSessionStats(sessionId, {
 export function exportOpenCodeSession(sessionId, {
   execFileFn = execFile,
   executable = 'opencode',
-  prefixArgs = []
+  prefixArgs = [],
+  sanitize = true
 } = {}) {
   if (!isSafeNativeSessionId(sessionId) || isCommandShell(executable)) {
     return Promise.resolve(null)
   }
   return new Promise((resolve) => {
-    execFileFn(executable, [...prefixArgs, 'export', sessionId, '--sanitize'], {
+    const args = [...prefixArgs, 'export', sessionId]
+    if (sanitize) args.push('--sanitize')
+    execFileFn(executable, args, {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 15_000,

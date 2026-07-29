@@ -172,7 +172,7 @@ export async function parseJsonLinesCooperatively(content, parser, {
 export function createSessionHistoryService({
   resolveSession,
   readFile: readHistoryFile = readFile,
-  exportOpenCode = exportOpenCodeSession,
+  exportOpenCode = (sessionId) => exportOpenCodeSession(sessionId, { sanitize: false }),
   resolveClaudeTranscript = (session) =>
     findClaudeTranscriptFile(defaultHome(), session.cwd, session.cliSessionId),
   resolveCodexTranscript = (session) =>

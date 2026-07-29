@@ -147,7 +147,7 @@ test('uses the resolved Windows executable for an official export', async () => 
   assert.deepEqual(calls[0].args, ['export', 'ses_fixture', '--sanitize'])
 })
 
-test('exports sanitized OpenCode source for conversation history', async () => {
+test('exports sanitized OpenCode source by default for statistics', async () => {
   const calls = []
   const source = await exportOpenCodeSession('ses_fixture', {
     executable: 'opencode.exe',
@@ -170,6 +170,20 @@ test('exports sanitized OpenCode source for conversation history', async () => {
       maxBuffer: 8 * 1024 * 1024
     }
   }])
+})
+
+test('exports unsanitized OpenCode source when complete history is requested', async () => {
+  const calls = []
+  await exportOpenCodeSession('ses_fixture', {
+    executable: 'opencode.exe',
+    sanitize: false,
+    execFileFn(file, args, options, callback) {
+      calls.push({ file, args, options })
+      callback(null, JSON.stringify(fixture), '')
+    }
+  })
+
+  assert.deepEqual(calls[0].args, ['export', 'ses_fixture'])
 })
 
 test('sanitized export never falls back through a Windows command shell', async () => {

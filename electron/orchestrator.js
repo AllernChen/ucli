@@ -77,7 +77,8 @@ export function createOrchestrator() {
       const launch = resolveOpenCodeLaunch()
       return exportOpenCodeSession(nativeSessionId, {
         executable: launch.file,
-        prefixArgs: launch.prefixArgs
+        prefixArgs: launch.prefixArgs,
+        sanitize: false
       })
     }
   })
