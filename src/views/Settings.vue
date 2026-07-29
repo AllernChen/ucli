@@ -120,10 +120,36 @@
         message="当前版本不支持应用内更新，请从 GitHub Release 下载新版本。"
       />
       <pre v-if="updateState?.releaseNotes" class="release-notes">{{ visibleReleaseNotes(updateState.releaseNotes) }}</pre>
+      <div v-if="updateState?.status === 'downloading'" class="update-progress">
+        <a-progress :percent="updateState.progressPercent ?? 0" status="active" />
+        <span class="muted">{{ updateProgressText(updateState) }}</span>
+      </div>
+      <a-alert
+        v-if="updateState?.status === 'installing'"
+        type="info"
+        show-icon
+        message="即将重启并启动安装程序，安装进度将在系统安装窗口中显示。"
+      />
       <a-space>
-        <a-button :loading="updateBusy" @click="checkForUpdates">检查更新</a-button>
-        <a-button v-if="updateState?.status === 'available'" type="primary" :loading="updateBusy" @click="downloadUpdate">下载更新</a-button>
-        <a-button v-if="updateState?.status === 'downloaded'" type="primary" :loading="updateBusy" @click="installUpdate">重启并安装</a-button>
+        <a-button
+          :loading="updateState?.status === 'checking'"
+          :disabled="updateState?.status === 'downloading' || updateState?.status === 'installing'"
+          @click="checkForUpdates"
+        >检查更新</a-button>
+        <a-button
+          v-if="['available', 'downloading'].includes(updateState?.status)"
+          type="primary"
+          :loading="updateState?.status === 'downloading'"
+          :disabled="updateState?.status === 'downloading'"
+          @click="downloadUpdate"
+        >{{ updateState?.status === 'downloading' ? '正在下载更新' : '下载更新' }}</a-button>
+        <a-button
+          v-if="['downloaded', 'installing'].includes(updateState?.status)"
+          type="primary"
+          :loading="updateState?.status === 'installing'"
+          :disabled="updateState?.status === 'installing'"
+          @click="installUpdate"
+        >{{ updateState?.status === 'installing' ? '正在启动安装程序' : '重启并安装' }}</a-button>
       </a-space>
     </a-card>
 
@@ -157,7 +183,7 @@ import { useSessionsStore } from '../stores/sessions.js'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { formatCliDiagnosticSummary, persistenceStatusLabel } from '../diagnosticsPresentation.js'
-import { updateStatusLabel, visibleReleaseNotes } from '../updatePresentation.js'
+import { updateProgressText, updateStatusLabel, visibleReleaseNotes } from '../updatePresentation.js'
 
 const settings = useSettingsStore()
 const sessions = useSessionsStore()
@@ -171,7 +197,6 @@ const diagnostics = ref(null)
 const diagnosticsLoading = ref(false)
 const diagnosticsExporting = ref(false)
 const updateState = ref(null)
-const updateBusy = ref(false)
 let stopUpdateListener = null
 const lastCliOutput = computed(() => {
   const result = lastCliResult.value
@@ -220,13 +245,10 @@ async function loadUpdateState() {
 }
 
 async function runUpdateAction(action, fallbackMessage) {
-  updateBusy.value = true
   try {
     updateState.value = await action()
   } catch {
     message.error(fallbackMessage)
-  } finally {
-    updateBusy.value = false
   }
 }
 
@@ -239,14 +261,11 @@ function downloadUpdate() {
 }
 
 async function installUpdate() {
-  updateBusy.value = true
   try {
     const started = await ipc.installUpdate()
     if (!started) message.error('更新尚未准备就绪')
   } catch {
     message.error('启动安装失败')
-  } finally {
-    updateBusy.value = false
   }
 }
 
@@ -382,6 +401,8 @@ async function resetBinding(id) {
 .cli-error { color: #bfbfbf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diagnostics-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .update-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.update-progress { margin: 12px 0; }
+.update-progress .muted { display: block; margin-top: 6px; font-size: 12px; }
 .release-notes { margin: 12px 0; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
 .result-command, :global(.confirm-command) { font-family: 'Cascadia Code', Consolas, monospace; }
 .result-command { margin-bottom: 6px; color: #262626; }

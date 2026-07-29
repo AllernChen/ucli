@@ -30,7 +30,7 @@ class FakeUpdater extends EventEmitter {
   }
 }
 
-function createInstalledService(updater = new FakeUpdater()) {
+function createInstalledService(updater = new FakeUpdater(), options = {}) {
   return {
     updater,
     service: createUpdateService({
@@ -38,7 +38,8 @@ function createInstalledService(updater = new FakeUpdater()) {
       appVersion: '0.4.7',
       isPackaged: true,
       isPortable: false,
-      platform: 'win32'
+      platform: 'win32',
+      ...options
     })
   }
 }
@@ -59,6 +60,9 @@ test('installed builds check without automatic download and publish a safe avail
     releaseDate: '2026-07-29T00:00:00.000Z',
     releaseNotes: 'Safe update',
     progressPercent: null,
+    transferred: null,
+    total: null,
+    bytesPerSecond: null,
     error: ''
   })
 })
@@ -78,8 +82,14 @@ test('portable and development builds never call the network updater', async () 
   assert.equal(development.checkCalls, 0)
 })
 
-test('download and install require available then downloaded states', async () => {
-  const { updater, service } = createInstalledService()
+test('download progress exposes transfer detail and installation hands off after a visible state', async () => {
+  const scheduled = []
+  const { updater, service } = createInstalledService(new FakeUpdater(), {
+    schedule: (callback, delay) => {
+      scheduled.push({ callback, delay })
+      return scheduled.length
+    }
+  })
 
   assert.equal(service.install(), false)
   await service.download()
@@ -88,13 +98,25 @@ test('download and install require available then downloaded states', async () =
   await service.check()
   await service.download()
   assert.equal(updater.downloadCalls, 1)
-  updater.emit('download-progress', { percent: 42.4 })
+  updater.emit('download-progress', {
+    percent: 42.4,
+    transferred: 10 * 1024 * 1024,
+    total: 24 * 1024 * 1024,
+    bytesPerSecond: 2 * 1024 * 1024
+  })
   assert.equal(service.getState().status, 'downloading')
   assert.equal(service.getState().progressPercent, 42)
+  assert.equal(service.getState().transferred, 10 * 1024 * 1024)
+  assert.equal(service.getState().total, 24 * 1024 * 1024)
+  assert.equal(service.getState().bytesPerSecond, 2 * 1024 * 1024)
 
   updater.emit('update-downloaded', { version: '0.4.8' })
   assert.equal(service.getState().status, 'downloaded')
   assert.equal(service.install(), true)
+  assert.equal(service.getState().status, 'installing')
+  assert.equal(updater.quitArgs, null)
+  assert.deepEqual(scheduled.map(({ delay }) => delay), [200])
+  scheduled[0].callback()
   assert.deepEqual(updater.quitArgs, [false, true])
 })
 
@@ -114,6 +136,9 @@ test('update errors expose a generic status without raw network details', async 
     releaseDate: null,
     releaseNotes: '',
     progressPercent: null,
+    transferred: null,
+    total: null,
+    bytesPerSecond: null,
     error: '更新检查失败'
   })
 })

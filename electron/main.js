@@ -162,6 +162,9 @@ function fallbackUpdateState() {
     releaseDate: null,
     releaseNotes: '',
     progressPercent: null,
+    transferred: null,
+    total: null,
+    bytesPerSecond: null,
     error: ''
   }
 }

@@ -6,6 +6,9 @@ function initialState(currentVersion, status = 'idle') {
     releaseDate: null,
     releaseNotes: '',
     progressPercent: null,
+    transferred: null,
+    total: null,
+    bytesPerSecond: null,
     error: ''
   }
 }
@@ -42,6 +45,9 @@ export function createUpdateService({
       releaseDate: null,
       releaseNotes: '',
       progressPercent: null,
+      transferred: null,
+      total: null,
+      bytesPerSecond: null,
       error: message
     })
   }
@@ -58,6 +64,9 @@ export function createUpdateService({
       releaseDate: info.releaseDate || null,
       releaseNotes: plainReleaseNotes(info.releaseNotes),
       progressPercent: null,
+      transferred: null,
+      total: null,
+      bytesPerSecond: null,
       error: ''
     })
   })
@@ -68,20 +77,32 @@ export function createUpdateService({
       releaseDate: null,
       releaseNotes: '',
       progressPercent: null,
+      transferred: null,
+      total: null,
+      bytesPerSecond: null,
       error: ''
     })
   })
-  updater.on('download-progress', ({ percent } = {}) => {
+  updater.on('download-progress', ({ percent, transferred, total, bytesPerSecond } = {}) => {
     const progressPercent = Number.isFinite(percent)
       ? Math.max(0, Math.min(100, Math.round(percent)))
       : null
-    emit({ status: 'downloading', progressPercent, error: '' })
+    const byteValue = (value) => Number.isFinite(value) && value >= 0 ? value : null
+    emit({
+      status: 'downloading',
+      progressPercent,
+      transferred: byteValue(transferred),
+      total: byteValue(total),
+      bytesPerSecond: byteValue(bytesPerSecond),
+      error: ''
+    })
   })
   updater.on('update-downloaded', (info = {}) => {
     emit({
       status: 'downloaded',
       availableVersion: String(info.version || state.availableVersion || ''),
       progressPercent: 100,
+      bytesPerSecond: null,
       error: ''
     })
   })
@@ -95,6 +116,9 @@ export function createUpdateService({
       releaseDate: null,
       releaseNotes: '',
       progressPercent: null,
+      transferred: null,
+      total: null,
+      bytesPerSecond: null,
       error: ''
     })
     try {
@@ -107,7 +131,14 @@ export function createUpdateService({
 
   async function download() {
     if (!supported || state.status !== 'available') return { ...state }
-    emit({ status: 'downloading', progressPercent: 0, error: '' })
+    emit({
+      status: 'downloading',
+      progressPercent: 0,
+      transferred: null,
+      total: null,
+      bytesPerSecond: null,
+      error: ''
+    })
     try {
       await updater.downloadUpdate()
     } catch {
@@ -119,7 +150,14 @@ export function createUpdateService({
   function install() {
     if (!supported || state.status !== 'downloaded') return false
     try {
-      updater.quitAndInstall(false, true)
+      emit({ status: 'installing', error: '' })
+      schedule(() => {
+        try {
+          updater.quitAndInstall(false, true)
+        } catch {
+          fail('更新安装失败')
+        }
+      }, 200)
       return true
     } catch {
       fail('更新安装失败')
