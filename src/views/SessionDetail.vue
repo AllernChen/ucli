@@ -159,6 +159,15 @@
             <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
             <a-space size="small">
               <a-button
+                v-if="pane.sessionId"
+                size="small"
+                type="text"
+                @click.stop="togglePaneHistory(i)"
+                :title="pane.viewMode === 'history' ? '返回实时终端' : '查看完整历史记录'"
+              >
+                {{ pane.viewMode === 'history' ? '终端' : '历史' }}
+              </a-button>
+              <a-button
                 v-if="pane.sessionId && !gridFullscreen"
                 size="small"
                 type="text"
@@ -187,7 +196,16 @@
             <span class="pi-item sid">{{ sessions.byId(pane.sessionId)?.id?.slice(0,8) }}</span>
           </div>
           <!-- Terminal container -->
-          <div :ref="el => setPaneRef(i, el)" class="pane-terminal"></div>
+          <div
+            v-show="pane.viewMode !== 'history'"
+            :ref="el => setPaneRef(i, el)"
+            class="pane-terminal"
+          ></div>
+          <PaneHistory
+            v-show="pane.viewMode === 'history'"
+            :session-id="pane.sessionId || ''"
+            :active="pane.viewMode === 'history'"
+          />
         </div>
       </div>
     </div>
@@ -294,6 +312,7 @@ import { nextSessionPaneIndex, targetPaneForSessionAddition } from '../workbench
 import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldBlockDuplicateClipboardPaste, shouldHandleTerminalPaste } from '../terminalKeybindings.js'
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { compactPaneSessionIds } from '../paneCompaction.js'
+import PaneHistory from '../components/PaneHistory.vue'
 import {
   reconcileSessionPanes,
   resolveSessionFocusPane,
@@ -329,7 +348,7 @@ const activePane = computed({
   set: (v) => sessions.setWorkbenchActivePane(v)
 })
 
-// Each pane: { id, sessionId, term, fitAddon, resizeObserver }
+// Each pane: { id, sessionId, viewMode, term, fitAddon, resizeObserver }
 const panes = ref([])
 const assignedPaneCount = computed(() => panes.value.filter((pane) => pane.sessionId).length)
 // Refs storage for pane terminal containers
@@ -433,6 +452,9 @@ function createPanes(count) {
     const savedId = sessions.workbench.paneSessionIds[i]
     return sessions.byId(savedId) ? savedId : null
   }).panes
+  for (const pane of panes.value) {
+    if (!pane.viewMode) pane.viewMode = 'terminal'
+  }
   if (activePane.value >= count) activePane.value = count - 1
   // Initialize only new panes. ResizeObserver refits retained terminals after
   // the grid changes size.
@@ -570,7 +592,22 @@ function sendToPane(i, data) {
 
 function activatePane(i) {
   activePane.value = i
-  nextTick(() => panes.value[i]?.term?.focus())
+  if (panes.value[i]?.viewMode !== 'history') {
+    nextTick(() => panes.value[i]?.term?.focus())
+  }
+}
+
+function togglePaneHistory(i) {
+  const pane = panes.value[i]
+  if (!pane?.sessionId) return
+  pane.viewMode = pane.viewMode === 'history' ? 'terminal' : 'history'
+  activePane.value = i
+  if (pane.viewMode === 'terminal') {
+    nextTick(() => {
+      try { pane.fitAddon?.fit() } catch {}
+      pane.term?.focus()
+    })
+  }
 }
 
 async function togglePaneFullscreen(i) {
@@ -605,7 +642,7 @@ function onFullscreenChange() {
       try { pane?.fitAddon?.fit() } catch {}
     }
     const i = fullscreenPane.value ?? activePane.value
-    panes.value[i]?.term?.focus()
+    if (panes.value[i]?.viewMode !== 'history') panes.value[i]?.term?.focus()
   })
 }
 
@@ -640,6 +677,7 @@ function assignToPane(sessionId) {
   for (let i = 0; i < panes.value.length; i++) {
     if (i !== activePane.value && panes.value[i].sessionId === sessionId) {
       panes.value[i].sessionId = null
+      panes.value[i].viewMode = 'terminal'
       panes.value[i].term?.clear()
       sessions.setWorkbenchPane(i, null)
       unsubscribePane(i)
@@ -650,6 +688,7 @@ function assignToPane(sessionId) {
     panes.value[activePane.value].term?.clear()
   }
   panes.value[activePane.value].sessionId = sessionId
+  panes.value[activePane.value].viewMode = 'terminal'
   sessions.setWorkbenchPane(activePane.value, sessionId)
   nextTick(() => panes.value[activePane.value]?.term?.focus())
   // If session is offline, auto-restart; if running, attach terminal output
@@ -747,7 +786,11 @@ function compactPanes(omitIndex) {
   sessions.workbench.paneSessionIds = [...next.paneSessionIds]
   sessions.workbench.activePane = 0
   sessions.saveWorkbench()
-  panes.value = next.paneSessionIds.map((sessionId, index) => ({ id: `pane-${index}`, sessionId }))
+  panes.value = next.paneSessionIds.map((sessionId, index) => ({
+    id: `pane-${index}`,
+    sessionId,
+    viewMode: 'terminal'
+  }))
   nextTick(() => createPanes(next.splitCount))
 }
 
@@ -888,7 +931,9 @@ function activateWorkbench() {
     for (const pane of panes.value) {
       try { pane?.fitAddon?.fit() } catch {}
     }
-    panes.value[activePane.value]?.term?.focus()
+    if (panes.value[activePane.value]?.viewMode !== 'history') {
+      panes.value[activePane.value]?.term?.focus()
+    }
   })
 }
 
