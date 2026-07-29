@@ -44,7 +44,7 @@
       </div>
     </a-layout-sider>
     <a-layout class="main-layout">
-      <a-layout-header class="header">
+      <a-layout-header v-if="!isWorkbenchRoute" class="header">
         <div class="header-main">
           <a-button
             size="small"
@@ -91,6 +91,7 @@ const sessions = useSessionsStore()
 const navCollapsed = ref(false)
 watch(navCollapsed, (v) => sessions.setNavCollapsed(v))
 const appVersion = __UCLI_VERSION__
+const isWorkbenchRoute = computed(() => route.path.startsWith('/session'))
 
 const selectedKeys = ref([route.path])
 watch(() => route.path, (p) => {
