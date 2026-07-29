@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init","uuid":"claude-system-1","timestamp":"2026-07-29T01:00:00.000Z","session_id":"claude-session-1","model":"claude-sonnet"}
+{"type":"user","uuid":"claude-user-1","timestamp":"2026-07-29T01:00:01.000Z","message":{"content":[{"type":"text","text":"Claude first question"}]}}
+{"type":"assistant","uuid":"claude-assistant-1","timestamp":"2026-07-29T01:00:02.000Z","message":{"content":[{"type":"thinking","thinking":"private reasoning must not appear"},{"type":"text","text":"Claude first answer"}]}}
+{"type":"user","uuid":"claude-user-2","timestamp":"2026-07-29T01:00:03.000Z","message":{"content":[{"type":"text","text":"Claude second question"}]}}
+{"type":"assistant","uuid":"claude-assistant-2","timestamp":"2026-07-29T01:00:04.000Z","message":{"content":[{"type":"tool_use","id":"tool-use-1","name":"Read","input":{"file_path":"F:\\projects\\ucli\\README.md"}},{"type":"text","text":"Claude second answer"}]}}
+{"type":"user","uuid":"claude-tool-result-1","timestamp":"2026-07-29T01:00:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"tool-use-1","content":"README contents summarized"}]}}
+not-json

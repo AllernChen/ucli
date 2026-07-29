@@ -1,0 +1,9 @@
+{"type":"session_meta","timestamp":"2026-07-29T02:00:00.000Z","payload":{"id":"codex-session-1","cwd":"F:\\projects\\ucli","model":"gpt-5"}}
+{"type":"response_item","timestamp":"2026-07-29T02:00:01.000Z","payload":{"type":"message","id":"codex-user-1","role":"user","content":[{"type":"input_text","text":"Codex first question"}]}}
+{"type":"response_item","timestamp":"2026-07-29T02:00:02.000Z","payload":{"type":"message","id":"codex-assistant-1","role":"assistant","content":[{"type":"reasoning","text":"private reasoning must not appear"},{"type":"output_text","text":"Codex first answer"}]}}
+{"type":"event_msg","timestamp":"2026-07-29T02:00:03.000Z","payload":{"type":"user_message","message":"Codex second question"}}
+{"type":"response_item","timestamp":"2026-07-29T02:00:04.000Z","payload":{"type":"function_call","call_id":"codex-tool-1","name":"shell_command","arguments":"{\"command\":\"npm test\"}"}}
+{"type":"response_item","timestamp":"2026-07-29T02:00:05.000Z","payload":{"type":"function_call_output","call_id":"codex-tool-1","output":"tests passed"}}
+{"type":"event_msg","timestamp":"2026-07-29T02:00:06.000Z","payload":{"type":"agent_message","message":"Codex second answer"}}
+{"type":"event_msg","timestamp":"2026-07-29T02:00:07.000Z","payload":{"type":"agent_reasoning","text":"private reasoning must not appear"}}
+not-json
