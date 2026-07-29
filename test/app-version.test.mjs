@@ -17,3 +17,8 @@ test('sidebar version is injected from the package version during renderer build
   assert.match(appSource, /\{\{ appVersion \}\}/)
   assert.doesNotMatch(appSource, /v0\.3\.1/)
 })
+
+test('header does not show fixed CLI provider tags', () => {
+  assert.doesNotMatch(appSource, /<a-tag color="purple">Claude Code<\/a-tag>/)
+  assert.doesNotMatch(appSource, /<a-tag color="green">Codex<\/a-tag>/)
+})
