@@ -313,6 +313,7 @@ import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldBlockDuplicate
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { compactPaneSessionIds } from '../paneCompaction.js'
 import PaneHistory from '../components/PaneHistory.vue'
+import { terminalSizeChanged } from '../terminalResize.js'
 import {
   reconcileSessionPanes,
   resolveSessionFocusPane,
@@ -331,7 +332,10 @@ const router = useRouter()
 const sessions = useSessionsStore()
 const settings = useSettingsStore()
 const sessionListHidden = ref(false)
-watch(sessionListHidden, (v) => sessions.setSessionListHidden(v))
+watch(sessionListHidden, (v) => {
+  sessions.setSessionListHidden(v)
+  nextTick(() => syncAllPaneTerminalSizes())
+})
 const fullscreenPane = ref(null)
 const gridFullscreen = ref(false)
 const paneGridRef = ref(null)
@@ -467,12 +471,19 @@ function createPanes(count) {
         if (!unsubs[i]) subscribePaneTerminal(i, sessionId)
         const s = sessions.byId(sessionId)
         if (s?.status === 'offline') {
-          sessions.restart(sessionId).catch(e => message.error('重启失败：' + (e?.message || e)))
+          sessions.restart(sessionId)
+            .then(() => {
+              if (panes.value[i]) panes.value[i].lastPtySize = null
+              nextTick(() => syncPaneTerminalSize(i))
+            })
+            .catch(e => message.error('重启失败：' + (e?.message || e)))
         } else {
           ipc.attachTerminal(sessionId)
+            .then(() => nextTick(() => syncPaneTerminalSize(i)))
+            .catch(() => {})
         }
       } else {
-        try { panes.value[i]?.fitAddon?.fit() } catch {}
+        syncPaneTerminalSize(i)
       }
     }
   })
@@ -495,7 +506,6 @@ function initPaneTerminal(i) {
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
   term.open(el)
-  fitAddon.fit()
 
   // Clickable links — Ctrl+Click / Cmd+Click opens URL in default browser
   const webLinksAddon = new WebLinksAddon((e, uri) => {
@@ -556,33 +566,62 @@ function initPaneTerminal(i) {
     if (sid) window.ucli.sendTerminalInput(sid, data)
   })
 
-  // Resize
+  panes.value[i].term = term
+  panes.value[i].fitAddon = fitAddon
+  panes.value[i].lastPtySize = null
+
+  const terminalResizeDisposable = term.onResize((size) => {
+    sendPaneTerminalSize(i, size)
+  })
+
+  // ResizeObserver refits the local xterm. The xterm resize event above is
+  // the single path that forwards changed dimensions to the PTY.
   const resizeObserver = new ResizeObserver(() => {
-    if (fitAddon) {
-      try { fitAddon.fit() } catch {}
-      const sid = panes.value[i]?.sessionId
-      if (sid && term) window.ucli.terminalResize(sid, term.cols, term.rows)
-    }
+    if (panes.value[i]?.viewMode === 'history') return
+    try { fitAddon.fit() } catch {}
   })
   resizeObserver.observe(el)
 
-  panes.value[i].term = term
-  panes.value[i].fitAddon = fitAddon
   panes.value[i].resizeObserver = resizeObserver
+  panes.value[i].terminalResizeDisposable = terminalResizeDisposable
   panes.value[i].webLinksAddon = webLinksAddon
+  syncPaneTerminalSize(i)
 }
 
 function destroyPaneTerminal(i) {
   const p = panes.value[i]
   p?.webLinksAddon?.dispose()
+  p?.terminalResizeDisposable?.dispose()
   p?.resizeObserver?.disconnect()
   if (p?.term) {
     p.term.dispose()
     p.term = null
     p.fitAddon = null
     p.resizeObserver = null
+    p.terminalResizeDisposable = null
     p.webLinksAddon = null
+    p.lastPtySize = null
   }
+}
+
+function sendPaneTerminalSize(i, nextSize) {
+  const pane = panes.value[i]
+  const sessionId = pane?.sessionId
+  if (!pane || !sessionId || !terminalSizeChanged(pane.lastPtySize, nextSize)) return false
+  pane.lastPtySize = { cols: nextSize.cols, rows: nextSize.rows }
+  ipc.terminalResize(sessionId, nextSize.cols, nextSize.rows).catch(() => {})
+  return true
+}
+
+function syncPaneTerminalSize(i) {
+  const pane = panes.value[i]
+  if (!pane?.term || !pane.fitAddon || pane.viewMode === 'history') return false
+  try { pane.fitAddon.fit() } catch { return false }
+  return sendPaneTerminalSize(i, { cols: pane.term.cols, rows: pane.term.rows })
+}
+
+function syncAllPaneTerminalSizes() {
+  for (let i = 0; i < panes.value.length; i++) syncPaneTerminalSize(i)
 }
 
 function sendToPane(i, data) {
@@ -604,7 +643,7 @@ function togglePaneHistory(i) {
   activePane.value = i
   if (pane.viewMode === 'terminal') {
     nextTick(() => {
-      try { pane.fitAddon?.fit() } catch {}
+      syncPaneTerminalSize(i)
       pane.term?.focus()
     })
   }
@@ -635,12 +674,8 @@ function onFullscreenChange() {
   gridFullscreen.value = target.grid
   fullscreenPane.value = target.paneIndex
   nextTick(() => {
-    const targets = target.grid || !document.fullscreenElement
-      ? panes.value
-      : [panes.value[fullscreenPane.value ?? activePane.value]]
-    for (const pane of targets) {
-      try { pane?.fitAddon?.fit() } catch {}
-    }
+    if (target.grid || !document.fullscreenElement) syncAllPaneTerminalSizes()
+    else syncPaneTerminalSize(fullscreenPane.value ?? activePane.value)
     const i = fullscreenPane.value ?? activePane.value
     if (panes.value[i]?.viewMode !== 'history') panes.value[i]?.term?.focus()
   })
@@ -678,6 +713,7 @@ function assignToPane(sessionId) {
     if (i !== activePane.value && panes.value[i].sessionId === sessionId) {
       panes.value[i].sessionId = null
       panes.value[i].viewMode = 'terminal'
+      panes.value[i].lastPtySize = null
       panes.value[i].term?.clear()
       sessions.setWorkbenchPane(i, null)
       unsubscribePane(i)
@@ -689,21 +725,38 @@ function assignToPane(sessionId) {
   }
   panes.value[activePane.value].sessionId = sessionId
   panes.value[activePane.value].viewMode = 'terminal'
+  panes.value[activePane.value].lastPtySize = null
   sessions.setWorkbenchPane(activePane.value, sessionId)
-  nextTick(() => panes.value[activePane.value]?.term?.focus())
+  const paneIndex = activePane.value
+  nextTick(() => {
+    syncPaneTerminalSize(paneIndex)
+    panes.value[paneIndex]?.term?.focus()
+  })
   // If session is offline, auto-restart; if running, attach terminal output
   const s = sessions.byId(sessionId)
   // Subscribe terminal output first so we don't miss startup output
   subscribePaneTerminal(activePane.value, sessionId)
   if (s?.status === 'offline') {
     // Offline persisted session — restart (which calls start → replays history)
-    sessions.restart(sessionId).catch(e => message.error('重启失败：' + (e?.message || e)))
+    sessions.restart(sessionId)
+      .then(() => {
+        if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
+        nextTick(() => syncPaneTerminalSize(paneIndex))
+      })
+      .catch(e => message.error('重启失败：' + (e?.message || e)))
   } else if (s?.status === 'starting') {
     // Brand new session — start the adapter (terminal is already subscribed)
     ipc.startAdapter(sessionId)
+      .then(() => {
+        if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
+        nextTick(() => syncPaneTerminalSize(paneIndex))
+      })
+      .catch(e => message.error('启动失败：' + (e?.message || e)))
   } else {
     // Already running/idle — replay history to this pane
     ipc.attachTerminal(sessionId)
+      .then(() => nextTick(() => syncPaneTerminalSize(paneIndex)))
+      .catch(() => {})
   }
 }
 
@@ -928,9 +981,7 @@ function activateWorkbench() {
   window.addEventListener('keydown', onWorkbenchKeydown)
   document.addEventListener('fullscreenchange', onFullscreenChange)
   nextTick(() => {
-    for (const pane of panes.value) {
-      try { pane?.fitAddon?.fit() } catch {}
-    }
+    syncAllPaneTerminalSizes()
     if (panes.value[activePane.value]?.viewMode !== 'history') {
       panes.value[activePane.value]?.term?.focus()
     }

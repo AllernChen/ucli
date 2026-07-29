@@ -837,13 +837,12 @@ export function createOrchestrator() {
     })
 
     // Renderer calls this after it has registered the terminal-output listener
-    ipcMain.handle('session:start-adapter', (_e, sessionId) => {
+    ipcMain.handle('session:start-adapter', async (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (!e || !e.adapter) return false
-      hookReady.then(() => {
-        e.adapter.hookPort = hookPort
-        return e.adapter.start()
-      })
+      await hookReady
+      e.adapter.hookPort = hookPort
+      await e.adapter.start()
       return true
     })
     ipcMain.handle('session:send-turn', (_e, sessionId, text) => {
