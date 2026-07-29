@@ -291,7 +291,7 @@ import { matchesBinding } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { groupSessionsByProject } from '../sessionGrouping.js'
 import { nextSessionPaneIndex, targetPaneForSessionAddition } from '../workbenchKeyboard.js'
-import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldHandleTerminalPaste } from '../terminalKeybindings.js'
+import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldBlockDuplicateClipboardPaste, shouldHandleTerminalPaste } from '../terminalKeybindings.js'
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { compactPaneSessionIds } from '../paneCompaction.js'
 import {
@@ -483,6 +483,7 @@ function initPaneTerminal(i) {
 
   // Custom key handler for copy/paste and pane switching
   term.attachCustomKeyEventHandler((e) => {
+    if (shouldBlockDuplicateClipboardPaste(e)) return false
     if (e.type !== 'keydown') return true
     const overrides = settings.keybindings || {}
 

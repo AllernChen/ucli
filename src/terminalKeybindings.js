@@ -22,3 +22,9 @@ export function shouldHandleTerminalPaste(event, bindingMatches) {
 export function shouldSendClipboardPaste(event) {
   return event?.type === 'keydown' && isClipboardPasteShortcut(event)
 }
+
+// xterm may emit a keypress after the keydown handler has already forwarded
+// clipboard content. Suppress that second Ctrl/Cmd+V path without affecting keyup.
+export function shouldBlockDuplicateClipboardPaste(event) {
+  return event?.type === 'keypress' && isClipboardPasteShortcut(event)
+}

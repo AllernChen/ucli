@@ -57,10 +57,6 @@
           </a-button>
           <span>{{ title }}</span>
         </div>
-        <a-space size="small">
-          <a-tag color="purple">Claude Code</a-tag>
-          <a-tag color="green">Codex</a-tag>
-        </a-space>
       </a-layout-header>
       <a-layout-content class="content">
         <router-view v-slot="{ Component }">

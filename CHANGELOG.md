@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-07-29
+
+### Fixed
+
+- Prevented Ctrl+V from being forwarded twice by the terminal key handler.
+- Removed fixed Claude Code and Codex provider tags from the page header.
+
 ## [0.4.7] - 2026-07-28
 
 ### Added
