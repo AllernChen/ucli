@@ -6,6 +6,7 @@ import {
   buildOpenCodePermission,
   classifyOpenCodeNotification,
   OpenCodeAdapter,
+  resolveOpenCodeCmdShim,
   resolveOpenCodeLaunch
 } from '../electron/adapters/openCodeAdapter.js'
 
@@ -27,6 +28,13 @@ test('OpenCode new sessions can still start with the selected model', () => {
     '--model',
     'anthropic/claude-sonnet-4-5'
   ])
+})
+
+test('OpenCode rejects unsafe model identifiers before building process arguments', () => {
+  assert.throws(() => buildOpenCodeArgs({
+    model: 'provider/model & calc.exe',
+    cliSessionId: null
+  }), /invalid OpenCode model/)
 })
 
 test('OpenCode safety rules allow trusted commands and ask for risky commands', () => {
@@ -89,6 +97,117 @@ test('OpenCode Windows launch bypasses the npm cmd shim for ConPTY', () => {
     file: 'F:\\soft\\nvm\\nodejs\\node_modules\\opencode-ai\\bin\\opencode.exe',
     prefixArgs: []
   })
+})
+
+test('OpenCode safely resolves direct executable and Node cmd shims without invoking cmd.exe', () => {
+  const directShim = [
+    '@ECHO off',
+    '"%dp0%\\node_modules\\opencode-ai\\bin\\opencode.exe" %*'
+  ].join('\r\n')
+  const nodeShim = [
+    '@ECHO off',
+    '"%~dp0\\node.exe" "%~dp0\\node_modules\\opencode-ai\\bin\\opencode.js" %*'
+  ].join('\r\n')
+  const existing = new Set([
+    'F:\\tools\\node_modules\\opencode-ai\\bin\\opencode.exe',
+    'F:\\tools\\node.exe',
+    'F:\\tools\\node_modules\\opencode-ai\\bin\\opencode.js'
+  ])
+
+  assert.deepEqual(resolveOpenCodeCmdShim(
+    'F:\\tools\\opencode.cmd',
+    directShim,
+    (path) => existing.has(path)
+  ), {
+    file: 'F:\\tools\\node_modules\\opencode-ai\\bin\\opencode.exe',
+    prefixArgs: []
+  })
+  assert.deepEqual(resolveOpenCodeCmdShim(
+    'F:\\tools\\opencode.cmd',
+    nodeShim,
+    (path) => existing.has(path)
+  ), {
+    file: 'F:\\tools\\node.exe',
+    prefixArgs: ['F:\\tools\\node_modules\\opencode-ai\\bin\\opencode.js']
+  })
+})
+
+test('OpenCode cmd shim expansion preserves the trailing separator semantics of %~dp0', () => {
+  const shim = '"%~dp0node.exe" "%~dp0node_modules\\opencode-ai\\bin\\opencode.js" %*'
+  const existing = new Set([
+    'F:\\tools\\node.exe',
+    'F:\\tools\\node_modules\\opencode-ai\\bin\\opencode.js'
+  ])
+
+  assert.deepEqual(resolveOpenCodeCmdShim(
+    'F:\\tools\\opencode.cmd',
+    shim,
+    (path) => existing.has(path)
+  ), {
+    file: 'F:\\tools\\node.exe',
+    prefixArgs: ['F:\\tools\\node_modules\\opencode-ai\\bin\\opencode.js']
+  })
+})
+
+test('OpenCode safely extracts the fixed entrypoint from a standard npm cmd shim', () => {
+  const shim = [
+    '@ECHO off',
+    'SETLOCAL',
+    'IF EXIST "%~dp0node.exe" (',
+    '  SET "_prog=%~dp0node.exe"',
+    ') ELSE (',
+    '  SET "_prog=node"',
+    ')',
+    'endLocal & goto #_undefined_# 2>NUL || "%_prog%" "%~dp0node_modules\\opencode-ai\\bin\\opencode.js" %*'
+  ].join('\r\n')
+  const existing = new Set([
+    'F:\\tools\\node.exe',
+    'F:\\tools\\node_modules\\opencode-ai\\bin\\opencode.js'
+  ])
+
+  assert.deepEqual(resolveOpenCodeCmdShim(
+    'F:\\tools\\opencode.cmd',
+    shim,
+    (path) => existing.has(path)
+  ), {
+    file: 'F:\\tools\\node.exe',
+    prefixArgs: ['F:\\tools\\node_modules\\opencode-ai\\bin\\opencode.js']
+  })
+})
+
+test('OpenCode rejects cmd shims containing shell operators', () => {
+  const maliciousShim = '"%~dp0\\node.exe" "%~dp0\\opencode.js" & calc.exe %*'
+
+  assert.equal(resolveOpenCodeCmdShim(
+    'F:\\tools\\opencode.cmd',
+    maliciousShim,
+    () => true
+  ), null)
+})
+
+test('OpenCode launch uses a safely parsed cmd shim when the fixed npm path is absent', () => {
+  const shim = 'F:\\custom\\opencode.cmd'
+  const executable = 'F:\\custom\\runtime\\opencode.exe'
+  const launch = resolveOpenCodeLaunch(
+    [shim],
+    (path) => path === executable,
+    'win32',
+    () => `"${executable}" %*`
+  )
+
+  assert.deepEqual(launch, { file: executable, prefixArgs: [] })
+})
+
+test('OpenCode Windows launch never falls back to a command interpreter', () => {
+  assert.throws(
+    () => resolveOpenCodeLaunch(
+      ['F:\\custom\\opencode.cmd'],
+      () => false,
+      'win32',
+      () => '@ECHO off\r\nopencode %*'
+    ),
+    /safe OpenCode executable not found/
+  )
 })
 
 test('OpenCode asks for non-blacklisted tools in ask-everything mode', () => {

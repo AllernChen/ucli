@@ -1,4 +1,5 @@
 import { execFile } from 'child_process'
+import { isSafeNativeSessionId } from './sessionDiscovery.js'
 
 function number(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
@@ -63,9 +64,23 @@ export function loadOpenCodeSessionStats(sessionId, {
   executable = 'opencode',
   prefixArgs = []
 } = {}) {
-  if (!sessionId) return Promise.resolve(null)
+  return exportOpenCodeSession(sessionId, { execFileFn, executable, prefixArgs })
+    .then((source) => source ? parseOpenCodeSessionStats(source) : null)
+}
+
+export function exportOpenCodeSession(sessionId, {
+  execFileFn = execFile,
+  executable = 'opencode',
+  prefixArgs = [],
+  sanitize = true
+} = {}) {
+  if (!isSafeNativeSessionId(sessionId) || isCommandShell(executable)) {
+    return Promise.resolve(null)
+  }
   return new Promise((resolve) => {
-    execFileFn(executable, [...prefixArgs, 'export', sessionId, '--sanitize'], {
+    const args = [...prefixArgs, 'export', sessionId]
+    if (sanitize) args.push('--sanitize')
+    execFileFn(executable, args, {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 15_000,
@@ -73,12 +88,16 @@ export function loadOpenCodeSessionStats(sessionId, {
     }, (error, stdout) => {
       if (error) return resolve(null)
       try {
-        resolve(parseOpenCodeSessionStats(JSON.parse(stdout)))
+        resolve(JSON.parse(stdout))
       } catch {
         resolve(null)
       }
     })
   })
+}
+
+function isCommandShell(executable) {
+  return /(^|[\\/])(?:cmd|powershell|pwsh)(?:\.exe)?$/i.test(String(executable || ''))
 }
 
 export function parseOpenCodeSessionStats(source) {

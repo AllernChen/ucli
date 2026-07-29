@@ -22,3 +22,8 @@ test('header does not show fixed CLI provider tags', () => {
   assert.doesNotMatch(appSource, /<a-tag color="purple">Claude Code<\/a-tag>/)
   assert.doesNotMatch(appSource, /<a-tag color="green">Codex<\/a-tag>/)
 })
+
+test('workbench route hides the global layout header while other routes retain it', () => {
+  assert.match(appSource, /<a-layout-header v-if="!isWorkbenchRoute" class="header">/)
+  assert.match(appSource, /const isWorkbenchRoute = computed\(\(\) => route\.path\.startsWith\('\/session'\)\)/)
+})

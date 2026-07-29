@@ -1,4 +1,4 @@
-import { existsSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { win32 } from 'path'
 import { createRequire } from 'module'
 import { spawnSync } from 'child_process'
@@ -156,7 +156,12 @@ export function buildOpenCodeArgs(session) {
   // Passing --model here would override that historical configuration.
   if (session.cliSessionId) return ['--session', session.cliSessionId]
   const args = []
-  if (session.model && session.model !== 'default') args.push('--model', session.model)
+  if (session.model && session.model !== 'default') {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._:@/+~-]{0,255}$/.test(session.model)) {
+      throw new Error('invalid OpenCode model')
+    }
+    args.push('--model', session.model)
+  }
   return args
 }
 
@@ -174,7 +179,8 @@ function findOpenCodeOnPath() {
 export function resolveOpenCodeLaunch(
   candidates = null,
   pathExists = existsSync,
-  platform = process.platform
+  platform = process.platform,
+  readShim = readFileSync
 ) {
   if (platform !== 'win32') return { file: 'opencode', prefixArgs: [] }
   const paths = candidates || findOpenCodeOnPath()
@@ -184,8 +190,88 @@ export function resolveOpenCodeLaunch(
   for (const shim of paths.filter((path) => path.toLowerCase().endsWith('.cmd'))) {
     const npmExecutable = win32.join(win32.dirname(shim), 'node_modules', 'opencode-ai', 'bin', 'opencode.exe')
     if (pathExists(npmExecutable)) return { file: npmExecutable, prefixArgs: [] }
+    try {
+      const launch = resolveOpenCodeCmdShim(shim, readShim(shim, 'utf8'), pathExists)
+      if (launch) return launch
+    } catch {}
   }
-  return { file: 'cmd.exe', prefixArgs: ['/c', 'opencode'] }
+  throw new Error('safe OpenCode executable not found')
+}
+
+function expandShimPath(value, shimDirectory) {
+  const directoryPrefix = shimDirectory.endsWith('\\')
+    ? shimDirectory
+    : `${shimDirectory}\\`
+  const expanded = String(value)
+    .replace(/%~dp0/gi, directoryPrefix)
+    .replace(/%dp0%/gi, directoryPrefix)
+  if (expanded.includes('%')) return null
+  return win32.normalize(expanded)
+}
+
+function isWithinDirectory(path, directory) {
+  const relative = win32.relative(directory, path)
+  return relative !== '..' &&
+    !relative.startsWith(`..${win32.sep}`) &&
+    !win32.isAbsolute(relative)
+}
+
+function resolveStaticOpenCodeEntry(shimPath, content, pathExists) {
+  const directory = win32.dirname(shimPath)
+  const candidates = [...String(content || '').matchAll(/"(%~?dp0%?[^"]+)"/gi)]
+    .map((match) => expandShimPath(match[1], directory))
+    .filter((path) =>
+      path &&
+      isWithinDirectory(path, directory) &&
+      path.toLowerCase().includes(`${win32.sep}node_modules${win32.sep}`) &&
+      path.toLowerCase().includes('opencode') &&
+      pathExists(path)
+    )
+
+  const executable = candidates.find((path) =>
+    win32.basename(path).toLowerCase() === 'opencode.exe'
+  )
+  if (executable) return { file: executable, prefixArgs: [] }
+
+  const script = candidates.find((path) => /\.(?:c?js|mjs)$/i.test(path))
+  const node = win32.join(directory, 'node.exe')
+  if (script && pathExists(node)) return { file: node, prefixArgs: [script] }
+  return null
+}
+
+export function resolveOpenCodeCmdShim(shimPath, content, pathExists = existsSync) {
+  const staticEntry = resolveStaticOpenCodeEntry(shimPath, content, pathExists)
+  if (staticEntry) return staticEntry
+
+  const invocation = String(content || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => /%\*\s*$/i.test(line) && !/^(?:call|rem|::)\b/i.test(line))
+  if (!invocation || /[&|<>^]/.test(invocation)) return null
+
+  const match = invocation.match(/^"([^"]+\.exe)"(?:\s+"([^"]+)")?\s+%\*\s*$/i)
+  if (!match) return null
+
+  const directory = win32.dirname(shimPath)
+  const executable = expandShimPath(match[1], directory)
+  if (!executable || !pathExists(executable)) return null
+
+  const executableName = win32.basename(executable).toLowerCase()
+  if (executableName === 'opencode.exe' && !match[2]) {
+    return { file: executable, prefixArgs: [] }
+  }
+  if (executableName !== 'node.exe' || !match[2]) return null
+
+  const script = expandShimPath(match[2], directory)
+  if (
+    !script ||
+    !/\.(?:c?js|mjs)$/i.test(script) ||
+    !script.toLowerCase().includes('opencode') ||
+    !pathExists(script)
+  ) {
+    return null
+  }
+  return { file: executable, prefixArgs: [script] }
 }
 
 export function classifyOpenCodeNotification(message) {

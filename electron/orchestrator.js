@@ -10,14 +10,16 @@ import { classify, toClassifierInput, parsePattern } from './permission/classifi
 import { DEFAULT_RULESET, upgradeDefaultRuleset } from './permission/defaultRules.js'
 import { claudeDescriptor } from './adapters/claudeAdapter.js'
 import { codexDescriptor } from './adapters/codexAdapter.js'
-import { openCodeDescriptor } from './adapters/openCodeAdapter.js'
+import { openCodeDescriptor, resolveOpenCodeLaunch } from './adapters/openCodeAdapter.js'
 import { TIER } from './adapters/cliAdapter.js'
 import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
-import { annotateImportedSessions, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
+import { annotateImportedSessions, isSafeNativeSessionId, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
 import { listOpenCodeSessions } from './openCodeSessions.js'
+import { exportOpenCodeSession } from './openCodeStats.js'
+import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
 import {
   advanceSessionNotification,
   advanceTaskCompletion,
@@ -60,6 +62,25 @@ export function createOrchestrator() {
     getPersistence: () => ({ available: Boolean(getDb()), recoveryInfo: persistenceRecovery }),
     showSaveDialog: (options) => dialog.showSaveDialog(mainWindow, options),
     writeFile: writeFileSync
+  })
+  const historyService = createSessionHistoryService({
+    resolveSession: (sessionId) => {
+      const entry = sessions.get(sessionId)
+      return entry
+        ? {
+            ...entry.session,
+            historyRevision: entry._lastCompletedTurns
+          }
+        : null
+    },
+    exportOpenCode: (nativeSessionId) => {
+      const launch = resolveOpenCodeLaunch()
+      return exportOpenCodeSession(nativeSessionId, {
+        executable: launch.file,
+        prefixArgs: launch.prefixArgs,
+        sanitize: false
+      })
+    }
   })
 
   // ---- DB init (async — callers must await) ----
@@ -313,6 +334,9 @@ export function createOrchestrator() {
 
   // ---- session lifecycle ----
   function createSession(config) {
+    if (config.cliSessionId && !isSafeNativeSessionId(config.cliSessionId)) {
+      throw new Error('invalid native session id')
+    }
     const sessionId = randomUUID()
     const tier = config.tier || settings.defaultTier
     const rulesetId = config.rulesetId || 'default'
@@ -780,6 +804,7 @@ export function createOrchestrator() {
     ipcMain.handle('cli-tools:run', (_e, id, action) => runCliToolAction(id, action))
     ipcMain.handle('diagnostics:get', () => diagnostics.getReport())
     ipcMain.handle('diagnostics:export', () => diagnostics.exportReport())
+    registerSessionHistoryIpc(ipcMain, historyService)
 
     ipcMain.handle('dialog:pick-directory', async () => {
       const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
@@ -816,13 +841,12 @@ export function createOrchestrator() {
     })
 
     // Renderer calls this after it has registered the terminal-output listener
-    ipcMain.handle('session:start-adapter', (_e, sessionId) => {
+    ipcMain.handle('session:start-adapter', async (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (!e || !e.adapter) return false
-      hookReady.then(() => {
-        e.adapter.hookPort = hookPort
-        return e.adapter.start()
-      })
+      await hookReady
+      e.adapter.hookPort = hookPort
+      await e.adapter.start()
       return true
     })
     ipcMain.handle('session:send-turn', (_e, sessionId, text) => {
@@ -864,6 +888,7 @@ export function createOrchestrator() {
       const e = sessions.get(sessionId)
       if (!e) throw new Error('no session')
       if (!e.adapter) throw new Error('会话已离线，请先重新启动')
+      if (!isSafeNativeSessionId(cliSessionId)) throw new Error('invalid native session id')
       return e.adapter.resume(cliSessionId)
     })
     ipcMain.handle('session:restart', (_e, sessionId) => restartSession(sessionId))
@@ -883,6 +908,7 @@ export function createOrchestrator() {
       if (e) {
         if (e.adapter) e.adapter.dispose()
         sessions.delete(sessionId)
+        historyService.invalidate(sessionId)
         const db = getDb()
         if (db) { db.removeSession(sessionId); scheduleFlush() }
       }

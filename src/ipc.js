@@ -32,6 +32,7 @@ export const ipc = {
   sendTerminalInput: (sessionId, data) => u.sendTerminalInput(sessionId, data),
   terminalResize: (sessionId, cols, rows) => u.terminalResize(sessionId, cols, rows),
   attachTerminal: (sessionId) => u.attachTerminal(sessionId),
+  getSessionHistory: (sessionId, options) => u.getSessionHistory(sessionId, options),
   resumeSession: (sessionId, cliSessionId) => u.resumeSession(sessionId, cliSessionId),
   stopSession: (sessionId) => u.stopSession(sessionId),
   restartSession: (sessionId) => u.restartSession(sessionId),

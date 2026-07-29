@@ -4,7 +4,10 @@ import assert from 'node:assert/strict'
 import {
   annotateImportedSessions,
   claudeProjectHash,
+  findClaudeTranscriptFile,
+  findCodexTranscriptFile,
   findClaudeProjectDirectory,
+  isSafeNativeSessionId,
   listClaudeTranscriptFiles,
   parseCodexProviderConfig,
   resolveCodexResumeProvider
@@ -44,6 +47,39 @@ test('Claude project directory resolver finds transcripts for Chinese cwd', () =
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+test('provider transcript resolvers return only the requested native session file', () => {
+  const home = mkdtempSync(join(tmpdir(), 'ucli-history-source-'))
+  const claudeDir = join(home, '.claude', 'projects', 'F--projects-ucli')
+  const codexDir = join(home, '.codex', 'sessions', '2026', '07', '29')
+  mkdirSync(claudeDir, { recursive: true })
+  mkdirSync(codexDir, { recursive: true })
+  const claudePath = join(claudeDir, 'claude-native.jsonl')
+  const codexPath = join(codexDir, 'rollout-2026-07-29-codex-native.jsonl')
+  writeFileSync(claudePath, '{}\n')
+  writeFileSync(codexPath, '{}\n')
+
+  try {
+    assert.equal(
+      findClaudeTranscriptFile(home, 'F:\\projects\\ucli', 'claude-native'),
+      claudePath
+    )
+    assert.equal(findCodexTranscriptFile(home, 'codex-native'), codexPath)
+    assert.equal(findClaudeTranscriptFile(home, 'F:\\projects\\ucli', '../escape'), null)
+    assert.equal(findCodexTranscriptFile(home, '../escape'), null)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('native session IDs reject command and path syntax before reaching a CLI', () => {
+  assert.equal(isSafeNativeSessionId('ses_01HZX-safe'), true)
+  assert.equal(isSafeNativeSessionId('019f217c-5274-7280-87b2-ffb4b8728f8b'), true)
+  assert.equal(isSafeNativeSessionId('ses_safe & calc.exe'), false)
+  assert.equal(isSafeNativeSessionId('ses_safe|whoami'), false)
+  assert.equal(isSafeNativeSessionId('../escape'), false)
+  assert.equal(isSafeNativeSessionId(''), false)
 })
 
 test('missing historical Codex provider falls back to current built-in provider', () => {
