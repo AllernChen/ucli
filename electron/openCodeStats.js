@@ -1,4 +1,5 @@
 import { execFile } from 'child_process'
+import { isSafeNativeSessionId } from './sessionDiscovery.js'
 
 function number(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
@@ -72,7 +73,9 @@ export function exportOpenCodeSession(sessionId, {
   executable = 'opencode',
   prefixArgs = []
 } = {}) {
-  if (!sessionId) return Promise.resolve(null)
+  if (!isSafeNativeSessionId(sessionId) || isCommandShell(executable)) {
+    return Promise.resolve(null)
+  }
   return new Promise((resolve) => {
     execFileFn(executable, [...prefixArgs, 'export', sessionId, '--sanitize'], {
       encoding: 'utf8',
@@ -88,6 +91,10 @@ export function exportOpenCodeSession(sessionId, {
       }
     })
   })
+}
+
+function isCommandShell(executable) {
+  return /(^|[\\/])(?:cmd|powershell|pwsh)(?:\.exe)?$/i.test(String(executable || ''))
 }
 
 export function parseOpenCodeSessionStats(source) {

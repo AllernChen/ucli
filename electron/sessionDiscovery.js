@@ -83,7 +83,7 @@ export function listClaudeTranscriptFiles(home, cwd) {
   return transcripts
 }
 
-function safeNativeSessionId(value) {
+export function isSafeNativeSessionId(value) {
   return typeof value === 'string' &&
     value.length > 0 &&
     value.length <= 256 &&
@@ -91,7 +91,7 @@ function safeNativeSessionId(value) {
 }
 
 export function findClaudeTranscriptFile(home, cwd, sessionId) {
-  if (!safeNativeSessionId(sessionId)) return null
+  if (!isSafeNativeSessionId(sessionId)) return null
   const directory = findClaudeProjectDirectory(home, cwd)
   if (!directory) return null
   const transcript = join(directory, `${sessionId}.jsonl`)
@@ -99,7 +99,7 @@ export function findClaudeTranscriptFile(home, cwd, sessionId) {
 }
 
 export function findCodexTranscriptFile(home, sessionId) {
-  if (!home || !safeNativeSessionId(sessionId)) return null
+  if (!home || !isSafeNativeSessionId(sessionId)) return null
   const sessionsRoot = join(home, '.codex', 'sessions')
   if (!existsSync(sessionsRoot)) return null
 

@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
-import { createSessionHistoryService } from '../electron/sessionHistoryService.js'
+import {
+  createSessionHistoryService,
+  parseJsonLinesCooperatively
+} from '../electron/sessionHistoryService.js'
+import { parseCodexHistory } from '../electron/sessionHistory.js'
 
 const claudeTranscript = readFileSync(
   new URL('./fixtures/history/claude.jsonl', import.meta.url),
@@ -140,4 +144,159 @@ test('history service reports unavailable provider sources without exposing a pa
     service.getPage('ucli-session'),
     (error) => error.message === 'history source unavailable'
   )
+})
+
+test('history service rejects unsafe native session IDs before OpenCode export', async () => {
+  let exports = 0
+  const service = createSessionHistoryService({
+    resolveSession: () => ({
+      id: 'ucli-session',
+      adapterId: 'opencode',
+      cwd: 'F:\\projects\\ucli',
+      cliSessionId: 'ses_safe & calc.exe'
+    }),
+    readFile: () => '',
+    exportOpenCode: async () => {
+      exports += 1
+      return openCodeExport
+    }
+  })
+
+  await assert.rejects(service.getPage('ucli-session'), /invalid native session id/)
+  assert.equal(exports, 0)
+})
+
+test('history service evicts the least recently used session from a bounded cache', async () => {
+  let reads = 0
+  const service = createSessionHistoryService({
+    resolveSession: (id) => ({
+      id,
+      adapterId: 'claude',
+      cwd: 'F:\\projects\\ucli',
+      cliSessionId: id
+    }),
+    resolveClaudeTranscript: (session) => `${session.id}.jsonl`,
+    readFile: async () => {
+      reads += 1
+      return claudeTranscript
+    },
+    exportOpenCode: async () => null,
+    cacheLimit: 2
+  })
+
+  await service.getPage('session-a')
+  await service.getPage('session-b')
+  await service.getPage('session-c')
+  await service.getPage('session-a')
+
+  assert.equal(reads, 4)
+})
+
+test('large transcript parsing yields to the event loop between bounded chunks', async () => {
+  const records = Array.from({ length: 7 }, (_, index) => JSON.stringify({
+    type: 'user',
+    uuid: `message-${index}`,
+    timestamp: `2026-07-29T02:00:0${index}.000Z`,
+    message: {
+      content: [{ type: 'text', text: `message ${index}` }]
+    }
+  })).join('\n')
+  let yields = 0
+
+  const items = await parseJsonLinesCooperatively(records, (lines) => lines, {
+    chunkSize: 2,
+    yieldControl: async () => {
+      yields += 1
+    }
+  })
+
+  assert.equal(items.length, 7)
+  assert.ok(yields >= 3)
+  assert.ok(items.every((item) => typeof item === 'object'))
+})
+
+test('large single-line transcripts are parsed off the main event loop', async () => {
+  const content = JSON.stringify({
+    type: 'user',
+    uuid: 'large-message',
+    timestamp: '2026-07-29T02:00:00.000Z',
+    message: {
+      content: [{ type: 'text', text: 'x'.repeat(2 * 1024 * 1024) }]
+    }
+  })
+  let eventLoopTicks = 0
+  const timer = setInterval(() => {
+    eventLoopTicks += 1
+  }, 0)
+
+  try {
+    const items = await parseJsonLinesCooperatively(content, (records) => records, {
+      workerThresholdBytes: 1
+    })
+    assert.equal(items.length, 1)
+    assert.ok(eventLoopTicks > 0)
+  } finally {
+    clearInterval(timer)
+  }
+})
+
+test('cooperative normalization keeps Codex dual records in the same batch', async () => {
+  const content = [
+    JSON.stringify({
+      type: 'response_item',
+      timestamp: '2026-07-29T02:00:01.000Z',
+      payload: {
+        type: 'message',
+        id: 'canonical-1',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'one copy' }]
+      }
+    }),
+    JSON.stringify({
+      type: 'event_msg',
+      timestamp: '2026-07-29T02:00:01.100Z',
+      payload: { type: 'user_message', message: 'one copy' }
+    })
+  ].join('\n')
+
+  const items = await parseJsonLinesCooperatively(content, parseCodexHistory, {
+    chunkSize: 1,
+    normalizeChunkSize: 1
+  })
+
+  assert.equal(items.length, 1)
+  assert.equal(items[0].text, 'one copy')
+})
+
+test('Codex dual records stay paired across ignored records and batch boundaries', async () => {
+  const content = [
+    JSON.stringify({
+      type: 'event_msg',
+      timestamp: '2026-07-29T02:00:01.000Z',
+      payload: { type: 'user_message', message: 'one copy' }
+    }),
+    JSON.stringify({
+      type: 'turn_context',
+      timestamp: '2026-07-29T02:00:01.050Z',
+      payload: { model: 'gpt-5' }
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      timestamp: '2026-07-29T02:00:01.100Z',
+      payload: {
+        type: 'message',
+        id: 'canonical-1',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'one copy' }]
+      }
+    })
+  ].join('\n')
+
+  const items = await parseJsonLinesCooperatively(content, parseCodexHistory, {
+    chunkSize: 1,
+    normalizeChunkSize: 1
+  })
+
+  assert.equal(items.length, 1)
+  assert.equal(items[0].text, 'one copy')
 })

@@ -16,7 +16,7 @@ import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
-import { annotateImportedSessions, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
+import { annotateImportedSessions, isSafeNativeSessionId, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
 import { listOpenCodeSessions } from './openCodeSessions.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
@@ -333,6 +333,9 @@ export function createOrchestrator() {
 
   // ---- session lifecycle ----
   function createSession(config) {
+    if (config.cliSessionId && !isSafeNativeSessionId(config.cliSessionId)) {
+      throw new Error('invalid native session id')
+    }
     const sessionId = randomUUID()
     const tier = config.tier || settings.defaultTier
     const rulesetId = config.rulesetId || 'default'
@@ -884,6 +887,7 @@ export function createOrchestrator() {
       const e = sessions.get(sessionId)
       if (!e) throw new Error('no session')
       if (!e.adapter) throw new Error('会话已离线，请先重新启动')
+      if (!isSafeNativeSessionId(cliSessionId)) throw new Error('invalid native session id')
       return e.adapter.resume(cliSessionId)
     })
     ipcMain.handle('session:restart', (_e, sessionId) => restartSession(sessionId))
@@ -903,6 +907,7 @@ export function createOrchestrator() {
       if (e) {
         if (e.adapter) e.adapter.dispose()
         sessions.delete(sessionId)
+        historyService.invalidate(sessionId)
         const db = getDb()
         if (db) { db.removeSession(sessionId); scheduleFlush() }
       }

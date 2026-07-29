@@ -171,3 +171,18 @@ test('exports sanitized OpenCode source for conversation history', async () => {
     }
   }])
 })
+
+test('sanitized export never falls back through a Windows command shell', async () => {
+  let executions = 0
+  const source = await exportOpenCodeSession('ses_fixture', {
+    executable: 'cmd.exe',
+    prefixArgs: ['/c', 'opencode'],
+    execFileFn(_file, _args, _options, callback) {
+      executions += 1
+      callback(null, JSON.stringify(fixture), '')
+    }
+  })
+
+  assert.equal(source, null)
+  assert.equal(executions, 0)
+})

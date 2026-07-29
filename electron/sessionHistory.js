@@ -1,5 +1,6 @@
 const ROLES = new Set(['user', 'assistant', 'tool', 'system'])
 const TOOL_SUMMARY_LIMIT = 2000
+const CODEX_DUAL_RECORD_WINDOW_MS = 5000
 
 function parseRecord(line) {
   if (line && typeof line === 'object') return line
@@ -69,13 +70,13 @@ function claudeToolResult(content) {
   return contentText(content, new Set(['text']))
 }
 
-export function parseClaudeHistory(lines = []) {
+export function parseClaudeHistory(lines = [], { recordOffset = 0 } = {}) {
   const items = []
 
   for (const [recordIndex, line] of Array.from(lines).entries()) {
     const record = parseRecord(line)
     if (!record) continue
-    const baseId = record.uuid || record.message?.id || `claude-${recordIndex}`
+    const baseId = record.uuid || record.message?.id || `claude-${recordOffset + recordIndex}`
     const timestamp = record.timestamp || record.message?.timestamp
 
     if (record.type === 'system' && record.subtype === 'init') {
@@ -131,7 +132,131 @@ function codexMessageText(content, role) {
   return contentText(content, allowed)
 }
 
-export function parseCodexHistory(lines = []) {
+function normalizedCodexMessage(record, payload) {
+  if (record.type === 'response_item' && payload?.type === 'message') {
+    return {
+      role: payload.role,
+      content: payload.content,
+      id: payload.id,
+      priority: 2,
+      source: 'canonical'
+    }
+  }
+  if (record.type === 'event_msg' && payload) {
+    const role = payload.type === 'user_message'
+      ? 'user'
+      : payload.type === 'assistant_message' || payload.type === 'agent_message'
+        ? 'assistant'
+        : null
+    if (!role) return null
+    return {
+      role,
+      content: payload.message ?? payload.content,
+      id: payload.id,
+      priority: 1,
+      source: 'event'
+    }
+  }
+  if (record.role === 'user' || record.role === 'assistant') {
+    return {
+      role: record.role,
+      content: record.content ?? record.message,
+      id: record.id,
+      priority: 2,
+      source: 'legacy'
+    }
+  }
+  if (record.type === 'user_message' || record.type === 'assistant_message') {
+    return {
+      role: record.type === 'user_message' ? 'user' : 'assistant',
+      content: record.message ?? record.content,
+      id: record.id,
+      priority: 2,
+      source: 'legacy'
+    }
+  }
+  return null
+}
+
+function codexMessagesAreDualPair(left, right) {
+  const sourcesAreEventAndCanonical =
+    (left?.source === 'event' && right?.source === 'canonical') ||
+    (left?.source === 'canonical' && right?.source === 'event')
+  return Boolean(
+    left &&
+    right &&
+    left.role === right.role &&
+    left.text === right.text &&
+    sourcesAreEventAndCanonical &&
+    left.timestamp !== null &&
+    right.timestamp !== null &&
+    Math.abs(left.timestamp - right.timestamp) <= CODEX_DUAL_RECORD_WINDOW_MS
+  )
+}
+
+function codexRecordMessage(record) {
+  const parsed = parseRecord(record)
+  if (!parsed) return null
+  const payload = parsed.payload && typeof parsed.payload === 'object'
+    ? parsed.payload
+    : null
+  const message = normalizedCodexMessage(parsed, payload)
+  if (!message) return null
+  const text = approvedText(
+    typeof message.content === 'string'
+      ? message.content
+      : codexMessageText(message.content, message.role)
+  )
+  if (!text) return null
+  return {
+    role: message.role,
+    text,
+    source: message.source,
+    timestamp: normalizeTimestamp(parsed.timestamp || payload?.timestamp)
+  }
+}
+
+export function isCodexDualRecordPair(left, right) {
+  return codexMessagesAreDualPair(
+    codexRecordMessage(left),
+    codexRecordMessage(right)
+  )
+}
+
+function addCodexMessage(items, { id, role, text, timestamp, priority, source }) {
+  const safeText = approvedText(text)
+  if ((role !== 'user' && role !== 'assistant') || !safeText) return
+  const item = {
+    id: String(id),
+    role,
+    text: safeText,
+    timestamp: normalizeTimestamp(timestamp),
+    _priority: priority,
+    _source: source
+  }
+  const previous = items.at(-1)
+  const isDualFormatDuplicate = codexMessagesAreDualPair(
+    previous && {
+      role: previous.role,
+      text: previous.text,
+      source: previous._source,
+      timestamp: previous.timestamp
+    },
+    {
+      role: item.role,
+      text: item.text,
+      source: item._source,
+      timestamp: item.timestamp
+    }
+  )
+  if (isDualFormatDuplicate) {
+    if ((previous._priority || 0) < priority) items[items.length - 1] = item
+    return
+  }
+  items.push(item)
+}
+
+export function parseCodexHistory(lines = [], { recordOffset = 0 } = {}) {
   const items = []
 
   for (const [recordIndex, line] of Array.from(lines).entries()) {
@@ -140,7 +265,7 @@ export function parseCodexHistory(lines = []) {
     const payload = record.payload && typeof record.payload === 'object'
       ? record.payload
       : null
-    const baseId = payload?.id || payload?.call_id || record.id || `codex-${recordIndex}`
+    const baseId = payload?.id || payload?.call_id || record.id || `codex-${recordOffset + recordIndex}`
     const timestamp = record.timestamp || payload?.timestamp
 
     if (record.type === 'session_meta' && payload) {
@@ -154,37 +279,21 @@ export function parseCodexHistory(lines = []) {
       continue
     }
 
-    if (record.type === 'response_item' && payload?.type === 'message') {
-      const role = payload.role
-      if (role === 'user' || role === 'assistant') {
-        addItem(items, {
-          id: `${baseId}:${role}`,
-          role,
-          text: codexMessageText(payload.content, role),
-          timestamp
-        })
-      }
+    const message = normalizedCodexMessage(record, payload)
+    if (message) {
+      addCodexMessage(items, {
+        id: `${message.id || baseId}:${message.role}`,
+        role: message.role,
+        text: typeof message.content === 'string'
+          ? message.content
+          : codexMessageText(message.content, message.role),
+        timestamp,
+        priority: message.priority,
+        source: message.source
+      })
       continue
     }
-
-    if (record.type === 'event_msg' && payload) {
-      const role = payload.type === 'user_message'
-        ? 'user'
-        : payload.type === 'assistant_message' || payload.type === 'agent_message'
-          ? 'assistant'
-          : null
-      if (role) {
-        addItem(items, {
-          id: `${baseId}:${role}`,
-          role,
-          text: typeof payload.message === 'string'
-            ? payload.message
-            : codexMessageText(payload.content, role),
-          timestamp
-        })
-      }
-      continue
-    }
+    if (record.type === 'event_msg') continue
 
     const tool = record.type === 'response_item' && payload
       ? payload
@@ -206,7 +315,7 @@ export function parseCodexHistory(lines = []) {
     }
   }
 
-  return items
+  return items.map(({ _priority, _source, ...item }) => item)
 }
 
 export function parseOpenCodeHistory(source) {

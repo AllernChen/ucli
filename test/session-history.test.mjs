@@ -53,6 +53,84 @@ test('provider parsers expose tool summaries but omit reasoning and malformed ob
   }
 })
 
+test('Codex history supports legacy root messages and removes adjacent dual-format duplicates', () => {
+  const conversation = parseCodexHistory(fixtureLines('codex'))
+    .filter((item) => item.role === 'user' || item.role === 'assistant')
+
+  assert.deepEqual(conversation.map((item) => item.text), [
+    'Codex first question',
+    'Codex first answer',
+    'Codex second question',
+    'Codex second answer'
+  ])
+})
+
+test('Codex history preserves adjacent identical canonical messages', () => {
+  const conversation = parseCodexHistory([
+    JSON.stringify({
+      type: 'response_item',
+      timestamp: '2026-07-29T02:00:01.000Z',
+      payload: {
+        type: 'message',
+        id: 'codex-user-repeat-1',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'continue' }]
+      }
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      timestamp: '2026-07-29T02:00:02.000Z',
+      payload: {
+        type: 'message',
+        id: 'codex-user-repeat-2',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'continue' }]
+      }
+    })
+  ])
+
+  assert.deepEqual(conversation.map((item) => item.id), [
+    'codex-user-repeat-1:user',
+    'codex-user-repeat-2:user'
+  ])
+})
+
+test('Codex history only deduplicates a nearby event and canonical pair', () => {
+  const canonicalThenLateEvent = parseCodexHistory([
+    JSON.stringify({
+      type: 'response_item',
+      timestamp: '2026-07-29T02:00:01.000Z',
+      payload: {
+        type: 'message',
+        id: 'canonical-1',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'repeat later' }]
+      }
+    }),
+    JSON.stringify({
+      type: 'event_msg',
+      timestamp: '2026-07-29T02:01:01.000Z',
+      payload: { type: 'user_message', message: 'repeat later' }
+    })
+  ])
+  const legacyThenEvent = parseCodexHistory([
+    JSON.stringify({
+      role: 'assistant',
+      id: 'legacy-1',
+      timestamp: '2026-07-29T02:00:01.000Z',
+      content: 'same text'
+    }),
+    JSON.stringify({
+      type: 'event_msg',
+      timestamp: '2026-07-29T02:00:01.100Z',
+      payload: { type: 'agent_message', message: 'same text' }
+    })
+  ])
+
+  assert.equal(canonicalThenLateEvent.length, 2)
+  assert.equal(legacyThenEvent.length, 2)
+})
+
 test('normalized timestamps are milliseconds or null and remain chronological', () => {
   for (const items of [
     parseClaudeHistory(fixtureLines('claude')),
