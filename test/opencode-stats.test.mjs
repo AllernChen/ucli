@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { loadOpenCodeSessionStats, parseOpenCodeSessionStats } from '../electron/openCodeStats.js'
+import {
+  exportOpenCodeSession,
+  loadOpenCodeSessionStats,
+  parseOpenCodeSessionStats
+} from '../electron/openCodeStats.js'
 
 const fixture = JSON.parse(readFileSync(
   new URL('./fixtures/opencode/session-export.json', import.meta.url),
@@ -141,4 +145,29 @@ test('uses the resolved Windows executable for an official export', async () => 
 
   assert.equal(calls[0].file, 'F:\\soft\\nvm\\nodejs\\node_modules\\opencode-ai\\bin\\opencode.exe')
   assert.deepEqual(calls[0].args, ['export', 'ses_fixture', '--sanitize'])
+})
+
+test('exports sanitized OpenCode source for conversation history', async () => {
+  const calls = []
+  const source = await exportOpenCodeSession('ses_fixture', {
+    executable: 'opencode.exe',
+    prefixArgs: ['--wrapper'],
+    execFileFn(file, args, options, callback) {
+      calls.push({ file, args, options })
+      callback(null, JSON.stringify(fixture), '')
+    }
+  })
+
+  assert.equal(source.info.id, 'ses_fixture')
+  assert.equal(source.messages.length, 5)
+  assert.deepEqual(calls, [{
+    file: 'opencode.exe',
+    args: ['--wrapper', 'export', 'ses_fixture', '--sanitize'],
+    options: {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 15000,
+      maxBuffer: 8 * 1024 * 1024
+    }
+  }])
 })

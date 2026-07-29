@@ -63,6 +63,15 @@ export function loadOpenCodeSessionStats(sessionId, {
   executable = 'opencode',
   prefixArgs = []
 } = {}) {
+  return exportOpenCodeSession(sessionId, { execFileFn, executable, prefixArgs })
+    .then((source) => source ? parseOpenCodeSessionStats(source) : null)
+}
+
+export function exportOpenCodeSession(sessionId, {
+  execFileFn = execFile,
+  executable = 'opencode',
+  prefixArgs = []
+} = {}) {
   if (!sessionId) return Promise.resolve(null)
   return new Promise((resolve) => {
     execFileFn(executable, [...prefixArgs, 'export', sessionId, '--sanitize'], {
@@ -73,7 +82,7 @@ export function loadOpenCodeSessionStats(sessionId, {
     }, (error, stdout) => {
       if (error) return resolve(null)
       try {
-        resolve(parseOpenCodeSessionStats(JSON.parse(stdout)))
+        resolve(JSON.parse(stdout))
       } catch {
         resolve(null)
       }

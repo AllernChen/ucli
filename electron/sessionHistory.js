@@ -91,17 +91,16 @@ export function parseClaudeHistory(lines = []) {
 
     if (record.type !== 'user' && record.type !== 'assistant') continue
     const parts = Array.isArray(record.message?.content) ? record.message.content : []
-    const text = contentText(parts, new Set(['text']))
-    addItem(items, {
-      id: `${baseId}:${record.type}`,
-      role: record.type,
-      text,
-      timestamp
-    })
-
     for (const [partIndex, part] of parts.entries()) {
       if (!part || typeof part !== 'object') continue
-      if (part.type === 'tool_use') {
+      if (part.type === 'text') {
+        addItem(items, {
+          id: `${baseId}:${record.type}:${partIndex}`,
+          role: record.type,
+          text: part.text,
+          timestamp
+        })
+      } else if (part.type === 'tool_use') {
         addItem(items, {
           id: part.id || `${baseId}:tool-use:${partIndex}`,
           role: 'tool',
@@ -222,15 +221,18 @@ export function parseOpenCodeHistory(source) {
     const baseId = info.id || `opencode-${messageIndex}`
     const timestamp = info.time?.created
 
-    addItem(items, {
-      id: `${baseId}:${role}`,
-      role,
-      text: contentText(parts, new Set(['text'])),
-      timestamp
-    })
-
     for (const [partIndex, part] of parts.entries()) {
-      if (!part || part.type !== 'tool') continue
+      if (!part || typeof part !== 'object') continue
+      if (part.type === 'text') {
+        addItem(items, {
+          id: part.id || `${baseId}:${role}:${partIndex}`,
+          role,
+          text: part.text,
+          timestamp
+        })
+        continue
+      }
+      if (part.type !== 'tool') continue
       const state = part.state && typeof part.state === 'object' ? part.state : {}
       const status = approvedText(state.status)
       const output = approvedText(state.output)

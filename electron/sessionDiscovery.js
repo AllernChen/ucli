@@ -83,6 +83,52 @@ export function listClaudeTranscriptFiles(home, cwd) {
   return transcripts
 }
 
+function safeNativeSessionId(value) {
+  return typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    /^[a-zA-Z0-9._-]+$/.test(value)
+}
+
+export function findClaudeTranscriptFile(home, cwd, sessionId) {
+  if (!safeNativeSessionId(sessionId)) return null
+  const directory = findClaudeProjectDirectory(home, cwd)
+  if (!directory) return null
+  const transcript = join(directory, `${sessionId}.jsonl`)
+  return existsSync(transcript) ? transcript : null
+}
+
+export function findCodexTranscriptFile(home, sessionId) {
+  if (!home || !safeNativeSessionId(sessionId)) return null
+  const sessionsRoot = join(home, '.codex', 'sessions')
+  if (!existsSync(sessionsRoot)) return null
+
+  let years
+  try {
+    years = readdirSync(sessionsRoot)
+  } catch {
+    return null
+  }
+  for (const year of years) {
+    const yearDirectory = join(sessionsRoot, year)
+    let months
+    try { months = readdirSync(yearDirectory) } catch { continue }
+    for (const month of months) {
+      const monthDirectory = join(yearDirectory, month)
+      let days
+      try { days = readdirSync(monthDirectory) } catch { continue }
+      for (const day of days) {
+        const dayDirectory = join(monthDirectory, day)
+        let files
+        try { files = readdirSync(dayDirectory) } catch { continue }
+        const match = files.find((file) => file.endsWith(`${sessionId}.jsonl`))
+        if (match) return join(dayDirectory, match)
+      }
+    }
+  }
+  return null
+}
+
 /** Parse only Codex provider identity from config.toml. Credentials and other
  * provider settings never leave the main process. */
 export function parseCodexProviderConfig(content = '') {

@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import {
   annotateImportedSessions,
   claudeProjectHash,
+  findClaudeTranscriptFile,
+  findCodexTranscriptFile,
   findClaudeProjectDirectory,
   listClaudeTranscriptFiles,
   parseCodexProviderConfig,
@@ -41,6 +43,30 @@ test('Claude project directory resolver finds transcripts for Chinese cwd', () =
   try {
     assert.equal(findClaudeProjectDirectory(home, 'F:\\项目\\GZXS'), projectDir)
     assert.deepEqual(listClaudeTranscriptFiles(home, 'F:\\项目\\GZXS').map((item) => item.sessionId), ['session-1'])
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('provider transcript resolvers return only the requested native session file', () => {
+  const home = mkdtempSync(join(tmpdir(), 'ucli-history-source-'))
+  const claudeDir = join(home, '.claude', 'projects', 'F--projects-ucli')
+  const codexDir = join(home, '.codex', 'sessions', '2026', '07', '29')
+  mkdirSync(claudeDir, { recursive: true })
+  mkdirSync(codexDir, { recursive: true })
+  const claudePath = join(claudeDir, 'claude-native.jsonl')
+  const codexPath = join(codexDir, 'rollout-2026-07-29-codex-native.jsonl')
+  writeFileSync(claudePath, '{}\n')
+  writeFileSync(codexPath, '{}\n')
+
+  try {
+    assert.equal(
+      findClaudeTranscriptFile(home, 'F:\\projects\\ucli', 'claude-native'),
+      claudePath
+    )
+    assert.equal(findCodexTranscriptFile(home, 'codex-native'), codexPath)
+    assert.equal(findClaudeTranscriptFile(home, 'F:\\projects\\ucli', '../escape'), null)
+    assert.equal(findCodexTranscriptFile(home, '../escape'), null)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

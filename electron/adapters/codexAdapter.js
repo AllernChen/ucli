@@ -2,7 +2,7 @@ import { readFileSync, existsSync, readdirSync, statSync, rmSync } from 'fs'
 import { join } from 'path'
 import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
-import { isSafeProviderName } from '../sessionDiscovery.js'
+import { findCodexTranscriptFile, isSafeProviderName } from '../sessionDiscovery.js'
 
 const DISPLAY_NAME = 'Codex'
 const STATS_IDLE_DELAY_MS = 2000
@@ -201,25 +201,7 @@ export class CodexAdapter extends BaseAdapter {
 
   _findTranscript(cliSessionId) {
     const home = process.env.HOME || process.env.USERPROFILE || '~'
-    const sessionsDir = join(home, '.codex', 'sessions')
-    if (!existsSync(sessionsDir)) return null
-    // Walk year/month/day for the session file
-    for (const year of readdirSync(sessionsDir)) {
-      const yDir = join(sessionsDir, year)
-      let months; try { months = readdirSync(yDir) } catch { continue }
-      for (const month of months) {
-        const mDir = join(yDir, month)
-        let days; try { days = readdirSync(mDir) } catch { continue }
-        for (const day of days) {
-          const dDir = join(mDir, day)
-          let files; try { files = readdirSync(dDir) } catch { continue }
-          for (const f of files) {
-            if (f.endsWith(cliSessionId + '.jsonl')) return join(dDir, f)
-          }
-        }
-      }
-    }
-    return null
+    return findCodexTranscriptFile(home, cliSessionId)
   }
 
   _findLatestTranscript() {

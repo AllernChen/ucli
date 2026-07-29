@@ -42,6 +42,8 @@ const api = {
   sendTerminalInput: (sessionId, data) => ipcRenderer.invoke('session:send-terminal-input', sessionId, data),
   terminalResize: (sessionId, cols, rows) => ipcRenderer.invoke('session:terminal-resize', sessionId, cols, rows),
   attachTerminal: (sessionId) => ipcRenderer.invoke('session:attach-terminal', sessionId),
+  getSessionHistory: (sessionId, options) =>
+    ipcRenderer.invoke('session:get-history', sessionId, options),
   resumeSession: (sessionId, cliSessionId) =>
     ipcRenderer.invoke('session:resume', sessionId, cliSessionId),
   stopSession: (sessionId) => ipcRenderer.invoke('session:stop', sessionId),
