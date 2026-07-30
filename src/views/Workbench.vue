@@ -10,6 +10,7 @@
         <a-select-option value="ask-everything">逐次确认</a-select-option>
       </a-select>
       <span class="spacer"></span>
+      <GatewayHeaderControl />
       <a-button v-if="filtered.length" size="small" type="text" @click="expandAll">全部展开</a-button>
       <a-button v-if="filtered.length" size="small" type="text" @click="collapseAll">全部收起</a-button>
       <span class="count">{{ groupedSessions.length }} 个项目 · {{ filtered.length }} 个会话</span>
@@ -142,6 +143,7 @@ import {
 import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
 import SessionCard from '../components/SessionCard.vue'
+import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
 import { groupSessionsByProject } from '../sessionGrouping.js'
 import { ipc } from '../ipc.js'
 

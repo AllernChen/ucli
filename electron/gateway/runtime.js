@@ -96,6 +96,7 @@ export class GatewayRuntime {
       phase: 'off',
       channelType: null,
       targetLabel: '',
+      botIdentity: null,
       errorCode: null,
       errorMessage: '',
       selectedSessionCount: 0,
@@ -115,6 +116,14 @@ export class GatewayRuntime {
 
   getChannel() {
     return this.channel
+  }
+
+  getSessionRelayState(sessionId) {
+    const queue = this.taskQueue.getState(sessionId)
+    return {
+      queueCount: (queue.running ? 1 : 0) + queue.waiting.length,
+      paused: queue.paused
+    }
   }
 
   getConnection() {
@@ -154,6 +163,7 @@ export class GatewayRuntime {
       phase: 'connecting',
       channelType: config?.channelType || 'feishu',
       targetLabel: targetIdOf(config) || '',
+      botIdentity: this.botIdentity,
       errorCode: null,
       errorMessage: ''
     })
@@ -190,6 +200,7 @@ export class GatewayRuntime {
       phase: 'connected',
       channelType: config?.channelType || 'feishu',
       targetLabel: targetIdOf(config) || '',
+      botIdentity: this.botIdentity,
       errorCode: null,
       errorMessage: '',
       lastConnectedAt: Date.now()

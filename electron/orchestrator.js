@@ -811,6 +811,7 @@ export function createOrchestrator() {
       phase: 'error',
       channelType: null,
       targetLabel: '',
+      botIdentity: null,
       errorCode: 'PERSISTENCE_UNAVAILABLE',
       errorMessage: 'Gateway 持久化不可用。',
       selectedSessionCount: 0,

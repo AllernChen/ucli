@@ -33,6 +33,7 @@ test('runtime publishes redacted observable state for every connection transitio
     phase: 'connected',
     channelType: 'feishu',
     targetLabel: 'oc_group',
+    botIdentity: { openId: 'ou_bot', name: 'UCLI Bot' },
     errorCode: null,
     errorMessage: '',
     selectedSessionCount: 1,

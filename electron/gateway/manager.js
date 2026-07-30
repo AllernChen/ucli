@@ -100,6 +100,7 @@ export class GatewayManager {
     )
     return this.port.listSessions().map((session) => {
       const route = routes.get(session.id)
+      const relay = this.runtime.getSessionRelayState(session.id)
       return {
         id: session.id,
         name: session.name || null,
@@ -107,7 +108,8 @@ export class GatewayManager {
         provider: session.provider || null,
         status: session.status,
         relayEnabled: Boolean(route?.relayEnabled),
-        routeStatus: route?.routeStatus || 'waiting'
+        routeStatus: route?.routeStatus || 'waiting',
+        queueCount: relay.queueCount
       }
     })
   }

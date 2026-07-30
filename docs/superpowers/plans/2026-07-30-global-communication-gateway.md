@@ -1017,13 +1017,13 @@ git commit -m "feat: integrate gateway runtime with UCLI"
 - Create: `test/gateway-settings-template.test.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Build and test the Pinia store**
+- [x] **Step 1: Build and test the Pinia store**
 
 Store actions mirror the IPC list. It subscribes once to state changes and does not store App Secret after test submission.
 
 Draft shape in the drawer may temporarily contain `appSecret` in component-local state only. Clear it after successful test, failed test, drawer close, and unmount.
 
-- [ ] **Step 2: Add the workbench header control**
+- [x] **Step 2: Add the workbench header control**
 
 Place `GatewayHeaderControl` in `src/views/Workbench.vue`’s existing `.toolbar`, on the right side before layout/count controls.
 
@@ -1036,7 +1036,7 @@ It shows:
 
 It contains no endpoint fields and no session relay list.
 
-- [ ] **Step 3: Add Settings summary card**
+- [x] **Step 3: Add Settings summary card**
 
 The card shows:
 
@@ -1049,7 +1049,7 @@ The card shows:
 
 `Settings.vue` watches `route.query.panel`; the value `gateway` opens the drawer, and closing the drawer replaces the route without that query key so browser Back does not repeatedly reopen it.
 
-- [ ] **Step 4: Build the drawer sections**
+- [x] **Step 4: Build the drawer sections**
 
 **Communication endpoint**
 
@@ -1070,7 +1070,7 @@ Each existing session row shows name, adapter/provider, online state, relay togg
 
 Show desired state, connection phase, bot identity, last connected time, redacted error, pending decisions, and queued tasks. Do not show secret, task text, message body, command body, or snapshot content.
 
-- [ ] **Step 5: Add accessibility and failure behavior**
+- [x] **Step 5: Add accessibility and failure behavior**
 
 - switches and buttons have labels;
 - drawer focus returns to the trigger;
@@ -1078,7 +1078,7 @@ Show desired state, connection phase, bot identity, last connected time, redacte
 - failed apply preserves the old applied summary and displays the candidate error;
 - error text is copyable but redacted.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```powershell
 node --test test/gateway-presentation.test.mjs test/gateway-header-template.test.mjs test/gateway-settings-template.test.mjs test/workbench-keyboard.test.mjs test/workbench-route-retention.test.mjs
