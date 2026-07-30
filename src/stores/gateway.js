@@ -2,6 +2,30 @@ import { defineStore } from 'pinia'
 
 import { ipc } from '../ipc.js'
 
+function requireAccepted(result, fallbackMessage) {
+  if (result?.accepted !== false) return result
+  const messages = {
+    binding_candidate_not_found: '该绑定请求已失效，请从飞书重新发起。',
+    configuration_operation_in_progress: '另一项 Gateway 配置操作正在进行，请稍后重试。'
+  }
+  throw Object.assign(
+    new Error(messages[result.reason] || fallbackMessage),
+    { code: result.reason || 'GATEWAY_OPERATION_REJECTED' }
+  )
+}
+
+function requireApplied(result) {
+  if (result?.applied !== false) return result
+  const messages = {
+    test_expired: '连接测试已失效，请重新测试后再应用。',
+    configuration_operation_in_progress: '另一项 Gateway 配置操作正在进行，请稍后重试。'
+  }
+  throw Object.assign(
+    new Error(messages[result.reason] || 'Gateway 配置应用失败'),
+    { code: result.reason || 'GATEWAY_APPLY_REJECTED' }
+  )
+}
+
 let unsubscribe = null
 
 const EMPTY_STATE = {
@@ -16,6 +40,7 @@ const EMPTY_STATE = {
   readySessionCount: 0,
   pendingDecisionCount: 0,
   queuedTaskCount: 0,
+  bindingCandidate: null,
   lastConnectedAt: null
 }
 
@@ -79,11 +104,44 @@ export const useGatewayStore = defineStore('gateway', {
     },
     async applyDraft(testId) {
       const applied = await ipc.applyGatewayDraft(testId)
+      if (
+        applied?.applied === false &&
+        applied.reason !== 'configuration_operation_in_progress'
+      ) {
+        this.testedDraft = null
+      }
+      requireApplied(applied)
       this.testedDraft = null
       this.configuration = applied
       this.runtime = await ipc.getGatewayState()
       await this.refreshSessions()
       return applied
+    },
+    async confirmBinding(bindingId) {
+      const result = await ipc.confirmGatewayBinding(bindingId)
+      requireAccepted(result, '确认绑定失败')
+      await Promise.all([
+        this.refreshConfiguration(),
+        this.refreshSessions()
+      ])
+      this.runtime = await ipc.getGatewayState()
+      return result
+    },
+    async dismissBinding(bindingId) {
+      const result = await ipc.dismissGatewayBinding(bindingId)
+      requireAccepted(result, '忽略绑定请求失败')
+      this.runtime = await ipc.getGatewayState()
+      return result
+    },
+    async clearBinding() {
+      const result = await ipc.clearGatewayBinding()
+      requireAccepted(result, '解除绑定失败')
+      await Promise.all([
+        this.refreshConfiguration(),
+        this.refreshSessions()
+      ])
+      this.runtime = await ipc.getGatewayState()
+      return result
     },
     invalidateTest() {
       this.testedDraft = null

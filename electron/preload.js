@@ -76,6 +76,11 @@ const api = {
   testGatewayDraft: (draft) => ipcRenderer.invoke('gateway:test-draft', draft),
   applyGatewayDraft: (testId) =>
     ipcRenderer.invoke('gateway:apply-draft', testId),
+  confirmGatewayBinding: (bindingId) =>
+    ipcRenderer.invoke('gateway:confirm-binding', bindingId),
+  dismissGatewayBinding: (bindingId) =>
+    ipcRenderer.invoke('gateway:dismiss-binding', bindingId),
+  clearGatewayBinding: () => ipcRenderer.invoke('gateway:clear-binding'),
   listGatewaySessions: () => ipcRenderer.invoke('gateway:list-sessions'),
   setSessionRelayEnabled: (sessionId, enabled) =>
     ipcRenderer.invoke('gateway:set-session-relay', sessionId, enabled),

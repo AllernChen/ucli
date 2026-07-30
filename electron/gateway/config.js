@@ -16,33 +16,51 @@ function requiredPrefix(value, prefix, field) {
   return value.trim()
 }
 
+function optionalLabel(value) {
+  if (typeof value !== 'string') return ''
+  const normalized = value
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .normalize('NFC')
+    .trim()
+  return Array.from(normalized).slice(0, 100).join('')
+}
+
 export function normalizeGatewayConfig(input) {
   if (!input || typeof input !== 'object' || input.channelType !== 'feishu') {
     throw configError('channelType must be feishu')
   }
   const appId = requiredPrefix(input.appId, 'cli_', 'appId')
-  const targetType = input.target?.type
-  if (targetType !== 'user' && targetType !== 'group') {
-    throw configError('target.type must be user or group')
+  let target = null
+  if (input.target != null) {
+    const targetType = input.target?.type
+    if (targetType !== 'user' && targetType !== 'group') {
+      throw configError('target.type must be user or group')
+    }
+    const targetId = requiredPrefix(
+      input.target?.id,
+      targetType === 'user' ? 'ou_' : 'oc_',
+      'target.id'
+    )
+    target = {
+      type: targetType,
+      id: targetId
+    }
+    const name = optionalLabel(input.target?.name)
+    if (name) target.name = name
   }
-  const targetId = requiredPrefix(
-    input.target?.id,
-    targetType === 'user' ? 'ou_' : 'oc_',
-    'target.id'
-  )
   if (!Array.isArray(input.operatorOpenIds)) {
     throw configError('operatorOpenIds are required')
   }
   const operatorOpenIds = [...new Set(input.operatorOpenIds.map((value) =>
     requiredPrefix(value, 'ou_', 'operatorOpenIds')
   ))]
-  if (!operatorOpenIds.length) {
+  if (target && !operatorOpenIds.length) {
     throw configError('operatorOpenIds must contain at least one operator')
   }
   return {
     channelType: 'feishu',
     appId,
-    target: { type: targetType, id: targetId },
+    target,
     operatorOpenIds
   }
 }
@@ -52,10 +70,12 @@ export function channelFingerprint(config) {
   const identity = {
     channelType: normalized.channelType,
     appId: normalized.appId,
-    target: {
-      type: normalized.target.type,
-      id: normalized.target.id
-    }
+    target: normalized.target
+      ? {
+          type: normalized.target.type,
+          id: normalized.target.id
+        }
+      : null
   }
   return createHash('sha256')
     .update(JSON.stringify(identity))
@@ -85,7 +105,7 @@ function bindingHash(config, secretHash) {
 function connectionConfig(config, secretBuffer) {
   return {
     ...config,
-    target: { ...config.target },
+    target: config.target ? { ...config.target } : null,
     operatorOpenIds: [...config.operatorOpenIds],
     appSecret: secretBuffer.toString('utf8')
   }
@@ -219,19 +239,147 @@ export class GatewayConfigService {
       }
       return redactGatewayConfig(entry.config, true)
     } catch (error) {
+      let failure = error
       if (activationAttempted) {
-        try {
-          await this.runtime.setChannel(oldChannel, oldConnection)
-        } catch { /* retain original error */ }
+        failure = await this._restoreRuntimeOrFail({
+          oldChannel,
+          oldConnection,
+          originalError: error
+        })
       }
       await disconnect(candidate)
-      throw error
+      throw failure
     } finally {
       entry.secretBuffer.fill(0)
     }
   }
 
+  async applyBindingCandidate(candidate) {
+    const current = this.db.getGatewaySetting(APPLIED_CONFIG_KEY)
+    if (!current) {
+      throw Object.assign(new Error('Gateway configuration is required'), {
+        code: 'CONFIG_REQUIRED'
+      })
+    }
+    const normalizedCurrent = normalizeGatewayConfig(current)
+    const target = candidate?.target
+    const operatorOpenId = candidate?.operator?.openId
+    const next = normalizeGatewayConfig({
+      ...normalizedCurrent,
+      target: target
+        ? {
+            type: target.type,
+            id: target.id,
+            name: target.name
+          }
+        : null,
+      operatorOpenIds: [
+        ...normalizedCurrent.operatorOpenIds,
+        operatorOpenId
+      ].filter(Boolean)
+    })
+    return this._replaceAppliedConfig(next)
+  }
+
+  async clearBinding() {
+    const current = this.db.getGatewaySetting(APPLIED_CONFIG_KEY)
+    if (!current) {
+      throw Object.assign(new Error('Gateway configuration is required'), {
+        code: 'CONFIG_REQUIRED'
+      })
+    }
+    const normalizedCurrent = normalizeGatewayConfig(current)
+    return this._replaceAppliedConfig(normalizeGatewayConfig({
+      ...normalizedCurrent,
+      target: null,
+      operatorOpenIds: []
+    }))
+  }
+
+  async _replaceAppliedConfig(config) {
+    const secret = this.secretStore.getSecret(APP_SECRET_KEY)
+    if (!secret) {
+      throw Object.assign(new Error('App Secret is required'), {
+        code: 'GATEWAY_SECRET_REQUIRED'
+      })
+    }
+    const normalized = normalizeGatewayConfig(config)
+    const secretBuffer = Buffer.from(secret, 'utf8')
+    const candidate = this.createChannel()
+    const oldChannel = this.runtime.getChannel()
+    const oldConnection = this.runtime.getConnection?.() || null
+    let activationAttempted = false
+    try {
+      const botIdentity = safeBotIdentity(
+        await candidate.connect(connectionConfig(normalized, secretBuffer))
+      )
+      await this.db.transaction(async () => {
+        this.db.saveGatewaySetting(APPLIED_CONFIG_KEY, normalized)
+        if (this.shouldActivate()) {
+          activationAttempted = true
+          await this.runtime.setChannel(candidate, {
+            config: normalized,
+            fingerprint: channelFingerprint(normalized),
+            botIdentity
+          })
+        } else {
+          await disconnect(candidate)
+        }
+      })
+      if (activationAttempted && oldChannel && oldChannel !== candidate) {
+        await disconnect(oldChannel)
+      }
+      return redactGatewayConfig(normalized, true)
+    } catch (error) {
+      let failure = error
+      if (activationAttempted) {
+        failure = await this._restoreRuntimeOrFail({
+          oldChannel,
+          oldConnection,
+          originalError: error
+        })
+      }
+      await disconnect(candidate)
+      throw failure
+    } finally {
+      secretBuffer.fill(0)
+    }
+  }
+
   async dispose() {
     this.invalidateTests()
+  }
+
+  async _restoreRuntimeOrFail({
+    oldChannel,
+    oldConnection,
+    originalError
+  }) {
+    try {
+      await this.runtime.setChannel(oldChannel, oldConnection)
+      return originalError
+    } catch (restoreError) {
+      const failure = Object.assign(
+        new Error(
+          'Gateway configuration failed and the previous connection could not be restored'
+        ),
+        {
+          code: 'GATEWAY_ROLLBACK_FAILED',
+          cause: originalError
+        }
+      )
+      try {
+        await this.runtime.setChannel(null, null)
+      } catch {
+        // Continue cleanup even if the runtime cannot detach cleanly.
+      }
+      await disconnect(oldChannel)
+      try {
+        this.runtime.reportConnectionError?.(failure)
+      } catch {
+        // The stable rollback error is still returned to the caller.
+      }
+      return failure
+    }
   }
 }

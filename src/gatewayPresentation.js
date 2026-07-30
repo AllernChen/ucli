@@ -1,6 +1,7 @@
 const PHASES = {
   off: { label: '已关闭', color: 'default' },
   connecting: { label: '连接中', color: 'blue' },
+  waiting_binding: { label: '等待绑定', color: 'orange' },
   connected: { label: '已连接', color: 'green' },
   reconnecting: { label: '重连中', color: 'orange' },
   error: { label: '连接异常', color: 'red' }
@@ -16,7 +17,10 @@ export function gatewayPhaseColor(phase) {
 
 export function gatewayTargetLabel(config) {
   const target = config?.target
-  if (!target?.id) return '未配置'
+  if (!target?.id) return '等待飞书绑定'
+  if (target.name) {
+    return `${target.type === 'group' ? '群聊' : '用户'} · ${target.name}`
+  }
   const points = Array.from(target.id)
   const masked = points.length > 8
     ? `${points.slice(0, 4).join('')}…${points.slice(-4).join('')}`

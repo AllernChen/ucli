@@ -16,6 +16,25 @@ function safeText(value, fallback = '') {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback
 }
 
+function safeBindingLabel(value, fallback) {
+  if (typeof value !== 'string') return fallback
+  const normalized = value
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .normalize('NFC')
+    .trim()
+  return normalized
+    ? Array.from(normalized).slice(0, 100).join('')
+    : fallback
+}
+
+function maskedIdentifier(value) {
+  if (typeof value !== 'string' || !value) return '—'
+  const points = Array.from(value)
+  return points.length > 4
+    ? `${points.slice(0, 4).join('')}…${points.slice(-4).join('')}`
+    : value
+}
+
 function sanitizeInboundText(value) {
   if (typeof value !== 'string') return null
   const normalized = value
@@ -90,6 +109,7 @@ export class GatewayRuntime {
     this.latestCompletions = new Map()
     this.turnTasks = new Map()
     this.providerBusySessions = new Set()
+    this.bindingCandidates = new Map()
     this.state = {
       desiredEnabled: false,
       phase: 'off',
@@ -102,6 +122,7 @@ export class GatewayRuntime {
       readySessionCount: 0,
       pendingDecisionCount: 0,
       queuedTaskCount: 0,
+      bindingCandidate: null,
       lastConnectedAt: null
     }
   }
@@ -195,15 +216,17 @@ export class GatewayRuntime {
     this.config = structuredClone(config)
     this.fingerprint = fingerprint
     this.botIdentity = botIdentity ? structuredClone(botIdentity) : null
+    this.bindingCandidates.clear()
     this._bindChannel(channel)
     this._setState({
       desiredEnabled: true,
-      phase: 'connected',
+      phase: targetIdOf(config) ? 'connected' : 'waiting_binding',
       channelType: config?.channelType || 'feishu',
       targetLabel: targetIdOf(config) || '',
       botIdentity: this.botIdentity,
       errorCode: null,
       errorMessage: '',
+      bindingCandidate: null,
       lastConnectedAt: Date.now()
     })
     await this._syncSelectedRoots()
@@ -220,11 +243,13 @@ export class GatewayRuntime {
     this.acceptingInbound = false
     this.decisionRegistry.invalidateRemoteTokens('gateway_off')
     this.actions.clear()
+    this.bindingCandidates.clear()
     this._setState({
       desiredEnabled: false,
       phase: 'off',
       errorCode: null,
-      errorMessage: ''
+      errorMessage: '',
+      bindingCandidate: null
     })
     if (this.channel) {
       for (const route of this._selectedRoutes()) {
@@ -249,8 +274,25 @@ export class GatewayRuntime {
   }
 
   async resyncSession(sessionId) {
-    if (!this.channel || !this._isSelected(sessionId)) return null
+    if (!this.channel || !targetIdOf(this.config) || !this._isSelected(sessionId)) {
+      return null
+    }
     return this._ensureRoot(sessionId)
+  }
+
+  getBindingCandidate(bindingId) {
+    const value = this.bindingCandidates.get(bindingId)
+    return value ? structuredClone(value) : null
+  }
+
+  dismissBindingCandidate(bindingId) {
+    if (!this.bindingCandidates.delete(bindingId)) {
+      return { accepted: false, reason: 'binding_candidate_not_found' }
+    }
+    if (this.state.bindingCandidate?.id === bindingId) {
+      this._setState({ bindingCandidate: null })
+    }
+    return { accepted: true }
   }
 
   async setSessionRelayEnabled(sessionId, enabled) {
@@ -340,6 +382,9 @@ export class GatewayRuntime {
   async handleInboundMessage(message) {
     if (!this.acceptingInbound) {
       return { accepted: false, reason: 'gateway_not_accepting' }
+    }
+    if (!targetIdOf(this.config)) {
+      return this._handleBindingMessage(message)
     }
     if (!this._isAuthorized(message?.senderOpenId)) {
       return { accepted: false, reason: 'unauthorized_operator' }
@@ -579,7 +624,7 @@ export class GatewayRuntime {
       this.decisionRegistry.invalidateRemoteTokens('channel_reconnected')
       this.actions.clear()
       this._setState({
-        phase: 'connected',
+        phase: targetIdOf(this.config) ? 'connected' : 'waiting_binding',
         errorCode: null,
         errorMessage: '',
         lastConnectedAt: Date.now()
@@ -609,6 +654,7 @@ export class GatewayRuntime {
   }
 
   async _syncSelectedRoots() {
+    if (!targetIdOf(this.config)) return
     for (const route of this._selectedRoutes()) {
       const session = this.port.getSession(route.sessionId)
       if (session && READY_SESSION_STATES.has(session.status)) {
@@ -618,6 +664,7 @@ export class GatewayRuntime {
   }
 
   async _ensureRoot(sessionId) {
+    if (!targetIdOf(this.config)) return null
     const stored = this._routeFor(sessionId)
     const view = this._rootView(sessionId)
     if (
@@ -659,7 +706,9 @@ export class GatewayRuntime {
   }
 
   async _updateRoot(sessionId, overrides = {}) {
-    if (!this.channel || !this._isSelected(sessionId)) return
+    if (!this.channel || !targetIdOf(this.config) || !this._isSelected(sessionId)) {
+      return
+    }
     const route = this._routeFor(sessionId)
     if (!route?.rootMessageId) {
       await this._ensureRoot(sessionId)
@@ -1093,12 +1142,80 @@ export class GatewayRuntime {
       this.config?.operatorOpenIds?.includes(senderOpenId)
   }
 
+  async _handleBindingMessage(message) {
+    if (
+      !message?.supported ||
+      message?.rawContentType !== 'text' ||
+      !/^(?:\/bind|绑定\s*UCLI)$/iu.test(sanitizeInboundText(message.text) || '')
+    ) {
+      return { accepted: false, reason: 'binding_command_required' }
+    }
+    if (
+      this.state.bindingCandidate?.id &&
+      this.bindingCandidates.has(this.state.bindingCandidate.id)
+    ) {
+      return { accepted: false, reason: 'binding_candidate_pending' }
+    }
+    const candidate = await this.channel?.resolveBindingCandidate?.(message)
+    const target = candidate?.target
+    const operator = candidate?.operator
+    if (
+      (target?.type !== 'group' && target?.type !== 'user') ||
+      typeof target?.id !== 'string' ||
+      typeof operator?.openId !== 'string' ||
+      !operator.openId.startsWith('ou_')
+    ) {
+      return { accepted: false, reason: 'invalid_binding_candidate' }
+    }
+    if (
+      (target.type === 'group' && !target.id.startsWith('oc_')) ||
+      (target.type === 'user' && !target.id.startsWith('ou_'))
+    ) {
+      return { accepted: false, reason: 'invalid_binding_candidate' }
+    }
+    const id = opaqueToken()
+    const requestedAt = Date.now()
+    this.bindingCandidates.clear()
+    this.bindingCandidates.set(id, {
+      target: structuredClone(target),
+      operator: structuredClone(operator),
+      requestedAt
+    })
+    this._setState({
+      phase: 'waiting_binding',
+      bindingCandidate: {
+        id,
+        targetType: target.type,
+        displayName: safeBindingLabel(
+          target.name,
+          target.type === 'group' ? '飞书群聊' : '飞书用户'
+        ),
+        operatorName: safeBindingLabel(operator.name, '飞书用户'),
+        targetHint: maskedIdentifier(target.id),
+        operatorHint: maskedIdentifier(operator.openId),
+        confirmationCode: id.slice(0, 6).toUpperCase(),
+        requestedAt
+      }
+    })
+    try {
+      await this.channel?.sendBindingNotice?.(message, {
+        message: '绑定请求已收到，请在 UCLI 设置中确认。'
+      })
+    } catch {
+      // The local confirmation remains available even if the acknowledgement fails.
+    }
+    return {
+      accepted: true,
+      reason: 'binding_confirmation_required'
+    }
+  }
+
   _counts() {
     const selected = this._selectedRoutes()
-    const ready = selected.filter((route) => {
+    const ready = targetIdOf(this.config) ? selected.filter((route) => {
       const value = this.port.getSession(route.sessionId)
       return value && READY_SESSION_STATES.has(value.status)
-    })
+    }) : []
     let queuedTaskCount = 0
     for (const route of selected) {
       const queue = this.taskQueue.getState(route.sessionId)

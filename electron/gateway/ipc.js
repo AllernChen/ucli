@@ -40,6 +40,13 @@ export function registerGatewayIpc({ ipcMain, manager }) {
   ipcMain.handle('gateway:apply-draft', async (_event, testId) =>
     manager.applyDraft(requireOpaqueId(testId, 'testId'))
   )
+  ipcMain.handle('gateway:confirm-binding', async (_event, bindingId) =>
+    manager.confirmBinding(requireOpaqueId(bindingId, 'bindingId'))
+  )
+  ipcMain.handle('gateway:dismiss-binding', (_event, bindingId) =>
+    manager.dismissBinding(requireOpaqueId(bindingId, 'bindingId'))
+  )
+  ipcMain.handle('gateway:clear-binding', () => manager.clearBinding())
   ipcMain.handle('gateway:list-sessions', () => manager.listSessions())
   ipcMain.handle('gateway:set-session-relay', async (_event, sessionId, enabled) =>
     manager.setSessionRelayEnabled(

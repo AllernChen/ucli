@@ -40,6 +40,7 @@ const badgeStatus = computed(() => ({
   connected: 'success',
   error: 'error',
   connecting: 'processing',
+  waiting_binding: 'warning',
   reconnecting: 'warning'
 }[gateway.runtime.phase] || 'default'))
 

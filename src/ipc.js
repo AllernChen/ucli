@@ -56,6 +56,9 @@ export const ipc = {
   getGatewayConfiguration: () => u.getGatewayConfiguration(),
   testGatewayDraft: (draft) => u.testGatewayDraft(draft),
   applyGatewayDraft: (testId) => u.applyGatewayDraft(testId),
+  confirmGatewayBinding: (bindingId) => u.confirmGatewayBinding(bindingId),
+  dismissGatewayBinding: (bindingId) => u.dismissGatewayBinding(bindingId),
+  clearGatewayBinding: () => u.clearGatewayBinding(),
   listGatewaySessions: () => u.listGatewaySessions(),
   setSessionRelayEnabled: (sessionId, enabled) =>
     u.setSessionRelayEnabled(sessionId, enabled),

@@ -19,23 +19,12 @@
             :placeholder="gateway.configuration?.hasAppSecret ? '已保存；留空则继续使用' : '请输入 App Secret'"
           />
         </a-form-item>
-        <a-form-item label="目标类型">
-          <a-radio-group v-model:value="draft.targetType" aria-label="飞书目标类型">
-            <a-radio value="group">群聊</a-radio>
-            <a-radio value="user">用户</a-radio>
-          </a-radio-group>
-        </a-form-item>
-        <a-form-item label="目标 ID">
-          <a-input v-model:value="draft.targetId" aria-label="飞书目标 ID" :placeholder="draft.targetType === 'group' ? 'oc_...' : 'ou_...'" />
-        </a-form-item>
-        <a-form-item label="Operator Open ID 白名单">
-          <a-textarea
-            v-model:value="draft.operators"
-            aria-label="Operator Open ID 白名单"
-            :rows="3"
-            placeholder="每行一个 ou_..."
-          />
-        </a-form-item>
+        <a-alert
+          type="info"
+          show-icon
+          message="目标会话无需手工填写 ID"
+          description="保存配置并启动 Gateway 后，在飞书私聊机器人发送“绑定 UCLI”，或在群聊中 @机器人发送“绑定 UCLI”。UCLI 收到请求后会在这里等待你确认。"
+        />
         <a-alert
           type="warning"
           show-icon
@@ -53,6 +42,69 @@
         </div>
         <a-alert v-if="candidateError" type="error" show-icon :message="candidateError" />
       </a-form>
+    </section>
+
+    <a-divider />
+    <section class="gateway-section">
+      <h3>飞书会话绑定</h3>
+      <div v-if="gateway.configuration?.target" class="binding-row">
+        <div>
+          <a-tag color="green">已绑定</a-tag>
+          <span>{{ gatewayTargetLabel(gateway.configuration) }}</span>
+        </div>
+        <a-popconfirm
+          title="解除当前飞书绑定？Gateway 将回到等待绑定状态。"
+          ok-text="解除绑定"
+          cancel-text="取消"
+          @confirm="clearBinding"
+        >
+          <a-button size="small" :loading="bindingBusy">解除绑定</a-button>
+        </a-popconfirm>
+      </div>
+      <a-alert
+        v-else-if="gateway.runtime.bindingCandidate"
+        type="warning"
+        show-icon
+        message="收到新的绑定请求"
+      >
+        <template #description>
+          <div class="binding-candidate">
+            <span>
+              {{ gateway.runtime.bindingCandidate.targetType === 'group' ? '群聊' : '用户' }}
+              · {{ gateway.runtime.bindingCandidate.displayName }}
+              （{{ gateway.runtime.bindingCandidate.targetHint }}）
+            </span>
+            <span>
+              发起人 {{ gateway.runtime.bindingCandidate.operatorName }}
+              （{{ gateway.runtime.bindingCandidate.operatorHint }}）
+              将获得远程任务与决策权限
+            </span>
+            <strong>
+              校验码 {{ gateway.runtime.bindingCandidate.confirmationCode }}
+            </strong>
+            <div class="binding-actions">
+              <a-button
+                size="small"
+                type="primary"
+                :loading="bindingBusy"
+                @click="confirmBinding(gateway.runtime.bindingCandidate.id)"
+              >确认绑定</a-button>
+              <a-button
+                size="small"
+                :disabled="bindingBusy"
+                @click="dismissBinding(gateway.runtime.bindingCandidate.id)"
+              >忽略</a-button>
+            </div>
+          </div>
+        </template>
+      </a-alert>
+      <a-alert
+        v-else
+        type="info"
+        show-icon
+        :message="gateway.runtime.desiredEnabled ? '等待飞书绑定' : '启动 Gateway 后等待绑定'"
+        description="请在飞书中向机器人发送“绑定 UCLI”；群聊中需要 @机器人。"
+      />
     </section>
 
     <a-divider />
@@ -113,6 +165,7 @@ import { message } from 'ant-design-vue'
 
 import {
   gatewayPhaseLabel,
+  gatewayTargetLabel,
   gatewayTimeLabel
 } from '../../gatewayPresentation.js'
 import { useGatewayStore } from '../../stores/gateway.js'
@@ -122,21 +175,16 @@ const emit = defineEmits(['update:open', 'closed'])
 const gateway = useGatewayStore()
 const testing = ref(false)
 const applying = ref(false)
+const bindingBusy = ref(false)
 const candidateError = ref('')
 const testedSignature = ref('')
 const draft = reactive({
   appId: '',
-  appSecret: '',
-  targetType: 'group',
-  targetId: '',
-  operators: ''
+  appSecret: ''
 })
 
 const signature = computed(() => JSON.stringify({
-  appId: draft.appId.trim(),
-  targetType: draft.targetType,
-  targetId: draft.targetId.trim(),
-  operators: operatorIds()
+  appId: draft.appId.trim()
 }))
 const canApply = computed(() =>
   Boolean(gateway.testedDraft?.testId) &&
@@ -167,18 +215,9 @@ watch(() => draft.appSecret, (value) => {
   }
 })
 
-function operatorIds() {
-  return [...new Set(
-    draft.operators.split(/\r?\n|,/).map((value) => value.trim()).filter(Boolean)
-  )]
-}
-
 function loadAppliedDraft() {
   const config = gateway.configuration
   draft.appId = config?.appId || ''
-  draft.targetType = config?.target?.type || 'group'
-  draft.targetId = config?.target?.id || ''
-  draft.operators = (config?.operatorOpenIds || []).join('\n')
   draft.appSecret = ''
   candidateError.value = ''
   testedSignature.value = ''
@@ -186,14 +225,60 @@ function loadAppliedDraft() {
 }
 
 function payload() {
+  const applied = gateway.configuration
+  const preserveBinding = applied?.appId === draft.appId.trim()
   return {
     config: {
       channelType: 'feishu',
       appId: draft.appId,
-      target: { type: draft.targetType, id: draft.targetId },
-      operatorOpenIds: operatorIds()
+      target: preserveBinding && applied?.target
+        ? { ...applied.target }
+        : null,
+      operatorOpenIds: preserveBinding
+        ? [...(applied?.operatorOpenIds || [])]
+        : []
     },
     appSecret: draft.appSecret
+  }
+}
+
+async function confirmBinding(bindingId) {
+  if (!bindingId) return
+  bindingBusy.value = true
+  candidateError.value = ''
+  try {
+    await gateway.confirmBinding(bindingId)
+    message.success('飞书会话已绑定')
+  } catch (error) {
+    candidateError.value = error?.message || '确认绑定失败'
+  } finally {
+    bindingBusy.value = false
+  }
+}
+
+async function dismissBinding(bindingId) {
+  if (!bindingId) return
+  bindingBusy.value = true
+  candidateError.value = ''
+  try {
+    await gateway.dismissBinding(bindingId)
+  } catch (error) {
+    candidateError.value = error?.message || '忽略绑定请求失败'
+  } finally {
+    bindingBusy.value = false
+  }
+}
+
+async function clearBinding() {
+  bindingBusy.value = true
+  candidateError.value = ''
+  try {
+    await gateway.clearBinding()
+    message.success('飞书绑定已解除')
+  } catch (error) {
+    candidateError.value = error?.message || '解除绑定失败'
+  } finally {
+    bindingBusy.value = false
   }
 }
 
@@ -244,5 +329,8 @@ onUnmounted(() => {
 <style scoped>
 .gateway-section h3 { margin: 0 0 14px; }
 .drawer-actions { display: flex; gap: 8px; margin: 14px 0; }
+.binding-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.binding-candidate { display: flex; flex-direction: column; gap: 10px; }
+.binding-actions { display: flex; gap: 8px; }
 .copyable-error { user-select: text; white-space: pre-wrap; }
 </style>

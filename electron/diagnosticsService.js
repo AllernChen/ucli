@@ -16,6 +16,7 @@ const GATEWAY_ERROR_MESSAGES = {
 const GATEWAY_PHASES = new Set([
   'off',
   'connecting',
+  'waiting_binding',
   'connected',
   'reconnecting',
   'error'

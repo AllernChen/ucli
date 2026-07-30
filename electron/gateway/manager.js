@@ -49,6 +49,7 @@ export class GatewayManager {
     })
     this.unsubscribeEvents = null
     this.started = false
+    this.configurationOperationInProgress = false
   }
 
   getState() {
@@ -95,17 +96,19 @@ export class GatewayManager {
   }
 
   async setDesiredEnabled(enabled) {
-    if (!enabled) {
-      this.configService.invalidateTests?.()
-      await this.runtime.setDesiredEnabled(false)
+    return this._runConfigurationOperationOrThrow(async () => {
+      if (!enabled) {
+        this.configService.invalidateTests?.()
+        await this.runtime.setDesiredEnabled(false)
+        return this.getState()
+      }
+      const config = this.db.getGatewaySetting(APPLIED_CONFIG_KEY)
+      const secret = this.secretStore.getSecret(APP_SECRET_KEY)
+      if (!config || !secret) throw configRequired()
+      await this.runtime.setDesiredEnabled(true)
+      await this._connectApplied(config, true, secret)
       return this.getState()
-    }
-    const config = this.db.getGatewaySetting(APPLIED_CONFIG_KEY)
-    const secret = this.secretStore.getSecret(APP_SECRET_KEY)
-    if (!config || !secret) throw configRequired()
-    await this.runtime.setDesiredEnabled(true)
-    await this._connectApplied(config, true, secret)
-    return this.getState()
+    })
   }
 
   async testDraft(draft) {
@@ -113,7 +116,42 @@ export class GatewayManager {
   }
 
   async applyDraft(testId) {
-    return this.configService.applyTestedDraft({ testId })
+    return this._runConfigurationOperation(
+      { applied: false, reason: 'configuration_operation_in_progress' },
+      () => this.configService.applyTestedDraft({ testId })
+    )
+  }
+
+  async confirmBinding(bindingId) {
+    return this._runConfigurationOperation(
+      { accepted: false, reason: 'configuration_operation_in_progress' },
+      async () => {
+        const candidate = this.runtime.getBindingCandidate(bindingId)
+        if (!candidate) {
+          return { accepted: false, reason: 'binding_candidate_not_found' }
+        }
+        const applied = await this.configService.applyBindingCandidate(candidate)
+        this.runtime.dismissBindingCandidate(bindingId)
+        return { accepted: true, configuration: applied }
+      }
+    )
+  }
+
+  dismissBinding(bindingId) {
+    if (this.configurationOperationInProgress) {
+      return { accepted: false, reason: 'configuration_operation_in_progress' }
+    }
+    return this.runtime.dismissBindingCandidate(bindingId)
+  }
+
+  async clearBinding() {
+    return this._runConfigurationOperation(
+      { accepted: false, reason: 'configuration_operation_in_progress' },
+      async () => {
+        const configuration = await this.configService.clearBinding()
+        return { accepted: true, configuration }
+      }
+    )
   }
 
   listSessions() {
@@ -176,7 +214,7 @@ export class GatewayManager {
       channel = this.createChannel()
       const botIdentity = await channel.connect({
         ...config,
-        target: { ...config.target },
+        target: config.target ? { ...config.target } : null,
         operatorOpenIds: [...config.operatorOpenIds],
         appSecret: secret
       })
@@ -197,6 +235,31 @@ export class GatewayManager {
         })
       }
       return false
+    }
+  }
+
+  async _runConfigurationOperation(busyResult, operation) {
+    if (this.configurationOperationInProgress) return busyResult
+    this.configurationOperationInProgress = true
+    try {
+      return await operation()
+    } finally {
+      this.configurationOperationInProgress = false
+    }
+  }
+
+  async _runConfigurationOperationOrThrow(operation) {
+    if (this.configurationOperationInProgress) {
+      throw Object.assign(
+        new Error('Another Gateway configuration operation is in progress'),
+        { code: 'GATEWAY_CONFIG_BUSY' }
+      )
+    }
+    this.configurationOperationInProgress = true
+    try {
+      return await operation()
+    } finally {
+      this.configurationOperationInProgress = false
     }
   }
 }

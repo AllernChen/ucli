@@ -70,6 +70,17 @@ test('Gateway config normalization is strict and fingerprints only channel ident
       target: { type: 'group', id: 'oc_group' }
     })
   )
+  assert.equal(
+    normalizeGatewayConfig({
+      ...CONFIG,
+      target: {
+        type: 'group',
+        id: 'oc_group',
+        name: '\u0000研发\n群\u007F'
+      }
+    }).target.name,
+    '研发群'
+  )
   assert.throws(() => normalizeGatewayConfig({ ...CONFIG, appId: 'bad' }), {
     code: 'INVALID_GATEWAY_CONFIG'
   })
@@ -234,6 +245,63 @@ test('a runtime swap failure rolls back staged config and restores the old chann
     assert.equal(db.getGatewaySecretCiphertext('gateway.feishu.appSecret'), oldCiphertext)
     assert.equal(runtime.channel, oldChannel)
     assert.equal(channels[1].disconnected, true)
+  } finally {
+    await service.dispose()
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a failed runtime restore disconnects both channels and reports an explicit rollback error', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ucli-gateway-config-restore-'))
+  const db = await openDb(join(dir, 'ucli.db'))
+  const secretStore = new SecretStore({ db, safeStorage: fakeSafeStorage() })
+  const oldConfig = normalizeGatewayConfig({
+    ...CONFIG,
+    appId: 'cli_old',
+    target: { type: 'user', id: 'ou_old' }
+  })
+  db.saveGatewaySetting('gateway.config', oldConfig)
+  secretStore.setSecret('gateway.feishu.appSecret', 'old-secret')
+  const oldChannel = {
+    async disconnect() { this.disconnected = true }
+  }
+  const runtime = {
+    channel: oldChannel,
+    attempts: 0,
+    getChannel() { return this.channel },
+    getConnection: () => ({
+      config: oldConfig,
+      fingerprint: channelFingerprint(oldConfig)
+    }),
+    async setChannel(channel) {
+      this.attempts += 1
+      if (this.attempts <= 2) throw new Error('runtime install failed')
+      this.channel = channel
+    },
+    reportConnectionError(error) {
+      this.reportedError = error
+    }
+  }
+  const channels = []
+  const service = new GatewayConfigService({
+    db,
+    secretStore,
+    createChannel: channelFactory(channels),
+    runtime
+  })
+
+  try {
+    const tested = await service.testDraft({ config: CONFIG, appSecret: 'new-secret' })
+    await assert.rejects(
+      service.applyTestedDraft({ testId: tested.testId }),
+      { code: 'GATEWAY_ROLLBACK_FAILED' }
+    )
+    assert.equal(runtime.channel, null)
+    assert.equal(runtime.reportedError.code, 'GATEWAY_ROLLBACK_FAILED')
+    assert.equal(oldChannel.disconnected, true)
+    assert.equal(channels[1].disconnected, true)
+    assert.deepEqual(db.getGatewaySetting('gateway.config'), oldConfig)
   } finally {
     await service.dispose()
     db.close()

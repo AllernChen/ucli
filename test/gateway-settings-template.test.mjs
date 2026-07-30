@@ -21,9 +21,18 @@ test('Gateway drawer separates endpoint, sessions, and runtime without rendering
   for (const heading of ['通信端配置', 'AI CLI 会话', 'Gateway 运行状态']) {
     assert.match(source, new RegExp(heading))
   }
-  for (const field of ['App ID', 'App Secret', '目标类型', 'Operator Open ID']) {
+  for (const field of ['App ID', 'App Secret', '飞书会话绑定']) {
     assert.match(source, new RegExp(field))
   }
+  assert.doesNotMatch(source, /目标 ID|Operator Open ID/)
+  assert.match(source, /confirmBinding/)
+  assert.match(source, /dismissBinding/)
+  assert.match(source, /clearBinding/)
+  assert.match(source, /confirmationCode/)
+  assert.match(source, /targetHint/)
+  assert.match(source, /operatorHint/)
+  assert.match(source, /confirmBinding\(gateway\.runtime\.bindingCandidate\.id\)/)
+  assert.match(source, /绑定 UCLI/)
   assert.match(source, /测试连接/)
   assert.match(source, /保存并应用/)
   assert.match(source, /重新同步/)

@@ -8,6 +8,18 @@
 
 **Tech Stack:** Electron 32, Node.js ESM, Vue 3, Pinia, Ant Design Vue, sql.js, Electron `safeStorage`, official `@larksuiteoapi/node-sdk` Channel API over WebSocket, Node test runner.
 
+## Binding Amendment
+
+The original manual target/operator fields in this plan are superseded by an
+inbound-first binding flow. After App ID and App Secret are applied, an unbound
+Gateway enters `waiting_binding`. A Feishu user sends `绑定 UCLI` in a direct
+chat, or mentions the bot with that command in a group. UCLI derives the target
+and initiating operator from the Feishu event, displays a masked local
+candidate plus confirmation code, and persists them only after local
+confirmation. Until confirmation, no session root or AI CLI message is
+forwarded. The first candidate remains locked until confirmed or dismissed;
+later requests cannot silently replace it.
+
 ## Global Constraints
 
 - There is one global Gateway desired state. The workbench header exposes only its quick switch and current status.

@@ -40,6 +40,7 @@ test('runtime publishes redacted observable state for every connection transitio
     readySessionCount: 1,
     pendingDecisionCount: 0,
     queuedTaskCount: 0,
+    bindingCandidate: null,
     lastConnectedAt: runtime.getState().lastConnectedAt
   })
 

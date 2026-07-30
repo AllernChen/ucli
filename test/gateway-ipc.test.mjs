@@ -42,6 +42,9 @@ function loadRendererIpc() {
       getGatewayConfiguration: method('getConfig'),
       testGatewayDraft: method('testDraft'),
       applyGatewayDraft: method('applyDraft'),
+      confirmGatewayBinding: method('confirmBinding'),
+      dismissGatewayBinding: method('dismissBinding'),
+      clearGatewayBinding: method('clearBinding'),
       listGatewaySessions: method('listSessions'),
       setSessionRelayEnabled: method('setRelay'),
       resyncGatewaySession: method('resync'),
@@ -62,6 +65,9 @@ test('main Gateway IPC validates booleans and opaque IDs before delegation', asy
       getConfiguration: () => null,
       testDraft: async (draft) => calls.push(['test', draft]),
       applyDraft: async (testId) => calls.push(['apply', testId]),
+      confirmBinding: async (bindingId) => calls.push(['confirmBinding', bindingId]),
+      dismissBinding: (bindingId) => calls.push(['dismissBinding', bindingId]),
+      clearBinding: async () => calls.push(['clearBinding']),
       listSessions: () => [],
       setSessionRelayEnabled: async (...args) => calls.push(['relay', ...args]),
       resyncSession: async (id) => calls.push(['resync', id])
@@ -78,12 +84,18 @@ test('main Gateway IPC validates booleans and opaque IDs before delegation', asy
   )
   await handlers.get('gateway:set-desired-enabled')({}, true)
   await handlers.get('gateway:apply-draft')({}, 'test_abc-123')
+  await handlers.get('gateway:confirm-binding')({}, 'binding_abc-123')
+  await handlers.get('gateway:dismiss-binding')({}, 'binding_abc-123')
+  await handlers.get('gateway:clear-binding')({})
   await handlers.get('gateway:set-session-relay')({}, 'session-1', false)
   await handlers.get('gateway:resync-session')({}, 'session-1')
 
   assert.deepEqual(calls, [
     ['enabled', true],
     ['apply', 'test_abc-123'],
+    ['confirmBinding', 'binding_abc-123'],
+    ['dismissBinding', 'binding_abc-123'],
+    ['clearBinding'],
     ['relay', 'session-1', false],
     ['resync', 'session-1']
   ])
@@ -96,6 +108,9 @@ test('preload exposes only named Gateway calls and a removable state listener', 
   await api.getGatewayConfiguration()
   await api.testGatewayDraft({ appSecret: 'plaintext-only-here' })
   await api.applyGatewayDraft('test_1')
+  await api.confirmGatewayBinding('binding_1')
+  await api.dismissGatewayBinding('binding_1')
+  await api.clearGatewayBinding()
   await api.listGatewaySessions()
   await api.setSessionRelayEnabled('session-1', true)
   await api.resyncGatewaySession('session-1')
@@ -110,6 +125,9 @@ test('preload exposes only named Gateway calls and a removable state listener', 
     'gateway:get-configuration',
     'gateway:test-draft',
     'gateway:apply-draft',
+    'gateway:confirm-binding',
+    'gateway:dismiss-binding',
+    'gateway:clear-binding',
     'gateway:list-sessions',
     'gateway:set-session-relay',
     'gateway:resync-session'
@@ -125,6 +143,9 @@ test('renderer IPC delegates the complete narrow Gateway surface', async () => {
   await ipc.getGatewayConfiguration()
   await ipc.testGatewayDraft({ config: {} })
   await ipc.applyGatewayDraft('test_1')
+  await ipc.confirmGatewayBinding('binding_1')
+  await ipc.dismissGatewayBinding('binding_1')
+  await ipc.clearGatewayBinding()
   await ipc.listGatewaySessions()
   await ipc.setSessionRelayEnabled('session-1', true)
   await ipc.resyncGatewaySession('session-1')
@@ -136,6 +157,9 @@ test('renderer IPC delegates the complete narrow Gateway surface', async () => {
     'getConfig',
     'testDraft',
     'applyDraft',
+    'confirmBinding',
+    'dismissBinding',
+    'clearBinding',
     'listSessions',
     'setRelay',
     'resync',

@@ -14,6 +14,7 @@
         <MenuFoldOutlined v-else />
       </a-button>
       <span class="spacer"></span>
+      <GatewayHeaderControl />
       <a-space size="small">
         <a-button size="small" @click="showImport = true">📥 导入</a-button>
         <a-button size="small" @click="$router.push('/')">➕ 新建</a-button>
@@ -313,6 +314,7 @@ import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldBlockDuplicate
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { compactPaneSessionIds } from '../paneCompaction.js'
 import PaneHistory from '../components/PaneHistory.vue'
+import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
 import { terminalSizeChanged } from '../terminalResize.js'
 import {
   reconcileSessionPanes,

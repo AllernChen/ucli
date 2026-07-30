@@ -87,6 +87,62 @@ test('Feishu channel configures deterministic WebSocket policy and lifecycle onc
   })
 })
 
+test('unbound Feishu channel listens for an explicit binding request without a target allowlist', async () => {
+  const sdk = fakeSdk()
+  sdk.getChatInfo = async () => ({
+    chatId: 'oc_group',
+    chatType: 'group',
+    name: '研发群'
+  })
+  let options
+  const channel = new FeishuChannel({
+    createLarkChannel: (value) => {
+      options = value
+      return sdk
+    }
+  })
+
+  await channel.connect({
+    channelType: 'feishu',
+    appId: 'cli_example',
+    appSecret: 'secret-value',
+    target: null,
+    operatorOpenIds: []
+  })
+
+  assert.deepEqual(options.policy, {
+    requireMention: true,
+    dmMode: 'open',
+    dmAllowlist: [],
+    groupAllowlist: [],
+    respondToMentionAll: false
+  })
+  assert.deepEqual(await channel.resolveBindingCandidate({
+    messageId: 'message-1',
+    chatId: 'oc_group',
+    chatType: 'group',
+    senderOpenId: 'ou_operator',
+    senderName: '张三'
+  }), {
+    target: { type: 'group', id: 'oc_group', name: '研发群' },
+    operator: { openId: 'ou_operator', name: '张三' }
+  })
+
+  await channel.sendBindingNotice({
+    messageId: 'message-1',
+    chatId: 'oc_group',
+    chatType: 'group'
+  }, {
+    message: '请在 UCLI 中确认绑定。'
+  })
+  assert.equal(sdk.sent[0].targetId, 'oc_group')
+  assert.deepEqual(sdk.sent[0].options, {
+    replyTo: 'message-1',
+    replyInThread: true
+  })
+  await channel.disconnect()
+})
+
 test('inbound SDK events are normalized and scheduled without awaiting Gateway work', async () => {
   const sdk = fakeSdk()
   const scheduled = []
@@ -143,6 +199,7 @@ test('inbound SDK events are normalized and scheduled without awaiting Gateway w
     chatId: 'oc_group',
     chatType: 'group',
     senderOpenId: 'ou_operator',
+    senderName: '',
     text: 'continue',
     rawContentType: 'text',
     supported: true,

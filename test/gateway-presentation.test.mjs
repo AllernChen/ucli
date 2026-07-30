@@ -11,14 +11,14 @@ import {
 
 test('Gateway presentation covers every runtime phase with safe Chinese labels', () => {
   assert.deepEqual(
-    ['off', 'connecting', 'connected', 'reconnecting', 'error']
+    ['off', 'connecting', 'waiting_binding', 'connected', 'reconnecting', 'error']
       .map(gatewayPhaseLabel),
-    ['已关闭', '连接中', '已连接', '重连中', '连接异常']
+    ['已关闭', '连接中', '等待绑定', '已连接', '重连中', '连接异常']
   )
   assert.deepEqual(
-    ['off', 'connecting', 'connected', 'reconnecting', 'error']
+    ['off', 'connecting', 'waiting_binding', 'connected', 'reconnecting', 'error']
       .map(gatewayPhaseColor),
-    ['default', 'blue', 'green', 'orange', 'red']
+    ['default', 'blue', 'orange', 'green', 'orange', 'red']
   )
 })
 
@@ -37,6 +37,17 @@ test('Gateway target and tooltip expose bounded metadata rather than endpoint de
   assert.match(tooltip, /Gateway 权限不足/)
 })
 
+test('unbound Gateway presentation explains that Feishu is waiting for binding', () => {
+  assert.equal(gatewayPhaseLabel('waiting_binding'), '等待绑定')
+  assert.equal(gatewayTargetLabel({ target: null }), '等待飞书绑定')
+  assert.equal(
+    gatewayTargetLabel({
+      target: { type: 'group', id: 'oc_1234567890', name: '研发群' }
+    }),
+    '群聊 · 研发群'
+  )
+})
+
 test('Gateway store never declares or assigns an App Secret field', () => {
   const source = readFileSync(
     new URL('../src/stores/gateway.js', import.meta.url),
@@ -46,4 +57,6 @@ test('Gateway store never declares or assigns an App Secret field', () => {
   assert.match(source, /onGatewayState/)
   assert.match(source, /testGatewayDraft/)
   assert.match(source, /setSessionRelayEnabled/)
+  assert.match(source, /requireApplied/)
+  assert.match(source, /configuration_operation_in_progress/)
 })

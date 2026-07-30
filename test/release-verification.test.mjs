@@ -29,8 +29,9 @@ test('Gateway release acceptance documents every required Feishu prerequisite', 
     '回复消息',
     '消息表情回复',
     '群组完整消息权限',
-    '操作人白名单',
-    '目标 ID'
+    '绑定 UCLI',
+    '本地确认',
+    '自动成为首位操作人'
   ]) {
     assert.match(acceptance, new RegExp(requirement))
   }

@@ -51,6 +51,7 @@ function normalizeMessage(message) {
     chatId: message?.chatId || '',
     chatType: message?.chatType || 'p2p',
     senderOpenId: message?.senderId || '',
+    senderName: typeof message?.senderName === 'string' ? message.senderName : '',
     text: supported && typeof message?.content === 'string' ? message.content : '',
     rawContentType: message?.rawContentType || 'unknown',
     supported,
@@ -101,17 +102,18 @@ export class FeishuChannel {
 
   async connect(config) {
     if (this.connected && this.sdk) return safeBotIdentity(this.sdk.botIdentity)
-    this.targetId = config.target.id
+    this.targetId = config.target?.id || null
+    const bound = Boolean(this.targetId)
     this.sdk = this.createLarkChannel({
       appId: config.appId,
       appSecret: config.appSecret,
       transport: 'websocket',
       handshakeTimeoutMs: 15_000,
       policy: {
-        requireMention: false,
-        dmMode: 'allowlist',
+        requireMention: !bound,
+        dmMode: bound ? 'allowlist' : 'open',
         dmAllowlist: [...config.operatorOpenIds],
-        groupAllowlist: config.target.type === 'group' ? [config.target.id] : [],
+        groupAllowlist: config.target?.type === 'group' ? [config.target.id] : [],
         respondToMentionAll: false
       },
       safety: {
@@ -200,9 +202,50 @@ export class FeishuChannel {
     }
   }
 
-  _requireConnected() {
-    if (!this.connected || !this.sdk || !this.targetId) {
+  _requireConnected({ targetRequired = true } = {}) {
+    if (!this.connected || !this.sdk || (targetRequired && !this.targetId)) {
       throw normalizedError(null, 'not_connected')
+    }
+  }
+
+  async resolveBindingCandidate(message) {
+    this._requireConnected({ targetRequired: false })
+    const group = message?.chatType === 'group'
+    let targetName = group ? '' : message?.senderName || ''
+    if (group && message?.chatId && this.sdk.getChatInfo) {
+      try {
+        const chat = await this.sdk.getChatInfo(message.chatId)
+        targetName = typeof chat?.name === 'string' ? chat.name : ''
+      } catch {
+        // A name is helpful but the IDs from the signed inbound event are authoritative.
+      }
+    }
+    return {
+      target: {
+        type: group ? 'group' : 'user',
+        id: group ? message?.chatId || '' : message?.senderOpenId || '',
+        name: targetName
+      },
+      operator: {
+        openId: message?.senderOpenId || '',
+        name: message?.senderName || ''
+      }
+    }
+  }
+
+  async sendBindingNotice(message, view) {
+    this._requireConnected({ targetRequired: false })
+    try {
+      return await this.sdk.send(
+        message.chatId,
+        { card: buildNoticeCard(view) },
+        {
+          replyTo: message.messageId,
+          replyInThread: message.chatType === 'group'
+        }
+      )
+    } catch (error) {
+      throw normalizedError(error)
     }
   }
 
