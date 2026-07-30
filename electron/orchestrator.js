@@ -1,4 +1,4 @@
-import { app, ipcMain, dialog, shell, Notification } from 'electron'
+import { app, ipcMain, dialog, shell, Notification, safeStorage } from 'electron'
 import { join } from 'path'
 import { readFileSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
@@ -20,6 +20,10 @@ import { annotateImportedSessions, isSafeNativeSessionId, listClaudeTranscriptFi
 import { listOpenCodeSessions } from './openCodeSessions.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
+import { registerGatewayIpc } from './gateway/ipc.js'
+import { GatewayManager } from './gateway/manager.js'
+import { createGatewayPort } from './gateway/orchestratorPort.js'
+import { SessionSignalBus } from './gateway/sessionSignalBus.js'
 import {
   advanceSessionNotification,
   advanceTaskCompletion,
@@ -47,6 +51,8 @@ export function createOrchestrator() {
   let rulesets = { default: structuredClone(DEFAULT_RULESET) }
   let settings = { ...DEFAULT_SETTINGS }
   let persistenceRecovery = null
+  const gatewaySignals = new SessionSignalBus()
+  let gatewayManager = null
   const approvalNotifications = new Map()
   const completionNotifications = new Set()
   const diagnostics = createDiagnosticsService({
@@ -219,6 +225,23 @@ export function createOrchestrator() {
     onApprovalRequest(req) {
       send('session:approval-request', req)
       showApprovalNotification(req)
+      gatewaySignals.publish({
+        type: 'decision_required',
+        sessionId: req.sessionId,
+        turnId: `permission:${req.requestId}`,
+        occurredAt: Date.now(),
+        decision: {
+          decisionId: req.requestId,
+          kind: 'permission',
+          title: '需要确认操作',
+          summary: req.summary || req.tool || '',
+          options: [
+            { id: 'allow_once', label: '允许一次' },
+            { id: 'deny', label: '拒绝' }
+          ],
+          responseMode: 'single'
+        }
+      })
     },
     onApprovalResolved(req) {
       dismissApprovalNotification(req.requestId)
@@ -333,6 +356,10 @@ export function createOrchestrator() {
   }
 
   // ---- session lifecycle ----
+  function wireAdapterGateway(adapter) {
+    adapter.on('gateway-event', (event) => gatewaySignals.publish(event))
+  }
+
   function createSession(config) {
     if (config.cliSessionId && !isSafeNativeSessionId(config.cliSessionId)) {
       throw new Error('invalid native session id')
@@ -380,6 +407,7 @@ export function createOrchestrator() {
     }
     sessions.set(sessionId, entry)
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
+    wireAdapterGateway(adapter)
 
     // Persist to SQLite
     const db = getDb()
@@ -404,6 +432,7 @@ export function createOrchestrator() {
       case 'ready':
         entry.status = 'idle'
         entry.lastActivity = '已就绪'
+        await gatewayManager?.resyncSession(sessionId)
         break
       case 'init':
         // cliSessionId discovered from PTY output (new session) or from transcript
@@ -764,6 +793,113 @@ export function createOrchestrator() {
     }))
   }
 
+  function gatewaySessionView(sessionId) {
+    const entry = sessions.get(sessionId)
+    if (!entry) return null
+    return {
+      id: sessionId,
+      name: entry.session.name || null,
+      adapterId: entry.session.adapterId,
+      provider: entry.session.provider || null,
+      status: entry.status
+    }
+  }
+
+  function createUnavailableGatewayManager() {
+    const state = {
+      desiredEnabled: false,
+      phase: 'error',
+      channelType: null,
+      targetLabel: '',
+      errorCode: 'PERSISTENCE_UNAVAILABLE',
+      errorMessage: 'Gateway 持久化不可用。',
+      selectedSessionCount: 0,
+      readySessionCount: 0,
+      pendingDecisionCount: 0,
+      queuedTaskCount: 0,
+      lastConnectedAt: null
+    }
+    const unavailable = () => {
+      throw Object.assign(new Error('Gateway persistence is unavailable'), {
+        code: 'PERSISTENCE_UNAVAILABLE'
+      })
+    }
+    return {
+      getState: () => ({ ...state }),
+      setDesiredEnabled: unavailable,
+      getConfiguration: () => null,
+      testDraft: unavailable,
+      applyDraft: unavailable,
+      listSessions: () => listSessions().map((session) => ({
+        id: session.id,
+        name: session.name,
+        adapterId: session.adapterId,
+        provider: session.provider,
+        status: session.status,
+        relayEnabled: false,
+        routeStatus: 'waiting'
+      })),
+      setSessionRelayEnabled: unavailable,
+      resyncSession: async () => ({ accepted: false, reason: 'unavailable' }),
+      respondDesktopDecision: async () => ({ accepted: false, reason: 'unavailable' }),
+      shutdown: async () => {}
+    }
+  }
+
+  async function startGateway() {
+    if (gatewayManager) return gatewayManager.getState()
+    const db = getDb()
+    if (!db) {
+      gatewayManager = createUnavailableGatewayManager()
+      return gatewayManager.getState()
+    }
+    const gatewayPort = createGatewayPort({
+      listSessions: () => [...sessions.keys()]
+        .map(gatewaySessionView)
+        .filter(Boolean),
+      getSession: gatewaySessionView,
+      sendTurn: async (sessionId, text) => {
+        const entry = sessions.get(sessionId)
+        if (!entry?.adapter) {
+          return { accepted: false, reason: 'session_offline' }
+        }
+        entry.status = 'running'
+        await entry.adapter.sendTurn(text)
+        return { accepted: true }
+      },
+      interrupt: async (sessionId) => {
+        const entry = sessions.get(sessionId)
+        if (!entry?.adapter) {
+          return { accepted: false, reason: 'session_offline' }
+        }
+        await entry.adapter.interrupt()
+        return { accepted: true }
+      },
+      respondDecision: async (sessionId, decisionId, response) => {
+        const entry = sessions.get(sessionId)
+        if (!entry?.adapter) {
+          return { accepted: false, reason: 'session_offline' }
+        }
+        return entry.adapter.respondDecision(decisionId, response)
+      },
+      getDecisionContext: (sessionId, decisionId) =>
+        sessions.get(sessionId)?.adapter?.getDecisionContext(decisionId) || null,
+      getLatestPlanSnapshot: (sessionId, decisionId) =>
+        sessions.get(sessionId)?.adapter?.getLatestPlanSnapshot(decisionId) || null,
+      getLatestResultSnapshot: (sessionId, turnId) =>
+        sessions.get(sessionId)?.adapter?.getLatestResultSnapshot(turnId) || null,
+      subscribeGatewayEvents: (listener) => gatewaySignals.subscribe(listener)
+    })
+    gatewayManager = new GatewayManager({
+      db,
+      safeStorage,
+      port: gatewayPort,
+      publishState: (state) => send('gateway:state', state)
+    })
+    await gatewayManager.start()
+    return gatewayManager.getState()
+  }
+
   /** Respawn an offline (persisted) session. */
   async function restartSession(sessionId) {
     const entry = sessions.get(sessionId)
@@ -788,15 +924,18 @@ export function createOrchestrator() {
     entry._lastCompletedTurns = entry.session.cliSessionId ? null : 0
     entry._lastNotification = null
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
+    wireAdapterGateway(adapter)
     adapter.hookPort = hookPort
     await adapter.start()
     const db = getDb()
     if (db) { db.updateSession(sessionId, { status: 'idle' }); scheduleFlush() }
     send('session:event', { sessionId, type: 'ready', status: entry.status })
+    await gatewayManager?.resyncSession(sessionId)
   }
 
   // ---- IPC registration ----
   function registerIpc() {
+    registerGatewayIpc({ ipcMain, manager: gatewayManager })
     ipcMain.handle('adapters:list', () =>
       Array.from(adapters.values()).map((d) => ({ id: d.id, displayName: d.displayName, icon: d.icon, models: d.models }))
     )
@@ -876,7 +1015,13 @@ export function createOrchestrator() {
       }
       return true
     })
-    ipcMain.handle('session:respond-approval', (_e, sessionId, requestId, verdict) => {
+    ipcMain.handle('session:respond-approval', async (_e, sessionId, requestId, verdict) => {
+      const gatewayResult = await gatewayManager?.respondDesktopDecision(
+        sessionId,
+        requestId,
+        { action: verdict === 'allow' ? 'allow_once' : 'deny' }
+      )
+      if (gatewayResult?.accepted) return true
       return engine.respondApproval(requestId, verdict)
     })
     ipcMain.handle('session:interrupt', (_e, sessionId) => {
@@ -884,17 +1029,24 @@ export function createOrchestrator() {
       if (!e || !e.adapter) throw new Error('会话已离线')
       return e.adapter.interrupt()
     })
-    ipcMain.handle('session:resume', (_e, sessionId, cliSessionId) => {
+    ipcMain.handle('session:resume', async (_e, sessionId, cliSessionId) => {
       const e = sessions.get(sessionId)
       if (!e) throw new Error('no session')
       if (!e.adapter) throw new Error('会话已离线，请先重新启动')
       if (!isSafeNativeSessionId(cliSessionId)) throw new Error('invalid native session id')
-      return e.adapter.resume(cliSessionId)
+      const result = await e.adapter.resume(cliSessionId)
+      await gatewayManager?.resyncSession(sessionId)
+      return result
     })
     ipcMain.handle('session:restart', (_e, sessionId) => restartSession(sessionId))
     ipcMain.handle('session:stop', (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (e) {
+        gatewaySignals.publish({
+          type: 'session_stopped',
+          sessionId,
+          occurredAt: Date.now()
+        })
         if (e.adapter) e.adapter.dispose()
         e.adapter = null
         e.status = 'offline'
@@ -906,6 +1058,11 @@ export function createOrchestrator() {
     ipcMain.handle('session:delete', (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (e) {
+        gatewaySignals.publish({
+          type: 'session_stopped',
+          sessionId,
+          occurredAt: Date.now()
+        })
         if (e.adapter) e.adapter.dispose()
         sessions.delete(sessionId)
         historyService.invalidate(sessionId)
@@ -1051,6 +1208,7 @@ export function createOrchestrator() {
       approvalNotifications.clear()
       for (const notification of completionNotifications) notification.close()
       completionNotifications.clear()
+      await gatewayManager?.shutdown()
       const db = getDb()
       for (const [id, entry] of sessions) {
         if (entry.adapter) {
@@ -1061,16 +1219,16 @@ export function createOrchestrator() {
         entry.status = 'offline'
         if (db) db.updateSession(id, { status: 'offline' })
       }
-      if (db) {
-        log('shutdown — calling db.flush()')
-        db.flush()
-        log('shutdown — db.flush() done')
-      }
       try {
         const server = hookServer || await hookReady
         await server?.close()
       } catch (error) {
         console.error('Failed to close permission hook server:', error)
+      }
+      if (db) {
+        log('shutdown — calling db.flush()')
+        db.flush()
+        log('shutdown — db.flush() done')
       }
       log('shutdown() complete')
     })()
@@ -1082,6 +1240,7 @@ export function createOrchestrator() {
     setMainWindow,
     hookReady,
     initPersistence,
+    startGateway,
     shutdown,
     getPersistenceRecovery: () => persistenceRecovery
   }

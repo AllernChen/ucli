@@ -157,3 +157,30 @@ test('large safe decisions expose full content from memory without persisting it
   assert.equal(JSON.stringify(routes).includes('x'.repeat(100)), false)
   assert.equal(port.calls.decisions.length, 0)
 })
+
+test('a winning desktop response resolves the provider and invalidates every remote button', async () => {
+  const port = createPort([session('session-1')])
+  const routes = new MemoryRouteStore()
+  routes.upsertSessionRoute({ sessionId: 'session-1', relayEnabled: true })
+  const channel = new FakeGatewayChannel()
+  const runtime = new GatewayRuntime({ port, routeStore: routes })
+  await runtime.attachConnectedChannel({
+    channel,
+    config: FEISHU_CONFIG,
+    fingerprint: 'fingerprint-1'
+  })
+  await runtime.handleGatewayEvent(decisionEvent())
+  const oldToken = channel.decisions[0].view.actions[0].token
+
+  assert.deepEqual(await runtime.respondDesktopDecision(
+    'session-1',
+    'decision-1',
+    { action: 'deny' }
+  ), { accepted: true })
+  assert.deepEqual(port.calls.decisions[0].response, { action: 'deny' })
+  assert.equal(channel.cardUpdates.length, 1)
+  assert.deepEqual(await runtime.handleInboundAction({
+    senderOpenId: 'ou_operator',
+    token: oldToken
+  }), { accepted: false, reason: 'invalid_action_token' })
+})

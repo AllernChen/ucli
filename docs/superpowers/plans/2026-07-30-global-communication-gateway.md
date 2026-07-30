@@ -921,7 +921,7 @@ git commit -m "feat: orchestrate global communication gateway"
 - Create: `test/gateway-ipc.test.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Create an injected Gateway port in orchestrator**
+- [x] **Step 1: Create an injected Gateway port in orchestrator**
 
 The runtime receives only:
 
@@ -941,7 +941,7 @@ The runtime receives only:
 
 It must not reach directly into the orchestrator `sessions` map or PTY process.
 
-- [ ] **Step 2: Wire all explicit lifecycle sources**
+- [x] **Step 2: Wire all explicit lifecycle sources**
 
 - permission engine request/resolution;
 - adapter gateway lifecycle events;
@@ -951,7 +951,7 @@ It must not reach directly into the orchestrator `sessions` map or PTY process.
 
 When a desktop response wins, call `DecisionRegistry.resolve({ source: 'desktop' })` before notifying the Gateway view.
 
-- [ ] **Step 3: Add startup and shutdown order**
+- [x] **Step 3: Add startup and shutdown order**
 
 After persistence:
 
@@ -970,7 +970,7 @@ Shutdown order:
 3. dispose adapters/hook server;
 4. flush and close database.
 
-- [ ] **Step 4: Add narrow IPC**
+- [x] **Step 4: Add narrow IPC**
 
 Preload API:
 
@@ -994,7 +994,7 @@ Rules:
 - IPC validates IDs and booleans in the main process;
 - enabling without valid applied config returns `CONFIG_REQUIRED`.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```powershell
 node --test test/gateway-orchestrator.test.mjs test/gateway-startup.test.mjs test/gateway-ipc.test.mjs test/diagnostics-ipc.test.mjs test/update-ipc.test.mjs

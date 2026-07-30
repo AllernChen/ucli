@@ -108,11 +108,18 @@ async function disconnect(channel) {
 }
 
 export class GatewayConfigService {
-  constructor({ db, secretStore, createChannel, runtime }) {
+  constructor({
+    db,
+    secretStore,
+    createChannel,
+    runtime,
+    shouldActivate = () => true
+  }) {
     this.db = db
     this.secretStore = secretStore
     this.createChannel = createChannel
     this.runtime = runtime
+    this.shouldActivate = shouldActivate
     this._testedDrafts = new Map()
   }
 
@@ -182,21 +189,40 @@ export class GatewayConfigService {
 
     const candidate = this.createChannel()
     const oldChannel = this.runtime.getChannel()
-    let swapped = false
+    const oldConnection = this.runtime.getConnection?.() || null
+    let activationAttempted = false
     try {
-      await candidate.connect(connectionConfig(entry.config, entry.secretBuffer))
+      const botIdentity = safeBotIdentity(
+        await candidate.connect(connectionConfig(entry.config, entry.secretBuffer))
+      )
       const ciphertext = this.secretStore.encryptSecret(entry.secretBuffer)
       await this.db.transaction(async () => {
         this.db.saveGatewaySecretCiphertext(APP_SECRET_KEY, ciphertext)
         this.db.saveGatewaySetting(APPLIED_CONFIG_KEY, entry.config)
-        swapped = true
-        this.runtime.setChannel(candidate)
+        if (this.shouldActivate()) {
+          activationAttempted = true
+          await this.runtime.setChannel(candidate, {
+            config: entry.config,
+            fingerprint: entry.fingerprint,
+            botIdentity
+          })
+        } else {
+          await disconnect(candidate)
+        }
       })
-      if (oldChannel && oldChannel !== candidate) await disconnect(oldChannel)
+      if (
+        activationAttempted &&
+        oldChannel &&
+        oldChannel !== candidate
+      ) {
+        await disconnect(oldChannel)
+      }
       return redactGatewayConfig(entry.config, true)
     } catch (error) {
-      if (swapped) {
-        try { this.runtime.setChannel(oldChannel) } catch { /* retain original error */ }
+      if (activationAttempted) {
+        try {
+          await this.runtime.setChannel(oldChannel, oldConnection)
+        } catch { /* retain original error */ }
       }
       await disconnect(candidate)
       throw error

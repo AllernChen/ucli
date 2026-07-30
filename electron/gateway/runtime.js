@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 
 import {
+  buildDecisionCard,
   buildInterruptCard,
   buildPlanDetailCard,
   buildQueueCard
@@ -80,6 +81,7 @@ export class GatewayRuntime {
         this.port.respondDecision(sessionId, decisionId, response)
     })
     this.channel = null
+    this.acceptingInbound = false
     this.config = null
     this.fingerprint = null
     this.botIdentity = null
@@ -111,6 +113,62 @@ export class GatewayRuntime {
     }
   }
 
+  getChannel() {
+    return this.channel
+  }
+
+  getConnection() {
+    if (!this.channel || !this.config || !this.fingerprint) return null
+    return {
+      config: structuredClone(this.config),
+      fingerprint: this.fingerprint,
+      botIdentity: this.botIdentity ? structuredClone(this.botIdentity) : null
+    }
+  }
+
+  async setChannel(channel, connection = null) {
+    if (!channel) {
+      this._unbindChannel()
+      this.channel = null
+      return
+    }
+    if (connection?.config && connection?.fingerprint) {
+      await this.attachConnectedChannel({ channel, ...connection })
+      return
+    }
+    this.channel = channel
+  }
+
+  restoreDesiredEnabled(value, config = null) {
+    this._setState({
+      desiredEnabled: Boolean(value),
+      phase: value ? 'connecting' : 'off',
+      channelType: config?.channelType || this.state.channelType,
+      targetLabel: targetIdOf(config) || this.state.targetLabel
+    })
+  }
+
+  markConnecting(config) {
+    this._setState({
+      desiredEnabled: true,
+      phase: 'connecting',
+      channelType: config?.channelType || 'feishu',
+      targetLabel: targetIdOf(config) || '',
+      errorCode: null,
+      errorMessage: ''
+    })
+  }
+
+  reportConnectionError(error) {
+    const errorCode = safeText(error?.code, 'connection_error')
+    this._setState({
+      desiredEnabled: true,
+      phase: 'error',
+      errorCode,
+      errorMessage: publicErrorMessage(errorCode)
+    })
+  }
+
   async attachConnectedChannel({
     channel,
     config,
@@ -122,6 +180,7 @@ export class GatewayRuntime {
       this.routeStore.deactivateFingerprint(this.fingerprint)
     }
     this.channel = channel
+    this.acceptingInbound = true
     this.config = structuredClone(config)
     this.fingerprint = fingerprint
     this.botIdentity = botIdentity ? structuredClone(botIdentity) : null
@@ -157,6 +216,7 @@ export class GatewayRuntime {
     }
     this.decisionRegistry.invalidateRemoteTokens('gateway_off')
     this.actions.clear()
+    this.acceptingInbound = false
     if (this.channel) {
       await this.channel.disconnect()
     }
@@ -175,7 +235,59 @@ export class GatewayRuntime {
     return this._ensureRoot(sessionId)
   }
 
+  async setSessionRelayEnabled(sessionId, enabled) {
+    if (typeof sessionId !== 'string' || !sessionId) {
+      return { accepted: false, reason: 'invalid_session' }
+    }
+    if (enabled) {
+      this.routeStore.setRelayEnabled(sessionId, true)
+      await this.resyncSession(sessionId)
+    } else {
+      if (this._isSelected(sessionId)) {
+        await this._updateRoot(sessionId, {
+          stateLabel: '已停止转发',
+          interruptToken: null
+        })
+      }
+      this.taskQueue.onRelayDisabled(sessionId)
+      this.routeStore.setRelayEnabled(sessionId, false)
+    }
+    this._publish()
+    return { accepted: true }
+  }
+
+  async respondDesktopDecision(sessionId, decisionId, response) {
+    const pending = this.decisionRegistry.listPendingForSession(sessionId)
+      .find((entry) => entry.decision.decisionId === decisionId)
+    if (!pending) return { accepted: false, reason: 'already_resolved' }
+    const result = await this.decisionRegistry.resolve({
+      decisionId,
+      response,
+      source: 'desktop'
+    })
+    if (result.accepted) {
+      await this._markDecisionResolved(decisionId)
+      this.pendingDecisions.delete(decisionId)
+      await this._updateRoot(sessionId)
+      this._publish()
+    }
+    return result
+  }
+
+  async shutdown() {
+    this.acceptingInbound = false
+    this.decisionRegistry.invalidateRemoteTokens('gateway_shutdown')
+    this.actions.clear()
+    this._unbindChannel()
+    const channel = this.channel
+    this.channel = null
+    await channel?.disconnect?.()
+  }
+
   async handleInboundMessage(message) {
+    if (!this.acceptingInbound) {
+      return { accepted: false, reason: 'gateway_not_accepting' }
+    }
     if (!this._isAuthorized(message?.senderOpenId)) {
       return { accepted: false, reason: 'unauthorized_operator' }
     }
@@ -211,6 +323,7 @@ export class GatewayRuntime {
             source: 'feishu'
           })
           if (result.accepted) {
+            await this._markDecisionResolved(explicitRoute.decisionId)
             this.pendingDecisions.delete(explicitRoute.decisionId)
             await this._updateRoot(sessionId)
             this._publish()
@@ -249,6 +362,9 @@ export class GatewayRuntime {
   }
 
   async handleInboundAction(action) {
+    if (!this.acceptingInbound) {
+      return { accepted: false, reason: 'gateway_not_accepting' }
+    }
     if (!this._isAuthorized(action?.senderOpenId)) {
       return { accepted: false, reason: 'unauthorized_operator' }
     }
@@ -266,6 +382,7 @@ export class GatewayRuntime {
         source: 'feishu'
       })
       if (result.accepted) {
+        await this._markDecisionResolved(binding.decisionId)
         this.pendingDecisions.delete(binding.decisionId)
         await this._updateRoot(binding.sessionId)
         this._publish()
@@ -636,6 +753,7 @@ export class GatewayRuntime {
         },
         viewToken
       })
+      this._rememberDecisionMessage(decision.decisionId, sent?.messageId)
       this._saveDecisionRoute(sent, sessionId, decision.decisionId, 'plan')
       return
     }
@@ -687,7 +805,33 @@ export class GatewayRuntime {
       desktopOnly: summary.desktopOnly,
       actions
     })
+    this._rememberDecisionMessage(decision.decisionId, sent?.messageId)
     this._saveDecisionRoute(sent, sessionId, decision.decisionId, 'decision')
+  }
+
+  _rememberDecisionMessage(decisionId, messageId) {
+    const pending = this.pendingDecisions.get(decisionId)
+    if (pending && messageId) pending.messageId = messageId
+  }
+
+  async _markDecisionResolved(decisionId) {
+    const pending = this.pendingDecisions.get(decisionId)
+    for (const [token, binding] of this.actions) {
+      if (binding.decisionId === decisionId) this.actions.delete(token)
+    }
+    if (!pending?.messageId || !this.channel?.updateCard) return
+    try {
+      await this.channel.updateCard(
+        pending.messageId,
+        buildDecisionCard({
+          title: pending.decision.title,
+          summary: '该决策已处理。',
+          actions: []
+        })
+      )
+    } catch {
+      // The provider response already won; a stale remote card cannot undo it.
+    }
   }
 
   _saveDecisionRoute(sent, sessionId, decisionId, routeKind) {

@@ -182,6 +182,7 @@ app.whenReady().then(async () => {
   // adapter registry, sessions, stats, and all IPC handlers.
   orchestrator = createOrchestrator()
   try { await orchestrator.initPersistence() } catch (e) { console.error('initPersistence failed:', e) }
+  try { await orchestrator.startGateway() } catch (e) { console.error('startGateway failed:', e) }
   orchestrator.registerIpc()
 
   try {

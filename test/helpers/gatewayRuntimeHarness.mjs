@@ -85,6 +85,7 @@ export class FakeGatewayChannel {
     this.plans = []
     this.completions = []
     this.cards = []
+    this.cardUpdates = []
     this.reactions = []
     this.removedReactions = []
     this.messageListeners = new Set()
@@ -144,6 +145,10 @@ export class FakeGatewayChannel {
     return { messageId }
   }
 
+  async updateCard(messageId, card) {
+    this.cardUpdates.push({ messageId, card: structuredClone(card) })
+  }
+
   async addReaction(messageId, emojiType) {
     const reactionId = `reaction-${this.reactions.length + 1}`
     this.reactions.push({ messageId, emojiType, reactionId })
@@ -174,6 +179,7 @@ export class FakeGatewayChannel {
 
 export function createPort(sessions = []) {
   const values = new Map(sessions.map((session) => [session.id, { ...session }]))
+  const gatewayListeners = new Set()
   const calls = {
     turns: [],
     interrupts: [],
@@ -221,6 +227,13 @@ export function createPort(sessions = []) {
         turnId,
         capturedAt: 2
       }
+    },
+    subscribeGatewayEvents(listener) {
+      gatewayListeners.add(listener)
+      return () => gatewayListeners.delete(listener)
+    },
+    emitGatewayEvent(event) {
+      return Promise.all([...gatewayListeners].map((listener) => listener(event)))
     }
   }
 }
