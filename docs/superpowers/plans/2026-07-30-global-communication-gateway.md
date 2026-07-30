@@ -489,7 +489,7 @@ git commit -m "feat: expose Codex and OpenCode gateway capabilities"
 - Create: `test/gateway-route-store.test.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Write additive migration tests**
+- [x] **Step 1: Write additive migration tests**
 
 Open both a new database and a legacy database fixture. Assert all four Gateway tables appear without altering sessions, statistics, rules, or settings.
 
@@ -500,7 +500,7 @@ Open both a new database and a legacy database fixture. Assert all four Gateway 
 - retain decision audit metadata;
 - retain existing session/statistics retention behavior.
 
-- [ ] **Step 2: Add DB methods and route invariants**
+- [x] **Step 2: Add DB methods and route invariants**
 
 Implement:
 
@@ -520,7 +520,7 @@ saveGatewayDecisionAudit(record)
 
 No method accepts message content, task text, plan markdown, result markdown, or action tokens.
 
-- [ ] **Step 3: Implement secure secret storage**
+- [x] **Step 3: Implement secure secret storage**
 
 `SecretStore` receives Electron `safeStorage` as a dependency:
 
@@ -534,7 +534,7 @@ if (!safeStorage.isEncryptionAvailable()) {
 
 Store `encryptString(plaintext).toString('base64')`. Never use a plaintext fallback.
 
-- [ ] **Step 4: Implement strict endpoint configuration**
+- [x] **Step 4: Implement strict endpoint configuration**
 
 Applied config:
 
@@ -558,7 +558,7 @@ Validation rules:
 
 `channelFingerprint` hashes only `{ channelType, appId, target.type, target.id }`. Secret and operator allowlist changes do not force new roots; App/target identity changes do.
 
-- [ ] **Step 5: Test config transaction semantics**
+- [x] **Step 5: Test config transaction semantics**
 
 Define:
 
@@ -578,7 +578,7 @@ applyTestedDraft({ testId }) -> redactedAppliedConfig
 
 If candidate connection, encryption, staging, swap, or commit fails, roll back the database transaction, restore the old runtime reference, disconnect the candidate, erase the failed registry entry, and retain the old persisted config, old secret, and old live channel. When the draft App Secret field is blank, testing uses the already stored secret; it never returns that secret to the renderer.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```powershell
 node --test test/gateway-db-migration.test.mjs test/gateway-secret-store.test.mjs test/gateway-config.test.mjs test/gateway-route-store.test.mjs test/db-retention.test.mjs test/db-recovery.test.mjs
