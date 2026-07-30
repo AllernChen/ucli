@@ -784,7 +784,7 @@ git commit -m "feat: add Feishu gateway channel"
 - Create: `test/gateway-queue-flow.test.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Define observable runtime state**
+- [x] **Step 1: Define observable runtime state**
 
 ```js
 {
@@ -804,7 +804,7 @@ git commit -m "feat: add Feishu gateway channel"
 
 Every transition publishes one redacted status event to the renderer.
 
-- [ ] **Step 2: Implement root lifecycle**
+- [x] **Step 2: Implement root lifecycle**
 
 On selected session `ready`:
 
@@ -817,7 +817,7 @@ Root state includes display name, adapter/provider, short session ID, current st
 
 On `stopped`, `failed`, `interrupted`, relay disabled, Gateway paused, or target migration, update/close the appropriate view as defined in Global Constraints.
 
-- [ ] **Step 3: Implement exact inbound routing**
+- [x] **Step 3: Implement exact inbound routing**
 
 Routing precedence:
 
@@ -828,7 +828,7 @@ Routing precedence:
 
 Group normal messages never reach step 3. Resolve all IDs through `RouteStore` and the current channel fingerprint. Never fall back to latest session.
 
-- [ ] **Step 4: Implement task acceptance and FIFO**
+- [x] **Step 4: Implement task acceptance and FIFO**
 
 For valid ordinary text:
 
@@ -842,7 +842,7 @@ For valid ordinary text:
 
 Each completed turn receives its own completion reply. If items remain, the root says it is moving to the next task; otherwise it returns to idle.
 
-- [ ] **Step 5: Implement decision flow**
+- [x] **Step 5: Implement decision flow**
 
 On `decision_required`:
 
@@ -862,14 +862,14 @@ On response:
 - persist only `{ decisionId, kind, verdict, source, resolvedAt }`;
 - update both Feishu and desktop surfaces to resolved/already handled.
 
-- [ ] **Step 6: Implement plan/result detail actions**
+- [x] **Step 6: Implement plan/result detail actions**
 
 - `查看完整方案` reads `planSnapshotId` from memory and sends chunked cards in the same session thread; only the final card contains execute/reject.
 - `回复修改意见` accepts a routed free-text response through `respondDecision()`.
 - completion card offers `查看完整结果`; its action fetches `getLatestResultSnapshot(turnId)` and sends chunked detail.
 - if UCLI restarted or the snapshot was cleared, explain that the content is no longer cached and direct the user to desktop/history.
 
-- [ ] **Step 7: Implement remote interrupt**
+- [x] **Step 7: Implement remote interrupt**
 
 Interrupt action calls `adapter.interrupt()` for the exact session, pauses its queue, updates root, and sends buttons:
 
@@ -878,7 +878,7 @@ Interrupt action calls `adapter.interrupt()` for the exact session, pauses its q
 
 No other remote session-management action exists.
 
-- [ ] **Step 8: Implement Gateway off and reconnect**
+- [x] **Step 8: Implement Gateway off and reconnect**
 
 Intentional off:
 
@@ -897,7 +897,7 @@ Unexpected reconnect:
 - send latest completion per selected session;
 - do not replay task/message history.
 
-- [ ] **Step 9: Verify and commit**
+- [x] **Step 9: Verify and commit**
 
 ```powershell
 node --test test/gateway-runtime-state.test.mjs test/gateway-session-routing.test.mjs test/gateway-root-lifecycle.test.mjs test/gateway-reconnect.test.mjs test/gateway-decision-flow.test.mjs test/gateway-queue-flow.test.mjs
