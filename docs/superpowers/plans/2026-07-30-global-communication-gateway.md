@@ -285,7 +285,7 @@ git commit -m "fix: keep permission decisions pending"
 - Create: `test/session-signal-bus.test.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
 Assert:
 
@@ -296,7 +296,7 @@ Assert:
 - terminal/message/reasoning/tool/stat event types are rejected;
 - subscribers receive events in publication order and can unsubscribe.
 
-- [ ] **Step 2: Add the pure contracts and signal bus**
+- [x] **Step 2: Add the pure contracts and signal bus**
 
 `SessionSignalBus.publish(event)` validates and synchronously snapshots the event before notifying listeners. It does not deduplicate completion based on timing; adapter/provider stable IDs provide identity.
 
@@ -320,7 +320,7 @@ export class SessionSignalBus {
 }
 ```
 
-- [ ] **Step 3: Extend `BaseAdapter` without breaking existing adapters**
+- [x] **Step 3: Extend `BaseAdapter` without breaking existing adapters**
 
 Add:
 
@@ -331,7 +331,7 @@ Add:
 
 Keep existing `emitEvent()` and renderer events unchanged.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```powershell
 node --test test/gateway-contracts.test.mjs test/session-signal-bus.test.mjs test/adapter-stats.test.mjs test/opencode-adapter.test.mjs
