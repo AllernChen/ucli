@@ -66,6 +66,7 @@ export function createOrchestrator() {
     }),
     inspectCliTools,
     getPersistence: () => ({ available: Boolean(getDb()), recoveryInfo: persistenceRecovery }),
+    getGateway: () => gatewayManager?.getDiagnostics() || null,
     showSaveDialog: (options) => dialog.showSaveDialog(mainWindow, options),
     writeFile: writeFileSync
   })
@@ -356,8 +357,22 @@ export function createOrchestrator() {
   }
 
   // ---- session lifecycle ----
-  function wireAdapterGateway(adapter) {
-    adapter.on('gateway-event', (event) => gatewaySignals.publish(event))
+  function wireAdapterGateway(sessionId, adapter) {
+    adapter.on('gateway-event', (event) => {
+      const entry = sessions.get(sessionId)
+      if (entry) {
+        if (event.type === 'turn_started') entry._gatewayTurnActive = true
+        if (
+          event.type === 'turn_completed' ||
+          event.type === 'turn_failed' ||
+          event.type === 'turn_interrupted' ||
+          event.type === 'session_stopped'
+        ) {
+          entry._gatewayTurnActive = false
+        }
+      }
+      gatewaySignals.publish(event)
+    })
   }
 
   function createSession(config) {
@@ -403,11 +418,12 @@ export function createOrchestrator() {
       _dirtyStats: null,
       _lastCumTokens: null,
       _lastCompletedTurns: session.cliSessionId ? null : 0,
-      _lastNotification: null
+      _lastNotification: null,
+      _gatewayTurnActive: false
     }
     sessions.set(sessionId, entry)
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
-    wireAdapterGateway(adapter)
+    wireAdapterGateway(sessionId, adapter)
 
     // Persist to SQLite
     const db = getDb()
@@ -801,7 +817,8 @@ export function createOrchestrator() {
       name: entry.session.name || null,
       adapterId: entry.session.adapterId,
       provider: entry.session.provider || null,
-      status: entry.status
+      status: entry.status,
+      turnActive: entry._gatewayTurnActive === true
     }
   }
 
@@ -843,6 +860,7 @@ export function createOrchestrator() {
       setSessionRelayEnabled: unavailable,
       resyncSession: async () => ({ accepted: false, reason: 'unavailable' }),
       respondDesktopDecision: async () => ({ accepted: false, reason: 'unavailable' }),
+      respondDesktopInput: async () => ({ accepted: false, reason: 'unavailable' }),
       shutdown: async () => {}
     }
   }
@@ -865,6 +883,7 @@ export function createOrchestrator() {
           return { accepted: false, reason: 'session_offline' }
         }
         entry.status = 'running'
+        entry._gatewayTurnActive = true
         await entry.adapter.sendTurn(text)
         return { accepted: true }
       },
@@ -924,8 +943,9 @@ export function createOrchestrator() {
     entry._lastCumTokens = null
     entry._lastCompletedTurns = entry.session.cliSessionId ? null : 0
     entry._lastNotification = null
+    entry._gatewayTurnActive = false
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
-    wireAdapterGateway(adapter)
+    wireAdapterGateway(sessionId, adapter)
     adapter.hookPort = hookPort
     await adapter.start()
     const db = getDb()
@@ -994,11 +1014,13 @@ export function createOrchestrator() {
       if (!e) throw new Error('no session')
       if (!e.adapter) throw new Error('会话已离线，请先重新启动')
       e.status = 'running'
+      e._gatewayTurnActive = true
       return e.adapter.sendTurn(text)
     })
-    ipcMain.handle('session:send-terminal-input', (_e, sessionId, data) => {
+    ipcMain.handle('session:send-terminal-input', async (_e, sessionId, data) => {
       const e = sessions.get(sessionId)
       if (e && e.adapter && typeof e.adapter.writeInput === 'function') {
+        await gatewayManager?.respondDesktopInput(sessionId)
         return e.adapter.writeInput(data)
       }
       return false

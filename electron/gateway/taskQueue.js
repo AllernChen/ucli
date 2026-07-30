@@ -6,7 +6,8 @@ function emptyState() {
   return {
     running: null,
     waiting: [],
-    paused: false
+    paused: false,
+    providerBusy: false
   }
 }
 
@@ -41,7 +42,10 @@ export class GatewayTaskQueue {
     if (state.running && state.waiting.length >= MAX_WAITING) {
       return { accepted: false, reason: 'queue_full' }
     }
-    if (state.paused && state.waiting.length >= MAX_WAITING) {
+    if (
+      (state.paused || state.providerBusy) &&
+      state.waiting.length >= MAX_WAITING
+    ) {
       return { accepted: false, reason: 'queue_full' }
     }
     const task = {
@@ -51,7 +55,7 @@ export class GatewayTaskQueue {
       text: text.trim(),
       enqueuedAt: Date.now()
     }
-    if (!state.running && !state.paused) {
+    if (!state.running && !state.paused && !state.providerBusy) {
       state.running = task
       return { accepted: true, task: cloneTask(task), position: 0 }
     }
@@ -61,6 +65,23 @@ export class GatewayTaskQueue {
       task: cloneTask(task),
       position: state.running ? state.waiting.length : state.waiting.length
     }
+  }
+
+  setProviderBusy(sessionId, busy) {
+    const state = this._state(sessionId)
+    state.providerBusy = Boolean(busy)
+    this._deleteIfEmpty(sessionId, state)
+  }
+
+  releaseProviderBusy(sessionId) {
+    const state = this._sessions.get(sessionId)
+    if (!state) return null
+    state.providerBusy = false
+    if (!state.running && !state.paused) {
+      state.running = state.waiting.shift() || null
+    }
+    this._deleteIfEmpty(sessionId, state)
+    return cloneTask(state.running)
   }
 
   completeCurrent(sessionId, relayTaskId) {
@@ -120,7 +141,12 @@ export class GatewayTaskQueue {
   }
 
   _deleteIfEmpty(sessionId, state) {
-    if (!state.running && !state.waiting.length && !state.paused) {
+    if (
+      !state.running &&
+      !state.waiting.length &&
+      !state.paused &&
+      !state.providerBusy
+    ) {
       this._sessions.delete(sessionId)
     }
   }

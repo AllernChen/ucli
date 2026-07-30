@@ -103,6 +103,11 @@ test('removing a session disables relay and routes while retaining decision audi
       source: 'feishu',
       resolvedAt: 10
     })
+    assert.deepEqual(db.getGatewayDiagnosticCounts(), {
+      sessionRoutes: 1,
+      messageRoutes: 1,
+      decisionAudits: 1
+    })
 
     db.removeSession('session-1')
 

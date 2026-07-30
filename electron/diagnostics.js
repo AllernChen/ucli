@@ -10,7 +10,8 @@ export function buildDiagnosticReport({
   electronVersion,
   nodeVersion,
   cliTools = [],
-  persistence
+  persistence,
+  gateway
 }) {
   return {
     schemaVersion: 1,
@@ -32,7 +33,8 @@ export function buildDiagnosticReport({
       status: persistence?.available
         ? (persistence.recoveryInfo ? 'recovered' : 'ready')
         : 'unavailable'
-    }
+    },
+    ...(gateway ? { gateway } : {})
   }
 }
 

@@ -59,12 +59,34 @@ export class GatewayManager {
     return this.configService.getAppliedConfig()
   }
 
+  getDiagnostics() {
+    const state = this.getState()
+    const config = this.getConfiguration()
+    return {
+      desiredEnabled: state.desiredEnabled,
+      phase: state.phase,
+      channelType: state.channelType,
+      target: config?.target
+        ? { type: config.target.type, id: config.target.id }
+        : null,
+      selectedSessionCount: state.selectedSessionCount,
+      readySessionCount: state.readySessionCount,
+      lastConnectedAt: state.lastConnectedAt,
+      errorCode: state.errorCode,
+      rowCounts: this.db.getGatewayDiagnosticCounts?.() || {
+        sessionRoutes: this.routeStore.listSessionRoutes().length,
+        messageRoutes: 0,
+        decisionAudits: 0
+      }
+    }
+  }
+
   async start() {
     if (this.started) return this.getState()
     this.started = true
-    this.unsubscribeEvents = this.port.subscribeGatewayEvents((event) => {
+    this.unsubscribeEvents = this.port.subscribeGatewayEvents((event) =>
       Promise.resolve(this.runtime.handleGatewayEvent(event)).catch(() => {})
-    })
+    )
     const config = this.db.getGatewaySetting(APPLIED_CONFIG_KEY)
     const desired = this.db.getGatewaySetting(DESIRED_ENABLED_KEY) === true
     this.runtime.restoreDesiredEnabled(desired, config)
@@ -131,6 +153,10 @@ export class GatewayManager {
 
   async respondDesktopDecision(sessionId, decisionId, response) {
     return this.runtime.respondDesktopDecision(sessionId, decisionId, response)
+  }
+
+  async respondDesktopInput(sessionId) {
+    return this.runtime.respondDesktopInput(sessionId)
   }
 
   async shutdown() {

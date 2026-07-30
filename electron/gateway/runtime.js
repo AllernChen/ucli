@@ -1,11 +1,5 @@
 import { randomBytes } from 'node:crypto'
 
-import {
-  buildDecisionCard,
-  buildInterruptCard,
-  buildPlanDetailCard,
-  buildQueueCard
-} from './channels/feishuCards.js'
 import { DecisionRegistry } from './decisionRegistry.js'
 import { prepareDecisionSummary, redactDisplayText } from './redaction.js'
 import { SnapshotStore } from './snapshotStore.js'
@@ -56,6 +50,10 @@ function actionResponse(action) {
   return { optionId: action }
 }
 
+function decisionKey(sessionId, decisionId) {
+  return JSON.stringify([sessionId, decisionId])
+}
+
 export class GatewayRuntime {
   constructor({
     port,
@@ -91,6 +89,7 @@ export class GatewayRuntime {
     this.decisionDetails = new Map()
     this.latestCompletions = new Map()
     this.turnTasks = new Map()
+    this.providerBusySessions = new Set()
     this.state = {
       desiredEnabled: false,
       phase: 'off',
@@ -188,6 +187,8 @@ export class GatewayRuntime {
     this._unbindChannel()
     if (this.fingerprint && this.fingerprint !== fingerprint) {
       this.routeStore.deactivateFingerprint(this.fingerprint)
+      this.decisionRegistry.invalidateRemoteTokens('target_migrated')
+      this.actions.clear()
     }
     this.channel = channel
     this.acceptingInbound = true
@@ -216,20 +217,26 @@ export class GatewayRuntime {
       this._setState({ desiredEnabled: true })
       return
     }
+    this.acceptingInbound = false
+    this.decisionRegistry.invalidateRemoteTokens('gateway_off')
+    this.actions.clear()
+    this._setState({
+      desiredEnabled: false,
+      phase: 'off',
+      errorCode: null,
+      errorMessage: ''
+    })
     if (this.channel) {
       for (const route of this._selectedRoutes()) {
-        await this._updateRoot(route.sessionId, {
+        await this._bestEffortUpdateRoot(route.sessionId, {
           pausedByGateway: true,
           stateLabel: 'Gateway 已暂停',
           interruptToken: null
         })
       }
     }
-    this.decisionRegistry.invalidateRemoteTokens('gateway_off')
-    this.actions.clear()
-    this.acceptingInbound = false
     if (this.channel) {
-      await this.channel.disconnect()
+      await this._disconnectBestEffort(this.channel)
     }
     this._unbindChannel()
     this.channel = null
@@ -250,21 +257,33 @@ export class GatewayRuntime {
     if (typeof sessionId !== 'string' || !sessionId) {
       return { accepted: false, reason: 'invalid_session' }
     }
+    let cancelled = 0
     if (enabled) {
       this.routeStore.setRelayEnabled(sessionId, true)
       await this.resyncSession(sessionId)
     } else {
-      if (this._isSelected(sessionId)) {
-        await this._updateRoot(sessionId, {
+      const route = this._routeFor(sessionId)
+      const wasSelected = this._isSelected(sessionId)
+      cancelled = this.taskQueue.onRelayDisabled(sessionId)
+      this.providerBusySessions.delete(sessionId)
+      this.decisionRegistry.invalidateRemoteTokensForSession(
+        sessionId,
+        'relay_disabled'
+      )
+      for (const [token, binding] of this.actions) {
+        if (binding.sessionId === sessionId) this.actions.delete(token)
+      }
+      this.routeStore.deactivateSession(sessionId)
+      if (wasSelected && route?.rootMessageId) {
+        await this._bestEffortUpdateSessionRoot(route, {
+          ...this._rootView(sessionId),
           stateLabel: '已停止转发',
           interruptToken: null
         })
       }
-      this.taskQueue.onRelayDisabled(sessionId)
-      this.routeStore.setRelayEnabled(sessionId, false)
     }
     this._publish()
-    return { accepted: true }
+    return enabled ? { accepted: true } : { accepted: true, cancelled }
   }
 
   async respondDesktopDecision(sessionId, decisionId, response) {
@@ -272,17 +291,40 @@ export class GatewayRuntime {
       .find((entry) => entry.decision.decisionId === decisionId)
     if (!pending) return { accepted: false, reason: 'already_resolved' }
     const result = await this.decisionRegistry.resolve({
+      sessionId,
       decisionId,
       response,
       source: 'desktop'
     })
     if (result.accepted) {
-      await this._markDecisionResolved(decisionId)
-      this.pendingDecisions.delete(decisionId)
+      await this._markDecisionResolved(sessionId, decisionId)
+      this.pendingDecisions.delete(decisionKey(sessionId, decisionId))
       await this._updateRoot(sessionId)
       this._publish()
     }
     return result
+  }
+
+  async respondDesktopInput(sessionId) {
+    const pending = this.decisionRegistry.listPendingForSession(sessionId)
+      .find((entry) =>
+        entry.decision.kind === 'plan_review' ||
+        entry.decision.kind === 'question' ||
+        entry.decision.kind === 'terminal_prompt'
+      )
+    if (!pending) return { accepted: false, reason: 'no_pending_decision' }
+    const decisionId = pending.decision.decisionId
+    const result = this.decisionRegistry.resolveExternally({
+      sessionId,
+      decisionId,
+      source: 'desktop'
+    })
+    if (!result.accepted) return result
+    await this._markDecisionResolved(sessionId, decisionId)
+    this.pendingDecisions.delete(decisionKey(sessionId, decisionId))
+    await this._updateRoot(sessionId)
+    this._publish()
+    return { accepted: true, decisionId }
   }
 
   async shutdown() {
@@ -305,22 +347,23 @@ export class GatewayRuntime {
     const explicitRoute = this._resolveExplicitMessageRoute(message)
     const sessionId = explicitRoute?.sessionId || this._resolveMessageSession(message)
     if (!sessionId) {
-      return {
-        accepted: false,
-        reason: message?.chatType === 'group'
+      const reason = message?.chatType === 'group'
+        ? 'route_required'
+        : this._fallbackCandidates().length === 1
           ? 'route_required'
-          : this._fallbackCandidates().length === 1
-            ? 'route_required'
-            : 'ambiguous_session'
-      }
+          : 'ambiguous_session'
+      return this._rejectInbound(message, reason)
     }
     if (!message?.supported || message?.rawContentType !== 'text') {
-      return { accepted: false, reason: 'unsupported_content' }
+      return this._rejectInbound(message, 'unsupported_content')
     }
     const text = sanitizeInboundText(message.text)
-    if (!text) return { accepted: false, reason: 'invalid_task' }
+    if (!text) return this._rejectInbound(message, 'invalid_task')
     if (explicitRoute?.decisionId) {
-      const pending = this.pendingDecisions.get(explicitRoute.decisionId)
+      const pending = this.pendingDecisions.get(decisionKey(
+        sessionId,
+        explicitRoute.decisionId
+      ))
       if (pending) {
         const response = pending.decision.kind === 'plan_review'
           ? { action: 'revise', text }
@@ -329,13 +372,20 @@ export class GatewayRuntime {
             : null
         if (response) {
           const result = await this.decisionRegistry.resolve({
+            sessionId,
             decisionId: explicitRoute.decisionId,
             response,
             source: 'feishu'
           })
           if (result.accepted) {
-            await this._markDecisionResolved(explicitRoute.decisionId)
-            this.pendingDecisions.delete(explicitRoute.decisionId)
+            await this._markDecisionResolved(
+              sessionId,
+              explicitRoute.decisionId
+            )
+            this.pendingDecisions.delete(decisionKey(
+              sessionId,
+              explicitRoute.decisionId
+            ))
             await this._updateRoot(sessionId)
             this._publish()
           }
@@ -344,8 +394,16 @@ export class GatewayRuntime {
       }
     }
 
+    const queueBefore = this.taskQueue.getState(sessionId)
+    if (
+      !queueBefore.running &&
+      this.port.getSession(sessionId)?.turnActive === true
+    ) {
+      this.providerBusySessions.add(sessionId)
+      this.taskQueue.setProviderBusy(sessionId, true)
+    }
     const queued = this.taskQueue.enqueue(sessionId, message.messageId, text)
-    if (!queued.accepted) return queued
+    if (!queued.accepted) return this._rejectInbound(message, queued.reason)
     this.routeStore.saveMessageRoute({
       messageId: message.messageId,
       sessionId,
@@ -358,10 +416,10 @@ export class GatewayRuntime {
       await this._startTask(queued.task)
     } else {
       const route = this._routeFor(sessionId)
-      await this.channel?.sendCard(buildQueueCard({
+      await this.channel?.sendQueue(route, {
         sessionLabel: this.port.getSession(sessionId)?.name,
         position: queued.position
-      }), { replyTo: route?.rootMessageId })
+      })
     }
     await this._updateRoot(sessionId)
     this._publish()
@@ -381,10 +439,18 @@ export class GatewayRuntime {
     }
     const binding = this.actions.get(action?.token)
     if (!binding) return { accepted: false, reason: 'invalid_action_token' }
+    if (
+      binding.fingerprint !== this.fingerprint ||
+      !this._isSelected(binding.sessionId)
+    ) {
+      this.actions.delete(action.token)
+      return { accepted: false, reason: 'invalid_action_token' }
+    }
     this.actions.delete(action.token)
 
     if (binding.kind === 'decision') {
       const result = await this.decisionRegistry.resolve({
+        sessionId: binding.sessionId,
         decisionId: binding.decisionId,
         response: {
           ...actionResponse(binding.action),
@@ -393,8 +459,11 @@ export class GatewayRuntime {
         source: 'feishu'
       })
       if (result.accepted) {
-        await this._markDecisionResolved(binding.decisionId)
-        this.pendingDecisions.delete(binding.decisionId)
+        await this._markDecisionResolved(binding.sessionId, binding.decisionId)
+        this.pendingDecisions.delete(decisionKey(
+          binding.sessionId,
+          binding.decisionId
+        ))
         await this._updateRoot(binding.sessionId)
         this._publish()
       }
@@ -428,6 +497,27 @@ export class GatewayRuntime {
     return { accepted: false, reason: 'invalid_action_token' }
   }
 
+  async _rejectInbound(message, reason) {
+    const messages = {
+      route_required: '请在对应的 UCLI 会话消息或线程中回复。',
+      ambiguous_session: '当前有多个可用会话，请回复到对应会话入口。',
+      unsupported_content: '当前只支持文本任务。',
+      invalid_task: '任务内容为空或过长，无法转发。',
+      queue_full: '当前会话最多等待 5 个任务，请稍后重试。'
+    }
+    if (message?.messageId && messages[reason]) {
+      try {
+        await this.channel?.sendNotice?.(message.messageId, {
+          reason,
+          message: messages[reason]
+        })
+      } catch {
+        // A rejection remains authoritative even if its explanatory reply fails.
+      }
+    }
+    return { accepted: false, reason }
+  }
+
   async handleGatewayEvent(event) {
     if (!event?.sessionId) return { accepted: false, reason: 'invalid_event' }
     if (event.type === 'decision_required') {
@@ -435,6 +525,10 @@ export class GatewayRuntime {
     } else if (event.type === 'turn_started') {
       const running = this.taskQueue.getState(event.sessionId).running
       if (running) this.turnTasks.set(event.turnId, running)
+      else {
+        this.providerBusySessions.add(event.sessionId)
+        this.taskQueue.setProviderBusy(event.sessionId, true)
+      }
       await this._updateRoot(event.sessionId)
     } else if (
       event.type === 'turn_completed' ||
@@ -445,8 +539,19 @@ export class GatewayRuntime {
       await this._handleProviderInterruption(event)
     } else if (event.type === 'session_stopped') {
       this.taskQueue.onSessionStopped(event.sessionId)
+      this.providerBusySessions.delete(event.sessionId)
       this.decisionRegistry.cancelForSession(event.sessionId, 'session_stopped')
-      this.routeStore.deactivateSession(event.sessionId)
+      this.decisionRegistry.invalidateRemoteTokensForSession(
+        event.sessionId,
+        'session_stopped'
+      )
+      for (const [token, binding] of this.actions) {
+        if (binding.sessionId === event.sessionId) this.actions.delete(token)
+      }
+      await this._updateRoot(event.sessionId, {
+        stateLabel: 'stopped',
+        interruptToken: null
+      })
     }
     this._publish()
     return { accepted: true }
@@ -571,6 +676,30 @@ export class GatewayRuntime {
     }
   }
 
+  async _bestEffortUpdateRoot(sessionId, overrides = {}) {
+    try {
+      await this._updateRoot(sessionId, overrides)
+    } catch {
+      // Local state transitions are authoritative over remote presentation.
+    }
+  }
+
+  async _bestEffortUpdateSessionRoot(route, view) {
+    try {
+      await this.channel?.updateSessionRoot?.(route, view)
+    } catch {
+      // Persisted route deactivation is authoritative over remote presentation.
+    }
+  }
+
+  async _disconnectBestEffort(channel) {
+    try {
+      await channel?.disconnect?.()
+    } catch {
+      // The local runtime is already closed to inbound work.
+    }
+  }
+
   _rootView(sessionId) {
     const value = this.port.getSession(sessionId) || {}
     const queue = this.taskQueue.getState(sessionId)
@@ -660,10 +789,11 @@ export class GatewayRuntime {
     this.latestCompletions.set(event.sessionId, completion)
     await this._sendCompletion(completion)
     this.turnTasks.delete(event.turnId)
-    const next = this.taskQueue.completeCurrent(
-      event.sessionId,
-      task?.relayTaskId
-    )
+    const next = task
+      ? this.taskQueue.completeCurrent(event.sessionId, task.relayTaskId)
+      : this.providerBusySessions.delete(event.sessionId)
+        ? this.taskQueue.releaseProviderBusy(event.sessionId)
+        : null
     if (next) await this._startTask(next)
     await this._updateRoot(event.sessionId)
   }
@@ -721,16 +851,19 @@ export class GatewayRuntime {
     const route = this._routeFor(sessionId)
     const continueToken = this._issueAction({ kind: 'continue', sessionId })
     const clearToken = this._issueAction({ kind: 'clear', sessionId })
-    await this.channel?.sendCard(buildInterruptCard({
+    await this.channel?.sendInterrupt(route, {
       cancelledTaskLabel: task ? '当前任务已中断。' : '队列已暂停。',
       continueToken,
       clearToken
-    }), { replyTo: route?.rootMessageId })
+    })
   }
 
   async _handleDecision(event) {
     this.decisionRegistry.register(event.decision, event.sessionId)
-    this.pendingDecisions.set(event.decision.decisionId, {
+    this.pendingDecisions.set(decisionKey(
+      event.sessionId,
+      event.decision.decisionId
+    ), {
       sessionId: event.sessionId,
       decision: structuredClone(event.decision)
     })
@@ -764,7 +897,11 @@ export class GatewayRuntime {
         },
         viewToken
       })
-      this._rememberDecisionMessage(decision.decisionId, sent?.messageId)
+      this._rememberDecisionMessage(
+        sessionId,
+        decision.decisionId,
+        sent?.messageId
+      )
       this._saveDecisionRoute(sent, sessionId, decision.decisionId, 'plan')
       return
     }
@@ -791,6 +928,7 @@ export class GatewayRuntime {
     if (!summary.desktopOnly) {
       for (const option of decision.options || []) {
         const decisionToken = this.decisionRegistry.issueActionToken(
+          sessionId,
           decision.decisionId,
           option.id
         )
@@ -816,29 +954,37 @@ export class GatewayRuntime {
       desktopOnly: summary.desktopOnly,
       actions
     })
-    this._rememberDecisionMessage(decision.decisionId, sent?.messageId)
+    this._rememberDecisionMessage(
+      sessionId,
+      decision.decisionId,
+      sent?.messageId
+    )
     this._saveDecisionRoute(sent, sessionId, decision.decisionId, 'decision')
   }
 
-  _rememberDecisionMessage(decisionId, messageId) {
-    const pending = this.pendingDecisions.get(decisionId)
+  _rememberDecisionMessage(sessionId, decisionId, messageId) {
+    const pending = this.pendingDecisions.get(decisionKey(sessionId, decisionId))
     if (pending && messageId) pending.messageId = messageId
   }
 
-  async _markDecisionResolved(decisionId) {
-    const pending = this.pendingDecisions.get(decisionId)
+  async _markDecisionResolved(sessionId, decisionId) {
+    const pending = this.pendingDecisions.get(decisionKey(sessionId, decisionId))
     for (const [token, binding] of this.actions) {
-      if (binding.decisionId === decisionId) this.actions.delete(token)
+      if (
+        binding.sessionId === sessionId &&
+        binding.decisionId === decisionId
+      ) {
+        this.actions.delete(token)
+      }
     }
-    if (!pending?.messageId || !this.channel?.updateCard) return
+    if (!pending?.messageId || !this.channel?.markDecisionResolved) return
     try {
-      await this.channel.updateCard(
+      await this.channel.markDecisionResolved(
         pending.messageId,
-        buildDecisionCard({
+        {
           title: pending.decision.title,
           summary: '该决策已处理。',
-          actions: []
-        })
+        }
       )
     } catch {
       // The provider response already won; a stale remote card cannot undo it.
@@ -864,6 +1010,7 @@ export class GatewayRuntime {
       const actions = []
       for (const action of chunk.actions) {
         const decisionToken = this.decisionRegistry.issueActionToken(
+          binding.sessionId,
           binding.decisionId,
           action.id
         )
@@ -879,11 +1026,11 @@ export class GatewayRuntime {
           })
         })
       }
-      await this.channel.sendCard(buildPlanDetailCard({
+      await this.channel.sendDetail(route, {
         title: '完整方案',
         ...chunk,
         actions
-      }), { replyTo: route?.rootMessageId })
+      })
     }
     return { accepted: true }
   }
@@ -893,11 +1040,11 @@ export class GatewayRuntime {
     if (!chunks) return { accepted: false, reason: 'snapshot_unavailable' }
     const route = this._routeFor(binding.sessionId)
     for (const chunk of chunks) {
-      await this.channel.sendCard(buildPlanDetailCard({
+      await this.channel.sendDetail(route, {
         title: '完整结果',
         ...chunk,
         actions: []
-      }), { replyTo: route?.rootMessageId })
+      })
     }
     return { accepted: true }
   }
@@ -907,20 +1054,23 @@ export class GatewayRuntime {
     if (!detail) return { accepted: false, reason: 'snapshot_unavailable' }
     const route = this._routeFor(binding.sessionId)
     for (let index = 0; index < detail.chunks.length; index++) {
-      await this.channel.sendCard(buildPlanDetailCard({
+      await this.channel.sendDetail(route, {
         title: '完整决策内容',
         index: index + 1,
         total: detail.chunks.length,
         markdown: detail.chunks[index],
         actions: []
-      }), { replyTo: route?.rootMessageId })
+      })
     }
     return { accepted: true }
   }
 
   _issueAction(binding) {
     const token = opaqueToken()
-    this.actions.set(token, binding)
+    this.actions.set(token, {
+      ...binding,
+      fingerprint: this.fingerprint
+    })
     return token
   }
 

@@ -57,5 +57,10 @@ test('orchestrator wires permission and adapter lifecycle into the Gateway bound
   assert.match(source, /gatewaySignals\.publish\(/)
   assert.match(source, /gatewayManager\?\.resyncSession\(sessionId\)/)
   assert.match(source, /gatewayManager\?\.respondDesktopDecision/)
+  assert.match(
+    source,
+    /session:send-terminal-input[\s\S]*gatewayManager\?\.respondDesktopInput\(sessionId\)/
+  )
+  assert.match(source, /turnActive:\s*entry\._gatewayTurnActive === true/)
   assert.doesNotMatch(source, /gatewayRuntime\.sessions/)
 })

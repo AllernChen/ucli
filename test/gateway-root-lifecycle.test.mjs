@@ -59,3 +59,27 @@ test('a revoked root is replaced atomically while relay selection remains enable
   assert.equal(routes.routes[0].rootMessageId, 'root-1')
   assert.notEqual(routes.routes[0].rootMessageId, 'recalled-root')
 })
+
+test('stopping a session clears transient work but retains selection and root', async () => {
+  const port = createPort([session('session-1')])
+  const routes = new MemoryRouteStore()
+  routes.upsertSessionRoute({ sessionId: 'session-1', relayEnabled: true })
+  const channel = new FakeGatewayChannel()
+  const runtime = new GatewayRuntime({ port, routeStore: routes })
+  await runtime.attachConnectedChannel({
+    channel,
+    config: FEISHU_CONFIG,
+    fingerprint: 'fingerprint-1'
+  })
+  const rootMessageId = routes.routes[0].rootMessageId
+
+  await runtime.handleGatewayEvent({
+    type: 'session_stopped',
+    sessionId: 'session-1',
+    occurredAt: 1
+  })
+
+  assert.equal(routes.routes[0].relayEnabled, true)
+  assert.equal(routes.routes[0].rootMessageId, rootMessageId)
+  assert.ok(channel.rootUpdates.length > 0)
+})

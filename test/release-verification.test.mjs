@@ -12,6 +12,30 @@ function verifyReleaseArtifacts({ rootDir }) {
   return verifyReleaseArtifactsForPlatform({ rootDir, platform: 'win32', arch: 'x64' })
 }
 
+test('Gateway release acceptance documents every required Feishu prerequisite', async () => {
+  const acceptance = await import('node:fs/promises')
+    .then(({ readFile }) => readFile(
+      new URL('../docs/release-acceptance.md', import.meta.url),
+      'utf8'
+    ))
+
+  for (const requirement of [
+    '机器人能力',
+    'WebSocket',
+    '消息接收事件',
+    '卡片回传事件',
+    '发送消息',
+    '更新卡片',
+    '回复消息',
+    '消息表情回复',
+    '群组完整消息权限',
+    '操作人白名单',
+    '目标 ID'
+  ]) {
+    assert.match(acceptance, new RegExp(requirement))
+  }
+})
+
 async function createReleaseFixture() {
   const rootDir = await mkdtemp(path.join(os.tmpdir(), 'ucli-release-'))
   const distDir = path.join(rootDir, 'dist')

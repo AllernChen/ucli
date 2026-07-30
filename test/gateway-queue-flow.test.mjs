@@ -44,8 +44,12 @@ test('runtime starts one task, queues five, rejects the sixth waiting item, and 
     accepted: false,
     reason: 'queue_full'
   })
+  assert.deepEqual(channel.notices.at(-1).view, {
+    reason: 'queue_full',
+    message: '当前会话最多等待 5 个任务，请稍后重试。'
+  })
   assert.equal(port.calls.turns.length, 1)
-  assert.equal(channel.cards.length, 5)
+  assert.equal(channel.cards.length, 6)
   assert.equal(channel.reactions.length, 6)
 
   await runtime.handleGatewayEvent({
@@ -102,4 +106,43 @@ test('remote interrupt pauses the queue, continue resumes its head, and clear re
     token: clearToken
   }), { accepted: true, cancelled: 2 })
   assert.equal(runtime.getState().queuedTaskCount, 0)
+})
+
+test('a Feishu task waits behind an already-running desktop turn', async () => {
+  const port = createPort([session('session-1', {
+    status: 'running',
+    turnActive: true
+  })])
+  const routes = new MemoryRouteStore()
+  routes.upsertSessionRoute({ sessionId: 'session-1', relayEnabled: true })
+  const channel = new FakeGatewayChannel()
+  const runtime = new GatewayRuntime({ port, routeStore: routes })
+  await runtime.attachConnectedChannel({
+    channel,
+    config: FEISHU_CONFIG,
+    fingerprint: 'fingerprint-1'
+  })
+
+  const accepted = await runtime.handleInboundMessage(inbound(1))
+  assert.equal(accepted.accepted, true)
+  assert.equal(accepted.position, 1)
+  assert.equal(port.calls.turns.length, 0)
+
+  await runtime.handleGatewayEvent({
+    type: 'turn_started',
+    sessionId: 'session-1',
+    turnId: 'desktop-turn',
+    occurredAt: 1
+  })
+  await runtime.handleGatewayEvent({
+    type: 'turn_completed',
+    sessionId: 'session-1',
+    turnId: 'desktop-turn',
+    occurredAt: 2
+  })
+
+  assert.deepEqual(port.calls.turns, [{
+    sessionId: 'session-1',
+    text: 'task 1'
+  }])
 })

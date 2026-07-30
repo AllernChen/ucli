@@ -28,14 +28,16 @@ test('decision resolution is first-writer-wins and audits only metadata', async 
     routeStore: { saveDecisionAudit: (record) => audits.push(record) }
   })
   registry.register(DECISION, 'session-1')
-  const token = registry.issueActionToken('decision-1', 'allow_once')
+  const token = registry.issueActionToken('session-1', 'decision-1', 'allow_once')
 
   const winner = registry.resolve({
+    sessionId: 'session-1',
     decisionId: 'decision-1',
     response: { action: 'allow_once', actionToken: token },
     source: 'feishu'
   })
   const loser = await registry.resolve({
+    sessionId: 'session-1',
     decisionId: 'decision-1',
     response: { action: 'deny' },
     source: 'desktop'
@@ -58,22 +60,25 @@ test('remote action tokens are opaque, single-use, and bound to decision plus ac
     routeStore: { saveDecisionAudit: () => {} }
   })
   registry.register(DECISION, 'session-1')
-  const token = registry.issueActionToken('decision-1', 'allow_once')
+  const token = registry.issueActionToken('session-1', 'decision-1', 'allow_once')
   assert.match(token, /^[A-Za-z0-9_-]{32,}$/)
 
   assert.deepEqual(await registry.resolve({
+    sessionId: 'session-1',
     decisionId: 'decision-1',
     response: { action: 'deny', actionToken: token },
     source: 'feishu'
   }), { accepted: false, reason: 'invalid_action_token' })
 
   assert.deepEqual(await registry.resolve({
+    sessionId: 'session-1',
     decisionId: 'decision-1',
     response: { action: 'allow_once', actionToken: token },
     source: 'feishu'
   }), { accepted: true })
 
   assert.deepEqual(await registry.resolve({
+    sessionId: 'session-1',
     decisionId: 'decision-1',
     response: { action: 'allow_once', actionToken: token },
     source: 'feishu'
@@ -87,7 +92,7 @@ test('session cancellation and remote invalidation do not resolve other decision
   })
   registry.register(DECISION, 'session-1')
   registry.register({ ...DECISION, decisionId: 'decision-2' }, 'session-2')
-  const token = registry.issueActionToken('decision-2', 'deny')
+  const token = registry.issueActionToken('session-2', 'decision-2', 'deny')
 
   assert.equal(registry.cancelForSession('session-1', 'session_stopped'), 1)
   assert.deepEqual(registry.listPendingForSession('session-1'), [])
@@ -95,6 +100,7 @@ test('session cancellation and remote invalidation do not resolve other decision
 
   registry.invalidateRemoteTokens('gateway_disabled')
   assert.deepEqual(await registry.resolve({
+    sessionId: 'session-2',
     decisionId: 'decision-2',
     response: { action: 'deny', actionToken: token },
     source: 'feishu'
@@ -122,14 +128,49 @@ test('routed Feishu text is accepted only for explicit free-text decisions', asy
   }, 'session-1')
 
   assert.deepEqual(await registry.resolve({
+    sessionId: 'session-1',
     decisionId: 'free-text',
     response: { text: 'Use staging' },
     source: 'feishu'
   }), { accepted: true })
   assert.deepEqual(await registry.resolve({
+    sessionId: 'session-1',
     decisionId: 'button-only',
     response: { text: 'allow' },
     source: 'feishu'
   }), { accepted: false, reason: 'invalid_action_token' })
   assert.deepEqual(calls, [{ text: 'Use staging' }])
+})
+
+test('identical provider decision IDs remain isolated by session', async () => {
+  const calls = []
+  const registry = new DecisionRegistry({
+    responder: async (sessionId, decisionId, response) => {
+      calls.push({ sessionId, decisionId, response })
+      return { accepted: true }
+    },
+    routeStore: { saveDecisionAudit: () => {} }
+  })
+  registry.register(DECISION, 'session-1')
+  registry.register(DECISION, 'session-2')
+  const token = registry.issueActionToken(
+    'session-2',
+    'decision-1',
+    'allow_once'
+  )
+
+  assert.equal(registry.listPendingForSession('session-1').length, 1)
+  assert.equal(registry.listPendingForSession('session-2').length, 1)
+  assert.deepEqual(await registry.resolve({
+    sessionId: 'session-2',
+    decisionId: 'decision-1',
+    response: { action: 'allow_once', actionToken: token },
+    source: 'feishu'
+  }), { accepted: true })
+  assert.deepEqual(calls, [{
+    sessionId: 'session-2',
+    decisionId: 'decision-1',
+    response: { action: 'allow_once' }
+  }])
+  assert.equal(registry.listPendingForSession('session-1').length, 1)
 })

@@ -3,7 +3,11 @@ import { createRequire } from 'node:module'
 import {
   buildCompletionCard,
   buildDecisionCard,
+  buildInterruptCard,
+  buildNoticeCard,
+  buildPlanDetailCard,
   buildPlanOverviewCard,
+  buildQueueCard,
   buildRootCard
 } from './feishuCards.js'
 
@@ -249,6 +253,37 @@ export class FeishuChannel {
     return this.sendCard(buildCompletionCard(view), {
       replyTo: route.rootMessageId
     })
+  }
+
+  async sendQueue(route, view) {
+    return this.sendCard(buildQueueCard(view), {
+      replyTo: route?.rootMessageId
+    })
+  }
+
+  async sendInterrupt(route, view) {
+    return this.sendCard(buildInterruptCard(view), {
+      replyTo: route?.rootMessageId
+    })
+  }
+
+  async sendDetail(route, view) {
+    return this.sendCard(buildPlanDetailCard(view), {
+      replyTo: route?.rootMessageId
+    })
+  }
+
+  async sendNotice(messageId, view) {
+    return this.sendCard(buildNoticeCard(view), {
+      replyTo: messageId
+    })
+  }
+
+  async markDecisionResolved(messageId, view) {
+    return this.updateCard(messageId, buildDecisionCard({
+      ...view,
+      actions: []
+    }))
   }
 
   async addReaction(messageId, emojiType) {

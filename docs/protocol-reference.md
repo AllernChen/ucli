@@ -122,3 +122,120 @@ npm 安装生成的 `opencode.cmd` 在 `cmd.exe` + ConPTY 链路中会无输出�
 
 ## 统一适配器事件（归一化）
 `init` `message`(partial/final) `reasoning` `tool_call` `tool_result` `command_output` `file_diff` `token_usage`(cumulative) `turn_complete` `error` `exit`。适配器把上述原生消息翻译成这套形状，UI 渲染器只认这套。
+
+## 通信 Gateway 协议
+
+### 架构与边界
+
+通信 Gateway 是 UCLI 主进程内的平台无关转发层。`GatewayRuntime` 只依赖
+`GatewayChannel`、路由存储和下述 UCLI 端口，不导入飞书 SDK 或飞书事件类型。
+`FeishuChannel` 是当前唯一的 Channel 实现，通过飞书长连接 WebSocket 接收事件，
+通过飞书开放平台 API 发送消息、回复、更新卡片和添加/移除表情回复；不需要公网
+Webhook 服务。
+
+```text
+Claude / Codex / OpenCode Adapter
+          │ 归一化生命周期与决策事件
+          ▼
+GatewayOrchestratorPort ── GatewayRuntime ── GatewayRouteStore
+                                  │
+                                  ▼
+                           FeishuChannel
+                                  │ WebSocket + Open API
+                                  ▼
+                                飞书
+```
+
+Gateway 端口只允许九类操作：列出会话、读取会话、发送普通任务、打断会话、响应
+结构化决策、读取决策上下文、读取最新方案快照、读取最新结果快照、订阅 Gateway
+事件。Gateway 不能远程创建、恢复、停止或删除 CLI 会话，也不能从飞书切换总开关
+或会话转发开关。
+
+### 适配器生命周期与决策契约
+
+适配器必须基于 provider 的明确证据产生以下 Gateway 事件：
+
+- `session_ready`、`session_resumed`、`session_stopped`；
+- `turn_started`、`turn_completed`、`turn_failed`、`turn_interrupted`；
+- `decision_required`，其中包含稳定的 `decisionId`、决策类型、标题、脱敏摘要、
+  可选项和响应模式。
+
+静默、Token 变化、终端提示符或任意一条 assistant 消息都不能被推断为任务完成。
+普通飞书文本任务只经 `sendTurn(sessionId, text)` 进入 CLI；权限选择、方案执行/
+修订/拒绝等结构化答复只经 `respondDecision(sessionId, decisionId, response)` 返回。
+Gateway 不转发终端流、reasoning、tool call、Token 用量或一般 AI CLI 消息。
+
+方案摘要由 UCLI 对 Markdown 做确定性结构提取，优先保留标题、目标和步骤；不调用
+LLM。完整方案和完整结果只保存在进程内快照中，用户点击卡片后按块发送。
+
+### 精确路由优先级
+
+入站消息按以下顺序解析，命中第一项即停止：
+
+1. 回复的消息 ID 对应当前连接指纹下的已知消息路由；
+2. root message ID 对应已选会话根消息；
+3. thread ID 对应已选会话线程；
+4. 仅限私聊：当前恰好有一个“已选择且状态为 idle/running”的会话时，允许无引用
+   文本回退到该会话。
+
+群聊永远不使用第 4 项；未知 root/thread、普通群消息和存在多个候选会话的私聊
+都会被拒绝。系统不会回退到“最近会话”，也不会按会话名称模糊匹配。卡片操作使用
+一次性随机 token 绑定精确的会话、决策和动作；操作人还必须命中 Open ID 白名单。
+
+### 持久化与内存数据
+
+持久化数据仅包括：全局期望开关、非秘密配置、系统安全存储加密后的 App Secret、
+会话选择、连接指纹、目标 ID、根消息/线程 ID、消息到会话的路由元数据，以及不含
+正文的决策审计（类型、结果来源和时间）。诊断只导出掩码目标、状态和行数。
+
+内存数据包括：普通任务正文和队列、待决策正文、完整方案、完整结果、卡片动作
+token、飞书事件载荷和 AI 输出。进程退出后这些内容不恢复，也不会为了“补发”而
+落库。重连只同步当前根状态、当前待决策和最近完成摘要，不重放普通任务。
+
+### 状态机
+
+Gateway 连接状态：
+
+```text
+off ──开启──> connecting ──成功──> connected
+                   │                 │
+                   └──失败──> error <┘
+connected ──长连接抖动──> reconnecting ──恢复──> connected
+任意开启态 ──关闭──> off
+```
+
+`desiredEnabled` 是持久化的用户意图，`phase` 是实际状态。关闭 Gateway 仅停止通信
+通道并使远程 token 失效，不停止任何 CLI 进程，也不清除会话选择。
+
+每个会话队列状态：
+
+```text
+idle ──首个任务──> running
+running ──新任务──> waiting（最多 5 个）
+running ──完成──> 下一个 waiting 变为 running；无等待则 idle
+running ──中断──> paused ──继续──> running
+paused ──清空──> idle
+```
+
+第六个等待任务返回 `queue_full`。任务正文与队列都不持久化。
+
+### 决策一致性与有效期
+
+Gateway 不设置决策有效期，不存在五分钟自动拒绝。AI CLI/provider 仍在等待时，
+决策会一直保持 pending，直到桌面端或飞书端明确响应、provider 自行取消、会话
+停止，或 Gateway 进程退出。
+
+桌面端和飞书端采用 first-writer-wins：第一个进入 resolving 并被 provider 接受的
+响应成为唯一结果；随后响应返回 `already_resolved` 或 `invalid_action_token`。
+胜出后所有远程按钮立即失效，飞书卡片更新为已处理。provider 拒绝响应时，决策可
+恢复 pending；审计写入失败不能撤销 provider 已接受的结果。
+
+原生终端中的方案、问题或终端提示输入也先在同一决策注册表中登记为桌面端胜出，
+再写入 PTY；因此不会留下仍可点击的飞书卡片。不同会话即使产生相同
+`decisionId`，也按 `(sessionId, decisionId)` 隔离。
+
+关闭单个会话的转发时，UCLI 先在本地清空队列、失效 token、停用消息路由并清除
+root/thread，再尽力更新远端卡片；重新开启会创建新的会话入口。关闭全局 Gateway
+同样先停止接收入站，再尝试远端状态更新和断开，网络错误不能使关闭操作失败开放。
+当适配器明确报告已有桌面 turn 在运行时，飞书任务在内存队列中等待该 turn 明确
+完成，不能依赖终端输出或 UI 的 running 标签推断占用。

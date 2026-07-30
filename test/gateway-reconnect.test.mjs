@@ -80,3 +80,26 @@ test('intentional off invalidates remote actions but retains selections and deci
   assert.equal(routes.routes[0].relayEnabled, true)
   assert.deepEqual(persisted, [false])
 })
+
+test('global off fails closed when remote root updates fail', async () => {
+  const port = createPort([session('session-1')])
+  const routes = new MemoryRouteStore()
+  routes.upsertSessionRoute({ sessionId: 'session-1', relayEnabled: true })
+  const channel = new FakeGatewayChannel()
+  const runtime = new GatewayRuntime({ port, routeStore: routes })
+  await runtime.attachConnectedChannel({
+    channel,
+    config: FEISHU_CONFIG,
+    fingerprint: 'fingerprint-1'
+  })
+  channel.updateError = 'network_error'
+
+  await runtime.setDesiredEnabled(false)
+
+  assert.equal(runtime.getState().phase, 'off')
+  assert.equal(channel.disconnectCount, 1)
+  assert.deepEqual(await runtime.handleInboundMessage({
+    messageId: 'late-message',
+    senderOpenId: 'ou_operator'
+  }), { accepted: false, reason: 'gateway_not_accepting' })
+})

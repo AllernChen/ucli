@@ -184,3 +184,83 @@ test('a winning desktop response resolves the provider and invalidates every rem
     token: oldToken
   }), { accepted: false, reason: 'invalid_action_token' })
 })
+
+test('relay disable and fingerprint changes invalidate scoped remote actions', async () => {
+  const port = createPort([
+    session('session-1'),
+    session('session-2')
+  ])
+  const routes = new MemoryRouteStore()
+  routes.upsertSessionRoute({ sessionId: 'session-1', relayEnabled: true })
+  routes.upsertSessionRoute({ sessionId: 'session-2', relayEnabled: true })
+  const first = new FakeGatewayChannel()
+  const runtime = new GatewayRuntime({ port, routeStore: routes })
+  await runtime.attachConnectedChannel({
+    channel: first,
+    config: FEISHU_CONFIG,
+    fingerprint: 'fingerprint-1'
+  })
+  await runtime.handleGatewayEvent(decisionEvent())
+  const disabledToken = first.decisions[0].view.actions[0].token
+
+  first.updateError = 'network_error'
+  await runtime.setSessionRelayEnabled('session-1', false)
+  assert.equal(routes.routes[0].rootMessageId, null)
+  assert.equal(
+    routes.messageRoutes
+      .filter((route) => route.sessionId === 'session-1')
+      .every((route) => route.active === false),
+    true
+  )
+  assert.deepEqual(await runtime.handleInboundAction({
+    senderOpenId: 'ou_operator',
+    token: disabledToken
+  }), { accepted: false, reason: 'invalid_action_token' })
+  assert.equal(port.calls.decisions.length, 0)
+
+  first.updateError = null
+  const secondEvent = decisionEvent()
+  secondEvent.sessionId = 'session-2'
+  secondEvent.decision.decisionId = 'decision-2'
+  await runtime.handleGatewayEvent(secondEvent)
+  const migratedToken = first.decisions.at(-1).view.actions[0].token
+  await runtime.attachConnectedChannel({
+    channel: new FakeGatewayChannel(),
+    config: {
+      ...FEISHU_CONFIG,
+      target: { type: 'group', id: 'oc_new_group' }
+    },
+    fingerprint: 'fingerprint-2'
+  })
+  assert.deepEqual(await runtime.handleInboundAction({
+    senderOpenId: 'ou_operator',
+    token: migratedToken
+  }), { accepted: false, reason: 'invalid_action_token' })
+  assert.equal(port.calls.decisions.length, 0)
+})
+
+test('native desktop input wins a pending plan decision and invalidates Feishu', async () => {
+  const port = createPort([session('session-1')])
+  const routes = new MemoryRouteStore()
+  routes.upsertSessionRoute({ sessionId: 'session-1', relayEnabled: true })
+  const channel = new FakeGatewayChannel()
+  const runtime = new GatewayRuntime({ port, routeStore: routes })
+  await runtime.attachConnectedChannel({
+    channel,
+    config: FEISHU_CONFIG,
+    fingerprint: 'fingerprint-1'
+  })
+  await runtime.handleGatewayEvent(decisionEvent('plan_review'))
+  const oldToken = channel.plans[0].view.viewToken
+
+  assert.deepEqual(await runtime.respondDesktopInput('session-1'), {
+    accepted: true,
+    decisionId: 'decision-1'
+  })
+  assert.deepEqual(await runtime.handleInboundAction({
+    senderOpenId: 'ou_operator',
+    token: oldToken
+  }), { accepted: false, reason: 'invalid_action_token' })
+  assert.equal(port.calls.decisions.length, 0)
+  assert.equal(channel.cardUpdates.length, 1)
+})

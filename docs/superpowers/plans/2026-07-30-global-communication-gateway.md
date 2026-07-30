@@ -1098,7 +1098,7 @@ git commit -m "feat: add gateway controls to UCLI"
 - Modify: `test/release-verification.test.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Add redacted diagnostics**
+- [x] **Step 1: Add redacted diagnostics**
 
 Diagnostics may include:
 
@@ -1112,7 +1112,7 @@ Diagnostics may include:
 
 Diagnostics must not include App Secret/ciphertext, operator full IDs, message bodies, task text, decision content, plan/result content, action tokens, or AI output.
 
-- [ ] **Step 2: Add a fake-channel end-to-end test**
+- [x] **Step 2: Add a fake-channel end-to-end test**
 
 Exercise:
 
@@ -1130,7 +1130,7 @@ Exercise:
 12. disable Gateway and prove CLI sessions keep running;
 13. restart and prove disabled state, selections, and routes persist without content.
 
-- [ ] **Step 3: Document protocol and operator setup**
+- [x] **Step 3: Document protocol and operator setup**
 
 `docs/protocol-reference.md` must describe:
 
@@ -1151,7 +1151,7 @@ Exercise:
 - group full-message permission when group target is used;
 - operator allowlist and target ID validation.
 
-- [ ] **Step 4: Run security/source scans**
+- [x] **Step 4: Run security/source scans**
 
 ```powershell
 rg -n "ASK_TIMEOUT_MS|timedOut|确认超时|auto-deny" electron test
@@ -1167,7 +1167,7 @@ Expected:
 - Gateway runtime calls `sendTurn()` only for ordinary queued tasks;
 - prohibited event names appear only in negative tests/guards, not outbound mappings.
 
-- [ ] **Step 5: Run full verification**
+- [x] **Step 5: Run full verification**
 
 ```powershell
 npm test
@@ -1179,7 +1179,7 @@ git status --short
 
 Expected: all commands pass. Review `git status --short` and ensure only files in this plan are staged for the feature.
 
-- [ ] **Step 6: Manual Feishu acceptance**
+- [ ] **Step 6: Manual Feishu acceptance (pending test enterprise credentials)**
 
 With a test enterprise app:
 
@@ -1196,7 +1196,7 @@ With a test enterprise app:
 - confirm unexpected reconnect sync versus intentional-off no-backfill;
 - export diagnostics and inspect for secret/content leakage.
 
-- [ ] **Step 7: Final commit**
+- [x] **Step 7: Final commit**
 
 ```powershell
 git add electron src test docs package.json package-lock.json
@@ -1219,14 +1219,14 @@ git commit -m "docs: finalize communication gateway acceptance"
 
 ## Final Review Checklist
 
-- [ ] Search the plan and implementation for `TODO`, `TBD`, placeholder secrets, and unexplained ellipses.
-- [ ] Trace every accepted requirement to at least one test above.
-- [ ] Confirm the core imports no Feishu SDK/types.
-- [ ] Confirm every provider emits explicit lifecycle evidence and never infers completion from silence/token changes.
-- [ ] Confirm ordinary tasks use `sendTurn()` and all structured decisions use `respondDecision()`.
-- [ ] Confirm only one selected running private session permits unquoted fallback.
-- [ ] Confirm group routing always requires a known root/reply/thread.
-- [ ] Confirm Gateway off does not modify CLI process state.
-- [ ] Confirm secret-only hot swap keeps roots and failed hot swap keeps the old connection.
-- [ ] Confirm no fixed route/decision expiry or five-minute auto-deny remains.
-- [ ] Confirm `git diff --check`, full tests, build, and release verification pass.
+- [x] Search the plan and implementation for `TODO`, `TBD`, placeholder secrets, and unexplained ellipses.
+- [x] Trace every accepted requirement to at least one test above.
+- [x] Confirm the core imports no Feishu SDK/types.
+- [x] Confirm every provider emits explicit lifecycle evidence and never infers completion from silence/token changes.
+- [x] Confirm ordinary tasks use `sendTurn()` and all structured decisions use `respondDecision()`.
+- [x] Confirm only one selected running private session permits unquoted fallback.
+- [x] Confirm group routing always requires a known root/reply/thread.
+- [x] Confirm Gateway off does not modify CLI process state.
+- [x] Confirm secret-only hot swap keeps roots and failed hot swap keeps the old connection.
+- [x] Confirm no fixed route/decision expiry or five-minute auto-deny remains.
+- [x] Confirm `git diff --check`, full tests, build, and release verification pass.

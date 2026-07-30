@@ -1,3 +1,11 @@
+import {
+  buildDecisionCard,
+  buildInterruptCard,
+  buildNoticeCard,
+  buildPlanDetailCard,
+  buildQueueCard
+} from '../../electron/gateway/channels/feishuCards.js'
+
 export class MemoryRouteStore {
   constructor() {
     this.routes = []
@@ -50,7 +58,14 @@ export class MemoryRouteStore {
 
   deactivateSession(sessionId) {
     const route = this.routes.find((item) => item.sessionId === sessionId)
-    if (route) Object.assign(route, { relayEnabled: false, routeStatus: 'inactive' })
+    if (route) {
+      Object.assign(route, {
+        relayEnabled: false,
+        routeStatus: 'inactive',
+        rootMessageId: null,
+        rootThreadId: null
+      })
+    }
     for (const value of this.messageRoutes) {
       if (value.sessionId === sessionId) value.active = false
     }
@@ -84,6 +99,7 @@ export class FakeGatewayChannel {
     this.decisions = []
     this.plans = []
     this.completions = []
+    this.notices = []
     this.cards = []
     this.cardUpdates = []
     this.reactions = []
@@ -137,6 +153,41 @@ export class FakeGatewayChannel {
     const messageId = `completion-message-${this.completions.length + 1}`
     this.completions.push({ messageId, route: { ...route }, view: structuredClone(view) })
     return { messageId }
+  }
+
+  async sendQueue(route, view) {
+    return this.sendCard(buildQueueCard(view), {
+      replyTo: route?.rootMessageId
+    })
+  }
+
+  async sendInterrupt(route, view) {
+    return this.sendCard(buildInterruptCard(view), {
+      replyTo: route?.rootMessageId
+    })
+  }
+
+  async sendDetail(route, view) {
+    return this.sendCard(buildPlanDetailCard(view), {
+      replyTo: route?.rootMessageId
+    })
+  }
+
+  async sendNotice(messageId, view) {
+    this.notices.push({
+      messageId,
+      view: structuredClone(view)
+    })
+    return this.sendCard(buildNoticeCard(view), {
+      replyTo: messageId
+    })
+  }
+
+  async markDecisionResolved(messageId, view) {
+    return this.updateCard(messageId, buildDecisionCard({
+      ...view,
+      actions: []
+    }))
   }
 
   async sendCard(card, options = {}) {

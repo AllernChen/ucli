@@ -5,6 +5,7 @@ import {
   buildCompletionCard,
   buildDecisionCard,
   buildInterruptCard,
+  buildNoticeCard,
   buildPlanDetailCard,
   buildPlanOverviewCard,
   buildQueueCard,
@@ -73,6 +74,7 @@ test('all Feishu Gateway cards use schema 2.0 and opaque-only button values', ()
       resultToken: 'opaque-result'
     }),
     buildQueueCard({ position: 3, sessionLabel: 'Gateway session' }),
+    buildNoticeCard({ message: 'Queue full.' }),
     buildInterruptCard({
       cancelledTaskLabel: '当前任务已中断',
       continueToken: 'opaque-continue',

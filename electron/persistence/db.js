@@ -667,6 +667,21 @@ class Db {
     )
   }
 
+  getGatewayDiagnosticCounts() {
+    const result = this.sql.exec(
+      `SELECT
+         (SELECT COUNT(*) FROM gateway_session_routes) AS session_routes,
+         (SELECT COUNT(*) FROM gateway_message_routes) AS message_routes,
+         (SELECT COUNT(*) FROM gateway_decision_audit) AS decision_audits`
+    )
+    const values = result[0]?.values?.[0] || [0, 0, 0]
+    return {
+      sessionRoutes: Number(values[0]) || 0,
+      messageRoutes: Number(values[1]) || 0,
+      decisionAudits: Number(values[2]) || 0
+    }
+  }
+
   async transaction(work) {
     this.sql.run('BEGIN IMMEDIATE')
     try {

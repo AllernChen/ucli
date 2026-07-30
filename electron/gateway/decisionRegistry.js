@@ -16,6 +16,10 @@ function verdictOf(response) {
   return 'submitted'
 }
 
+function decisionKey(sessionId, decisionId) {
+  return JSON.stringify([sessionId, decisionId])
+}
+
 export class DecisionRegistry {
   constructor({ responder, routeStore }) {
     this.responder = responder
@@ -30,7 +34,8 @@ export class DecisionRegistry {
         code: 'INVALID_GATEWAY_DECISION'
       })
     }
-    const existing = this._decisions.get(decision.decisionId)
+    const key = decisionKey(sessionId, decision.decisionId)
+    const existing = this._decisions.get(key)
     if (existing?.status === 'pending' || existing?.status === 'resolving') {
       return publicEntry(existing)
     }
@@ -40,22 +45,22 @@ export class DecisionRegistry {
       status: 'pending',
       registeredAt: Date.now()
     }
-    this._decisions.set(decision.decisionId, entry)
+    this._decisions.set(key, entry)
     return publicEntry(entry)
   }
 
-  issueActionToken(decisionId, action) {
-    const entry = this._decisions.get(decisionId)
+  issueActionToken(sessionId, decisionId, action) {
+    const entry = this._decisions.get(decisionKey(sessionId, decisionId))
     if (!entry || entry.status !== 'pending' || typeof action !== 'string' || !action) {
       return null
     }
     const token = randomBytes(32).toString('base64url')
-    this._tokens.set(token, { decisionId, action })
+    this._tokens.set(token, { sessionId, decisionId, action })
     return token
   }
 
-  async resolve({ decisionId, response, source }) {
-    const entry = this._decisions.get(decisionId)
+  async resolve({ sessionId, decisionId, response, source }) {
+    const entry = this._decisions.get(decisionKey(sessionId, decisionId))
     if (!entry || entry.status !== 'pending') {
       return { accepted: false, reason: 'already_resolved' }
     }
@@ -71,6 +76,7 @@ export class DecisionRegistry {
         const responseAction = response?.action || response?.optionId
         if (
           !binding ||
+          binding.sessionId !== sessionId ||
           binding.decisionId !== decisionId ||
           binding.action !== responseAction
         ) {
@@ -108,7 +114,7 @@ export class DecisionRegistry {
     }
 
     entry.status = 'resolved'
-    this._deleteTokensForDecision(decisionId)
+    this._deleteTokensForDecision(sessionId, decisionId)
     try {
       this.routeStore.saveDecisionAudit({
         id: randomUUID(),
@@ -125,16 +131,45 @@ export class DecisionRegistry {
     return { accepted: true }
   }
 
+  resolveExternally({ sessionId, decisionId, source }) {
+    const entry = this._decisions.get(decisionKey(sessionId, decisionId))
+    if (!entry || entry.status !== 'pending') {
+      return { accepted: false, reason: 'already_resolved' }
+    }
+    if (source !== 'desktop') {
+      return { accepted: false, reason: 'invalid_source' }
+    }
+    entry.status = 'resolved'
+    this._deleteTokensForDecision(sessionId, decisionId)
+    try {
+      this.routeStore.saveDecisionAudit({
+        id: randomUUID(),
+        sessionId,
+        decisionId,
+        kind: entry.decision.kind,
+        verdict: 'native_input',
+        source,
+        resolvedAt: Date.now()
+      })
+    } catch {
+      // Native input already reached the provider; audit failure cannot undo it.
+    }
+    return { accepted: true }
+  }
+
   cancelForSession(sessionId, reason) {
     let count = 0
-    for (const [decisionId, entry] of this._decisions) {
+    for (const entry of this._decisions.values()) {
       if (
         entry.sessionId !== sessionId ||
         entry.status !== 'pending'
       ) continue
       entry.status = 'cancelled'
       entry.cancelReason = reason
-      this._deleteTokensForDecision(decisionId)
+      this._deleteTokensForDecision(
+        entry.sessionId,
+        entry.decision.decisionId
+      )
       count += 1
     }
     return count
@@ -146,15 +181,30 @@ export class DecisionRegistry {
     return count
   }
 
+  invalidateRemoteTokensForSession(sessionId, _reason) {
+    let count = 0
+    for (const [token, binding] of this._tokens) {
+      if (binding.sessionId !== sessionId) continue
+      this._tokens.delete(token)
+      count += 1
+    }
+    return count
+  }
+
   listPendingForSession(sessionId) {
     return [...this._decisions.values()]
       .filter((entry) => entry.sessionId === sessionId && entry.status === 'pending')
       .map(publicEntry)
   }
 
-  _deleteTokensForDecision(decisionId) {
+  _deleteTokensForDecision(sessionId, decisionId) {
     for (const [token, binding] of this._tokens) {
-      if (binding.decisionId === decisionId) this._tokens.delete(token)
+      if (
+        binding.sessionId === sessionId &&
+        binding.decisionId === decisionId
+      ) {
+        this._tokens.delete(token)
+      }
     }
   }
 }

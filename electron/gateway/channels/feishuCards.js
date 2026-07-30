@@ -133,6 +133,14 @@ export function buildQueueCard(view = {}) {
   )
 }
 
+export function buildNoticeCard(view = {}) {
+  return createCard(
+    'UCLI Gateway',
+    [markdown(text(view.message, '该消息无法处理。'))],
+    'grey'
+  )
+}
+
 export function buildInterruptCard(view = {}) {
   const actions = []
   if (view.continueToken) {
