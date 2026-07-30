@@ -18,11 +18,19 @@ const SESSION_ID = process.env.UCLI_SESSION_ID
 function readStdin() {
   return new Promise((resolve) => {
     let data = ''
+    let settled = false
+    let timer = null
+    const done = () => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(data)
+    }
     process.stdin.setEncoding('utf8')
     process.stdin.on('data', (c) => (data += c))
-    process.stdin.on('end', () => resolve(data))
+    process.stdin.on('end', done)
     // If claude ever sends no stdin, don't hang forever.
-    setTimeout(() => resolve(data), 2000)
+    timer = setTimeout(done, 2000)
   })
 }
 
@@ -50,11 +58,6 @@ function post(path, bodyObj) {
 }
 
 async function main() {
-  if (!PORT || !SESSION_ID) {
-    // Misconfigured — fail safe (deny) so the tool doesn't run unsupervised.
-    emit('deny', 'UCLI hook env (UCLI_HOOK_PORT/UCLI_SESSION_ID) not set')
-    return
-  }
   const raw = await readStdin()
   let payload = {}
   try {
@@ -66,6 +69,15 @@ async function main() {
   const tool = payload.tool_name || payload.toolName || ''
   const input = payload.tool_input || payload.toolInput || {}
   const cwd = payload.cwd
+  if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') {
+    process.stdout.write('{}')
+    return
+  }
+  if (!PORT || !SESSION_ID) {
+    // Misconfigured — fail safe (deny) so ordinary tools don't run unsupervised.
+    emit('deny', 'UCLI hook env (UCLI_HOOK_PORT/UCLI_SESSION_ID) not set')
+    return
+  }
   try {
     const result = await post('/hook/pre-tool-use', { sessionId: SESSION_ID, tool, input, cwd })
     emit(result.verdict === 'allow' ? 'allow' : 'deny', result.reason || '')

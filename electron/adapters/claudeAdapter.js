@@ -4,6 +4,12 @@ import { tmpdir } from 'os'
 import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
 import { findClaudeProjectDirectory } from '../sessionDiscovery.js'
+import {
+  encodeClaudeDecisionResponse,
+  extractClaudePlanSnapshot,
+  extractClaudeResultSnapshot,
+  parseClaudeGatewayState
+} from './claudeGatewayParser.js'
 
 const DISPLAY_NAME = 'Claude Code'
 const ICON = '🟣'
@@ -118,6 +124,9 @@ export class ClaudeAdapter extends BaseAdapter {
     this._lastStatsTokens = { input: 0, output: 0 }
     this._lastModel = null
     this._lastCompletedTurns = -1
+    this._gatewayCursor = 0
+    this._gatewayDecision = null
+    this._gatewayRespondedDecisions = new Set()
   }
 
   /** Shared: return the matched ~/.claude/projects/<hash> directory, or null. */
@@ -232,6 +241,7 @@ export class ClaudeAdapter extends BaseAdapter {
     if (!path) return
     try {
       const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
+      this._scanGatewayState(lines)
       const { inputTokens, outputTokens, turnsCount, completedTurnsCount, costUsd, lastModel, modelBreakdown } = parseClaudeTranscriptStats(lines)
       // Emit if stats or model changed
       if (
@@ -254,6 +264,87 @@ export class ClaudeAdapter extends BaseAdapter {
         })
       }
     } catch { /* transcript read failed, ignore */ }
+  }
+
+  _scanGatewayState(lines) {
+    const state = parseClaudeGatewayState(lines, this._gatewayCursor)
+    this._gatewayCursor = state.cursor
+    if (state.nativeSessionId && !this.session.cliSessionId) {
+      this.session.cliSessionId = state.nativeSessionId
+      this.emitEvent({ type: 'init', cliSessionId: state.nativeSessionId })
+    }
+    this._gatewayDecision = state.currentDecision &&
+      !this._gatewayRespondedDecisions.has(state.currentDecision.decisionId)
+      ? state.currentDecision
+      : null
+    for (const event of state.events) {
+      this.emitGatewayEvent(event)
+    }
+  }
+
+  _gatewayTranscriptLines() {
+    const path = this.session.cliSessionId
+      ? this._findTranscript(this.session.cliSessionId)
+      : this._findLatestTranscript()
+    if (!path) return []
+    try {
+      return readFileSync(path, 'utf8').split('\n').filter(Boolean)
+    } catch {
+      return []
+    }
+  }
+
+  _primeGatewayCursor() {
+    if (!this.session.cliSessionId) return
+    const lines = this._gatewayTranscriptLines()
+    this._gatewayCursor = lines.length
+  }
+
+  get gatewayCapabilities() {
+    return {
+      decisions: true,
+      planSnapshot: true,
+      resultSnapshot: true
+    }
+  }
+
+  getDecisionContext() {
+    if (this._gatewayDecision) return structuredClone(this._gatewayDecision)
+    const state = parseClaudeGatewayState(this._gatewayTranscriptLines())
+    if (
+      state.currentDecision &&
+      !this._gatewayRespondedDecisions.has(state.currentDecision.decisionId)
+    ) {
+      this._gatewayDecision = state.currentDecision
+      return structuredClone(state.currentDecision)
+    }
+    return null
+  }
+
+  getLatestPlanSnapshot(decisionId) {
+    return extractClaudePlanSnapshot(this._gatewayTranscriptLines(), decisionId)
+  }
+
+  getLatestResultSnapshot(turnId) {
+    return extractClaudeResultSnapshot(this._gatewayTranscriptLines(), turnId)
+  }
+
+  async respondDecision(decisionId, response) {
+    const permission = await super.respondDecision(decisionId, response)
+    if (permission.accepted) return permission
+
+    const decision = this.getDecisionContext()
+    if (!decision || decision.decisionId !== decisionId) {
+      return { accepted: false, reason: 'already_resolved' }
+    }
+    const inputs = encodeClaudeDecisionResponse(decision, response)
+    if (!inputs) return { accepted: false, reason: 'invalid_response' }
+    for (const input of inputs) {
+      if (!this.writeInput(input)) return { accepted: false, reason: 'not_ready' }
+    }
+    this._gatewayRespondedDecisions.add(decisionId)
+    this._gatewayDecision = null
+    return { accepted: true }
   }
 
   _formatEvent(obj) {
@@ -314,6 +405,8 @@ export class ClaudeAdapter extends BaseAdapter {
       return
     }
 
+    this._primeGatewayCursor()
+
     // Replay history before starting
     this._replayHistory()
 
@@ -359,6 +452,11 @@ export class ClaudeAdapter extends BaseAdapter {
       this.ptyProc.onExit(({ exitCode }) => {
         this._write(`\r\n\x1b[90mprocess exited (code ${exitCode})\x1b[0m\r\n`)
         this.emitEvent({ type: 'exit', code: exitCode })
+        this.emitGatewayEvent({
+          type: 'session_stopped',
+          occurredAt: Date.now(),
+          exitCode
+        })
       })
 
       this._startStatsFallback()

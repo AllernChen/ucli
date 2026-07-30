@@ -344,13 +344,14 @@ git commit -m "refactor: define gateway adapter semantics"
 **Files:**
 - Modify: `electron/adapters/claudeAdapter.js`
 - Create: `electron/adapters/claudeGatewayParser.js`
+- Modify: `resources/claudeHook.runner.mjs`
 - Add fixtures: `test/fixtures/gateway/claude-plan.jsonl`
 - Add fixtures: `test/fixtures/gateway/claude-question.jsonl`
 - Add fixtures: `test/fixtures/gateway/claude-result.jsonl`
 - Create: `test/claude-gateway-capabilities.test.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Write parser tests from sanitized Claude transcript fixtures**
+- [x] **Step 1: Write parser tests from sanitized Claude transcript fixtures**
 
 Cover:
 
@@ -360,8 +361,9 @@ Cover:
 - the latest complete assistant result for a stable turn;
 - incomplete/truncated JSONL returns `null`, not guessed content;
 - duplicate transcript scans do not re-emit the same lifecycle event.
+- `AskUserQuestion` and `ExitPlanMode` bypass the safety-rule Hook decision so Claude keeps its native user prompt; all other tools continue through `PermissionEngine`.
 
-- [ ] **Step 2: Implement pure transcript extraction**
+- [x] **Step 2: Implement pure transcript extraction**
 
 Expose:
 
@@ -386,7 +388,7 @@ The plan snapshot shape is:
 
 No ANSI/TUI scraping is allowed. Use transcript tool-use/result structures only.
 
-- [ ] **Step 3: Emit lifecycle events from transcript transitions**
+- [x] **Step 3: Emit lifecycle events from transcript transitions**
 
 - emit `turn_started` when a new user turn appears;
 - emit `decision_required` for current hook/question/plan state;
@@ -397,7 +399,7 @@ No ANSI/TUI scraping is allowed. Use transcript tool-use/result structures only.
 
 Continue emitting existing stats/terminal events for the desktop UI.
 
-- [ ] **Step 4: Implement verified decision responses**
+- [x] **Step 4: Implement verified decision responses**
 
 `respondDecision(decisionId, response)` reloads the latest transcript state, verifies the ID is still current, then:
 
@@ -408,7 +410,7 @@ Continue emitting existing stats/terminal events for the desktop UI.
 
 Only the adapter may write provider-native PTY sequences.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```powershell
 node --test test/claude-gateway-capabilities.test.mjs test/adapter-stats.test.mjs test/session-history.test.mjs
