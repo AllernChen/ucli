@@ -600,7 +600,7 @@ git commit -m "feat: persist gateway configuration and routes"
 - Create: `test/gateway-redaction.test.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Implement and test per-session FIFO**
+- [x] **Step 1: Implement and test per-session FIFO**
 
 `GatewayTaskQueue.enqueue(sessionId, sourceMessageId, text)` assigns a UUID `relayTaskId`.
 
@@ -615,7 +615,7 @@ Assert:
 - session stop and relay disable clear the queue;
 - queue state is empty after a new process/runtime instance.
 
-- [ ] **Step 2: Implement first-writer-wins decisions**
+- [x] **Step 2: Implement first-writer-wins decisions**
 
 ```js
 register(decision, sessionId)
@@ -628,7 +628,7 @@ listPendingForSession(sessionId)
 
 `resolve()` calls one injected responder exactly once. The winner records metadata through `RouteStore`; the loser receives `already_resolved`. Tokens are random, in memory, single-use, and bound to decision ID plus action.
 
-- [ ] **Step 3: Implement deterministic plan overview**
+- [x] **Step 3: Implement deterministic plan overview**
 
 `buildPlanOverview(markdown)` extracts:
 
@@ -640,7 +640,7 @@ listPendingForSession(sessionId)
 
 If none are found, return the first 300 Unicode code points labeled `内容预览`. No LLM call or AI CLI call is permitted.
 
-- [ ] **Step 4: Implement in-memory snapshots**
+- [x] **Step 4: Implement in-memory snapshots**
 
 `SnapshotStore` generates opaque `planSnapshotId` and `resultSnapshotId`, stores full normalized markdown only in memory, and splits requested detail into card-safe chunks. The final plan chunk alone contains execute/reject actions.
 
@@ -649,7 +649,7 @@ On extraction failure:
 - plan view says “无法可靠提取完整方案，请在 UCLI 中处理” and has no execute button;
 - result view says “无法可靠提取完整结果，请在 UCLI 中查看”.
 
-- [ ] **Step 5: Implement display redaction**
+- [x] **Step 5: Implement display redaction**
 
 Redact:
 
@@ -660,7 +660,7 @@ Redact:
 
 Decision summaries stop at 1,000 Unicode code points with a “查看完整内容” action. Binary/NUL or content that cannot be safely normalized is marked desktop-only.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```powershell
 node --test test/gateway-task-queue.test.mjs test/gateway-decision-registry.test.mjs test/gateway-snapshots.test.mjs test/gateway-redaction.test.mjs
