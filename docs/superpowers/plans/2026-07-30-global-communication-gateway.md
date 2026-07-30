@@ -682,13 +682,13 @@ git commit -m "feat: implement gateway core primitives"
 - Modify: `package.json`
 - Modify: `package-lock.json`
 
-- [ ] **Step 1: Install the official SDK**
+- [x] **Step 1: Install the official SDK**
 
 Run: `npm install @larksuiteoapi/node-sdk`
 
 Use the installed lockfile version. Do not implement a custom WebSocket protocol. The SDK `Channel.connect()` completes the real WebSocket handshake, has its own 15-second connection timeout, and auto-reconnects afterward.
 
-- [ ] **Step 2: Write a fake-SDK contract test**
+- [x] **Step 2: Write a fake-SDK contract test**
 
 Inject `createLarkChannel` so tests do not access Feishu. Assert:
 
@@ -698,7 +698,7 @@ Inject `createLarkChannel` so tests do not access Feishu. Assert:
 - inbound callbacks schedule work and return without awaiting Gateway task execution;
 - `includeRawInMessage` is false.
 
-- [ ] **Step 3: Configure policy for deterministic routing**
+- [x] **Step 3: Configure policy for deterministic routing**
 
 Use:
 
@@ -723,7 +723,7 @@ Use:
 
 The runtime still verifies `senderId` against the operator allowlist and ignores non-routed group messages. `requireMention:false` is necessary so a known thread reply reaches UCLI without `@bot`.
 
-- [ ] **Step 4: Normalize only supported inbound content**
+- [x] **Step 4: Normalize only supported inbound content**
 
 Produce:
 
@@ -743,7 +743,7 @@ Produce:
 
 Mark non-text `rawContentType` unsupported. Do not download resources.
 
-- [ ] **Step 5: Render card V2 views**
+- [x] **Step 5: Render card V2 views**
 
 Implement root, decision, plan overview/detail, completion, queue, and interrupt cards. Card action payload contains only an opaque action token:
 
@@ -753,7 +753,7 @@ Implement root, decision, plan overview/detail, completion, queue, and interrupt
 
 Never embed session IDs, decision IDs, task text, credentials, or native CLI identifiers in button values.
 
-- [ ] **Step 6: Implement send/update/reaction helpers**
+- [x] **Step 6: Implement send/update/reaction helpers**
 
 Use SDK:
 
@@ -764,7 +764,7 @@ Use SDK:
 
 Keep returned reaction IDs in memory. Reaction failures must not fail task routing. Cards remain the authoritative state.
 
-- [ ] **Step 7: Verify and commit**
+- [x] **Step 7: Verify and commit**
 
 ```powershell
 node --test test/feishu-cards.test.mjs test/feishu-channel.test.mjs
