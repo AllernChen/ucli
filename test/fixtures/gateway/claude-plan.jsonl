@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","uuid":"system-plan","timestamp":"2026-07-30T01:00:00.000Z","session_id":"claude-native-plan","model":"claude-sonnet"}
+{"type":"user","uuid":"turn-plan","timestamp":"2026-07-30T01:00:01.000Z","message":{"content":[{"type":"text","text":"制定实现方案"}]}}
+{"type":"assistant","uuid":"assistant-plan","timestamp":"2026-07-30T01:00:02.000Z","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"方案如下。"},{"type":"tool_use","id":"decision-plan","name":"ExitPlanMode","input":{"plan":"# Gateway implementation\n\n## Goal\nConnect selected UCLI sessions.\n\n## Steps\n1. Add contracts.\n2. Add the Feishu channel.\n\nFiles: `electron/gateway/runtime.js`"}}]}}

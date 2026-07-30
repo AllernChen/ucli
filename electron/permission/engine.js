@@ -2,8 +2,6 @@ import { randomUUID } from 'crypto'
 import { classify, toClassifierInput } from './classifier.js'
 import { TIER } from '../adapters/cliAdapter.js'
 
-const ASK_TIMEOUT_MS = 5 * 60 * 1000 // auto-deny if the user never answers
-
 /**
  * The permission engine owns the per-session tier + ruleset and resolves every
  * tool-call approval. When a tier requires asking the user, it emits an
@@ -19,7 +17,7 @@ export class PermissionEngine {
   constructor({ onApprovalRequest, onApprovalResolved, onDecision }) {
     this._sessions = new Map() // sessionId -> { tier, rulesetId }
     this._rulesets = new Map() // rulesetId -> ruleset
-    this._pending = new Map() // requestId -> { resolve, timer, req }
+    this._pending = new Map() // requestId -> { resolve, req }
     this._onAsk = onApprovalRequest
     this._onResolved = onApprovalResolved || (() => {})
     this._onDecision = onDecision || (() => {})
@@ -106,14 +104,7 @@ export class PermissionEngine {
       reason
     }
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        if (this._pending.has(requestId)) {
-          this._pending.delete(requestId)
-          this._onResolved({ ...req, verdict: 'deny', timedOut: true })
-          resolve({ verdict: 'deny', classification, reason: '确认超时，已自动拒绝', matched })
-        }
-      }, ASK_TIMEOUT_MS)
-      this._pending.set(requestId, { resolve, timer, req })
+      this._pending.set(requestId, { resolve, req })
       this._onAsk(req)
     })
   }
@@ -121,7 +112,6 @@ export class PermissionEngine {
   respondApproval(requestId, verdict) {
     const pending = this._pending.get(requestId)
     if (!pending) return false
-    clearTimeout(pending.timer)
     this._pending.delete(requestId)
     this._onResolved({ ...pending.req, verdict })
     pending.resolve({

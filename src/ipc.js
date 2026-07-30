@@ -50,6 +50,20 @@ export const ipc = {
   // settings
   getSettings: () => u.getSettings(),
   updateSettings: (s) => u.updateSettings(s),
+  // communication Gateway
+  getGatewayState: () => u.getGatewayState(),
+  setGatewayDesiredEnabled: (enabled) => u.setGatewayDesiredEnabled(enabled),
+  getGatewayConfiguration: () => u.getGatewayConfiguration(),
+  testGatewayDraft: (draft) => u.testGatewayDraft(draft),
+  applyGatewayDraft: (testId) => u.applyGatewayDraft(testId),
+  confirmGatewayBinding: (bindingId) => u.confirmGatewayBinding(bindingId),
+  dismissGatewayBinding: (bindingId) => u.dismissGatewayBinding(bindingId),
+  clearGatewayBinding: () => u.clearGatewayBinding(),
+  listGatewaySessions: () => u.listGatewaySessions(),
+  setSessionRelayEnabled: (sessionId, enabled) =>
+    u.setSessionRelayEnabled(sessionId, enabled),
+  resyncGatewaySession: (sessionId) => u.resyncGatewaySession(sessionId),
+  onGatewayState: (handler) => u.onGatewayState(handler),
   // workbench
   getWorkbench: () => u.getWorkbench(),
   saveWorkbench: (state) => u.saveWorkbench(state),

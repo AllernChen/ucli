@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events'
+import { validateGatewayEvent } from '../gateway/contracts.js'
 
 /**
  * Permission tiers — selected per session (card).
@@ -48,6 +49,34 @@ export class BaseAdapter extends EventEmitter {
   async respondApproval(_requestId, _verdict) {
     // verdict: 'allow' | 'deny' (generic). Subclass maps to CLI-native decision.
   }
+  get gatewayCapabilities() {
+    return {
+      decisions: false,
+      planSnapshot: false,
+      resultSnapshot: false
+    }
+  }
+  getDecisionContext() {
+    return null
+  }
+  async respondDecision(decisionId, response) {
+    const action = typeof response === 'string' ? response : response?.action
+    const verdict = action === 'allow' || action === 'allow_once'
+      ? 'allow'
+      : action === 'deny'
+        ? 'deny'
+        : null
+    if (verdict && this.engine?.respondApproval(decisionId, verdict)) {
+      return { accepted: true }
+    }
+    return { accepted: false, reason: 'unsupported' }
+  }
+  getLatestPlanSnapshot(_decisionId) {
+    return null
+  }
+  getLatestResultSnapshot(_turnId) {
+    return null
+  }
   async interrupt() {
     throw new Error(`${this.id}: interrupt() not implemented`)
   }
@@ -63,6 +92,17 @@ export class BaseAdapter extends EventEmitter {
   emitEvent(event) {
     if (this._disposed) return
     this.emit('event', { ...event, sessionId: this.session.id, ts: Date.now() })
+  }
+
+  /** Emit a Gateway-only lifecycle event that never enters the terminal stream. */
+  emitGatewayEvent(event) {
+    if (this._disposed) return
+    const normalized = validateGatewayEvent({
+      ...event,
+      sessionId: this.session.id,
+      occurredAt: event.occurredAt ?? Date.now()
+    })
+    this.emit('gateway-event', normalized)
   }
 
   /**

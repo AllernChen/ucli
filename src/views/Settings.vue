@@ -1,5 +1,25 @@
 <template>
   <div class="settings">
+    <a-card title="通信 Gateway" class="settings-card">
+      <div class="gateway-summary">
+        <a-descriptions size="small" :column="1">
+          <a-descriptions-item label="通信端">飞书</a-descriptions-item>
+          <a-descriptions-item label="目标">{{ gatewayTargetLabel(gateway.configuration) }}</a-descriptions-item>
+          <a-descriptions-item label="状态">
+            {{ gateway.runtime.desiredEnabled ? '期望开启' : '期望关闭' }}
+            · {{ gatewayPhaseLabel(gateway.runtime.phase) }}
+          </a-descriptions-item>
+          <a-descriptions-item label="会话">
+            已选择 {{ gateway.runtime.selectedSessionCount }} · 可转发 {{ gateway.runtime.readySessionCount }}
+          </a-descriptions-item>
+          <a-descriptions-item label="最近连接">
+            {{ gateway.runtime.errorMessage || gatewayTimeLabel(gateway.runtime.lastConnectedAt) }}
+          </a-descriptions-item>
+        </a-descriptions>
+        <a-button ref="gatewayTrigger" type="primary" @click="openGatewayDrawer">配置</a-button>
+      </div>
+    </a-card>
+
     <a-card title="CLI 管理" class="settings-card">
       <div class="cli-toolbar">
         <span class="muted">检测本机 PATH 中的 AI CLI。安装或升级前会显示并确认完整命令。</span>
@@ -172,21 +192,38 @@
       <p>UCLI — 多 CLI 编排工作台</p>
       <p class="muted">集成 Claude Code、Codex 与 OpenCode 的卡片式编排 GUI，提供三档权限管控与使用统计。</p>
     </a-card>
+    <GatewayConfigDrawer
+      v-model:open="gatewayDrawerOpen"
+      @closed="onGatewayDrawerClosed"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick, h } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, h, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import { useSettingsStore } from '../stores/settings.js'
 import { useSessionsStore } from '../stores/sessions.js'
+import { useGatewayStore } from '../stores/gateway.js'
+import GatewayConfigDrawer from '../components/gateway/GatewayConfigDrawer.vue'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { formatCliDiagnosticSummary, persistenceStatusLabel } from '../diagnosticsPresentation.js'
 import { updateProgressText, updateStatusLabel, visibleReleaseNotes } from '../updatePresentation.js'
+import {
+  gatewayPhaseLabel,
+  gatewayTargetLabel,
+  gatewayTimeLabel
+} from '../gatewayPresentation.js'
 
 const settings = useSettingsStore()
 const sessions = useSessionsStore()
+const gateway = useGatewayStore()
+const route = useRoute()
+const router = useRouter()
+const gatewayDrawerOpen = ref(false)
+const gatewayTrigger = ref(null)
 const adapters = ref([])
 const local = ref({ defaultAdapter: 'claude', defaultTier: 'safety-rules', defaultCwd: '', language: 'zh-CN' })
 const cliTools = ref([])
@@ -207,12 +244,29 @@ const diagnosticCliSummary = computed(() => formatCliDiagnosticSummary(diagnosti
 
 onMounted(async () => {
   stopUpdateListener = ipc.on('update:state', (state) => { updateState.value = state })
-  await Promise.all([settings.load(), sessions.init(), loadCliTools(), loadDiagnostics(), loadUpdateState()])
+  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadDiagnostics(), loadUpdateState()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
 })
 
 onUnmounted(() => stopUpdateListener?.())
+
+watch(
+  () => route.query.panel,
+  (panel) => { gatewayDrawerOpen.value = panel === 'gateway' },
+  { immediate: true }
+)
+
+function openGatewayDrawer() {
+  router.push({ name: 'settings', query: { ...route.query, panel: 'gateway' } })
+}
+
+function onGatewayDrawerClosed() {
+  const query = { ...route.query }
+  delete query.panel
+  router.replace({ name: 'settings', query })
+  nextTick(() => gatewayTrigger.value?.$el?.focus?.())
+}
 
 async function loadCliTools() {
   detecting.value = true
@@ -394,6 +448,7 @@ async function resetBinding(id) {
 <style scoped>
 .settings { max-width: 820px; }
 .settings-card { margin-bottom: 14px; }
+.gateway-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .muted { color: #8c8c8c; }
 .cli-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .cli-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }

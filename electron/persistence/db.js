@@ -220,6 +220,48 @@ class Db {
         value TEXT
       )
     `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS gateway_secrets (
+        key        TEXT PRIMARY KEY,
+        ciphertext TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS gateway_session_routes (
+        session_id          TEXT PRIMARY KEY,
+        relay_enabled       INTEGER NOT NULL DEFAULT 0,
+        channel_fingerprint TEXT,
+        target_id           TEXT,
+        root_message_id     TEXT,
+        root_thread_id      TEXT,
+        route_status        TEXT NOT NULL DEFAULT 'waiting',
+        updated_at          INTEGER NOT NULL
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS gateway_message_routes (
+        message_id          TEXT PRIMARY KEY,
+        session_id          TEXT NOT NULL,
+        relay_task_id       TEXT,
+        decision_id         TEXT,
+        route_kind          TEXT NOT NULL,
+        channel_fingerprint TEXT NOT NULL,
+        active              INTEGER NOT NULL DEFAULT 1,
+        created_at          INTEGER NOT NULL
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS gateway_decision_audit (
+        id          TEXT PRIMARY KEY,
+        session_id  TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        verdict     TEXT NOT NULL,
+        source      TEXT NOT NULL,
+        resolved_at INTEGER NOT NULL
+      )
+    `)
   }
 
   // ---- projects ----
@@ -267,6 +309,7 @@ class Db {
       "UPDATE sessions SET status='removed', removed_at=?, updated_at=? WHERE id=?",
       [Date.now(), Date.now(), id]
     )
+    this.deactivateGatewayRoutesForSession(id)
   }
 
   listSessions({ includeRemoved = false } = {}) {
@@ -424,6 +467,233 @@ class Db {
     this.sql.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)', ['workbench', JSON.stringify(state)])
   }
 
+  // ---- Gateway configuration and routes ----
+  getGatewaySetting(key) {
+    if (!String(key).startsWith('gateway.')) return null
+    const values = rows(this.sql.exec(
+      'SELECT value FROM settings WHERE key=?',
+      [key]
+    ))
+    if (!values.length) return null
+    try {
+      return JSON.parse(values[0].value)
+    } catch {
+      return null
+    }
+  }
+
+  saveGatewaySetting(key, value) {
+    if (!String(key).startsWith('gateway.')) {
+      throw Object.assign(new TypeError('Gateway setting key is required'), {
+        code: 'INVALID_GATEWAY_SETTING'
+      })
+    }
+    this.sql.run(
+      'INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)',
+      [key, JSON.stringify(value)]
+    )
+  }
+
+  getGatewaySecretCiphertext(key) {
+    const values = rows(this.sql.exec(
+      'SELECT ciphertext FROM gateway_secrets WHERE key=?',
+      [key]
+    ))
+    return values[0]?.ciphertext || null
+  }
+
+  saveGatewaySecretCiphertext(key, ciphertext) {
+    if (
+      typeof key !== 'string' ||
+      !key.startsWith('gateway.') ||
+      typeof ciphertext !== 'string' ||
+      !ciphertext
+    ) {
+      throw Object.assign(new TypeError('Gateway ciphertext is required'), {
+        code: 'INVALID_GATEWAY_SECRET'
+      })
+    }
+    this.sql.run(
+      `INSERT INTO gateway_secrets (key, ciphertext, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         ciphertext=excluded.ciphertext,
+         updated_at=excluded.updated_at`,
+      [key, ciphertext, Date.now()]
+    )
+  }
+
+  listGatewaySessionRoutes() {
+    const result = rows(this.sql.exec(
+      'SELECT * FROM gateway_session_routes ORDER BY updated_at DESC'
+    ))
+    return result.map(gatewaySessionRoute)
+  }
+
+  upsertGatewaySessionRoute(route) {
+    if (!route?.sessionId) {
+      throw Object.assign(new TypeError('Gateway sessionId is required'), {
+        code: 'INVALID_GATEWAY_ROUTE'
+      })
+    }
+    const existing = rows(this.sql.exec(
+      'SELECT * FROM gateway_session_routes WHERE session_id=?',
+      [route.sessionId]
+    ))[0] || {}
+    const value = (camelKey, sqlKey, fallback = null) =>
+      route[camelKey] !== undefined ? route[camelKey] : existing[sqlKey] ?? fallback
+    this.sql.run(
+      `INSERT INTO gateway_session_routes (
+         session_id, relay_enabled, channel_fingerprint, target_id,
+         root_message_id, root_thread_id, route_status, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         relay_enabled=excluded.relay_enabled,
+         channel_fingerprint=excluded.channel_fingerprint,
+         target_id=excluded.target_id,
+         root_message_id=excluded.root_message_id,
+         root_thread_id=excluded.root_thread_id,
+         route_status=excluded.route_status,
+         updated_at=excluded.updated_at`,
+      [
+        route.sessionId,
+        value('relayEnabled', 'relay_enabled', 0) ? 1 : 0,
+        value('channelFingerprint', 'channel_fingerprint'),
+        value('targetId', 'target_id'),
+        value('rootMessageId', 'root_message_id'),
+        value('rootThreadId', 'root_thread_id'),
+        value('routeStatus', 'route_status', 'waiting'),
+        Date.now()
+      ]
+    )
+    return this.listGatewaySessionRoutes()
+      .find((candidate) => candidate.sessionId === route.sessionId) || null
+  }
+
+  saveGatewayMessageRoute(route) {
+    const required = [
+      route?.messageId,
+      route?.sessionId,
+      route?.routeKind,
+      route?.channelFingerprint
+    ]
+    if (required.some((value) => typeof value !== 'string' || !value)) {
+      throw Object.assign(new TypeError('Complete Gateway message route is required'), {
+        code: 'INVALID_GATEWAY_ROUTE'
+      })
+    }
+    this.sql.run(
+      `INSERT INTO gateway_message_routes (
+         message_id, session_id, relay_task_id, decision_id, route_kind,
+         channel_fingerprint, active, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(message_id) DO UPDATE SET
+         session_id=excluded.session_id,
+         relay_task_id=excluded.relay_task_id,
+         decision_id=excluded.decision_id,
+         route_kind=excluded.route_kind,
+         channel_fingerprint=excluded.channel_fingerprint,
+         active=excluded.active`,
+      [
+        route.messageId,
+        route.sessionId,
+        route.relayTaskId || null,
+        route.decisionId || null,
+        route.routeKind,
+        route.channelFingerprint,
+        route.active === false ? 0 : 1,
+        route.createdAt || Date.now()
+      ]
+    )
+  }
+
+  resolveGatewayMessageRoute(messageId, channelFingerprint) {
+    const result = rows(this.sql.exec(
+      `SELECT * FROM gateway_message_routes
+       WHERE message_id=? AND channel_fingerprint=? AND active=1`,
+      [messageId, channelFingerprint]
+    ))
+    return result.length ? gatewayMessageRoute(result[0]) : null
+  }
+
+  deactivateGatewayRoutesForSession(sessionId) {
+    this.sql.run(
+      `UPDATE gateway_session_routes
+       SET relay_enabled=0, route_status='inactive',
+           root_message_id=NULL, root_thread_id=NULL, updated_at=?
+       WHERE session_id=?`,
+      [Date.now(), sessionId]
+    )
+    this.sql.run(
+      'UPDATE gateway_message_routes SET active=0 WHERE session_id=?',
+      [sessionId]
+    )
+  }
+
+  deactivateGatewayRoutesForFingerprint(channelFingerprint) {
+    this.sql.run(
+      `UPDATE gateway_session_routes
+       SET route_status='inactive', root_message_id=NULL,
+           root_thread_id=NULL, updated_at=?
+       WHERE channel_fingerprint=?`,
+      [Date.now(), channelFingerprint]
+    )
+    this.sql.run(
+      'UPDATE gateway_message_routes SET active=0 WHERE channel_fingerprint=?',
+      [channelFingerprint]
+    )
+  }
+
+  saveGatewayDecisionAudit(record) {
+    const fields = ['id', 'sessionId', 'decisionId', 'kind', 'verdict', 'source']
+    if (fields.some((field) => typeof record?.[field] !== 'string' || !record[field])) {
+      throw Object.assign(new TypeError('Complete Gateway decision audit is required'), {
+        code: 'INVALID_GATEWAY_AUDIT'
+      })
+    }
+    this.sql.run(
+      `INSERT OR REPLACE INTO gateway_decision_audit (
+         id, session_id, decision_id, kind, verdict, source, resolved_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        record.id,
+        record.sessionId,
+        record.decisionId,
+        record.kind,
+        record.verdict,
+        record.source,
+        Number.isFinite(record.resolvedAt) ? record.resolvedAt : Date.now()
+      ]
+    )
+  }
+
+  getGatewayDiagnosticCounts() {
+    const result = this.sql.exec(
+      `SELECT
+         (SELECT COUNT(*) FROM gateway_session_routes) AS session_routes,
+         (SELECT COUNT(*) FROM gateway_message_routes) AS message_routes,
+         (SELECT COUNT(*) FROM gateway_decision_audit) AS decision_audits`
+    )
+    const values = result[0]?.values?.[0] || [0, 0, 0]
+    return {
+      sessionRoutes: Number(values[0]) || 0,
+      messageRoutes: Number(values[1]) || 0,
+      decisionAudits: Number(values[2]) || 0
+    }
+  }
+
+  async transaction(work) {
+    this.sql.run('BEGIN IMMEDIATE')
+    try {
+      const result = await work()
+      this.sql.run('COMMIT')
+      return result
+    } catch (error) {
+      try { this.sql.run('ROLLBACK') } catch { /* preserve original error */ }
+      throw error
+    }
+  }
+
   // ---- migration ----
   migrateFromJson(rulesets, settings, sessionsObj) {
     if (rulesets) {
@@ -506,6 +776,32 @@ function rows(result) {
     columns.forEach((c, i) => { obj[c] = vals[i] })
     return obj
   })
+}
+
+function gatewaySessionRoute(row) {
+  return {
+    sessionId: row.session_id,
+    relayEnabled: row.relay_enabled === 1,
+    channelFingerprint: row.channel_fingerprint || null,
+    targetId: row.target_id || null,
+    rootMessageId: row.root_message_id || null,
+    rootThreadId: row.root_thread_id || null,
+    routeStatus: row.route_status,
+    updatedAt: row.updated_at
+  }
+}
+
+function gatewayMessageRoute(row) {
+  return {
+    messageId: row.message_id,
+    sessionId: row.session_id,
+    relayTaskId: row.relay_task_id || null,
+    decisionId: row.decision_id || null,
+    routeKind: row.route_kind,
+    channelFingerprint: row.channel_fingerprint,
+    active: row.active === 1,
+    createdAt: row.created_at
+  }
 }
 
 function rowToSession(row) {

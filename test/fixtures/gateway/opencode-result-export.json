@@ -1,0 +1,35 @@
+{
+  "info": {
+    "id": "opencode-native-result",
+    "agent": "build",
+    "time": { "created": 1785385000000, "updated": 1785385003000 }
+  },
+  "messages": [
+    {
+      "info": {
+        "role": "user",
+        "id": "opencode-turn-result",
+        "sessionID": "opencode-native-result",
+        "time": { "created": 1785385001000 }
+      },
+      "parts": [{ "id": "part-user-result", "type": "text", "text": "完成 OpenCode Gateway" }]
+    },
+    {
+      "info": {
+        "role": "assistant",
+        "id": "opencode-result-message",
+        "sessionID": "opencode-native-result",
+        "agent": "build",
+        "finish": "stop",
+        "time": { "created": 1785385002000, "completed": 1785385003000 }
+      },
+      "parts": [
+        {
+          "id": "part-result-text",
+          "type": "text",
+          "text": "OpenCode Gateway 已完成。\n\n所有测试通过。"
+        }
+      ]
+    }
+  ]
+}

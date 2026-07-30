@@ -6,7 +6,17 @@ import { BaseAdapter, TIER } from './cliAdapter.js'
 import { consumeOsc9Notifications } from './codexAdapter.js'
 import { parsePattern } from '../permission/classifier.js'
 import { listOpenCodeSessions } from '../openCodeSessions.js'
-import { loadOpenCodeSessionStats, OpenCodeStatsScheduler } from '../openCodeStats.js'
+import {
+  exportOpenCodeSession,
+  loadOpenCodeSessionStats,
+  OpenCodeStatsScheduler
+} from '../openCodeStats.js'
+import {
+  encodeOpenCodeDecisionResponse,
+  extractOpenCodePlanSnapshot,
+  extractOpenCodeResultSnapshot,
+  parseOpenCodeGatewayState
+} from './openCodeGatewayParser.js'
 
 const DISPLAY_NAME = 'OpenCode'
 const ICON = '🔵'
@@ -309,6 +319,18 @@ export class OpenCodeAdapter extends BaseAdapter {
       })
     })
     this._lastStats = null
+    this._gatewaySource = null
+    this._gatewayCursor = []
+    this._gatewayDecision = null
+    this._gatewayRespondedDecisions = new Set()
+    this.gatewayReader = settings.gatewayReader || ((sessionId) => {
+      const launch = resolveOpenCodeLaunch()
+      return exportOpenCodeSession(sessionId, {
+        executable: launch.file,
+        prefixArgs: launch.prefixArgs,
+        sanitize: false
+      })
+    })
     this._statsScheduler = new OpenCodeStatsScheduler({
       onRun: () => this._extractStats(),
       idleDelayMs: STATS_IDLE_DELAY_MS,
@@ -359,6 +381,7 @@ export class OpenCodeAdapter extends BaseAdapter {
 
   async _extractStats() {
     if (this._disposed || !this.session.cliSessionId) return
+    await this._scanGatewayState()
     let stats
     try {
       stats = await this.statsReader(this.session.cliSessionId)
@@ -394,10 +417,86 @@ export class OpenCodeAdapter extends BaseAdapter {
     })
   }
 
+  async _readGatewaySource() {
+    if (!this.session.cliSessionId) return null
+    try {
+      return await this.gatewayReader(this.session.cliSessionId)
+    } catch {
+      return null
+    }
+  }
+
+  async _scanGatewayState({ emit = true } = {}) {
+    const source = await this._readGatewaySource()
+    if (!source || this._disposed) return
+    this._gatewaySource = source
+    const state = parseOpenCodeGatewayState(source, this._gatewayCursor)
+    this._gatewayCursor = state.cursor
+    this._gatewayDecision = state.currentDecision &&
+      !this._gatewayRespondedDecisions.has(state.currentDecision.decisionId)
+      ? state.currentDecision
+      : null
+    if (emit) {
+      for (const event of state.events) this.emitGatewayEvent(event)
+    }
+  }
+
+  async _primeGatewayCursor() {
+    if (!this.session.cliSessionId) return
+    const source = await this._readGatewaySource()
+    if (!source) return
+    this._gatewaySource = source
+    this._gatewayCursor = parseOpenCodeGatewayState(source).cursor
+  }
+
+  get gatewayCapabilities() {
+    return {
+      decisions: true,
+      planSnapshot: true,
+      resultSnapshot: true
+    }
+  }
+
+  getDecisionContext() {
+    return this._gatewayDecision ? structuredClone(this._gatewayDecision) : null
+  }
+
+  async getLatestPlanSnapshot(decisionId) {
+    const source = await this._readGatewaySource() || this._gatewaySource
+    if (source) this._gatewaySource = source
+    return extractOpenCodePlanSnapshot(source, decisionId)
+  }
+
+  async getLatestResultSnapshot(turnId) {
+    const source = await this._readGatewaySource() || this._gatewaySource
+    if (source) this._gatewaySource = source
+    return extractOpenCodeResultSnapshot(source, turnId)
+  }
+
+  async respondDecision(decisionId, response) {
+    const permission = await super.respondDecision(decisionId, response)
+    if (permission.accepted) return permission
+
+    if (!this._gatewayDecision) await this._scanGatewayState({ emit: false })
+    const decision = this.getDecisionContext()
+    if (!decision || decision.decisionId !== decisionId) {
+      return { accepted: false, reason: 'already_resolved' }
+    }
+    const inputs = encodeOpenCodeDecisionResponse(decision, response)
+    if (!inputs) return { accepted: false, reason: 'invalid_response' }
+    for (const input of inputs) {
+      if (!this.writeInput(input)) return { accepted: false, reason: 'not_ready' }
+    }
+    this._gatewayRespondedDecisions.add(decisionId)
+    this._gatewayDecision = null
+    return { accepted: true }
+  }
+
   async start() {
     this._disposed = false
     this._startedAt = Date.now()
     this._sessionDiscoveryAttempts = 0
+    await this._primeGatewayCursor()
     if (!pty) {
       this._write('\x1b[31mnode-pty 未加载，无法启动 OpenCode 终端模式\x1b[0m\r\n')
       this.emitEvent({ type: 'error', message: 'node-pty not available' })
@@ -427,6 +526,11 @@ export class OpenCodeAdapter extends BaseAdapter {
       this.ptyProc.onExit(({ exitCode }) => {
         this._write(`\r\n\x1b[90mOpenCode process exited (code ${exitCode})\x1b[0m\r\n`)
         this.emitEvent({ type: 'exit', code: exitCode })
+        this.emitGatewayEvent({
+          type: 'session_stopped',
+          occurredAt: Date.now(),
+          exitCode
+        })
       })
       this.emitEvent({
         type: 'stats_update',
@@ -482,6 +586,8 @@ export class OpenCodeAdapter extends BaseAdapter {
     this._statsScheduler.dispose()
     this._lastStats = null
     this._osc9Pending = ''
+    this._gatewayDecision = null
+    this._gatewaySource = null
     if (this.ptyProc) {
       try { this.ptyProc.kill() } catch {}
       this.ptyProc = null

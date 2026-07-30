@@ -67,6 +67,31 @@ const api = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSettings: (s) => ipcRenderer.invoke('settings:update', s),
 
+  // ---- communication Gateway ----
+  getGatewayState: () => ipcRenderer.invoke('gateway:get-state'),
+  setGatewayDesiredEnabled: (enabled) =>
+    ipcRenderer.invoke('gateway:set-desired-enabled', enabled),
+  getGatewayConfiguration: () =>
+    ipcRenderer.invoke('gateway:get-configuration'),
+  testGatewayDraft: (draft) => ipcRenderer.invoke('gateway:test-draft', draft),
+  applyGatewayDraft: (testId) =>
+    ipcRenderer.invoke('gateway:apply-draft', testId),
+  confirmGatewayBinding: (bindingId) =>
+    ipcRenderer.invoke('gateway:confirm-binding', bindingId),
+  dismissGatewayBinding: (bindingId) =>
+    ipcRenderer.invoke('gateway:dismiss-binding', bindingId),
+  clearGatewayBinding: () => ipcRenderer.invoke('gateway:clear-binding'),
+  listGatewaySessions: () => ipcRenderer.invoke('gateway:list-sessions'),
+  setSessionRelayEnabled: (sessionId, enabled) =>
+    ipcRenderer.invoke('gateway:set-session-relay', sessionId, enabled),
+  resyncGatewaySession: (sessionId) =>
+    ipcRenderer.invoke('gateway:resync-session', sessionId),
+  onGatewayState: (handler) => {
+    const wrapped = (_event, payload) => handler(payload)
+    ipcRenderer.on('gateway:state', wrapped)
+    return () => ipcRenderer.removeListener('gateway:state', wrapped)
+  },
+
   // ---- workbench ----
   getWorkbench: () => ipcRenderer.invoke('workbench:get'),
   saveWorkbench: (state) => ipcRenderer.invoke('workbench:save', state),

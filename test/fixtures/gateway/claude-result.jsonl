@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","uuid":"system-result","timestamp":"2026-07-30T03:00:00.000Z","session_id":"claude-native-result","model":"claude-sonnet"}
+{"type":"user","uuid":"turn-result","timestamp":"2026-07-30T03:00:01.000Z","message":{"content":[{"type":"text","text":"完成 Gateway 契约"}]}}
+{"type":"assistant","uuid":"assistant-result","timestamp":"2026-07-30T03:00:02.000Z","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Gateway 契约已经完成。\n\n测试全部通过。"}]}}
