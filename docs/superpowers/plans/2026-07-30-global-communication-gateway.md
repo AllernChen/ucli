@@ -228,7 +228,7 @@ Applied non-secret configuration and desired enabled state use existing `setting
 - Create: `test/permission-engine.test.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Write a failing no-timeout test**
+- [x] **Step 1: Write a failing no-timeout test**
 
 Use Node mock timers, advance beyond five minutes, and prove the pending decision remains unresolved:
 
@@ -255,19 +255,19 @@ Add regression cases for:
 - safety rules deny `deny`, ask `high-risk`, and allow both `allow` and unmatched `default`;
 - `respondApproval()` remains single-use.
 
-- [ ] **Step 2: Run the focused test**
+- [x] **Step 2: Run the focused test**
 
 Run: `node --test test/permission-engine.test.mjs test/permission-classifier.test.mjs test/default-rules.test.mjs`
 
 Expected: the no-timeout assertion fails because `_ask()` still schedules auto-deny.
 
-- [ ] **Step 3: Remove only timeout behavior**
+- [x] **Step 3: Remove only timeout behavior**
 
 Delete `ASK_TIMEOUT_MS`, the timer creation, `timedOut`, timeout-specific reason, `clearTimeout`, and the `timer` field. Store `{ resolve, req }`.
 
 Do not reorder or alter classifier/tier branches.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```powershell
 node --test test/permission-engine.test.mjs test/permission-classifier.test.mjs test/default-rules.test.mjs
