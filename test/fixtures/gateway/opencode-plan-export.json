@@ -1,0 +1,35 @@
+{
+  "info": {
+    "id": "opencode-native-plan",
+    "agent": "plan",
+    "time": { "created": 1785384000000, "updated": 1785384003000 }
+  },
+  "messages": [
+    {
+      "info": {
+        "role": "user",
+        "id": "opencode-turn-plan",
+        "sessionID": "opencode-native-plan",
+        "time": { "created": 1785384001000 }
+      },
+      "parts": [{ "id": "part-user-plan", "type": "text", "text": "制定 OpenCode Gateway 方案" }]
+    },
+    {
+      "info": {
+        "role": "assistant",
+        "id": "opencode-plan-message",
+        "sessionID": "opencode-native-plan",
+        "agent": "plan",
+        "finish": "stop",
+        "time": { "created": 1785384002000, "completed": 1785384003000 }
+      },
+      "parts": [
+        {
+          "id": "part-plan-text",
+          "type": "text",
+          "text": "# OpenCode Gateway\n\n## Goal\nConnect OpenCode decisions.\n\n## Steps\n1. Parse export.\n2. Route replies."
+        }
+      ]
+    }
+  ]
+}

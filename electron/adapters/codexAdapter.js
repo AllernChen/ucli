@@ -3,6 +3,12 @@ import { join } from 'path'
 import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
 import { findCodexTranscriptFile, isSafeProviderName } from '../sessionDiscovery.js'
+import {
+  encodeCodexDecisionResponse,
+  extractCodexPlanSnapshot,
+  extractCodexResultSnapshot,
+  parseCodexGatewayState
+} from './codexGatewayParser.js'
 
 const DISPLAY_NAME = 'Codex'
 const STATS_IDLE_DELAY_MS = 2000
@@ -197,6 +203,9 @@ export class CodexAdapter extends BaseAdapter {
     this._lastCompletedTurns = -1
     this._startedAt = Date.now()
     this._osc9Pending = ''
+    this._gatewayCursor = 0
+    this._gatewayDecision = null
+    this._gatewayRespondedDecisions = new Set()
   }
 
   _findTranscript(cliSessionId) {
@@ -367,6 +376,7 @@ export class CodexAdapter extends BaseAdapter {
     this._transcriptPath = path
     try {
       const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
+      this._scanGatewayState(lines)
       const stats = parseCodexTranscriptStats(lines)
       if (stats.cliSessionId && !this.session.cliSessionId) {
         this.session.cliSessionId = stats.cliSessionId
@@ -402,6 +412,87 @@ export class CodexAdapter extends BaseAdapter {
     } catch { /* ignore */ }
   }
 
+  _scanGatewayState(lines) {
+    const state = parseCodexGatewayState(lines, this._gatewayCursor)
+    this._gatewayCursor = state.cursor
+    if (state.nativeSessionId && !this.session.cliSessionId) {
+      this.session.cliSessionId = state.nativeSessionId
+      this.emitEvent({ type: 'init', cliSessionId: state.nativeSessionId })
+    }
+    this._gatewayDecision = state.currentDecision &&
+      !this._gatewayRespondedDecisions.has(state.currentDecision.decisionId)
+      ? state.currentDecision
+      : null
+    for (const event of state.events) this.emitGatewayEvent(event)
+  }
+
+  _gatewayTranscriptLines() {
+    let path = this._transcriptPath
+    if (!path) {
+      path = this.session.cliSessionId
+        ? this._findTranscript(this.session.cliSessionId)
+        : this._findLatestTranscript()
+    }
+    if (!path) return []
+    try {
+      return readFileSync(path, 'utf8').split('\n').filter(Boolean)
+    } catch {
+      return []
+    }
+  }
+
+  _primeGatewayCursor() {
+    if (!this.session.cliSessionId) return
+    this._gatewayCursor = this._gatewayTranscriptLines().length
+  }
+
+  get gatewayCapabilities() {
+    return {
+      decisions: true,
+      planSnapshot: true,
+      resultSnapshot: true
+    }
+  }
+
+  getDecisionContext() {
+    if (this._gatewayDecision) return structuredClone(this._gatewayDecision)
+    const state = parseCodexGatewayState(this._gatewayTranscriptLines())
+    if (
+      state.currentDecision &&
+      !this._gatewayRespondedDecisions.has(state.currentDecision.decisionId)
+    ) {
+      this._gatewayDecision = state.currentDecision
+      return structuredClone(state.currentDecision)
+    }
+    return null
+  }
+
+  getLatestPlanSnapshot(decisionId) {
+    return extractCodexPlanSnapshot(this._gatewayTranscriptLines(), decisionId)
+  }
+
+  getLatestResultSnapshot(turnId) {
+    return extractCodexResultSnapshot(this._gatewayTranscriptLines(), turnId)
+  }
+
+  async respondDecision(decisionId, response) {
+    const permission = await super.respondDecision(decisionId, response)
+    if (permission.accepted) return permission
+
+    const decision = this.getDecisionContext()
+    if (!decision || decision.decisionId !== decisionId) {
+      return { accepted: false, reason: 'already_resolved' }
+    }
+    const inputs = encodeCodexDecisionResponse(decision, response)
+    if (!inputs) return { accepted: false, reason: 'invalid_response' }
+    for (const input of inputs) {
+      if (!this.writeInput(input)) return { accepted: false, reason: 'not_ready' }
+    }
+    this._gatewayRespondedDecisions.add(decisionId)
+    this._gatewayDecision = null
+    return { accepted: true }
+  }
+
   /** Public: replay transcript history to the terminal. */
   replayHistory() {
     this._replayHistory()
@@ -410,6 +501,7 @@ export class CodexAdapter extends BaseAdapter {
   async start() {
     this._disposed = false
     this._startedAt = Date.now()
+    this._primeGatewayCursor()
     if (!pty) {
       this._write('\x1b[31mnode-pty 未加载，无法启动 Codex 终端模式\x1b[0m\r\n')
       this.emitEvent({ type: 'error', message: 'node-pty not available' })
@@ -451,6 +543,11 @@ export class CodexAdapter extends BaseAdapter {
       this.ptyProc.onExit(({ exitCode }) => {
         this._write(`\r\n\x1b[90mCodex process exited (code ${exitCode})\x1b[0m\r\n`)
         this.emitEvent({ type: 'exit', code: exitCode })
+        this.emitGatewayEvent({
+          type: 'session_stopped',
+          occurredAt: Date.now(),
+          exitCode
+        })
       })
 
       this._startStatsFallback()
@@ -494,6 +591,8 @@ export class CodexAdapter extends BaseAdapter {
     // Codex resumes through the `resume <thread-id>` startup form.
     if (cliSessionId) this.session.cliSessionId = cliSessionId
     await this.dispose()
+    this._transcriptPath = null
+    this._gatewayCursor = 0
     await this.start()
   }
 
@@ -506,6 +605,7 @@ export class CodexAdapter extends BaseAdapter {
     this._statsMaxTimer = null
     this._statsFallbackTimer = null
     this._osc9Pending = ''
+    this._gatewayDecision = null
     if (this.ptyProc) {
       try { this.ptyProc.kill() } catch {}
       this.ptyProc = null

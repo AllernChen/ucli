@@ -1,0 +1,5 @@
+{"type":"session_meta","timestamp":"2026-07-30T04:00:00.000Z","payload":{"id":"codex-native-plan","cwd":"F:\\projects\\ucli","model":"gpt-5.5"}}
+{"type":"event_msg","timestamp":"2026-07-30T04:00:01.000Z","payload":{"type":"task_started","turn_id":"codex-turn-plan"}}
+{"type":"response_item","timestamp":"2026-07-30T04:00:01.100Z","payload":{"type":"message","id":"codex-user-plan","role":"user","content":[{"type":"input_text","text":"制定 Gateway 方案"}]}}
+{"type":"response_item","timestamp":"2026-07-30T04:00:02.000Z","payload":{"type":"message","id":"codex-plan-message","role":"assistant","content":[{"type":"output_text","text":"<proposed_plan>\n# Codex Gateway\n\n## Goal\nConnect Codex decisions.\n\n## Steps\n1. Parse JSONL.\n2. Route replies.\n</proposed_plan>"}]}}
+{"type":"event_msg","timestamp":"2026-07-30T04:00:03.000Z","payload":{"type":"task_complete","turn_id":"codex-turn-plan"}}

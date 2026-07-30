@@ -433,9 +433,9 @@ git commit -m "feat: expose Claude gateway capabilities"
 - Create: `test/opencode-gateway-capabilities.test.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Write failing provider fixture tests**
+- [x] **Step 1: Write failing provider fixture tests**
 
-Codex tests use native JSONL plan-mode prompt and turn records. OpenCode tests use notification metadata plus sanitized session export. Prove:
+Codex tests use native JSONL plan-mode prompt and turn records. OpenCode tests use provider-native session export. Statistics continue to use sanitized exports; Gateway decision and snapshot extraction requests the complete export and keeps it in memory only. Prove:
 
 - provider records, not PTY silence or token changes, emit completion;
 - plan waiting emits `decision_required` and not `turn_completed`;
@@ -443,7 +443,7 @@ Codex tests use native JSONL plan-mode prompt and turn records. OpenCode tests u
 - failed extraction returns `null`;
 - old/stale decision IDs cannot affect the current prompt.
 
-- [ ] **Step 2: Add pure provider parsers**
+- [x] **Step 2: Add pure provider parsers**
 
 Expose equivalent normalized functions:
 
@@ -457,13 +457,13 @@ extractOpenCodePlanSnapshot(sessionExport, decisionId)
 extractOpenCodeResultSnapshot(sessionExport, turnId)
 ```
 
-- [ ] **Step 3: Wire adapter capabilities**
+- [x] **Step 3: Wire adapter capabilities**
 
 Use existing Codex transcript discovery and OpenCode export facilities. OSC9 notifications may trigger a rescan but are never themselves treated as the full decision or completion proof.
 
 Both adapters implement provider-native `respondDecision()` and re-check the latest prompt immediately before writing.
 
-- [ ] **Step 4: Verify all adapters**
+- [x] **Step 4: Verify all adapters**
 
 ```powershell
 node --test test/codex-gateway-capabilities.test.mjs test/opencode-gateway-capabilities.test.mjs test/opencode-adapter.test.mjs test/adapter-stats.test.mjs
