@@ -4,7 +4,7 @@
       type="text"
       size="small"
       class="gateway-relay-toggle"
-      :class="`tone-${view.tone}`"
+      :class="[`tone-${view.tone}`, { 'is-relay-selected': view.selected }]"
       :loading="pending"
       :disabled="pending"
       :aria-pressed="view.selected"
@@ -49,10 +49,10 @@ async function toggleRelay() {
 </script>
 
 <style scoped>
-.gateway-relay-toggle { padding-inline: 4px; }
+.gateway-relay-toggle { padding-inline: 4px; color: #bfbfbf; }
 .tone-default { color: #bfbfbf; }
-.tone-blue { color: #1677ff; }
-.tone-green { color: #389e0d; }
-.tone-orange { color: #d46b08; }
-.tone-red { color: #cf1322; }
+.gateway-relay-toggle.is-relay-selected.tone-blue { color: #1677ff; }
+.gateway-relay-toggle.is-relay-selected.tone-green { color: #389e0d; }
+.gateway-relay-toggle.is-relay-selected.tone-orange { color: #d46b08; }
+.gateway-relay-toggle.is-relay-selected.tone-red { color: #cf1322; }
 </style>
