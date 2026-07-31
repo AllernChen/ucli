@@ -50,6 +50,7 @@ async function toggleRelay() {
 
 <style scoped>
 .gateway-relay-toggle { padding-inline: 4px; }
+.tone-default { color: #bfbfbf; }
 .tone-blue { color: #1677ff; }
 .tone-green { color: #389e0d; }
 .tone-orange { color: #d46b08; }
