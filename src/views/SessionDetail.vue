@@ -114,6 +114,14 @@
                       />
                       <span :class="['status-dot', s.status]"></span>
                     </div>
+                    <span
+                      :class="['session-relay-state', `tone-${relayView(s).tone}`]"
+                      role="status"
+                      :aria-label="`飞书转发：${relayView(s).label}`"
+                    >
+                      <GatewayChannelIcon :channel-type="gateway.configuration?.channelType || 'feishu'" />
+                      {{ relayView(s).label }}
+                    </span>
                     <div class="item-meta">
                       <span class="item-id">{{ s.id.slice(0,8) }}</span>
                       <span class="item-time">{{ fmtTime(s.createdAt || s.startedAt) }}</span>
@@ -318,6 +326,8 @@ import { compactPaneSessionIds } from '../paneCompaction.js'
 import PaneHistory from '../components/PaneHistory.vue'
 import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
 import GatewayRelayToggle from '../components/gateway/GatewayRelayToggle.vue'
+import GatewayChannelIcon from '../components/gateway/GatewayChannelIcon.vue'
+import { deriveGatewayRelayControl } from '../gatewayRelayPresentation.js'
 import { terminalSizeChanged } from '../terminalResize.js'
 import {
   reconcileSessionPanes,
@@ -337,6 +347,15 @@ const router = useRouter()
 const sessions = useSessionsStore()
 const settings = useSettingsStore()
 const gateway = useGatewayStore()
+
+function relayView(session) {
+  return deriveGatewayRelayControl({
+    session: gateway.relaySessionFor(session.id),
+    gatewayPhase: gateway.runtime.phase,
+    pending: gateway.relayPendingFor(session.id)
+  })
+}
+
 const sessionListHidden = ref(false)
 watch(sessionListHidden, (v) => {
   sessions.setSessionListHidden(v)
@@ -1091,6 +1110,11 @@ onBeforeUnmount(() => {
 .item-name-wrap:hover .item-name-edit-icon { opacity: 1; }
 .item-name-edit-icon:hover { color: #1677ff; }
 .item-name-input { width: auto; min-width: 80px; max-width: 160px; font-size: 12px; font-weight: 600; }
+.session-relay-state { display: inline-flex; align-items: center; gap: 3px; margin-top: 2px; font-size: 10px; color: #8c8c8c; }
+.session-relay-state.tone-blue { color: #1677ff; }
+.session-relay-state.tone-green { color: #389e0d; }
+.session-relay-state.tone-orange { color: #d46b08; }
+.session-relay-state.tone-red { color: #cf1322; }
 .item-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 1px; }
 .item-id { font-size: 10px; color: #bfbfbf; font-family: monospace; }
 .item-time { font-size: 10px; color: #bfbfbf; }

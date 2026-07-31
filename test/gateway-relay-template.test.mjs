@@ -23,6 +23,8 @@ test('GatewayRelayToggle exposes one accessible, store-backed session relay cont
   assert.match(source, /\$\{view\.label\}：\$\{sessionName \|\| '当前会话'\}/)
   assert.match(source, /gateway\.relayPendingFor\(props\.sessionId\)/)
   assert.match(source, /deriveGatewayRelayControl/)
+  assert.match(source, /GatewayChannelIcon/)
+  assert.doesNotMatch(source, /GlobalOutlined/)
   assert.match(source, /message\.error/)
   assert.match(source, /@click\.stop="toggleRelay"/)
   assert.doesNotMatch(source, /v-html/)
@@ -38,4 +40,13 @@ test('session cards and workbench panes use the shared relay control', () => {
   assert.doesNotMatch(sessionCard, /relaySwitching|relay-icon|toggleRelay/)
   assert.doesNotMatch(sessionDetail, /paneRelayOn|togglePaneRelay/)
   assert.match(workbench, /gateway\.init\(\)/)
+})
+
+test('the workbench session list exposes a read-only Gateway relay state', () => {
+  const sessionDetail = readFileSync(sessionDetailUrl, 'utf8')
+
+  assert.match(sessionDetail, /'session-relay-state'/)
+  assert.match(sessionDetail, /relayView\(s\)\.label/)
+  assert.match(sessionDetail, /deriveGatewayRelayControl/)
+  assert.match(sessionDetail, /<GatewayChannelIcon/)
 })

@@ -11,7 +11,7 @@
       :aria-label="`${view.label}：${sessionName || '当前会话'}`"
       @click.stop="toggleRelay"
     >
-      <GlobalOutlined />
+      <GatewayChannelIcon :channel-type="gateway.configuration?.channelType || 'feishu'" />
       <span v-if="!compact">{{ view.label }}</span>
     </a-button>
   </a-tooltip>
@@ -20,10 +20,9 @@
 <script setup>
 import { computed } from 'vue'
 import { message } from 'ant-design-vue'
-import { GlobalOutlined } from '@ant-design/icons-vue'
-
 import { deriveGatewayRelayControl } from '../../gatewayRelayPresentation.js'
 import { useGatewayStore } from '../../stores/gateway.js'
+import GatewayChannelIcon from './GatewayChannelIcon.vue'
 
 const props = defineProps({
   sessionId: { type: String, required: true },
