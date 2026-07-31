@@ -532,7 +532,7 @@ function initPaneTerminal(i) {
   term.loadAddon(fitAddon)
   term.open(el)
 
-  // Clickable links — Ctrl+Click / Cmd+Click opens URL in default browser
+  // Clickable HTTP(S) links open in the default browser after main-process validation.
   const webLinksAddon = new WebLinksAddon((e, uri) => {
     if (shouldOpenTerminalLink(e)) ipc.openExternal(uri)
   })

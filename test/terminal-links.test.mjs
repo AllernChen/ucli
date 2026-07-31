@@ -3,14 +3,8 @@ import test from 'node:test'
 
 import { shouldOpenTerminalLink } from '../src/terminalLinks.js'
 
-test('terminal links require Ctrl on Windows and Linux', () => {
-  assert.equal(shouldOpenTerminalLink({ ctrlKey: true, metaKey: false }, 'Win32'), true)
-  assert.equal(shouldOpenTerminalLink({ ctrlKey: false, metaKey: true }, 'Win32'), false)
-  assert.equal(shouldOpenTerminalLink({ ctrlKey: true, metaKey: false }, 'Linux x86_64'), true)
-})
-
-test('terminal links require Command on macOS', () => {
-  assert.equal(shouldOpenTerminalLink({ ctrlKey: false, metaKey: true }, 'MacIntel'), true)
-  assert.equal(shouldOpenTerminalLink({ ctrlKey: true, metaKey: false }, 'MacIntel'), false)
-  assert.equal(shouldOpenTerminalLink({ ctrlKey: false, metaKey: false }, 'MacIntel'), false)
+test('terminal links open on a plain click across platforms', () => {
+  assert.equal(shouldOpenTerminalLink({ ctrlKey: false, metaKey: false }, 'Win32'), true)
+  assert.equal(shouldOpenTerminalLink({ ctrlKey: false, metaKey: false }, 'Linux x86_64'), true)
+  assert.equal(shouldOpenTerminalLink({ ctrlKey: false, metaKey: false }, 'MacIntel'), true)
 })
