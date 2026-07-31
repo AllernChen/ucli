@@ -27,6 +27,7 @@ test('GatewayRelayToggle exposes one accessible, store-backed session relay cont
   assert.doesNotMatch(source, /GlobalOutlined/)
   assert.match(source, /'is-relay-selected': view\.selected/)
   assert.match(source, /\.tone-default\s*\{\s*color:\s*#bfbfbf/)
+  assert.match(source, /:deep\(\.gateway-channel-icon\).*filter:\s*grayscale\(1\)/s)
   assert.match(source, /message\.error/)
   assert.match(source, /@click\.stop="toggleRelay"/)
   assert.doesNotMatch(source, /v-html/)

@@ -55,4 +55,8 @@ async function toggleRelay() {
 .gateway-relay-toggle.is-relay-selected.tone-green { color: #389e0d; }
 .gateway-relay-toggle.is-relay-selected.tone-orange { color: #d46b08; }
 .gateway-relay-toggle.is-relay-selected.tone-red { color: #cf1322; }
+.gateway-relay-toggle:not(.is-relay-selected) :deep(.gateway-channel-icon) {
+  filter: grayscale(1);
+  opacity: .48;
+}
 </style>
