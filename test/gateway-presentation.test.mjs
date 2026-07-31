@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { createPinia, setActivePinia } from 'pinia'
 
 import {
   gatewayPhaseColor,
@@ -8,6 +9,54 @@ import {
   gatewayTargetLabel,
   gatewayTooltip
 } from '../src/gatewayPresentation.js'
+
+const deferred = () => {
+  let resolve
+  let reject
+  const promise = new Promise((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+const runtime = (overrides = {}) => ({ phase: 'off', ...overrides })
+const initialSessions = [{ id: 'session-1', relayEnabled: false }]
+
+let stateCalls = 0
+let configurationCalls = 0
+let sessionCalls = 0
+let relayCalls = 0
+let relayRequest = null
+
+globalThis.window = {
+  ucli: {
+    onGatewayState: () => () => {},
+    getGatewayState: async () => {
+      stateCalls += 1
+      return runtime()
+    },
+    getGatewayConfiguration: async () => {
+      configurationCalls += 1
+      return { configured: false }
+    },
+    listGatewaySessions: async () => {
+      sessionCalls += 1
+      return initialSessions
+    },
+    setSessionRelayEnabled: async () => {
+      relayCalls += 1
+      return relayRequest.promise
+    }
+  }
+}
+
+const { useGatewayStore } = await import('../src/stores/gateway.js')
+
+function freshGatewayStore() {
+  setActivePinia(createPinia())
+  return useGatewayStore()
+}
 
 test('Gateway presentation covers every runtime phase with safe Chinese labels', () => {
   assert.deepEqual(
@@ -59,4 +108,70 @@ test('Gateway store never declares or assigns an App Secret field', () => {
   assert.match(source, /setSessionRelayEnabled/)
   assert.match(source, /requireApplied/)
   assert.match(source, /configuration_operation_in_progress/)
+})
+
+test('Gateway store shares one in-flight IPC initialization across callers', async () => {
+  const gate = deferred()
+  stateCalls = 0
+  configurationCalls = 0
+  sessionCalls = 0
+  globalThis.window.ucli.getGatewayState = async () => {
+    stateCalls += 1
+    return gate.promise
+  }
+  const gateway = freshGatewayStore()
+
+  const first = gateway.init()
+  const second = gateway.init()
+  assert.equal(stateCalls, 1)
+  assert.equal(configurationCalls, 1)
+  assert.equal(sessionCalls, 1)
+
+  gate.resolve(runtime({ phase: 'connected' }))
+  await Promise.all([first, second])
+  assert.equal(gateway.initialized, true)
+  assert.equal(gateway.loading, false)
+  assert.equal(gateway.runtime.phase, 'connected')
+})
+
+test('Gateway store rejects a concurrent relay update for the same session', async () => {
+  const gateway = freshGatewayStore()
+  gateway.sessions = initialSessions
+  relayCalls = 0
+  relayRequest = deferred()
+  globalThis.window.ucli.getGatewayState = async () => runtime({ phase: 'connected' })
+
+  const first = gateway.setSessionRelayEnabled('session-1', true)
+  assert.equal(gateway.relayPendingFor('session-1'), true)
+  await assert.rejects(
+    gateway.setSessionRelayEnabled('session-1', false),
+    (error) => error.code === 'GATEWAY_RELAY_BUSY'
+  )
+  assert.equal(relayCalls, 1)
+
+  relayRequest.resolve({ accepted: true })
+  await first
+  assert.equal(gateway.relayPendingFor('session-1'), false)
+})
+
+test('Gateway store restores server state after a rejected relay mutation', async () => {
+  const gateway = freshGatewayStore()
+  gateway.sessions = initialSessions
+  relayRequest = {
+    promise: Promise.resolve({ accepted: false, reason: 'relay_rejected' })
+  }
+  globalThis.window.ucli.listGatewaySessions = async () => [
+    { id: 'session-1', relayEnabled: false, routeStatus: 'waiting' }
+  ]
+  globalThis.window.ucli.getGatewayState = async () => runtime({ phase: 'off' })
+
+  await assert.rejects(
+    gateway.setSessionRelayEnabled('session-1', true),
+    (error) => error.code === 'relay_rejected'
+  )
+  assert.deepEqual(gateway.relaySessionFor('session-1'), {
+    id: 'session-1', relayEnabled: false, routeStatus: 'waiting'
+  })
+  assert.equal(gateway.runtime.phase, 'off')
+  assert.equal(gateway.relayPendingFor('session-1'), false)
 })

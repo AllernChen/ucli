@@ -22,6 +22,7 @@
       </div>
     </template>
     <template #extra>
+      <GatewayRelayToggle :session-id="session.id" compact />
       <a-tag :color="tierColor">{{ tierLabel }}</a-tag>
     </template>
 
@@ -50,6 +51,7 @@
 import { computed, ref, nextTick } from 'vue'
 import { FolderOpenOutlined, EditOutlined } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
+import GatewayRelayToggle from './gateway/GatewayRelayToggle.vue'
 
 const props = defineProps({ session: { type: Object, required: true } })
 const emit = defineEmits(['open'])

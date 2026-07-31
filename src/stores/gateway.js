@@ -27,6 +27,7 @@ function requireApplied(result) {
 }
 
 let unsubscribe = null
+let initPromise = null
 
 const EMPTY_STATE = {
   desiredEnabled: false,
@@ -51,8 +52,17 @@ export const useGatewayStore = defineStore('gateway', {
     sessions: [],
     testedDraft: null,
     initialized: false,
-    loading: false
+    loading: false,
+    relayPendingById: {}
   }),
+  getters: {
+    relaySessionFor: (state) => (sessionId) =>
+      state.sessions.find((item) =>
+        item.id === sessionId || item.sessionId === sessionId
+      ) || null,
+    relayPendingFor: (state) => (sessionId) =>
+      state.relayPendingById[sessionId] === true
+  },
   actions: {
     async init() {
       if (!unsubscribe) {
@@ -61,20 +71,22 @@ export const useGatewayStore = defineStore('gateway', {
         })
       }
       if (this.initialized) return
+      if (initPromise) return initPromise
       this.loading = true
-      try {
-        const [runtime, configuration, sessions] = await Promise.all([
-          ipc.getGatewayState(),
-          ipc.getGatewayConfiguration(),
-          ipc.listGatewaySessions()
-        ])
+      initPromise = Promise.all([
+        ipc.getGatewayState(),
+        ipc.getGatewayConfiguration(),
+        ipc.listGatewaySessions()
+      ]).then(([runtime, configuration, sessions]) => {
         this.runtime = { ...EMPTY_STATE, ...runtime }
         this.configuration = configuration
         this.sessions = sessions
         this.initialized = true
-      } finally {
+      }).finally(() => {
         this.loading = false
-      }
+        initPromise = null
+      })
+      return initPromise
     },
     async setDesiredEnabled(enabled) {
       this.runtime = {
@@ -147,10 +159,38 @@ export const useGatewayStore = defineStore('gateway', {
       this.testedDraft = null
     },
     async setSessionRelayEnabled(sessionId, enabled) {
-      const result = await ipc.setSessionRelayEnabled(sessionId, enabled)
-      await this.refreshSessions()
-      this.runtime = await ipc.getGatewayState()
-      return result
+      if (this.relayPendingById[sessionId]) {
+        throw Object.assign(new Error('该会话的转发状态正在更新'), {
+          code: 'GATEWAY_RELAY_BUSY'
+        })
+      }
+      this.relayPendingById = {
+        ...this.relayPendingById,
+        [sessionId]: true
+      }
+      try {
+        const result = await ipc.setSessionRelayEnabled(sessionId, Boolean(enabled))
+        if (result?.accepted === false) {
+          throw Object.assign(new Error('会话转发状态更新失败'), {
+            code: result.reason || 'GATEWAY_RELAY_REJECTED'
+          })
+        }
+        await this.refreshSessions()
+        this.runtime = await ipc.getGatewayState()
+        return result
+      } catch (error) {
+        await Promise.allSettled([
+          this.refreshSessions(),
+          ipc.getGatewayState().then((state) => {
+            this.runtime = { ...EMPTY_STATE, ...state }
+          })
+        ])
+        throw error
+      } finally {
+        const next = { ...this.relayPendingById }
+        delete next[sessionId]
+        this.relayPendingById = next
+      }
     },
     async resyncSession(sessionId) {
       const result = await ipc.resyncGatewaySession(sessionId)

@@ -168,6 +168,7 @@
               >
                 {{ pane.viewMode === 'history' ? '终端' : '历史' }}
               </a-button>
+              <GatewayRelayToggle v-if="pane.sessionId" :session-id="pane.sessionId" compact />
               <a-button
                 v-if="pane.sessionId && !gridFullscreen"
                 size="small"
@@ -306,6 +307,7 @@ import {
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
+import { useGatewayStore } from '../stores/gateway.js'
 import { matchesBinding } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { groupSessionsByProject } from '../sessionGrouping.js'
@@ -315,6 +317,7 @@ import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { compactPaneSessionIds } from '../paneCompaction.js'
 import PaneHistory from '../components/PaneHistory.vue'
 import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
+import GatewayRelayToggle from '../components/gateway/GatewayRelayToggle.vue'
 import { terminalSizeChanged } from '../terminalResize.js'
 import {
   reconcileSessionPanes,
@@ -333,6 +336,7 @@ defineOptions({ name: 'SessionDetail' })
 const router = useRouter()
 const sessions = useSessionsStore()
 const settings = useSettingsStore()
+const gateway = useGatewayStore()
 const sessionListHidden = ref(false)
 watch(sessionListHidden, (v) => {
   sessions.setSessionListHidden(v)
@@ -999,7 +1003,7 @@ onActivated(activateWorkbench)
 onDeactivated(deactivateWorkbench)
 
 onMounted(async () => {
-  await Promise.all([sessions.init(), settings.load()])
+  await Promise.all([sessions.init(), settings.load(), gateway.init()])
   await sessions.loadWorkbench()
   sessionListHidden.value = sessions.workbench.sessionListHidden // sync after load
   const savedIds = sessions.workbench.paneSessionIds

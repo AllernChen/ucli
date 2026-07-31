@@ -115,21 +115,23 @@
           <a-list-item>
             <template #actions>
               <a-switch
-                :checked="item.relayEnabled"
-                :aria-label="`${item.name || item.id} 转发开关`"
-                @change="(enabled) => gateway.setSessionRelayEnabled(item.id, enabled)"
+                :checked="relayView(item).selected"
+                :loading="gateway.relayPendingFor(item.id)"
+                :disabled="gateway.relayPendingFor(item.id)"
+                :aria-label="`${item.name || '当前会话'} 转发开关`"
+                @change="(enabled) => toggleSessionRelay(item.id, enabled)"
               />
               <a-button
                 size="small"
                 :disabled="!item.relayEnabled"
-                :aria-label="`重新同步 ${item.name || item.id}`"
+                :aria-label="`重新同步 ${item.name || '当前会话'}`"
                 @click="gateway.resyncSession(item.id)"
               >重新同步</a-button>
             </template>
             <a-list-item-meta :title="item.name || item.id">
               <template #description>
                 {{ item.adapterId }}<span v-if="item.provider"> / {{ item.provider }}</span>
-                · {{ item.status }} · 根消息 {{ item.routeStatus }} · 队列 {{ item.queueCount }}
+                · {{ relayView(item).label }} · {{ item.status }} · 根消息 {{ item.routeStatus }} · 队列 {{ item.queueCount }}
               </template>
             </a-list-item-meta>
           </a-list-item>
@@ -168,6 +170,7 @@ import {
   gatewayTargetLabel,
   gatewayTimeLabel
 } from '../../gatewayPresentation.js'
+import { deriveGatewayRelayControl } from '../../gatewayRelayPresentation.js'
 import { useGatewayStore } from '../../stores/gateway.js'
 
 const props = defineProps({ open: Boolean })
@@ -190,6 +193,22 @@ const canApply = computed(() =>
   Boolean(gateway.testedDraft?.testId) &&
   testedSignature.value === signature.value
 )
+
+function relayView(item) {
+  return deriveGatewayRelayControl({
+    session: item,
+    gatewayPhase: gateway.runtime.phase,
+    pending: gateway.relayPendingFor(item.id)
+  })
+}
+
+async function toggleSessionRelay(sessionId, enabled) {
+  try {
+    await gateway.setSessionRelayEnabled(sessionId, enabled)
+  } catch (error) {
+    message.error(error?.message || '会话转发状态更新失败')
+  }
+}
 
 watch(() => props.open, async (open) => {
   if (!open) return

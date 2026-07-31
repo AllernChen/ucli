@@ -141,6 +141,7 @@ import {
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
+import { useGatewayStore } from '../stores/gateway.js'
 import SessionCard from '../components/SessionCard.vue'
 import { groupSessionsByProject } from '../sessionGrouping.js'
 import { ipc } from '../ipc.js'
@@ -148,6 +149,7 @@ import { ipc } from '../ipc.js'
 const router = useRouter()
 const sessions = useSessionsStore()
 const settings = useSettingsStore()
+const gateway = useGatewayStore()
 
 const showNew = ref(false)
 const creating = ref(false)
@@ -190,7 +192,7 @@ const cliGroups = computed(() => {
 })
 
 onMounted(async () => {
-  await Promise.all([sessions.init(), settings.load()])
+  await Promise.all([sessions.init(), settings.load(), gateway.init()])
   form.value.adapterId = settings.defaultAdapter || 'claude'
   form.value.tier = settings.defaultTier || 'safety-rules'
   form.value.cwd = settings.defaultCwd || ''
