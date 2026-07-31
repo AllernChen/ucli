@@ -95,6 +95,7 @@ export class FakeGatewayChannel {
   constructor() {
     this.rootCounter = 0
     this.roots = []
+    this.threadStarters = []
     this.rootUpdates = []
     this.decisions = []
     this.plans = []
@@ -135,6 +136,12 @@ export class FakeGatewayChannel {
       code: this.updateError
     })
     this.rootUpdates.push({ route: { ...route }, view: structuredClone(view) })
+  }
+
+  async sendSessionThreadStarter(route) {
+    const messageId = `thread-starter-${this.threadStarters.length + 1}`
+    this.threadStarters.push({ messageId, route: { ...route } })
+    return { messageId }
   }
 
   async sendDecision(route, view) {

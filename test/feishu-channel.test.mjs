@@ -239,6 +239,13 @@ test('outbound cards use thread replies and failures expose stable error codes',
     input: { card },
     options: { replyTo: 'root-1', replyInThread: true }
   })
+  assert.deepEqual(await channel.sendSessionThreadStarter({ rootMessageId: 'root-1' }), {
+    messageId: 'message-2'
+  })
+  assert.deepEqual(sdk.sent[1].options, {
+    replyTo: 'root-1',
+    replyInThread: true
+  })
   await channel.updateCard('root-1', card)
   assert.deepEqual(sdk.updates[0], { messageId: 'root-1', card })
 

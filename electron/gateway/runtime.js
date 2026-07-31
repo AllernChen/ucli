@@ -702,6 +702,15 @@ export class GatewayRuntime {
         channelFingerprint: this.fingerprint
       })
     }
+    const threadStarter = await this.channel.sendSessionThreadStarter(route)
+    if (threadStarter?.messageId) {
+      this.routeStore.saveMessageRoute({
+        messageId: threadStarter.messageId,
+        sessionId,
+        routeKind: 'thread',
+        channelFingerprint: this.fingerprint
+      })
+    }
     return route
   }
 

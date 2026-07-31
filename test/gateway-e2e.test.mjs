@@ -367,7 +367,7 @@ test('real database restart retains only Gateway configuration, routes, and audi
     }
     assert.deepEqual(reopened.getGatewayDiagnosticCounts(), {
       sessionRoutes: 1,
-      messageRoutes: 5,
+      messageRoutes: 6,
       decisionAudits: 0
     })
   } finally {

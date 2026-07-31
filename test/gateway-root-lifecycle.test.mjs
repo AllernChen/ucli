@@ -25,10 +25,22 @@ test('selected ready sessions create and reuse one persistent root', async () =>
   assert.equal(channel.roots.length, 1)
   assert.equal(routes.routes[0].rootMessageId, 'root-1')
   assert.equal(routes.routes[0].rootThreadId, 'thread-1')
+  assert.deepEqual(channel.threadStarters, [{
+    messageId: 'thread-starter-1',
+    route: routes.routes[0]
+  }])
+  const threadStarterRoute = routes.messageRoutes.find(
+    (route) => route.messageId === 'thread-starter-1'
+  )
+  assert.equal(threadStarterRoute?.active, true)
+  assert.equal(threadStarterRoute?.sessionId, 'session-1')
+  assert.equal(threadStarterRoute?.routeKind, 'thread')
+  assert.equal(threadStarterRoute?.channelFingerprint, 'fingerprint-1')
   assert.equal(JSON.stringify(channel.roots[0]).includes('terminal'), false)
 
   await runtime.resyncSession('session-1')
   assert.equal(channel.roots.length, 1)
+  assert.equal(channel.threadStarters.length, 1)
   assert.equal(channel.rootUpdates.length, 1)
 })
 

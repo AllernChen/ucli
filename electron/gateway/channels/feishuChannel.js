@@ -275,6 +275,14 @@ export class FeishuChannel {
     return this.sendCard(buildRootCard(view))
   }
 
+  async sendSessionThreadStarter(route) {
+    return this.sendCard(buildNoticeCard({
+      message: '会话话题已创建。请直接在此话题回复任务，UCLI 会转发到当前会话。'
+    }), {
+      replyTo: route.rootMessageId
+    })
+  }
+
   async updateSessionRoot(route, view) {
     await this.updateCard(route.rootMessageId, buildRootCard(view))
     return route
