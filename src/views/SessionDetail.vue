@@ -896,7 +896,7 @@ async function saveNote() {
 // Import historical sessions
 const showImport = ref(false)
 const importCwd = ref('')
-const importDiscovered = ref({ claude: [], codex: [], opencode: [] })
+const importDiscovered = ref({ claude: [], codex: [], opencode: [], ucode: [] })
 const importSelection = ref({})
 const importTier = ref('safety-rules')
 const importing = ref(false)
@@ -936,12 +936,12 @@ async function pickImportDir() {
 async function discoverImport(dir) {
   discoveringImport.value = true
   importError.value = ''
-  importDiscovered.value = { claude: [], codex: [], opencode: [] }
+  importDiscovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
   importSelection.value = {}
   try {
     importDiscovered.value = await ipc.discoverSessions(dir)
   } catch (e) {
-    importDiscovered.value = { claude: [], codex: [], opencode: [] }
+    importDiscovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
     importError.value = e?.message || String(e)
   } finally {
     discoveringImport.value = false
@@ -974,7 +974,7 @@ async function doImport() {
       }
     }
     showImport.value = false
-    importDiscovered.value = { claude: [], codex: [], opencode: [] }
+    importDiscovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
     importSelection.value = {}
     message.success(`已导入 ${count} 个会话`)
   } catch (e) { message.error('导入失败：' + (e?.message || e)) }

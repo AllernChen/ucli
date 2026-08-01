@@ -131,6 +131,79 @@ test('a routed plan reply submits revision text through the decision API', async
   assert.equal(port.calls.turns.length, 0)
 })
 
+test('a numeric reply to a routed single-choice decision selects that option', async () => {
+  const port = createPort([session('session-1')])
+  const routes = new MemoryRouteStore()
+  routes.upsertSessionRoute({ sessionId: 'session-1', relayEnabled: true })
+  const channel = new FakeGatewayChannel()
+  const runtime = new GatewayRuntime({ port, routeStore: routes })
+  await runtime.attachConnectedChannel({
+    channel,
+    config: FEISHU_CONFIG,
+    fingerprint: 'fingerprint-1'
+  })
+  const event = decisionEvent()
+  event.decision.options = [
+    { id: 'allow_once', label: '1. Allow once' },
+    { id: 'allow_session', label: '2. Allow similar commands' },
+    { id: 'deny', label: '3. Deny' }
+  ]
+  await runtime.handleGatewayEvent(event)
+
+  const result = await runtime.handleInboundMessage({
+    messageId: 'choice-message',
+    chatId: 'oc_group',
+    chatType: 'group',
+    senderOpenId: 'ou_operator',
+    text: '2',
+    rawContentType: 'text',
+    supported: true,
+    replyToMessageId: channel.decisions[0].messageId,
+    rootId: null,
+    threadId: null
+  })
+
+  assert.deepEqual(result, { accepted: true })
+  assert.deepEqual(port.calls.decisions[0].response, {
+    optionId: 'allow_session'
+  })
+  assert.equal(port.calls.turns.length, 0)
+})
+
+test('an out-of-range reply to a decision is not forwarded as a new task', async () => {
+  const port = createPort([session('session-1')])
+  const routes = new MemoryRouteStore()
+  routes.upsertSessionRoute({ sessionId: 'session-1', relayEnabled: true })
+  const channel = new FakeGatewayChannel()
+  const runtime = new GatewayRuntime({ port, routeStore: routes })
+  await runtime.attachConnectedChannel({
+    channel,
+    config: FEISHU_CONFIG,
+    fingerprint: 'fingerprint-1'
+  })
+  await runtime.handleGatewayEvent(decisionEvent())
+
+  const result = await runtime.handleInboundMessage({
+    messageId: 'invalid-choice-message',
+    chatId: 'oc_group',
+    chatType: 'group',
+    senderOpenId: 'ou_operator',
+    text: '3',
+    rawContentType: 'text',
+    supported: true,
+    replyToMessageId: channel.decisions[0].messageId,
+    rootId: null,
+    threadId: null
+  })
+
+  assert.deepEqual(result, {
+    accepted: false,
+    reason: 'invalid_decision_response'
+  })
+  assert.equal(port.calls.decisions.length, 0)
+  assert.equal(port.calls.turns.length, 0)
+})
+
 test('large safe decisions expose full content from memory without persisting it', async () => {
   const port = createPort([session('session-1')])
   const routes = new MemoryRouteStore()

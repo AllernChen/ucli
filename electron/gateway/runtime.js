@@ -73,6 +73,14 @@ function decisionKey(sessionId, decisionId) {
   return JSON.stringify([sessionId, decisionId])
 }
 
+function routedDecisionResponse(decision, text) {
+  if (decision?.kind === 'plan_review') return { action: 'revise', text }
+  if (decision?.responseMode === 'free_text') return { text }
+  if (decision?.responseMode !== 'single' || !/^\d+$/.test(text)) return null
+  const option = decision.options?.[Number(text) - 1]
+  return option ? { optionId: option.id, _routedText: true } : null
+}
+
 export class GatewayRuntime {
   constructor({
     port,
@@ -410,11 +418,7 @@ export class GatewayRuntime {
         explicitRoute.decisionId
       ))
       if (pending) {
-        const response = pending.decision.kind === 'plan_review'
-          ? { action: 'revise', text }
-          : pending.decision.responseMode === 'free_text'
-            ? { text }
-            : null
+        const response = routedDecisionResponse(pending.decision, text)
         if (response) {
           const result = await this.decisionRegistry.resolve({
             sessionId,
@@ -436,6 +440,7 @@ export class GatewayRuntime {
           }
           return result
         }
+        return this._rejectInbound(message, 'invalid_decision_response')
       }
     }
 
@@ -548,6 +553,7 @@ export class GatewayRuntime {
       ambiguous_session: '当前有多个可用会话，请回复到对应会话入口。',
       unsupported_content: '当前只支持文本任务。',
       invalid_task: '任务内容为空或过长，无法转发。',
+      invalid_decision_response: '请回复决策中列出的数字选项。',
       queue_full: '当前会话最多等待 5 个任务，请稍后重试。'
     }
     if (message?.messageId && messages[reason]) {

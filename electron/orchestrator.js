@@ -8,16 +8,13 @@ import { startHookServer } from './permission/hookServer.js'
 import { describeBlacklist } from './permission/blacklist.js'
 import { classify, toClassifierInput, parsePattern } from './permission/classifier.js'
 import { DEFAULT_RULESET, upgradeDefaultRuleset } from './permission/defaultRules.js'
-import { claudeDescriptor } from './adapters/claudeAdapter.js'
-import { codexDescriptor } from './adapters/codexAdapter.js'
-import { openCodeDescriptor, resolveOpenCodeLaunch } from './adapters/openCodeAdapter.js'
+import { createAdapterMap } from './adapterRegistry.js'
 import { TIER } from './adapters/cliAdapter.js'
 import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
 import { annotateImportedSessions, isSafeNativeSessionId, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
-import { listOpenCodeSessions } from './openCodeSessions.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
@@ -45,7 +42,7 @@ const DEFAULT_SETTINGS = {
 export function createOrchestrator() {
   initLogger()
   log('createOrchestrator() — starting')
-  const adapters = new Map([claudeDescriptor, codexDescriptor, openCodeDescriptor].map((d) => [d.id, d]))
+  const adapters = createAdapterMap()
   const sessions = new Map() // sessionId -> { adapter?, session, status, stats, lastActivity, createdAt, _dirtyStats, _lastCumTokens }
   let mainWindow = null
   let rulesets = { default: structuredClone(DEFAULT_RULESET) }
@@ -80,8 +77,10 @@ export function createOrchestrator() {
           }
         : null
     },
-    exportOpenCode: (nativeSessionId) => {
-      const launch = resolveOpenCodeLaunch()
+    exportOpenCode: (nativeSessionId, adapterId = 'opencode') => {
+      const resolveLaunch = adapters.get(adapterId)?.resolveLaunch
+      if (!resolveLaunch) throw new Error('history provider unsupported')
+      const launch = resolveLaunch()
       return exportOpenCodeSession(nativeSessionId, {
         executable: launch.file,
         prefixArgs: launch.prefixArgs,
@@ -172,8 +171,8 @@ export function createOrchestrator() {
           db.updateSession(s.id, { native_session_id: cliSessionId, name: sessionName })
         }
       }
-      if (!cliSessionId && s.cwd && s.adapterId === 'opencode') {
-        const found = await findOpenCodeSessionIndex(s.cwd, s.createdAt)
+      if (!cliSessionId && s.cwd && adapters.get(s.adapterId)?.listNativeSessions) {
+        const found = await findCompatibleSessionIndex(s.adapterId, s.cwd, s.createdAt)
         if (found) {
           cliSessionId = found.sessionId
           sessionName = sessionName || found.name
@@ -402,13 +401,14 @@ export function createOrchestrator() {
       engine,
       settings: { hookRunnerPath, hookPort: null, ruleset: rulesets[rulesetId] }
     })
+    const costAvailable = descriptor.costAvailable !== false
     const entry = {
       adapter, session,
       status: 'starting', // not yet started — renderer calls start-adapter when pane is ready
       stats: {
         tokens: { input: 0, output: 0 },
-        costUsd: adapterId === 'opencode' ? null : 0,
-        costAvailable: adapterId !== 'opencode',
+        costUsd: costAvailable ? 0 : null,
+        costAvailable,
         turns: 0,
         approvals: { autoAllowed: 0, confirmed: 0, denied: 0 }
       },
@@ -771,10 +771,12 @@ export function createOrchestrator() {
     return best
   }
 
-  /** Recover a blank UCLI OpenCode record only from a nearby native session. */
-  async function findOpenCodeSessionIndex(cwd, nearTs) {
+  /** Recover a blank compatible CLI record only from a nearby native session. */
+  async function findCompatibleSessionIndex(adapterId, cwd, nearTs) {
     if (!nearTs) return null
-    const found = await listOpenCodeSessions(cwd)
+    const listNativeSessions = adapters.get(adapterId)?.listNativeSessions
+    if (!listNativeSessions) return null
+    const found = await listNativeSessions(cwd)
     if (!found.length) return null
     let best = null
     let bestDist = Infinity
@@ -782,7 +784,7 @@ export function createOrchestrator() {
       const dist = Math.abs((session.startedAt || session.updatedAt || 0) - nearTs)
       if (dist < bestDist) { bestDist = dist; best = session }
     }
-    // Prevent binding an old UCLI session to an unrelated OpenCode record.
+    // Prevent binding an old UCLI session to an unrelated native record.
     return bestDist <= 10 * 60 * 1000 ? best : null
   }
 
@@ -972,7 +974,7 @@ export function createOrchestrator() {
     })
 
     // Discover all CLI sessions for a cwd, grouped by adapter type.
-    // Returns { claude: [...], codex: [...], opencode: [...] }
+    // Returns native sessions grouped by adapter id.
     ipcMain.handle('session:discover', async (_e, cwd) => {
       const imported = new Set()
       for (const e of sessions.values()) {
@@ -982,11 +984,18 @@ export function createOrchestrator() {
         .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
         .slice(0, 30)
 
-      const openCode = await listOpenCodeSessions(cwd)
+      const compatibleGroups = await Promise.all(
+        Array.from(adapters.values())
+          .filter((descriptor) => descriptor.listNativeSessions)
+          .map(async (descriptor) => [
+            descriptor.id,
+            decorate(await descriptor.listNativeSessions(cwd))
+          ])
+      )
       return {
         claude: decorate(listClaudeSessionsByCwd(cwd)),
         codex: decorate(listCodexSessions(cwd)),
-        opencode: decorate(openCode)
+        ...Object.fromEntries(compatibleGroups)
       }
     })
 

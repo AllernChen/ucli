@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-01
+
+### Added
+
+- 新增 U-Code 一等适配器，支持原生 TUI、新建/恢复、按工作目录发现历史会话、完整历史视图与 Gateway 转发。
+- 设置页支持检测、安装和升级 `ucode`；安装与升级直接使用 `AllernChen/U-Code` 的 GitHub Latest Release 原生二进制，不依赖 npm。
+- U-Code 支持 UCLI 三档权限映射，以及逐会话模型、Token、轮次与费用可用性统计。
+
+### Changed
+
+- OpenCode 系谱适配核心改为运行时配置，在共享权限、统计、历史和 Gateway 解析能力的同时，隔离 OpenCode 与 U-Code 的可执行文件、配置环境变量和原生会话数据。
+
+### Fixed
+
+- Codex Gateway 现在识别新版 `custom_tool_call` 审批事件，将 1/2/3 选项推送到飞书，并把飞书数字回复映射回 Codex TUI。
+
 ## [0.5.3] - 2026-07-31
 
 ### Added

@@ -16,9 +16,9 @@ jobs:
       matrix:
         include:
           - platform: macOS
-            os: macos-26-intel
+            os: macos-26
             dist_command: npm run dist:mac
-            verify_command: npm run verify:release -- --platform darwin --arch x64
+            verify_command: npm run verify:release -- --platform darwin --arch arm64
             artifact_name: release-macos
             artifact_path: |
               dist/*.dmg

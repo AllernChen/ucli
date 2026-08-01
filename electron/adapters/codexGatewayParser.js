@@ -87,9 +87,10 @@ function questionDecision(payload) {
 }
 
 function permissionDecision(payload) {
-  const input = safeArguments(payload.arguments)
-  const detail = typeof payload.arguments === 'string'
-    ? payload.arguments
+  const rawInput = payload.arguments ?? payload.input
+  const input = safeArguments(rawInput)
+  const detail = typeof rawInput === 'string'
+    ? rawInput
     : JSON.stringify(input)
   return {
     decisionId: payload.call_id,
@@ -97,8 +98,9 @@ function permissionDecision(payload) {
     title: `Allow ${payload.name || 'Codex tool'}?`,
     summary: detail || payload.name || '',
     options: [
-      { id: 'allow_once', label: 'Allow once' },
-      { id: 'deny', label: 'Deny' }
+      { id: 'allow_once', label: '1. Allow once' },
+      { id: 'allow_session', label: '2. Allow similar commands this session' },
+      { id: 'deny', label: '3. Deny' }
     ],
     responseMode: 'single'
   }
@@ -170,7 +172,7 @@ export function parseCodexGatewayState(lines = [], previousCursor = 0) {
 
     if (
       record.type === 'response_item' &&
-      payload.type === 'function_call' &&
+      (payload.type === 'function_call' || payload.type === 'custom_tool_call') &&
       payload.call_id &&
       !resolved.has(payload.call_id)
     ) {

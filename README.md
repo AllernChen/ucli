@@ -4,12 +4,12 @@
 
 # UCLI
 
-UCLI 是一个支持 macOS 与 Windows 的本地 AI CLI 工作台。它在用户与已安装的 Claude Code、Codex、OpenCode 之间转发终端输入输出，保留原生 CLI 交互，同时提供多会话编排、安全确认、历史恢复和使用统计。
+UCLI 是一个支持 macOS 与 Windows 的本地 AI CLI 工作台。它在用户与已安装的 Claude Code、Codex、OpenCode、U-Code 之间转发终端输入输出，保留原生 CLI 交互，同时提供多会话编排、安全确认、历史恢复和使用统计。
 
 ## 主要功能
 
-- 原生终端代理：不重做 Claude Code、Codex 的交互界面。
-- 会话发现：按工作目录发现并导入 Claude Code、Codex 历史会话。
+- 原生终端代理：不重做 Claude Code、Codex、OpenCode、U-Code 的交互界面。
+- 会话发现：按工作目录发现并导入 Claude Code、Codex、OpenCode、U-Code 历史会话。
 - 多会话工作台：支持 1、2、4 窗格、导航收缩、会话列表隐藏、单窗格/分屏整体全屏，以及 `Tab`/`Shift+Tab` 切换会话。
 - 完整历史视图：每个窗格可独立切换原生终端与只读历史，支持分页、文本选择和滚动查看最早对话，切回终端时保留原生 TUI 状态。
 - 后台通知：Claude/Codex 需要确认、等待用户输入或完成任务时显示系统通知；通知标明会话与操作类型，点击后定位到对应工作台窗格。
@@ -20,7 +20,7 @@ UCLI 是一个支持 macOS 与 Windows 的本地 AI CLI 工作台。它在用户
 - CLI 管理：在设置页检测、安装和升级受支持的 AI CLI。
 - 桌面体验：单实例、关闭到托盘、后台审批/任务完成提醒、托盘恢复和退出清理；macOS 终端支持 `Command+C`/`Command+V`。
 
-当前适配 Claude Code、Codex 和 OpenCode。OpenCode 支持原生 TUI、新建/恢复会话、按目录发现历史、三档权限映射，以及逐会话模型、Token、轮次统计；官方导出未提供费用时会显示“不可用”，不会误报为 `$0`。其他 CLI 可按统一 adapter 接口继续扩展。
+当前适配 Claude Code、Codex、OpenCode 和 [U-Code](https://github.com/AllernChen/U-Code)。OpenCode 与 U-Code 均支持原生 TUI、新建/恢复会话、按目录发现历史、完整历史视图、三档权限映射，以及逐会话模型、Token、轮次统计；CLI 导出未提供费用时会显示“不可用”，不会误报为 `$0`。两者的可执行文件、配置环境和原生会话数据彼此隔离。
 
 ## 下载与安装
 
@@ -36,7 +36,7 @@ Windows 与 macOS 版本均可从 [GitHub Releases](https://github.com/AllernChe
 ## 快速开始
 
 1. 安装并启动 UCLI。
-2. 在“设置”页面检测本机 Claude Code 或 Codex。
+2. 在“设置”页面检测本机 AI CLI；U-Code 的安装和升级由 UCLI 从 [GitHub Latest Release](https://github.com/AllernChen/U-Code/releases/latest) 下载对应平台的原生二进制。
 3. 在“会话”页面新建会话并选择工作目录。
 4. UCLI 会扫描该目录对应的原生历史会话，可选择导入或新建。
 5. 在工作台选择 1、2、4 窗格管理多个会话。
@@ -58,7 +58,7 @@ macOS:  ~/Library/Application Support/ucli/ucli.db
 Windows: %APPDATA%\ucli\ucli.db
 ```
 
-开发版使用同一系统数据根目录下独立的 `ucli-dev` 目录，不会与安装版争用单实例锁或数据库。UCLI 不会删除 Claude Code、Codex 自己保存的原生会话。
+开发版使用同一系统数据根目录下独立的 `ucli-dev` 目录，不会与安装版争用单实例锁或数据库。UCLI 不会删除 Claude Code、Codex、OpenCode、U-Code 自己保存的原生会话。
 
 ## 本地开发
 

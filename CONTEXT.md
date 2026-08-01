@@ -16,5 +16,6 @@ UCLI 是一个支持 macOS 与 Windows 的桌面工作台与本地代理。它�
 
 - 桌面端负责工作台、目录选择、会话管理、规则、设置和统计。
 - 终端窗格保持 AI CLI 原生交互体验。
-- 当前支持 Claude Code、Codex 与 OpenCode；其他适配器按统一 adapter 接口扩展。
+- 当前支持 Claude Code、Codex、OpenCode 与 U-Code；其他适配器按统一 adapter 接口扩展。
 - OpenCode 保持原生 TUI，通过官方 `--session` 恢复源会话，并通过 `OPENCODE_CONFIG_CONTENT` 的会话级 `permission` 映射 UCLI 三档安全模式；该覆盖不修改用户配置文件。
+- U-Code 复用 OpenCode 兼容协议，但通过独立的 `ucode` 可执行文件、`UCODE_CONFIG_CONTENT`、`UCODE_CLIENT` 和 U-Code 原生数据目录运行；不得使用 OpenCode 进程读取或恢复 U-Code 会话。

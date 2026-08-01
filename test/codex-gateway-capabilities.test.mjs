@@ -102,6 +102,23 @@ test('Codex parses request_user_input and native approval decisions', async () =
   assert.match(approval.summary, /npm test/)
 })
 
+test('Codex pending custom tool call becomes a three-choice approval decision', async () => {
+  const { parseCodexGatewayState } = await parser()
+  const state = parseCodexGatewayState(fixtureLines('codex-approval'))
+
+  assert.deepEqual(state.events.map((event) => event.type), [
+    'turn_started',
+    'decision_required'
+  ])
+  assert.equal(state.currentDecision.kind, 'permission')
+  assert.match(state.currentDecision.summary, /npm test/)
+  assert.deepEqual(state.currentDecision.options.map((option) => option.id), [
+    'allow_once',
+    'allow_session',
+    'deny'
+  ])
+})
+
 test('Codex cursor deduplicates events and explicit turn_aborted maps to interruption', async () => {
   const { parseCodexGatewayState } = await parser()
   const lines = fixtureLines('codex-result')
@@ -151,5 +168,28 @@ test('Codex adapter verifies current decisions and owns provider input', async (
     { accepted: true }
   )
   assert.deepEqual(writes, ['Implement the approved plan.\r'])
+  await adapter.dispose()
+})
+
+test('Codex adapter writes the second approval choice back to the TUI', async () => {
+  const adapter = new CodexAdapter({
+    session: { id: 'session-1', cwd: 'F:\\projects\\ucli' },
+    engine: null,
+    settings: {}
+  })
+  const writes = []
+  adapter._gatewayDecision = (await parser()).parseCodexGatewayState(
+    fixtureLines('codex-approval')
+  ).currentDecision
+  adapter.writeInput = (value) => {
+    writes.push(value)
+    return true
+  }
+
+  assert.deepEqual(
+    await adapter.respondDecision('call-approval', { optionId: 'allow_session' }),
+    { accepted: true }
+  )
+  assert.deepEqual(writes, ['\x1b[B', '\r'])
   await adapter.dispose()
 })

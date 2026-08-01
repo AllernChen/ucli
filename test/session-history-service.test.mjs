@@ -97,6 +97,30 @@ test('history service loads Codex and OpenCode without accepting renderer paths 
   )
 })
 
+test('history service routes U-Code history through its own compatible exporter', async () => {
+  const exportCalls = []
+  const service = createSessionHistoryService({
+    resolveSession: (id) => id === 'ucli-ucode'
+      ? {
+          id,
+          adapterId: 'ucode',
+          cwd: 'F:\\projects\\ucli',
+          cliSessionId: 'ses_ucode'
+        }
+      : null,
+    exportOpenCode: async (sessionId, adapterId) => {
+      exportCalls.push({ sessionId, adapterId })
+      return openCodeExport
+    }
+  })
+
+  const page = await service.getPage('ucli-ucode', { limit: 100 })
+
+  assert.equal(page.source, 'ucode')
+  assert.equal(page.items.filter((item) => item.role === 'assistant').length, 2)
+  assert.deepEqual(exportCalls, [{ sessionId: 'ses_ucode', adapterId: 'ucode' }])
+})
+
 test('history service caches parsed provider history for at most five seconds', async () => {
   let clock = 1000
   let reads = 0

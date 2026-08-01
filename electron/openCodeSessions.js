@@ -74,3 +74,36 @@ export function listOpenCodeSessions(cwd, timeoutMs = 15_000) {
     timer.unref?.()
   })
 }
+
+export function listSessionsWithLaunch(cwd, launch, timeoutMs = 15_000) {
+  return new Promise((resolve) => {
+    const child = spawn(launch.file, [
+      ...(launch.prefixArgs || []),
+      'session', 'list', '--format', 'json', '--max-count', '200'
+    ], {
+      cwd: cwd || process.cwd(),
+      env: process.env,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    let stdout = ''
+    let settled = false
+    let timer = null
+    const finish = (sessions) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(sessions)
+    }
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString() })
+    child.once('error', () => finish([]))
+    child.once('close', (code) => {
+      finish(code === 0 ? parseOpenCodeSessionList(stdout, cwd) : [])
+    })
+    timer = setTimeout(() => {
+      child.kill()
+      finish([])
+    }, timeoutMs)
+    timer.unref?.()
+  })
+}

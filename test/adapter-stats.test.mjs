@@ -194,7 +194,10 @@ test('OpenCode retries native session discovery until its session is listed', as
   }
 
   adapter._scheduleSessionDiscovery()
-  await new Promise((resolve) => setTimeout(resolve, 30))
+  const deadline = Date.now() + 1000
+  while (scans < 2 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
 
   assert.equal(scans, 2)
   assert.equal(adapter.session.cliSessionId, 'ses_recovered')

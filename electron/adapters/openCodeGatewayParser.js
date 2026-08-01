@@ -14,7 +14,7 @@ function titleOf(markdown, fallback) {
   return markdown?.match(/^\s*#\s+(.+)$/m)?.[1]?.trim() || fallback
 }
 
-function questionDecision(part) {
+function questionDecision(part, displayName = 'OpenCode') {
   const questions = Array.isArray(part?.state?.input?.questions)
     ? part.state.input.questions
     : []
@@ -32,7 +32,7 @@ function questionDecision(part) {
   return {
     decisionId: part.id,
     kind: 'question',
-    title: questions[0]?.header || 'OpenCode question',
+    title: questions[0]?.header || `${displayName} question`,
     summary: questions
       .map((question) => question?.question)
       .filter((question) => typeof question === 'string' && question.trim())
@@ -47,12 +47,12 @@ function questionDecision(part) {
   }
 }
 
-function permissionDecision(part) {
+function permissionDecision(part, displayName = 'OpenCode') {
   const detail = part?.state?.input ? JSON.stringify(part.state.input) : part?.tool || ''
   return {
     decisionId: part.state.permissionID,
     kind: 'permission',
-    title: `Allow ${part.tool || 'OpenCode tool'}?`,
+    title: `Allow ${part.tool || `${displayName} tool`}?`,
     summary: detail,
     options: [
       { id: 'allow_once', label: 'Allow once' },
@@ -62,12 +62,12 @@ function permissionDecision(part) {
   }
 }
 
-function planDecision(message) {
+function planDecision(message, displayName = 'OpenCode') {
   const markdown = messageText(message)
   return {
     decisionId: `plan:${message.info.id}`,
     kind: 'plan_review',
-    title: titleOf(markdown, 'OpenCode plan'),
+    title: titleOf(markdown, `${displayName} plan`),
     summary: markdown.slice(0, 1000),
     options: [
       { id: 'execute', label: 'Execute plan' },
@@ -92,7 +92,8 @@ function eventKey(type, id, state = '') {
   return `${type}:${id || 'unknown'}:${state}`
 }
 
-export function parseOpenCodeGatewayState(source = {}, previousCursor = []) {
+export function parseOpenCodeGatewayState(source = {}, previousCursor = [], identity = {}) {
+  const displayName = identity.displayName || 'OpenCode'
   const messages = messagesOf(source)
   const seen = cursorSet(previousCursor)
   const nextCursor = new Set(seen)
@@ -126,9 +127,9 @@ export function parseOpenCodeGatewayState(source = {}, previousCursor = []) {
       if (status !== 'pending' && status !== 'running') continue
       let decision = null
       if (part.tool === 'question' && part.id) {
-        decision = questionDecision(part)
+        decision = questionDecision(part, displayName)
       } else if (part.state?.permissionID) {
-        decision = permissionDecision(part)
+        decision = permissionDecision(part, displayName)
       }
       if (!decision) continue
       currentDecision = decision
@@ -145,7 +146,7 @@ export function parseOpenCodeGatewayState(source = {}, previousCursor = []) {
     if (info.agent === 'plan') {
       const markdown = messageText(message)
       if (!markdown.trim()) continue
-      const decision = planDecision(message)
+      const decision = planDecision(message, displayName)
       currentDecision = decision
       pushNew(eventKey('plan', info.id, info.time?.completed), {
         type: 'decision_required',
@@ -172,7 +173,8 @@ export function parseOpenCodeGatewayState(source = {}, previousCursor = []) {
   }
 }
 
-export function extractOpenCodePlanSnapshot(source = {}, decisionId) {
+export function extractOpenCodePlanSnapshot(source = {}, decisionId, identity = {}) {
+  const displayName = identity.displayName || 'OpenCode'
   const message = messagesOf(source).find((candidate) =>
     candidate?.info?.role === 'assistant' &&
     candidate.info.agent === 'plan' &&
@@ -182,15 +184,16 @@ export function extractOpenCodePlanSnapshot(source = {}, decisionId) {
   if (!message || !markdown.trim()) return null
   return {
     kind: 'plan_review',
-    title: titleOf(markdown, 'OpenCode plan'),
+    title: titleOf(markdown, `${displayName} plan`),
     markdown,
-    provider: 'opencode',
+    provider: identity.provider || 'opencode',
     nativeSessionId: source?.info?.id || null,
     capturedAt: occurredAt(message, true)
   }
 }
 
-export function extractOpenCodeResultSnapshot(source = {}, turnId) {
+export function extractOpenCodeResultSnapshot(source = {}, turnId, identity = {}) {
+  const displayName = identity.displayName || 'OpenCode'
   const messages = messagesOf(source)
   const start = messages.findIndex((message) =>
     message?.info?.role === 'user' && message.info.id === turnId
@@ -211,9 +214,9 @@ export function extractOpenCodeResultSnapshot(source = {}, turnId) {
   if (!completedAt || !text.length) return null
   return {
     kind: 'result',
-    title: 'OpenCode result',
+    title: `${displayName} result`,
     markdown: text.join('\n\n'),
-    provider: 'opencode',
+    provider: identity.provider || 'opencode',
     nativeSessionId: source?.info?.id || null,
     turnId,
     capturedAt: completedAt

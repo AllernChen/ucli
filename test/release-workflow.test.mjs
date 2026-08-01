@@ -9,3 +9,8 @@ test('release publishing is idempotent for an existing tag release', () => {
   assert.match(workflow, /gh release upload "\$\{GITHUB_REF_NAME\}" release\/\* --clobber/)
   assert.match(workflow, /gh release create "\$\{GITHUB_REF_NAME\}"/)
 })
+
+test('macOS release targets arm64 so the published U-Code binary can run', () => {
+  assert.match(workflow, /os: macos-26\s+[\s\S]*verify_command: npm run verify:release -- --platform darwin --arch arm64/)
+  assert.doesNotMatch(workflow, /macos-26-intel|--platform darwin --arch x64/)
+})

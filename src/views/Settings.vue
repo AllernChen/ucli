@@ -190,7 +190,7 @@
 
     <a-card title="关于" class="settings-card">
       <p>UCLI — 多 CLI 编排工作台</p>
-      <p class="muted">集成 Claude Code、Codex 与 OpenCode 的卡片式编排 GUI，提供三档权限管控与使用统计。</p>
+      <p class="muted">集成 Claude Code、Codex、OpenCode 与 U-Code 的卡片式编排 GUI，提供三档权限管控与使用统计。</p>
     </a-card>
     <GatewayConfigDrawer
       v-model:open="gatewayDrawerOpen"

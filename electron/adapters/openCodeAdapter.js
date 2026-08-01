@@ -161,6 +161,22 @@ export function buildOpenCodeConfigContent(tier, ruleset = {}) {
   return JSON.stringify({ permission: buildOpenCodePermission(tier, ruleset) })
 }
 
+export function buildOpenCodeEnvironment(
+  session,
+  ruleset = {},
+  runtime = OPEN_CODE_RUNTIME,
+  baseEnv = process.env
+) {
+  return {
+    ...baseEnv,
+    UCLI_SESSION_ID: session.id,
+    [runtime.clientEnv]: 'ucli',
+    [runtime.configEnv]: buildOpenCodeConfigContent(session.tier, ruleset),
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor'
+  }
+}
+
 export function buildOpenCodeArgs(session) {
   // Let OpenCode load the provider/model recorded in the source session.
   // Passing --model here would override that historical configuration.
@@ -284,35 +300,51 @@ export function resolveOpenCodeCmdShim(shimPath, content, pathExists = existsSyn
   return { file: executable, prefixArgs: [script] }
 }
 
-export function classifyOpenCodeNotification(message) {
+export function classifyOpenCodeNotification(message, displayName = DISPLAY_NAME) {
   const normalized = String(message || '').toLowerCase()
   if (normalized.includes('permission') || normalized.includes('approval')) {
-    return { kind: 'approval', operation: '确认 OpenCode 操作' }
+    return { kind: 'approval', operation: `确认 ${displayName} 操作` }
   }
   if (normalized.includes('question') || normalized.includes('input') || normalized.includes('response')) {
-    return { kind: 'approval', operation: '回答 OpenCode 问题' }
+    return { kind: 'approval', operation: `回答 ${displayName} 问题` }
   }
   if (normalized.includes('error')) {
-    return { kind: 'approval', operation: '处理 OpenCode 错误' }
+    return { kind: 'approval', operation: `处理 ${displayName} 错误` }
   }
   return { kind: 'complete', operation: '任务完成' }
 }
 
+export function createOpenCodeRuntime(overrides = {}) {
+  return {
+    id: 'opencode',
+    displayName: DISPLAY_NAME,
+    clientEnv: 'OPENCODE_CLIENT',
+    configEnv: 'OPENCODE_CONFIG_CONTENT',
+    resolveLaunch: resolveOpenCodeLaunch,
+    listSessions: listOpenCodeSessions,
+    ...overrides
+  }
+}
+
+export const OPEN_CODE_RUNTIME = createOpenCodeRuntime()
+
 export class OpenCodeAdapter extends BaseAdapter {
-  constructor({ session, engine, settings }) {
-    super({ id: 'opencode', displayName: DISPLAY_NAME, session, engine })
+  constructor({ session, engine, settings }, runtime = OPEN_CODE_RUNTIME) {
+    super({ id: runtime.id, displayName: runtime.displayName, session, engine })
+    this.runtime = runtime
+    this.gatewayIdentity = { provider: runtime.id, displayName: runtime.displayName }
     this.ruleset = settings.ruleset || {}
     this.ptyProc = null
     this._sessionDiscoveryTimer = null
     this._sessionDiscoveryAttempts = 0
-    this.sessionFinder = listOpenCodeSessions
+    this.sessionFinder = runtime.listSessions
     this.sessionDiscoveryDelayMs = SESSION_DISCOVERY_DELAY_MS
     this.sessionDiscoveryRetryMs = SESSION_DISCOVERY_RETRY_MS
     this.sessionDiscoveryMaxAttempts = SESSION_DISCOVERY_MAX_ATTEMPTS
     this._startedAt = Date.now()
     this._osc9Pending = ''
     this.statsReader = settings.statsReader || ((sessionId) => {
-      const launch = resolveOpenCodeLaunch()
+      const launch = this.runtime.resolveLaunch()
       return loadOpenCodeSessionStats(sessionId, {
         executable: launch.file,
         prefixArgs: launch.prefixArgs
@@ -324,7 +356,7 @@ export class OpenCodeAdapter extends BaseAdapter {
     this._gatewayDecision = null
     this._gatewayRespondedDecisions = new Set()
     this.gatewayReader = settings.gatewayReader || ((sessionId) => {
-      const launch = resolveOpenCodeLaunch()
+      const launch = this.runtime.resolveLaunch()
       return exportOpenCodeSession(sessionId, {
         executable: launch.file,
         prefixArgs: launch.prefixArgs,
@@ -343,7 +375,10 @@ export class OpenCodeAdapter extends BaseAdapter {
     const parsed = consumeOsc9Notifications(this._osc9Pending, text)
     this._osc9Pending = parsed.pending
     for (const message of parsed.messages) {
-      this.emitEvent({ type: 'attention', ...classifyOpenCodeNotification(message) })
+      this.emitEvent({
+        type: 'attention',
+        ...classifyOpenCodeNotification(message, this.runtime.displayName)
+      })
     }
     this.emitEvent({ type: 'terminal', data: text })
     this._scheduleSessionDiscovery()
@@ -430,7 +465,7 @@ export class OpenCodeAdapter extends BaseAdapter {
     const source = await this._readGatewaySource()
     if (!source || this._disposed) return
     this._gatewaySource = source
-    const state = parseOpenCodeGatewayState(source, this._gatewayCursor)
+    const state = parseOpenCodeGatewayState(source, this._gatewayCursor, this.gatewayIdentity)
     this._gatewayCursor = state.cursor
     this._gatewayDecision = state.currentDecision &&
       !this._gatewayRespondedDecisions.has(state.currentDecision.decisionId)
@@ -446,7 +481,7 @@ export class OpenCodeAdapter extends BaseAdapter {
     const source = await this._readGatewaySource()
     if (!source) return
     this._gatewaySource = source
-    this._gatewayCursor = parseOpenCodeGatewayState(source).cursor
+    this._gatewayCursor = parseOpenCodeGatewayState(source, [], this.gatewayIdentity).cursor
   }
 
   get gatewayCapabilities() {
@@ -464,13 +499,13 @@ export class OpenCodeAdapter extends BaseAdapter {
   async getLatestPlanSnapshot(decisionId) {
     const source = await this._readGatewaySource() || this._gatewaySource
     if (source) this._gatewaySource = source
-    return extractOpenCodePlanSnapshot(source, decisionId)
+    return extractOpenCodePlanSnapshot(source, decisionId, this.gatewayIdentity)
   }
 
   async getLatestResultSnapshot(turnId) {
     const source = await this._readGatewaySource() || this._gatewaySource
     if (source) this._gatewaySource = source
-    return extractOpenCodeResultSnapshot(source, turnId)
+    return extractOpenCodeResultSnapshot(source, turnId, this.gatewayIdentity)
   }
 
   async respondDecision(decisionId, response) {
@@ -498,23 +533,16 @@ export class OpenCodeAdapter extends BaseAdapter {
     this._sessionDiscoveryAttempts = 0
     await this._primeGatewayCursor()
     if (!pty) {
-      this._write('\x1b[31mnode-pty 未加载，无法启动 OpenCode 终端模式\x1b[0m\r\n')
+      this._write(`\x1b[31mnode-pty 未加载，无法启动 ${this.runtime.displayName} 终端模式\x1b[0m\r\n`)
       this.emitEvent({ type: 'error', message: 'node-pty not available' })
       return
     }
 
     const args = buildOpenCodeArgs(this.session)
-    const env = {
-      ...process.env,
-      UCLI_SESSION_ID: this.session.id,
-      OPENCODE_CLIENT: 'ucli',
-      OPENCODE_CONFIG_CONTENT: buildOpenCodeConfigContent(this.session.tier, this.ruleset),
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor'
-    }
+    const env = buildOpenCodeEnvironment(this.session, this.ruleset, this.runtime)
 
     try {
-      const launch = resolveOpenCodeLaunch()
+      const launch = this.runtime.resolveLaunch()
       this.ptyProc = pty.spawn(launch.file, [...launch.prefixArgs, ...args], {
         name: 'xterm-256color',
         cols: 120,
@@ -524,7 +552,7 @@ export class OpenCodeAdapter extends BaseAdapter {
       })
       this.ptyProc.onData((data) => this._write(data))
       this.ptyProc.onExit(({ exitCode }) => {
-        this._write(`\r\n\x1b[90mOpenCode process exited (code ${exitCode})\x1b[0m\r\n`)
+        this._write(`\r\n\x1b[90m${this.runtime.displayName} process exited (code ${exitCode})\x1b[0m\r\n`)
         this.emitEvent({ type: 'exit', code: exitCode })
         this.emitGatewayEvent({
           type: 'session_stopped',
@@ -545,8 +573,11 @@ export class OpenCodeAdapter extends BaseAdapter {
       // Start discovery independently of terminal output and retry if needed.
       this._scheduleSessionDiscovery()
     } catch (err) {
-      this._write(`\x1b[31mOpenCode PTY spawn failed: ${err?.message}\x1b[0m\r\n`)
-      this.emitEvent({ type: 'error', message: 'OpenCode PTY spawn failed: ' + (err?.message || String(err)) })
+      this._write(`\x1b[31m${this.runtime.displayName} PTY spawn failed: ${err?.message}\x1b[0m\r\n`)
+      this.emitEvent({
+        type: 'error',
+        message: `${this.runtime.displayName} PTY spawn failed: ${err?.message || String(err)}`
+      })
     }
   }
 
@@ -601,5 +632,8 @@ export const openCodeDescriptor = {
   displayName: DISPLAY_NAME,
   icon: ICON,
   models: ['default'],
+  costAvailable: false,
+  resolveLaunch: resolveOpenCodeLaunch,
+  listNativeSessions: listOpenCodeSessions,
   create: (opts) => new OpenCodeAdapter(opts)
 }

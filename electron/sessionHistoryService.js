@@ -203,10 +203,10 @@ export function createSessionHistoryService({
     if (session.adapterId === 'codex') {
       return readTranscript(resolveCodexTranscript(session), parseCodexHistory)
     }
-    if (session.adapterId === 'opencode') {
+    if (session.adapterId === 'opencode' || session.adapterId === 'ucode') {
       let source
       try {
-        source = await exportOpenCode(session.cliSessionId)
+        source = await exportOpenCode(session.cliSessionId, session.adapterId)
       } catch {
         source = null
       }

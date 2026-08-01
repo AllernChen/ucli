@@ -84,11 +84,15 @@ export class DecisionRegistry {
         }
         this._tokens.delete(actionToken)
       } else {
+        const acceptsRoutedOption =
+          response?._routedText === true &&
+          entry.decision.responseMode === 'single' &&
+          entry.decision.options.some((option) => option.id === response?.optionId)
         const acceptsRoutedText = (
           entry.decision.responseMode === 'free_text' ||
           (entry.decision.kind === 'plan_review' && response?.action === 'revise')
         ) && typeof response?.text === 'string' && response.text.trim()
-        if (!acceptsRoutedText) {
+        if (!acceptsRoutedText && !acceptsRoutedOption) {
           return { accepted: false, reason: 'invalid_action_token' }
         }
       }
@@ -97,7 +101,11 @@ export class DecisionRegistry {
     entry.status = 'resolving'
     let result
     try {
-      const { actionToken: _ignored, ...providerResponse } = response || {}
+      const {
+        actionToken: _ignored,
+        _routedText: _ignoredRoutedText,
+        ...providerResponse
+      } = response || {}
       result = await this.responder(
         entry.sessionId,
         decisionId,
