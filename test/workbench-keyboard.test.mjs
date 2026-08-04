@@ -93,6 +93,18 @@ test('changing split count preserves existing terminal pane instances', () => {
   assert.deepEqual(reduced.removed, expanded.panes.slice(1))
 })
 
+test('saved sessions repopulate empty pane instances during workbench restoration', () => {
+  const terminal = { id: 'restored-terminal' }
+  const restored = reconcileSessionPanes([
+    { id: 'pane-0', sessionId: null, term: terminal },
+    { id: 'pane-1', sessionId: null }
+  ], 2, (index) => ['claude-a', 'codex-b'][index])
+
+  assert.equal(restored.panes[0].sessionId, 'claude-a')
+  assert.equal(restored.panes[0].term, terminal)
+  assert.equal(restored.panes[1].sessionId, 'codex-b')
+})
+
 test('pane fullscreen enters and exits through the document fullscreen API', async () => {
   const pane = {
     async requestFullscreen() {

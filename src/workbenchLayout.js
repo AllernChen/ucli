@@ -1,10 +1,11 @@
 export function reconcileSessionPanes(currentPanes, count, resolveSessionId = () => null) {
   const panes = []
   for (let i = 0; i < count; i++) {
-    panes.push(currentPanes[i] || {
-      id: `pane-${i}`,
-      sessionId: resolveSessionId(i) || null
-    })
+    const current = currentPanes[i]
+    const savedSessionId = resolveSessionId(i) || null
+    panes.push(current
+      ? (!current.sessionId && savedSessionId ? { ...current, sessionId: savedSessionId } : current)
+      : { id: `pane-${i}`, sessionId: savedSessionId })
   }
   return {
     panes,

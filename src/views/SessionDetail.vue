@@ -535,6 +535,7 @@ function fmtNum(n) { return n ? n.toLocaleString() : '0' }
 // --- Pane management ---
 function createPanes(count) {
   const currentPanes = panes.value
+  const previousSessionIds = currentPanes.map((pane) => pane?.sessionId || null)
   // Only dispose panes that are actually removed. Existing pane instances keep
   // their xterm scrollback when switching between 1/2/4 pane layouts.
   for (let i = count; i < currentPanes.length; i++) {
@@ -556,7 +557,12 @@ function createPanes(count) {
       const needsInit = !panes.value[i]?.term
       if (needsInit) initPaneTerminal(i)
       const sessionId = panes.value[i]?.sessionId
-      if (needsInit && sessionId) {
+      const sessionChanged = previousSessionIds[i] !== sessionId
+      if ((needsInit || sessionChanged) && sessionId) {
+        if (sessionChanged) {
+          unsubscribePane(i)
+          panes.value[i]?.term?.clear()
+        }
         if (!unsubs[i]) subscribePaneTerminal(i, sessionId)
         const s = sessions.byId(sessionId)
         if (s?.status === 'offline') {
