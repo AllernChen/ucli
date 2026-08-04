@@ -19,6 +19,7 @@ export const ipc = {
   installUpdate: () => u.installUpdate(),
   getDiagnostics: () => u.getDiagnostics(),
   exportDiagnostics: () => u.exportDiagnostics(),
+  getCodexRuntime: () => u.getCodexRuntime(),
   // dialog
   pickDirectory: () => u.pickDirectory(),
   scanClaudeSessions: (cwd) => u.scanClaudeSessions(cwd),
@@ -64,6 +65,7 @@ export const ipc = {
     u.setSessionRelayEnabled(sessionId, enabled),
   resyncGatewaySession: (sessionId) => u.resyncGatewaySession(sessionId),
   onGatewayState: (handler) => u.onGatewayState(handler),
+  onCodexRuntime: (handler) => u.onCodexRuntime(handler),
   // workbench
   getWorkbench: () => u.getWorkbench(),
   saveWorkbench: (state) => u.saveWorkbench(state),

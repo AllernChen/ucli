@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-04
+
+### Fixed
+
+- 补齐 Codex runtime 的 renderer IPC 转发，修复工作台启动时报 `ipc.getCodexRuntime is not a function`、从而中断会话与分屏恢复的问题。
+
 ## [0.7.1] - 2026-08-04
 
 ### Fixed
