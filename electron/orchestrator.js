@@ -14,7 +14,10 @@ import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
-import { annotateImportedSessions, isSafeNativeSessionId, listClaudeTranscriptFiles, parseCodexProviderConfig, resolveCodexResumeProvider } from './sessionDiscovery.js'
+import { annotateImportedSessions, isSafeNativeSessionId, isSafeProviderName, listClaudeTranscriptFiles, resolveCodexResumeProvider } from './sessionDiscovery.js'
+import { readCodexRuntimeSnapshot, resolveCodexHome } from './codexRuntimeConfig.js'
+import { normaliseCodexProviderPolicy, reconcileCodexRuntimeProvider, requiresCodexProcessRestart, resolveCodexProviderPolicy } from './codexProviderPolicy.js'
+import { createCodexConfigWatcher } from './codexConfigWatcher.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
@@ -35,6 +38,7 @@ const DEFAULT_SETTINGS = {
   defaultTier: TIER.SAFETY_RULES,
   defaultAdapter: 'claude',
   defaultCwd: '',
+  codexConfigDir: '',
   language: 'zh-CN',
   theme: 'light'
 }
@@ -47,6 +51,7 @@ export function createOrchestrator() {
   let mainWindow = null
   let rulesets = { default: structuredClone(DEFAULT_RULESET) }
   let settings = { ...DEFAULT_SETTINGS }
+  let codexConfigWatcher = null
   let persistenceRecovery = null
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
@@ -96,6 +101,96 @@ export function createOrchestrator() {
   function scheduleFlush() {
     if (flushTimer) clearTimeout(flushTimer)
     flushTimer = setTimeout(() => getDb()?.flush(), 5000)
+  }
+
+  function getCodexHome() {
+    return resolveCodexHome({ configuredDir: settings.codexConfigDir })
+  }
+
+  function applyCodexProviderPolicy(session, { imported = false } = {}) {
+    const providerPolicy = normaliseCodexProviderPolicy(session.providerPolicy, { imported })
+    const sourceProvider = session.sourceProvider || (providerPolicy === 'source' ? session.provider : null)
+    const explicitProvider = session.explicitProvider || null
+    const runtime = readCodexRuntimeSnapshot(getCodexHome())
+    const resolved = resolveCodexProviderPolicy({
+      policy: providerPolicy,
+      sourceProvider,
+      explicitProvider,
+      runtime
+    })
+    return {
+      ...session,
+      providerPolicy,
+      sourceProvider,
+      explicitProvider,
+      provider: resolved.effectiveProvider,
+      providerOverride: resolved.providerOverride,
+      providerWarning: resolved.warning,
+      runtimeRevision: `${runtime.configPath || runtime.codexHome || ''}|${runtime.mtimeMs || 0}`,
+      canStart: resolved.canStart !== false
+    }
+  }
+
+  function hasActiveCodexProcess(entry) {
+    return Boolean(entry.adapter && entry.status !== 'offline' && entry.status !== 'starting')
+  }
+
+  function refreshCodexProviderRuntime(entry, { imported = false, isActive = hasActiveCodexProcess(entry) } = {}) {
+    const resolved = applyCodexProviderPolicy(entry.session, { imported })
+    const runtime = reconcileCodexRuntimeProvider({
+      session: entry.session,
+      resolved,
+      isActive
+    })
+    Object.assign(entry.session, resolved, runtime)
+    return entry.session
+  }
+
+  function assertCodexSessionCanStart(session) {
+    if (session.canStart === false) {
+      throw new Error('The selected Codex provider is no longer available. Choose another provider before starting.')
+    }
+  }
+
+  function publishCodexRuntime(snapshot) {
+    for (const [sessionId, entry] of sessions) {
+      if (entry.session.adapterId !== 'codex') continue
+      const next = refreshCodexProviderRuntime(entry, { imported: Boolean(entry.session.cliSessionId) })
+      const db = getDb()
+      if (db && !next.restartRequired) {
+        db.updateSession(sessionId, {
+          provider: next.provider,
+          source_provider: next.sourceProvider,
+          provider_policy: next.providerPolicy,
+          explicit_provider: next.explicitProvider
+        })
+        scheduleFlush()
+      }
+      send('session:event', {
+        sessionId,
+        type: 'codex-runtime',
+        provider: next.provider,
+        providerPolicy: next.providerPolicy,
+        explicitProvider: next.explicitProvider,
+        providerWarning: next.providerWarning,
+        pendingProvider: next.pendingProvider,
+        pendingProviderWarning: next.pendingProviderWarning,
+        restartRequired: next.restartRequired,
+        canStart: next.canStart
+      })
+    }
+    send('codex:runtime', snapshot)
+  }
+
+  function startCodexConfigWatcher() {
+    codexConfigWatcher?.stop()
+    codexConfigWatcher = createCodexConfigWatcher({
+      readSnapshot: () => readCodexRuntimeSnapshot(getCodexHome()),
+      onChange: publishCodexRuntime
+    })
+    const snapshot = codexConfigWatcher.start(getCodexHome())
+    send('codex:runtime', snapshot)
+    return snapshot
   }
 
   async function initPersistence() {
@@ -163,6 +258,8 @@ export function createOrchestrator() {
       let sessionName = s.name || null
       let provider = s.provider || null
       let sourceProvider = s.sourceProvider || null
+      let providerPolicy = s.providerPolicy || null
+      let explicitProvider = s.explicitProvider || null
       if (!cliSessionId && s.cwd && s.adapterId === 'claude') {
         const found = findClaudeSessionIndex(s.cwd, s.createdAt)
         if (found) {
@@ -184,8 +281,23 @@ export function createOrchestrator() {
         if (found) {
           provider = found.resumeProvider || null
           sourceProvider = found.sourceProvider || null
-          db.updateSession(s.id, { provider, source_provider: sourceProvider })
+          providerPolicy = 'source'
         }
+      }
+      const restoredSession = s.adapterId === 'codex'
+        ? applyCodexProviderPolicy({ provider, sourceProvider, providerPolicy, explicitProvider }, { imported: Boolean(cliSessionId) })
+        : { provider, sourceProvider, providerPolicy: null, explicitProvider: null, providerOverride: null, providerWarning: null }
+      provider = restoredSession.provider
+      sourceProvider = restoredSession.sourceProvider
+      providerPolicy = restoredSession.providerPolicy
+      explicitProvider = restoredSession.explicitProvider
+      if (s.adapterId === 'codex') {
+        db.updateSession(s.id, {
+          provider,
+          source_provider: sourceProvider,
+          provider_policy: providerPolicy,
+          explicit_provider: explicitProvider
+        })
       }
       const entry = {
         adapter: null, // offline — CLI process not running
@@ -195,6 +307,16 @@ export function createOrchestrator() {
           model: s.model, tier: s.tier, rulesetId: 'default',
           provider,
           sourceProvider,
+          providerPolicy,
+          explicitProvider,
+          providerOverride: restoredSession.providerOverride,
+          providerWarning: restoredSession.providerWarning,
+          pendingProvider: null,
+          pendingProviderOverride: null,
+          pendingProviderWarning: null,
+          pendingRuntimeRevision: null,
+          restartRequired: false,
+          canStart: restoredSession.canStart,
           cliSessionId,
           name: sessionName,
           taskNote: s.taskNote || ''
@@ -213,6 +335,7 @@ export function createOrchestrator() {
       engine.setSession(s.id, { tier: s.tier, rulesetId: 'default', ruleset: rulesets['default'] })
     }
     db.flush()
+    startCodexConfigWatcher()
   }
 
   // ---- hook runner path (dev vs packaged) ----
@@ -386,20 +509,31 @@ export function createOrchestrator() {
     if (!descriptor) throw new Error('unknown adapter: ' + adapterId)
     const cwd = config.cwd || settings.defaultCwd || process.cwd()
 
-    const session = {
+    let session = {
       id: sessionId, adapterId, cwd,
       model: config.model || null, tier, rulesetId,
       provider: config.provider || null,
       sourceProvider: config.sourceProvider || null,
+      providerPolicy: config.providerPolicy || null,
+      explicitProvider: config.explicitProvider || null,
       cliSessionId: config.cliSessionId || null,
       name: config.name || null,
       taskNote: ''
+    }
+    if (adapterId === 'codex') {
+      session = applyCodexProviderPolicy(session, { imported: Boolean(session.cliSessionId) })
+      assertCodexSessionCanStart(session)
     }
     engine.setSession(sessionId, { tier, rulesetId, ruleset: rulesets[rulesetId] })
     const adapter = descriptor.create({
       session,
       engine,
-      settings: { hookRunnerPath, hookPort: null, ruleset: rulesets[rulesetId] }
+      settings: {
+        hookRunnerPath,
+        hookPort: null,
+        ruleset: rulesets[rulesetId],
+        codexHome: adapterId === 'codex' ? getCodexHome() : null
+      }
     })
     const costAvailable = descriptor.costAvailable !== false
     const entry = {
@@ -433,6 +567,8 @@ export function createOrchestrator() {
         id: sessionId, project_path: cwd, adapter_id: adapterId,
         native_session_id: session.cliSessionId, name: session.name, task_note: '', tier, model: session.model,
         provider: session.provider, source_provider: session.sourceProvider,
+        provider_policy: session.providerPolicy,
+        explicit_provider: session.explicitProvider,
         status: 'starting', created_at: entry.createdAt
       })
       db.flush()
@@ -669,18 +805,15 @@ export function createOrchestrator() {
    *  Returns array of { sessionId, name, startedAt }. */
   function listCodexSessions(cwd) {
     try {
-      const sessionsDir = join(home, '.codex', 'sessions')
+      const codexHome = getCodexHome()
+      const sessionsDir = join(codexHome, 'sessions')
       if (!existsSync(sessionsDir)) return []
-      let providerConfig = parseCodexProviderConfig('')
-      try {
-        const configPath = join(home, '.codex', 'config.toml')
-        if (existsSync(configPath)) providerConfig = parseCodexProviderConfig(readFileSync(configPath, 'utf8'))
-      } catch { /* default to the built-in provider */ }
+      const providerConfig = readCodexRuntimeSnapshot(codexHome)
 
       // Build name lookup from session_index.jsonl
       const nameMap = new Map()
       try {
-        const idxPath = join(home, '.codex', 'session_index.jsonl')
+        const idxPath = join(codexHome, 'session_index.jsonl')
         if (existsSync(idxPath)) {
           const lines = readFileSync(idxPath, 'utf8').split('\n').filter(Boolean)
           for (const line of lines) {
@@ -776,7 +909,9 @@ export function createOrchestrator() {
     if (!nearTs) return null
     const listNativeSessions = adapters.get(adapterId)?.listNativeSessions
     if (!listNativeSessions) return null
-    const found = await listNativeSessions(cwd)
+    const found = adapterId === 'codex'
+      ? listCodexSessions(cwd)
+      : await listNativeSessions(cwd)
     if (!found.length) return null
     let best = null
     let bestDist = Infinity
@@ -796,6 +931,13 @@ export function createOrchestrator() {
       model: e.session.model,
       provider: e.session.provider || null,
       sourceProvider: e.session.sourceProvider || null,
+      providerPolicy: e.session.providerPolicy || null,
+      providerWarning: e.session.providerWarning || null,
+      explicitProvider: e.session.explicitProvider || null,
+      pendingProvider: e.session.pendingProvider || null,
+      pendingProviderWarning: e.session.pendingProviderWarning || null,
+      restartRequired: Boolean(e.session.restartRequired),
+      canStart: e.session.canStart !== false,
       tier: e.session.tier,
       status: e.status,
       stats: e.stats,
@@ -930,13 +1072,31 @@ export function createOrchestrator() {
     const descriptor = adapters.get(entry.session.adapterId)
     if (!descriptor) throw new Error('unknown adapter: ' + entry.session.adapterId)
     engine.setSession(sessionId, { tier: entry.session.tier, rulesetId: entry.session.rulesetId, ruleset: rulesets[entry.session.rulesetId] })
+    if (entry.session.adapterId === 'codex') {
+      const next = refreshCodexProviderRuntime(entry, {
+        imported: Boolean(entry.session.cliSessionId),
+        isActive: false
+      })
+      assertCodexSessionCanStart(next)
+      const db = getDb()
+      if (db) {
+        db.updateSession(sessionId, {
+          provider: entry.session.provider,
+          source_provider: entry.session.sourceProvider,
+          provider_policy: entry.session.providerPolicy,
+          explicit_provider: entry.session.explicitProvider
+        })
+        scheduleFlush()
+      }
+    }
     const adapter = descriptor.create({
       session: entry.session,
       engine,
       settings: {
         hookRunnerPath,
         hookPort: null,
-        ruleset: rulesets[entry.session.rulesetId]
+        ruleset: rulesets[entry.session.rulesetId],
+        codexHome: entry.session.adapterId === 'codex' ? getCodexHome() : null
       }
     })
     entry.adapter = adapter
@@ -956,6 +1116,49 @@ export function createOrchestrator() {
     await gatewayManager?.resyncSession(sessionId)
   }
 
+  function updateCodexProviderPolicy(sessionId, { policy, explicitProvider } = {}) {
+    const entry = sessions.get(sessionId)
+    if (!entry) throw new Error('no session')
+    if (entry.session.adapterId !== 'codex') throw new Error('provider policy is only available for Codex')
+    if (!['source', 'live', 'explicit'].includes(policy)) throw new Error('invalid Codex provider policy')
+    if (explicitProvider && !isSafeProviderName(explicitProvider)) throw new Error('invalid Codex provider')
+
+    const resolved = applyCodexProviderPolicy({
+      ...entry.session,
+      providerPolicy: policy,
+      explicitProvider: explicitProvider || entry.session.explicitProvider || null
+    }, { imported: Boolean(entry.session.cliSessionId) })
+    const runtime = reconcileCodexRuntimeProvider({
+      session: entry.session,
+      resolved,
+      isActive: hasActiveCodexProcess(entry)
+    })
+    Object.assign(entry.session, resolved, runtime)
+    const db = getDb()
+    if (db) {
+      db.updateSession(sessionId, {
+        provider: entry.session.provider,
+        source_provider: entry.session.sourceProvider,
+        provider_policy: entry.session.providerPolicy,
+        explicit_provider: entry.session.explicitProvider
+      })
+      scheduleFlush()
+    }
+    const result = {
+      provider: entry.session.provider,
+      sourceProvider: entry.session.sourceProvider,
+      providerPolicy: entry.session.providerPolicy,
+      explicitProvider: entry.session.explicitProvider,
+      providerWarning: entry.session.providerWarning,
+      pendingProvider: entry.session.pendingProvider,
+      pendingProviderWarning: entry.session.pendingProviderWarning,
+      restartRequired: entry.session.restartRequired,
+      canStart: entry.session.canStart
+    }
+    send('session:event', { sessionId, type: 'codex-runtime', ...result })
+    return result
+  }
+
   // ---- IPC registration ----
   function registerIpc() {
     registerGatewayIpc({ ipcMain, manager: gatewayManager })
@@ -966,6 +1169,9 @@ export function createOrchestrator() {
     ipcMain.handle('cli-tools:run', (_e, id, action) => runCliToolAction(id, action))
     ipcMain.handle('diagnostics:get', () => diagnostics.getReport())
     ipcMain.handle('diagnostics:export', () => diagnostics.exportReport())
+    ipcMain.handle('codex:runtime:get', () =>
+      codexConfigWatcher?.getSnapshot() || readCodexRuntimeSnapshot(getCodexHome())
+    )
     registerSessionHistoryIpc(ipcMain, historyService)
 
     ipcMain.handle('dialog:pick-directory', async () => {
@@ -986,7 +1192,7 @@ export function createOrchestrator() {
 
       const compatibleGroups = await Promise.all(
         Array.from(adapters.values())
-          .filter((descriptor) => descriptor.listNativeSessions)
+          .filter((descriptor) => descriptor.id !== 'codex' && descriptor.listNativeSessions)
           .map(async (descriptor) => [
             descriptor.id,
             decorate(await descriptor.listNativeSessions(cwd))
@@ -1013,6 +1219,25 @@ export function createOrchestrator() {
     ipcMain.handle('session:start-adapter', async (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (!e || !e.adapter) return false
+      if (e.session.adapterId === 'codex') {
+        const next = refreshCodexProviderRuntime(e, {
+          imported: Boolean(e.session.cliSessionId),
+          isActive: false
+        })
+        send('session:event', {
+          sessionId,
+          type: 'codex-runtime',
+          provider: next.provider,
+          providerPolicy: next.providerPolicy,
+          explicitProvider: next.explicitProvider,
+          providerWarning: next.providerWarning,
+          pendingProvider: next.pendingProvider,
+          pendingProviderWarning: next.pendingProviderWarning,
+          restartRequired: next.restartRequired,
+          canStart: next.canStart
+        })
+        assertCodexSessionCanStart(next)
+      }
       await hookReady
       e.adapter.hookPort = hookPort
       await e.adapter.start()
@@ -1066,6 +1291,27 @@ export function createOrchestrator() {
       if (!e) throw new Error('no session')
       if (!e.adapter) throw new Error('会话已离线，请先重新启动')
       if (!isSafeNativeSessionId(cliSessionId)) throw new Error('invalid native session id')
+      if (e.session.adapterId === 'codex') {
+        const next = refreshCodexProviderRuntime(e, {
+          imported: Boolean(e.session.cliSessionId),
+          isActive: hasActiveCodexProcess(e)
+        })
+        send('session:event', {
+          sessionId,
+          type: 'codex-runtime',
+          provider: next.provider,
+          providerPolicy: next.providerPolicy,
+          explicitProvider: next.explicitProvider,
+          providerWarning: next.providerWarning,
+          pendingProvider: next.pendingProvider,
+          pendingProviderWarning: next.pendingProviderWarning,
+          restartRequired: next.restartRequired,
+          canStart: next.canStart
+        })
+        if (requiresCodexProcessRestart(next)) {
+          throw new Error('Codex configuration changed. Restart this session before resuming it.')
+        }
+      }
       const result = await e.adapter.resume(cliSessionId)
       await gatewayManager?.resyncSession(sessionId)
       return result
@@ -1114,6 +1360,9 @@ export function createOrchestrator() {
       if (e) { e.session.name = name; const db = getDb(); if (db) { db.updateSession(sessionId, { name }); scheduleFlush() } }
       return true
     })
+    ipcMain.handle('session:update-codex-provider-policy', (_e, sessionId, policy) =>
+      updateCodexProviderPolicy(sessionId, policy)
+    )
 
     ipcMain.handle('rules:get', () => rulesets)
     ipcMain.handle('rules:update', (_e, next) => {
@@ -1189,6 +1438,10 @@ export function createOrchestrator() {
     ipcMain.handle('settings:update', (_e, s) => {
       settings = { ...settings, ...s }
       const db = getDb(); if (db) { db.saveSettings(settings); scheduleFlush() }
+      if (Object.prototype.hasOwnProperty.call(s || {}, 'codexConfigDir')) {
+        const snapshot = startCodexConfigWatcher()
+        publishCodexRuntime(snapshot)
+      }
       return true
     })
 
@@ -1236,6 +1489,8 @@ export function createOrchestrator() {
         clearTimeout(flushTimer)
         flushTimer = null
       }
+      codexConfigWatcher?.stop()
+      codexConfigWatcher = null
       for (const notification of approvalNotifications.values()) notification.close()
       approvalNotifications.clear()
       for (const notification of completionNotifications) notification.close()

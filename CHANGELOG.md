@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-04
+
+### Added
+
+- Codex 现在支持显式配置目录；优先级为 UCLI 设置、`CODEX_HOME`、用户目录下的 `.codex`。配置只读，UCLI 不会写入 CC Switch 或 Codex 的配置、认证和原生会话文件。
+- Codex 会话可选择“来源 Provider”“跟随当前”或“显式指定”策略；设置页会显示已脱敏的当前 Provider 和可用 Provider，并监听外部配置变化。
+
+### Changed
+
+- 新建 Codex 会话默认跟随当前 live 配置，导入的历史会话默认保留来源 Provider；Provider 已不可用时会回退到当前配置并在界面提示。正在运行的会话不会因外部配置变化自动重启。
+
+### Fixed
+
+- UCLI 重启时会按工作目录和创建时间恢复缺失的 Codex 原生会话 ID，重新打开会话时使用 `codex resume <id>`，不再误建新会话。
+
 ## [0.6.0] - 2026-08-01
 
 ### Added

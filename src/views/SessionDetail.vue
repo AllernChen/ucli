@@ -203,6 +203,29 @@
             <span class="pi-item">↓{{ fmtNum(sessions.byId(pane.sessionId)?.stats?.tokens?.output) }}</span>
             <span class="pi-item" v-if="sessions.byId(pane.sessionId)?.stats?.costUsd">${{ sessions.byId(pane.sessionId).stats.costUsd.toFixed(4) }}</span>
             <span class="pi-item">{{ sessions.byId(pane.sessionId)?.stats?.turns || 0 }} 轮</span>
+            <a-select
+              v-if="isCodexSession(pane.sessionId)"
+              :value="sessions.byId(pane.sessionId)?.providerPolicy || 'live'"
+              size="small"
+              style="width: 108px"
+              @click.stop
+              @change="setCodexProviderPolicy(pane.sessionId, $event)"
+            >
+              <a-select-option value="source">来源 Provider</a-select-option>
+              <a-select-option value="live">跟随当前</a-select-option>
+              <a-select-option value="explicit">显式指定</a-select-option>
+            </a-select>
+            <a-select
+              v-if="isCodexSession(pane.sessionId) && sessions.byId(pane.sessionId)?.providerPolicy === 'explicit'"
+              :value="sessions.byId(pane.sessionId)?.explicitProvider || codexRuntime?.currentProvider"
+              size="small"
+              style="width: 130px"
+              @click.stop
+              @change="setCodexExplicitProvider(pane.sessionId, $event)"
+            >
+              <a-select-option v-for="provider in codexRuntime?.availableProviders || []" :key="provider" :value="provider">{{ provider }}</a-select-option>
+            </a-select>
+            <span v-if="isCodexSession(pane.sessionId) && codexProviderStatus(pane.sessionId)" class="pi-item provider-warning">{{ codexProviderStatus(pane.sessionId) }}</span>
             <span class="pi-item sid">{{ sessions.byId(pane.sessionId)?.id?.slice(0,8) }}</span>
           </div>
           <!-- Terminal container -->
@@ -380,6 +403,47 @@ const activePane = computed({
 // Each pane: { id, sessionId, viewMode, term, fitAddon, resizeObserver }
 const panes = ref([])
 const assignedPaneCount = computed(() => panes.value.filter((pane) => pane.sessionId).length)
+const codexRuntime = ref(null)
+let stopCodexRuntimeListener = null
+
+function isCodexSession(sessionId) {
+  return sessions.byId(sessionId)?.adapterId === 'codex'
+}
+
+function codexProviderStatus(sessionId) {
+  const session = sessions.byId(sessionId)
+  if (!session) return ''
+  if (session.restartRequired) {
+    return session.pendingProviderWarning === 'explicit_provider_unavailable'
+      ? '显式 Provider 已不可用；请重新选择后再重启。'
+      : `配置已变更；重启后将使用 ${session.pendingProvider || '当前配置'}。`
+  }
+  if (session.providerWarning === 'explicit_provider_unavailable') {
+    return '显式 Provider 已不可用；请重新选择后启动。'
+  }
+  return session.providerWarning ? '来源 Provider 已不可用，将使用当前配置。' : ''
+}
+
+async function setCodexProviderPolicy(sessionId, policy) {
+  const session = sessions.byId(sessionId)
+  const explicitProvider = policy === 'explicit'
+    ? (session?.explicitProvider || codexRuntime.value?.currentProvider || null)
+    : undefined
+  try {
+    await sessions.updateCodexProviderPolicy(sessionId, { policy, explicitProvider })
+    message.success('Codex Provider 策略已保存；正在运行的会话不会自动重启。')
+  } catch (error) {
+    message.error('保存 Provider 策略失败：' + (error?.message || error))
+  }
+}
+
+async function setCodexExplicitProvider(sessionId, explicitProvider) {
+  try {
+    await sessions.updateCodexProviderPolicy(sessionId, { policy: 'explicit', explicitProvider })
+  } catch (error) {
+    message.error('保存 Codex Provider 失败：' + (error?.message || error))
+  }
+}
 // Refs storage for pane terminal containers
 const paneRefs = {}
 const paneRootRefs = {}
@@ -1023,6 +1087,8 @@ onDeactivated(deactivateWorkbench)
 
 onMounted(async () => {
   await Promise.all([sessions.init(), settings.load(), gateway.init()])
+  codexRuntime.value = await ipc.getCodexRuntime().catch(() => null)
+  stopCodexRuntimeListener = ipc.onCodexRuntime((snapshot) => { codexRuntime.value = snapshot })
   await sessions.loadWorkbench()
   sessionListHidden.value = sessions.workbench.sessionListHidden // sync after load
   const savedIds = sessions.workbench.paneSessionIds
@@ -1051,6 +1117,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  stopCodexRuntimeListener?.()
   deactivateWorkbench()
   for (let i = 0; i < panes.value.length; i++) {
     destroyPaneTerminal(i)

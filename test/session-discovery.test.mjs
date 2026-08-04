@@ -6,13 +6,14 @@ import {
   claudeProjectHash,
   findClaudeTranscriptFile,
   findCodexTranscriptFile,
+  findCodexTranscriptFileInHome,
   findClaudeProjectDirectory,
   isSafeNativeSessionId,
   listClaudeTranscriptFiles,
   parseCodexProviderConfig,
   resolveCodexResumeProvider
 } from '../electron/sessionDiscovery.js'
-import { buildCodexArgs } from '../electron/adapters/codexAdapter.js'
+import { buildCodexArgs, codexDescriptor } from '../electron/adapters/codexAdapter.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -69,6 +70,53 @@ test('provider transcript resolvers return only the requested native session fil
     assert.equal(findClaudeTranscriptFile(home, 'F:\\projects\\ucli', '../escape'), null)
     assert.equal(findCodexTranscriptFile(home, '../escape'), null)
   } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('Codex transcript resolver supports an explicit CODEX_HOME directory', () => {
+  const codexHome = mkdtempSync(join(tmpdir(), 'ucli-codex-explicit-home-'))
+  const sessionId = 'codex-configured-home'
+  const transcript = join(codexHome, 'sessions', '2026', '08', '04', `rollout-${sessionId}.jsonl`)
+  mkdirSync(join(codexHome, 'sessions', '2026', '08', '04'), { recursive: true })
+  writeFileSync(transcript, '{}\n')
+  try {
+    assert.equal(findCodexTranscriptFileInHome(codexHome, sessionId), transcript)
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true })
+  }
+})
+
+test('Codex descriptor discovers the native session needed after a UCLI restart', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'ucli-codex-restart-'))
+  const codexDir = join(home, '.codex', 'sessions', '2026', '07', '31')
+  const cwd = 'F:\\projects\\ucli'
+  const sessionId = '019fb7c7-daa8-7c31-af6e-a8372324ec6e'
+  const startedAt = '2026-07-31T10:45:56.141Z'
+  mkdirSync(codexDir, { recursive: true })
+  writeFileSync(
+    join(codexDir, `rollout-2026-07-31-${sessionId}.jsonl`),
+    JSON.stringify({
+      type: 'session_meta',
+      timestamp: startedAt,
+      payload: { id: sessionId, timestamp: startedAt, cwd }
+    }) + '\n'
+  )
+
+  const previousHome = process.env.HOME
+  const previousProfile = process.env.USERPROFILE
+  delete process.env.HOME
+  process.env.USERPROFILE = home
+  try {
+    const sessions = await codexDescriptor.listNativeSessions(cwd)
+    assert.deepEqual(sessions.map(({ sessionId: id, startedAt: timestamp }) => ({ id, timestamp })), [
+      { id: sessionId, timestamp: Date.parse(startedAt) }
+    ])
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    if (previousProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = previousProfile
     rmSync(home, { recursive: true, force: true })
   }
 })

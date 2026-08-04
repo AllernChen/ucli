@@ -63,6 +63,10 @@ export const useSessionsStore = defineStore('sessions', {
         icon: adapter?.icon || '•',
         cwd: config.cwd,
         model: config.model || adapter?.models?.[0] || null,
+        provider: config.provider || null,
+        sourceProvider: config.sourceProvider || null,
+        providerPolicy: config.providerPolicy || (config.cliSessionId ? 'source' : 'live'),
+        explicitProvider: config.explicitProvider || null,
         tier: config.tier,
         status: 'starting',
         createdAt: Date.now(),
@@ -113,6 +117,12 @@ export const useSessionsStore = defineStore('sessions', {
       const row = this.sessions.find((s) => s.id === id)
       if (row) row.displayName = name
       await ipc.updateSessionName(id, name)
+    },
+    async updateCodexProviderPolicy(id, policy) {
+      const result = await ipc.updateCodexProviderPolicy(id, policy)
+      const row = this.sessions.find((s) => s.id === id)
+      if (row) Object.assign(row, result)
+      return result
     },
 
     // Workbench state persistence
@@ -191,6 +201,11 @@ export const useSessionsStore = defineStore('sessions', {
           id: s.id, adapterId: s.adapterId, displayName,
           icon: adapter?.icon || '•', cwd: s.cwd, model: s.model, tier: s.tier, status: s.status,
           stats: s.stats, cliSessionId: s.cliSessionId || s.nativeSessionId || null,
+          provider: s.provider || null, sourceProvider: s.sourceProvider || null,
+          providerPolicy: s.providerPolicy || null, explicitProvider: s.explicitProvider || null,
+          providerWarning: s.providerWarning || null, pendingProvider: s.pendingProvider || null,
+          pendingProviderWarning: s.pendingProviderWarning || null,
+          restartRequired: Boolean(s.restartRequired), canStart: s.canStart !== false,
           startedAt: s.startedAt || null,
           lastActivity: isImport ? ('📋 已离线 · ' + fmtShort(s.startedAt)) : '已离线',
           lastActivityTs: s.updatedAt || s.createdAt || s.startedAt || 0,
@@ -206,6 +221,15 @@ export const useSessionsStore = defineStore('sessions', {
         if (s.cliSessionId) row.cliSessionId = s.cliSessionId
         if (s.lastActivity) row.lastActivity = s.lastActivity
         if (s.taskNote != null) row.taskNote = s.taskNote
+        if (s.provider != null) row.provider = s.provider
+        if (s.sourceProvider != null) row.sourceProvider = s.sourceProvider
+        if (s.providerPolicy != null) row.providerPolicy = s.providerPolicy
+        if (s.explicitProvider != null) row.explicitProvider = s.explicitProvider
+        if (s.providerWarning !== undefined) row.providerWarning = s.providerWarning
+        if (s.pendingProvider !== undefined) row.pendingProvider = s.pendingProvider
+        if (s.pendingProviderWarning !== undefined) row.pendingProviderWarning = s.pendingProviderWarning
+        if (s.restartRequired !== undefined) row.restartRequired = s.restartRequired
+        if (s.canStart !== undefined) row.canStart = s.canStart
         if (s.createdAt) row.createdAt = s.createdAt
         if (s.updatedAt) {
           row.updatedAt = s.updatedAt
@@ -226,6 +250,15 @@ export const useSessionsStore = defineStore('sessions', {
           row.lastActivity = `进程退出 (${evt.code})`
         } else if (evt.type === 'error') {
           row.lastActivity = `错误: ${evt.message}`
+        } else if (evt.type === 'codex-runtime') {
+          if (evt.provider != null) row.provider = evt.provider
+          if (evt.providerPolicy != null) row.providerPolicy = evt.providerPolicy
+          if (evt.explicitProvider != null) row.explicitProvider = evt.explicitProvider
+          if (evt.providerWarning !== undefined) row.providerWarning = evt.providerWarning
+          if (evt.pendingProvider !== undefined) row.pendingProvider = evt.pendingProvider
+          if (evt.pendingProviderWarning !== undefined) row.pendingProviderWarning = evt.pendingProviderWarning
+          if (evt.restartRequired !== undefined) row.restartRequired = evt.restartRequired
+          if (evt.canStart !== undefined) row.canStart = evt.canStart
         } else if (evt.type === 'stats_update') {
           // Live stats from transcript extraction
           row.stats.tokens = { input: evt.usage.inputTokens, output: evt.usage.outputTokens }

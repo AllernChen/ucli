@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
+import { parseCodexProviderIdentity } from './codexRuntimeConfig.js'
 
 /** Keep discovered native sessions visible so the UI can explain why a
  * transcript cannot be selected again. Removed UCLI sessions are not present
@@ -99,8 +100,13 @@ export function findClaudeTranscriptFile(home, cwd, sessionId) {
 }
 
 export function findCodexTranscriptFile(home, sessionId) {
-  if (!home || !isSafeNativeSessionId(sessionId)) return null
-  const sessionsRoot = join(home, '.codex', 'sessions')
+  if (!home) return null
+  return findCodexTranscriptFileInHome(join(home, '.codex'), sessionId)
+}
+
+export function findCodexTranscriptFileInHome(codexHome, sessionId) {
+  if (!codexHome || !isSafeNativeSessionId(sessionId)) return null
+  const sessionsRoot = join(codexHome, 'sessions')
   if (!existsSync(sessionsRoot)) return null
 
   let years
@@ -129,20 +135,66 @@ export function findCodexTranscriptFile(home, sessionId) {
   return null
 }
 
+/** List Codex native sessions for restart recovery. Codex can write multiple
+ * rollout files for the same resumed session, so preserve its earliest start
+ * time while retaining the latest activity time. */
+export function listCodexTranscriptSessions(home, cwd) {
+  if (!home) return []
+  return listCodexTranscriptSessionsInHome(join(home, '.codex'), cwd)
+}
+
+export function listCodexTranscriptSessionsInHome(codexHome, cwd) {
+  if (!codexHome || !cwd) return []
+  const sessionsRoot = join(codexHome, 'sessions')
+  if (!existsSync(sessionsRoot)) return []
+  const targetCwd = normalizeCwd(cwd)
+  const sessions = new Map()
+
+  let years
+  try { years = readdirSync(sessionsRoot) } catch { return [] }
+  for (const year of years) {
+    const yearDirectory = join(sessionsRoot, year)
+    let months
+    try { months = readdirSync(yearDirectory) } catch { continue }
+    for (const month of months) {
+      const monthDirectory = join(yearDirectory, month)
+      let days
+      try { days = readdirSync(monthDirectory) } catch { continue }
+      for (const day of days) {
+        const dayDirectory = join(monthDirectory, day)
+        let files
+        try { files = readdirSync(dayDirectory) } catch { continue }
+        for (const file of files) {
+          if (!file.endsWith('.jsonl')) continue
+          const fullPath = join(dayDirectory, file)
+          try {
+            const content = readFileSync(fullPath, 'utf8').slice(0, 65536)
+            const firstLine = content.slice(0, content.indexOf('\n') >= 0 ? content.indexOf('\n') : content.length)
+            const record = JSON.parse(firstLine)
+            const meta = record.type === 'session_meta' ? record.payload : null
+            const sessionId = meta?.session_id || meta?.id
+            if (!isSafeNativeSessionId(sessionId) || normalizeCwd(meta.cwd) !== targetCwd) continue
+            const stat = statSync(fullPath)
+            const parsedStart = Date.parse(meta.timestamp || record.timestamp || '')
+            const startedAt = Number.isFinite(parsedStart) ? parsedStart : stat.birthtimeMs
+            const existing = sessions.get(sessionId)
+            sessions.set(sessionId, {
+              sessionId,
+              startedAt: existing ? Math.min(existing.startedAt, startedAt) : startedAt,
+              updatedAt: existing ? Math.max(existing.updatedAt, stat.mtimeMs) : stat.mtimeMs
+            })
+          } catch { /* one unreadable transcript must not hide the rest */ }
+        }
+      }
+    }
+  }
+  return Array.from(sessions.values()).sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
 /** Parse only Codex provider identity from config.toml. Credentials and other
  * provider settings never leave the main process. */
 export function parseCodexProviderConfig(content = '') {
-  const available = new Set(['openai'])
-  const sectionPattern = /^\s*\[model_providers\.([^\]]+)\]\s*$/gm
-  for (const match of content.matchAll(sectionPattern)) {
-    const name = unquote(match[1].trim())
-    if (isSafeProviderName(name)) available.add(name)
-  }
-
-  const currentMatch = content.match(/^\s*model_provider\s*=\s*([^#\r\n]+)$/m)
-  const declared = currentMatch ? unquote(currentMatch[1].trim()) : 'openai'
-  const currentProvider = available.has(declared) ? declared : 'openai'
-  return { currentProvider, availableProviders: Array.from(available) }
+  return parseCodexProviderIdentity(content)
 }
 
 export function resolveCodexResumeProvider(sourceProvider, config) {
@@ -160,13 +212,6 @@ export function resolveCodexResumeProvider(sourceProvider, config) {
 
 export function isSafeProviderName(value) {
   return typeof value === 'string' && /^[a-zA-Z0-9_.-]+$/.test(value)
-}
-
-function unquote(value) {
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1)
-  }
-  return value
 }
 
 function normalizeCwd(value) {

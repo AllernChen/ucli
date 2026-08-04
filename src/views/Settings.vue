@@ -90,6 +90,20 @@
             <a-button style="width: 80px" @click="pickDir">浏览</a-button>
           </a-input-group>
         </a-form-item>
+        <a-form-item label="Codex 配置目录">
+          <a-input-group compact>
+            <a-input v-model:value="local.codexConfigDir" placeholder="留空时使用 CODEX_HOME 或 ~/.codex" style="width: calc(100% - 80px)" />
+            <a-button style="width: 80px" @click="pickCodexConfigDir">浏览</a-button>
+          </a-input-group>
+          <div class="muted">切换后仅影响后续启动或重新启动的 Codex 会话。</div>
+        </a-form-item>
+        <a-form-item label="Codex 当前 Provider">
+          <a-space v-if="codexRuntime">
+            <a-tag color="blue">{{ codexRuntime.currentProvider }}</a-tag>
+            <span class="muted">可用：{{ codexRuntime.availableProviders.join('、') }}</span>
+          </a-space>
+          <span v-else class="muted">正在读取配置状态…</span>
+        </a-form-item>
         <a-form-item label="语言">
           <a-select v-model:value="local.language" style="width: 200px">
             <a-select-option value="zh-CN">简体中文</a-select-option>
@@ -225,7 +239,7 @@ const router = useRouter()
 const gatewayDrawerOpen = ref(false)
 const gatewayTrigger = ref(null)
 const adapters = ref([])
-const local = ref({ defaultAdapter: 'claude', defaultTier: 'safety-rules', defaultCwd: '', language: 'zh-CN' })
+const local = ref({ defaultAdapter: 'claude', defaultTier: 'safety-rules', defaultCwd: '', codexConfigDir: '', language: 'zh-CN' })
 const cliTools = ref([])
 const detecting = ref(false)
 const runningTool = ref('')
@@ -235,6 +249,8 @@ const diagnosticsLoading = ref(false)
 const diagnosticsExporting = ref(false)
 const updateState = ref(null)
 let stopUpdateListener = null
+const codexRuntime = ref(null)
+let stopCodexRuntimeListener = null
 const lastCliOutput = computed(() => {
   const result = lastCliResult.value
   if (!result) return ''
@@ -244,12 +260,16 @@ const diagnosticCliSummary = computed(() => formatCliDiagnosticSummary(diagnosti
 
 onMounted(async () => {
   stopUpdateListener = ipc.on('update:state', (state) => { updateState.value = state })
-  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadDiagnostics(), loadUpdateState()])
+  stopCodexRuntimeListener = ipc.onCodexRuntime((snapshot) => { codexRuntime.value = snapshot })
+  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadDiagnostics(), loadUpdateState(), loadCodexRuntime()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
 })
 
-onUnmounted(() => stopUpdateListener?.())
+onUnmounted(() => {
+  stopUpdateListener?.()
+  stopCodexRuntimeListener?.()
+})
 
 watch(
   () => route.query.panel,
@@ -368,6 +388,19 @@ function confirmCliAction(item, action) {
 async function pickDir() {
   const dir = await ipc.pickDirectory()
   if (dir) local.value.defaultCwd = dir
+}
+
+async function loadCodexRuntime() {
+  try {
+    codexRuntime.value = await ipc.getCodexRuntime()
+  } catch {
+    codexRuntime.value = null
+  }
+}
+
+async function pickCodexConfigDir() {
+  const dir = await ipc.pickDirectory()
+  if (dir) local.value.codexConfigDir = dir
 }
 
 async function save() {

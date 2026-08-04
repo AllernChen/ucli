@@ -17,6 +17,7 @@ UCLI 是一个支持 macOS 与 Windows 的本地 AI CLI 工作台。它在用户
 - 安全规则：可信命令自动放行，高风险操作要求确认，硬黑名单始终拒绝。
 - 使用留痕：记录 Token、费用、轮次、审批和模型统计；移除会话后仍保留历史统计。
 - Provider 回退：Codex 历史 provider 已失效时，可使用当前可用 provider 恢复原上下文。
+- CC Switch / Codex 配置共存：UCLI 只读 `config.toml` 的 Provider 身份，不读取或写入密钥、认证、CC Switch 数据库或原生会话文件。新建 Codex 会话默认跟随当前 live 配置；历史会话可选择保留来源 Provider、跟随当前或显式指定，并在外部配置变化后于下次启动生效。
 - CLI 管理：在设置页检测、安装和升级受支持的 AI CLI。
 - 桌面体验：单实例、关闭到托盘、后台审批/任务完成提醒、托盘恢复和退出清理；macOS 终端支持 `Command+C`/`Command+V`。
 

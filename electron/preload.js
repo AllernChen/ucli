@@ -26,6 +26,7 @@ const api = {
   installUpdate: () => ipcRenderer.invoke('update:install'),
   getDiagnostics: () => ipcRenderer.invoke('diagnostics:get'),
   exportDiagnostics: () => ipcRenderer.invoke('diagnostics:export'),
+  getCodexRuntime: () => ipcRenderer.invoke('codex:runtime:get'),
 
   // ---- dialog ----
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
@@ -52,6 +53,8 @@ const api = {
   listSessions: () => ipcRenderer.invoke('session:list'),
   updateSessionNote: (sessionId, note) => ipcRenderer.invoke('session:update-note', sessionId, note),
   updateSessionName: (sessionId, name) => ipcRenderer.invoke('session:update-name', sessionId, name),
+  updateCodexProviderPolicy: (sessionId, policy) =>
+    ipcRenderer.invoke('session:update-codex-provider-policy', sessionId, policy),
 
   // ---- rules / permission ----
   getRules: () => ipcRenderer.invoke('rules:get'),
@@ -90,6 +93,11 @@ const api = {
     const wrapped = (_event, payload) => handler(payload)
     ipcRenderer.on('gateway:state', wrapped)
     return () => ipcRenderer.removeListener('gateway:state', wrapped)
+  },
+  onCodexRuntime: (handler) => {
+    const wrapped = (_event, payload) => handler(payload)
+    ipcRenderer.on('codex:runtime', wrapped)
+    return () => ipcRenderer.removeListener('codex:runtime', wrapped)
   },
 
   // ---- workbench ----

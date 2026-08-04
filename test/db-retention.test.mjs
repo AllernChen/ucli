@@ -125,3 +125,50 @@ test('upgrades legacy statistics tables with cost availability columns', async (
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('upgrades Codex provider metadata with a safe default policy', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ucli-db-provider-policy-'))
+  const path = join(dir, 'ucli.db')
+  const initSqlJs = (await import('sql.js')).default
+  const SQL = await initSqlJs()
+  const legacy = new SQL.Database()
+  legacy.run('CREATE TABLE sessions (id TEXT PRIMARY KEY, project_path TEXT NOT NULL, adapter_id TEXT NOT NULL, native_session_id TEXT, name TEXT, task_note TEXT DEFAULT \'\', tier TEXT NOT NULL DEFAULT \'safety-rules\', model TEXT, provider TEXT, source_provider TEXT, status TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, removed_at INTEGER)')
+  legacy.run("INSERT INTO sessions VALUES ('imported', 'F:\\projects\\demo', 'codex', 'native-1', NULL, '', 'safety-rules', NULL, 'legacy_gateway', NULL, 'offline', 1, 2, NULL)")
+  legacy.run("INSERT INTO sessions VALUES ('fresh', 'F:\\projects\\demo', 'codex', NULL, NULL, '', 'safety-rules', NULL, NULL, NULL, 'offline', 1, 2, NULL)")
+  writeFileSync(path, Buffer.from(legacy.export()))
+  legacy.close()
+
+  const db = await openDb(path)
+  try {
+    assert.equal(db.getSession('imported').providerPolicy, 'source')
+    assert.equal(db.getSession('fresh').providerPolicy, 'live')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('persists an explicit Codex provider separately from the effective provider', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ucli-db-explicit-provider-'))
+  const db = await openDb(join(dir, 'ucli.db'))
+  try {
+    db.insertSession({
+      id: 'explicit-provider',
+      project_path: 'F:\\projects\\demo',
+      adapter_id: 'codex',
+      tier: 'safety-rules',
+      provider: 'work_gateway',
+      explicit_provider: 'legacy_gateway',
+      provider_policy: 'explicit',
+      status: 'offline',
+      created_at: 1
+    })
+    const session = db.getSession('explicit-provider')
+    assert.equal(session.provider, 'work_gateway')
+    assert.equal(session.explicitProvider, 'legacy_gateway')
+    assert.equal(session.providerPolicy, 'explicit')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

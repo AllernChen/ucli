@@ -6,6 +6,7 @@ export const useSettingsStore = defineStore('settings', {
     defaultTier: 'safety-rules',
     defaultAdapter: 'claude',
     defaultCwd: '',
+    codexConfigDir: '',
     language: 'zh-CN',
     theme: 'light',
     keybindings: {},

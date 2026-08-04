@@ -2,7 +2,12 @@ import { readFileSync, existsSync, readdirSync, statSync, rmSync } from 'fs'
 import { join } from 'path'
 import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
-import { findCodexTranscriptFile, isSafeProviderName } from '../sessionDiscovery.js'
+import {
+  findCodexTranscriptFileInHome,
+  isSafeProviderName,
+  listCodexTranscriptSessionsInHome
+} from '../sessionDiscovery.js'
+import { resolveCodexHome } from '../codexRuntimeConfig.js'
 import {
   encodeCodexDecisionResponse,
   extractCodexPlanSnapshot,
@@ -157,8 +162,11 @@ export function buildCodexArgs(session) {
     '-c', 'tui.notification_condition="always"'
   ]
   if (session.cliSessionId) args.push('resume', session.cliSessionId)
-  if (session.provider && isSafeProviderName(session.provider)) {
-    args.push('-c', `model_provider=${session.provider}`)
+  const providerOverride = session.providerPolicy === 'live'
+    ? null
+    : (session.providerOverride ?? session.provider)
+  if (providerOverride && isSafeProviderName(providerOverride)) {
+    args.push('-c', `model_provider=${providerOverride}`)
   }
   if (session.model) args.push('--model', session.model)
   return args
@@ -191,6 +199,7 @@ export class CodexAdapter extends BaseAdapter {
   constructor({ session, engine, settings }) {
     super({ id: 'codex', displayName: DISPLAY_NAME, session, engine })
     this.hookPort = settings.hookPort
+    this.codexHome = settings.codexHome || resolveCodexHome()
     this.ptyProc = null
     this._settingsDir = null
     this._statsTimer = null
@@ -209,13 +218,11 @@ export class CodexAdapter extends BaseAdapter {
   }
 
   _findTranscript(cliSessionId) {
-    const home = process.env.HOME || process.env.USERPROFILE || '~'
-    return findCodexTranscriptFile(home, cliSessionId)
+    return findCodexTranscriptFileInHome(this.codexHome, cliSessionId)
   }
 
   _findLatestTranscript() {
-    const home = process.env.HOME || process.env.USERPROFILE || '~'
-    const sessionsDir = join(home, '.codex', 'sessions')
+    const sessionsDir = join(this.codexHome, 'sessions')
     if (!existsSync(sessionsDir)) return null
     const normCwd = (this.session.cwd || '').replace(/\\/g, '/').toLowerCase()
     let newest = null
@@ -516,6 +523,7 @@ export class CodexAdapter extends BaseAdapter {
 
     const env = {
       ...process.env,
+      CODEX_HOME: this.codexHome,
       UCLI_SESSION_ID: this.session.id,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor'
@@ -623,5 +631,8 @@ export const codexDescriptor = {
   displayName: DISPLAY_NAME,
   icon: ICON,
   models: ['default', 'gpt-5', 'gpt-5.1', 'gpt-5.5'],
+  listNativeSessions: (cwd) => {
+    return listCodexTranscriptSessionsInHome(resolveCodexHome(), cwd)
+  },
   create: (opts) => new CodexAdapter(opts)
 }
