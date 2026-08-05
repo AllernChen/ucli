@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { registerHooks } from 'node:module'
+import { register } from 'node:module'
 
 import {
   annotateImportedSessions,
@@ -20,31 +20,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const electronStub = `
-export const app = {
-  getPath: () => process.env.UCLI_TEST_USER_DATA,
-  getAppPath: () => process.cwd(),
-  isPackaged: false,
-  getVersion: () => 'test'
-}
-export const ipcMain = { handle() {}, on() {} }
-export const dialog = {}
-export const shell = {}
-export class Notification {}
-export const safeStorage = {}
-`
-
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (specifier === 'electron') {
-      return {
-        url: `data:text/javascript,${encodeURIComponent(electronStub)}`,
-        shortCircuit: true
-      }
-    }
-    return nextResolve(specifier, context)
-  }
-})
+register('./fixtures/electron-stub-loader.mjs', import.meta.url)
 
 test('already imported native sessions remain visible and are marked as added', () => {
   const result = annotateImportedSessions(
