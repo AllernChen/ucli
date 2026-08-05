@@ -14,6 +14,7 @@ import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
+import { createSessionDiagnosticsService } from './sessionDiagnosticsService.js'
 import { annotateImportedSessions, isSafeNativeSessionId, isSafeProviderName, listClaudeTranscriptFiles, resolveCodexResumeProvider, resolveCodexTranscriptSessionInHome } from './sessionDiscovery.js'
 import { readCodexRuntimeSnapshot, resolveCodexHome } from './codexRuntimeConfig.js'
 import { normaliseCodexProviderPolicy, reconcileCodexRuntimeProvider, requiresCodexProcessRestart, resolveCodexProviderPolicy } from './codexProviderPolicy.js'
@@ -71,6 +72,23 @@ export function createOrchestrator() {
     getGateway: () => gatewayManager?.getDiagnostics() || null,
     showSaveDialog: (options) => dialog.showSaveDialog(mainWindow, options),
     writeFile: writeFileSync
+  })
+  const sessionDiagnostics = createSessionDiagnosticsService({
+    resolveSession: (sessionId) => sessions.get(sessionId) || null,
+    getCodexHome,
+    persistBinding: async (sessionId, nativeSessionId) => {
+      const db = getDb()
+      if (!db) throw new Error('本地数据当前不可用，无法保存会话绑定')
+      db.updateSession(sessionId, { native_session_id: nativeSessionId })
+      db.flush()
+    },
+    publishBinding: (sessionId, nativeSessionId) => {
+      send('session:event', {
+        sessionId,
+        type: 'init',
+        cliSessionId: nativeSessionId
+      })
+    }
   })
   const historyService = createSessionHistoryService({
     resolveSession: (sessionId) => {
