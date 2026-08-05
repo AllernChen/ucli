@@ -116,3 +116,8 @@ export function createSessionDiagnosticsService({
 
   return { get, repair }
 }
+
+export function registerSessionDiagnosticsIpc(ipcMain, service) {
+  ipcMain.handle('session:get-diagnostics', (_event, sessionId) => service.get(sessionId))
+  ipcMain.handle('session:repair-binding', (_event, sessionId) => service.repair(sessionId))
+}

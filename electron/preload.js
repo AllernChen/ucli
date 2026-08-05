@@ -45,6 +45,10 @@ const api = {
   attachTerminal: (sessionId) => ipcRenderer.invoke('session:attach-terminal', sessionId),
   getSessionHistory: (sessionId, options) =>
     ipcRenderer.invoke('session:get-history', sessionId, options),
+  getSessionDiagnostics: (sessionId) =>
+    ipcRenderer.invoke('session:get-diagnostics', sessionId),
+  repairSessionBinding: (sessionId) =>
+    ipcRenderer.invoke('session:repair-binding', sessionId),
   resumeSession: (sessionId, cliSessionId) =>
     ipcRenderer.invoke('session:resume', sessionId, cliSessionId),
   stopSession: (sessionId) => ipcRenderer.invoke('session:stop', sessionId),

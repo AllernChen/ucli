@@ -91,6 +91,14 @@ export const useSessionsStore = defineStore('sessions', {
     respondApproval(id, requestId, verdict) { return ipc.respondApproval(id, requestId, verdict) },
     interrupt(id) { return ipc.interruptSession(id) },
     resume(id, cliSessionId) { return ipc.resumeSession(id, cliSessionId) },
+    getDiagnostics(id) { return ipc.getSessionDiagnostics(id) },
+    async repairBinding(id) {
+      const result = await ipc.repairSessionBinding(id)
+      const nativeSessionId = result?.diagnostic?.resolvedNativeSessionId
+      const row = this.sessions.find((session) => session.id === id)
+      if (row && nativeSessionId) row.cliSessionId = nativeSessionId
+      return result
+    },
     async stop(id) {
       await ipc.stopSession(id)
       const i = this.sessions.findIndex((s) => s.id === id)
@@ -245,7 +253,7 @@ export const useSessionsStore = defineStore('sessions', {
         if (evt.type === 'ready') {
           row.lastActivity = '已就绪'
         } else if (evt.type === 'init') {
-          if (evt.cliSessionId && !row.cliSessionId) row.cliSessionId = evt.cliSessionId
+          if (evt.cliSessionId) row.cliSessionId = evt.cliSessionId
         } else if (evt.type === 'exit') {
           row.lastActivity = `进程退出 (${evt.code})`
         } else if (evt.type === 'error') {

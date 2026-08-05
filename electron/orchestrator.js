@@ -14,7 +14,7 @@ import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
-import { createSessionDiagnosticsService } from './sessionDiagnosticsService.js'
+import { createSessionDiagnosticsService, registerSessionDiagnosticsIpc } from './sessionDiagnosticsService.js'
 import { annotateImportedSessions, isSafeNativeSessionId, isSafeProviderName, listClaudeTranscriptFiles, resolveCodexResumeProvider, resolveCodexTranscriptSessionInHome } from './sessionDiscovery.js'
 import { readCodexRuntimeSnapshot, resolveCodexHome } from './codexRuntimeConfig.js'
 import { normaliseCodexProviderPolicy, reconcileCodexRuntimeProvider, requiresCodexProcessRestart, resolveCodexProviderPolicy } from './codexProviderPolicy.js'
@@ -1196,6 +1196,7 @@ export function createOrchestrator() {
       codexConfigWatcher?.getSnapshot() || readCodexRuntimeSnapshot(getCodexHome())
     )
     registerSessionHistoryIpc(ipcMain, historyService)
+    registerSessionDiagnosticsIpc(ipcMain, sessionDiagnostics)
 
     ipcMain.handle('dialog:pick-directory', async () => {
       const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
