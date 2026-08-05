@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-08-05
+
+### Fixed
+
+- Windows NSIS upgrades now detect and close only `UCLI.exe` from the selected installation directory, avoiding false process conflicts with other UCLI installations or portable copies.
+
 ## [0.7.2] - 2026-08-04
 
 ### Fixed

@@ -45,5 +45,6 @@ nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
   perMachine: false
+  include: build/installer.nsh
 portable:
   artifactName: ${productName}-Portable-${version}-${arch}.${ext}
