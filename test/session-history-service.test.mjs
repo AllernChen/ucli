@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { Worker } from 'node:worker_threads'
 
 import {
   createSessionHistoryService,
@@ -239,7 +240,7 @@ test('large transcript parsing yields to the event loop between bounded chunks',
   assert.ok(items.every((item) => typeof item === 'object'))
 })
 
-test('large single-line transcripts are parsed off the main event loop', async () => {
+test('large single-line transcripts are parsed in a worker', async () => {
   const content = JSON.stringify({
     type: 'user',
     uuid: 'large-message',
@@ -248,20 +249,21 @@ test('large single-line transcripts are parsed off the main event loop', async (
       content: [{ type: 'text', text: 'x'.repeat(2 * 1024 * 1024) }]
     }
   })
-  let eventLoopTicks = 0
-  const timer = setInterval(() => {
-    eventLoopTicks += 1
-  }, 0)
-
-  try {
-    const items = await parseJsonLinesCooperatively(content, (records) => records, {
-      workerThresholdBytes: 1
-    })
-    assert.equal(items.length, 1)
-    assert.ok(eventLoopTicks > 0)
-  } finally {
-    clearInterval(timer)
+  let workerStarts = 0
+  class TrackingWorker extends Worker {
+    constructor(...args) {
+      workerStarts += 1
+      super(...args)
+    }
   }
+
+  const items = await parseJsonLinesCooperatively(content, (records) => records, {
+    workerThresholdBytes: 1,
+    WorkerClass: TrackingWorker
+  })
+
+  assert.equal(items.length, 1)
+  assert.equal(workerStarts, 1)
 })
 
 test('cooperative normalization keeps Codex dual records in the same batch', async () => {
