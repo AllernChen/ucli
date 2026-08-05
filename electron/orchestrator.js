@@ -909,9 +909,7 @@ export function createOrchestrator() {
     if (!nearTs) return null
     const listNativeSessions = adapters.get(adapterId)?.listNativeSessions
     if (!listNativeSessions) return null
-    const found = adapterId === 'codex'
-      ? listCodexSessions(cwd)
-      : await listNativeSessions(cwd)
+    const found = await listNativeSessions(cwd)
     if (!found.length) return null
     let best = null
     let bestDist = Infinity

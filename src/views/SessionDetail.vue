@@ -354,6 +354,7 @@ import { deriveGatewayRelayControl } from '../gatewayRelayPresentation.js'
 import { terminalSizeChanged } from '../terminalResize.js'
 import {
   reconcileSessionPanes,
+  restoreAssignedPaneSessions,
   resolveSessionFocusPane,
   resolveWorkbenchFullscreenTarget,
   toggleElementFullscreen
@@ -552,7 +553,8 @@ function createPanes(count) {
   if (activePane.value >= count) activePane.value = count - 1
   // Initialize only new panes. ResizeObserver refits retained terminals after
   // the grid changes size.
-  nextTick(() => {
+  nextTick(async () => {
+    const assignedPanes = []
     for (let i = 0; i < count; i++) {
       const needsInit = !panes.value[i]?.term
       if (needsInit) initPaneTerminal(i)
@@ -564,23 +566,26 @@ function createPanes(count) {
           panes.value[i]?.term?.clear()
         }
         if (!unsubs[i]) subscribePaneTerminal(i, sessionId)
-        const s = sessions.byId(sessionId)
-        if (s?.status === 'offline') {
-          sessions.restart(sessionId)
-            .then(() => {
-              if (panes.value[i]) panes.value[i].lastPtySize = null
-              nextTick(() => syncPaneTerminalSize(i))
-            })
-            .catch(e => message.error('重启失败：' + (e?.message || e)))
-        } else {
-          ipc.attachTerminal(sessionId)
-            .then(() => nextTick(() => syncPaneTerminalSize(i)))
-            .catch(() => {})
-        }
+        assignedPanes.push({ paneIndex: i, sessionId })
       } else {
         syncPaneTerminalSize(i)
       }
     }
+    await restoreAssignedPaneSessions(assignedPanes, {
+      getSession: (sessionId) => sessions.byId(sessionId),
+      restartSession: async (sessionId, paneIndex) => {
+        await sessions.restart(sessionId)
+        if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
+        await nextTick()
+        syncPaneTerminalSize(paneIndex)
+      },
+      attachSession: async (sessionId, paneIndex) => {
+        await ipc.attachTerminal(sessionId)
+        await nextTick()
+        syncPaneTerminalSize(paneIndex)
+      },
+      onError: (error) => message.error('恢复失败：' + (error?.message || error))
+    })
   })
 }
 

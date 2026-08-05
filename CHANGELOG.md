@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-08-05
+
+### Fixed
+
+- Restored Codex native session IDs from the earliest matching rollout file, so sessions resumed multiple times still reopen with their original context after restarting UCLI.
+- Restored assigned workbench panes sequentially during startup, preventing one slow or failed CLI session from leaving other saved panes unopened.
+
 ## [0.7.4] - 2026-08-05
 
 ### Fixed

@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { registerHooks } from 'node:module'
 
 import {
   annotateImportedSessions,
@@ -14,9 +15,36 @@ import {
   resolveCodexResumeProvider
 } from '../electron/sessionDiscovery.js'
 import { buildCodexArgs, codexDescriptor } from '../electron/adapters/codexAdapter.js'
+import { getDb, openDb } from '../electron/persistence/db.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+const electronStub = `
+export const app = {
+  getPath: () => process.env.UCLI_TEST_USER_DATA,
+  getAppPath: () => process.cwd(),
+  isPackaged: false,
+  getVersion: () => 'test'
+}
+export const ipcMain = { handle() {}, on() {} }
+export const dialog = {}
+export const shell = {}
+export class Notification {}
+export const safeStorage = {}
+`
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === 'electron') {
+      return {
+        url: `data:text/javascript,${encodeURIComponent(electronStub)}`,
+        shortCircuit: true
+      }
+    }
+    return nextResolve(specifier, context)
+  }
+})
 
 test('already imported native sessions remain visible and are marked as added', () => {
   const result = annotateImportedSessions(
@@ -105,7 +133,9 @@ test('Codex descriptor discovers the native session needed after a UCLI restart'
 
   const previousHome = process.env.HOME
   const previousProfile = process.env.USERPROFILE
+  const previousCodexHome = process.env.CODEX_HOME
   delete process.env.HOME
+  delete process.env.CODEX_HOME
   process.env.USERPROFILE = home
   try {
     const sessions = await codexDescriptor.listNativeSessions(cwd)
@@ -117,7 +147,74 @@ test('Codex descriptor discovers the native session needed after a UCLI restart'
     else process.env.HOME = previousHome
     if (previousProfile === undefined) delete process.env.USERPROFILE
     else process.env.USERPROFILE = previousProfile
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME
+    else process.env.CODEX_HOME = previousCodexHome
     rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('UCLI restart recovers a Codex session from the earliest of multiple rollout files', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-codex-multi-rollout-'))
+  const userData = join(root, 'user-data')
+  const codexHome = join(root, 'codex-home')
+  const codexDir = join(codexHome, 'sessions', '2026', '07', '31')
+  const cwd = 'F:\\projects\\ucli'
+  const ucliSessionId = '86c7ff49-9090-4e79-bf3f-b6428cae75ff'
+  const nativeSessionId = '019fb7c7-daa8-7c31-af6e-a8372324ec6e'
+  const createdAt = Date.parse('2026-07-31T10:45:55.178Z')
+  const earliestRollout = '2026-07-31T10:45:56.141Z'
+  const resumedRollout = '2026-08-01T08:59:11.617Z'
+  mkdirSync(userData, { recursive: true })
+  mkdirSync(codexDir, { recursive: true })
+
+  for (const [suffix, timestamp] of [['original', earliestRollout], ['resumed', resumedRollout]]) {
+    writeFileSync(
+      join(codexDir, `rollout-${suffix}-${nativeSessionId}.jsonl`),
+      JSON.stringify({
+        type: 'session_meta',
+        timestamp,
+        payload: { id: nativeSessionId, timestamp, cwd }
+      }) + '\n'
+    )
+  }
+
+  const dbPath = join(userData, 'ucli.db')
+  const seed = await openDb(dbPath)
+  seed.insertSession({
+    id: ucliSessionId,
+    project_path: cwd,
+    adapter_id: 'codex',
+    native_session_id: null,
+    name: 'UCLI',
+    task_note: '',
+    tier: 'safety-rules',
+    model: null,
+    status: 'idle',
+    created_at: createdAt
+  })
+  seed.flush()
+  seed.close()
+
+  const previousCodexHome = process.env.CODEX_HOME
+  const previousUserData = process.env.UCLI_TEST_USER_DATA
+  process.env.CODEX_HOME = codexHome
+  process.env.UCLI_TEST_USER_DATA = userData
+  let orchestrator = null
+  try {
+    const { createOrchestrator } = await import('../electron/orchestrator.js?multi-rollout-recovery')
+    orchestrator = createOrchestrator()
+    await orchestrator.initPersistence()
+
+    const restored = getDb().listSessions().find((session) => session.id === ucliSessionId)
+    assert.equal(restored.nativeSessionId, nativeSessionId)
+  } finally {
+    await orchestrator?.shutdown()
+    getDb()?.close()
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME
+    else process.env.CODEX_HOME = previousCodexHome
+    if (previousUserData === undefined) delete process.env.UCLI_TEST_USER_DATA
+    else process.env.UCLI_TEST_USER_DATA = previousUserData
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

@@ -13,6 +13,27 @@ export function reconcileSessionPanes(currentPanes, count, resolveSessionId = ()
   }
 }
 
+export async function restoreAssignedPaneSessions(panes, {
+  getSession,
+  restartSession,
+  attachSession,
+  onError = () => {}
+}) {
+  for (const pane of panes) {
+    const session = getSession(pane.sessionId)
+    if (!session) continue
+    try {
+      if (session.status === 'offline') {
+        await restartSession(pane.sessionId, pane.paneIndex)
+      } else {
+        await attachSession(pane.sessionId, pane.paneIndex)
+      }
+    } catch (error) {
+      onError(error, pane)
+    }
+  }
+}
+
 export async function toggleElementFullscreen(documentRef, element) {
   if (!documentRef.fullscreenElement) {
     if (!element?.requestFullscreen) return false

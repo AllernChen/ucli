@@ -7,6 +7,7 @@ import {
 } from '../src/workbenchKeyboard.js'
 import {
   reconcileSessionPanes,
+  restoreAssignedPaneSessions,
   resolveSessionFocusPane,
   resolveWorkbenchFullscreenTarget,
   toggleElementFullscreen
@@ -103,6 +104,55 @@ test('saved sessions repopulate empty pane instances during workbench restoratio
   assert.equal(restored.panes[0].sessionId, 'claude-a')
   assert.equal(restored.panes[0].term, terminal)
   assert.equal(restored.panes[1].sessionId, 'codex-b')
+})
+
+test('restored panes activate in layout order without overlapping session starts', async () => {
+  const events = []
+  let activeStarts = 0
+  let maxActiveStarts = 0
+  await restoreAssignedPaneSessions([
+    { paneIndex: 1, sessionId: 'codex-a' },
+    { paneIndex: 2, sessionId: 'codex-b' }
+  ], {
+    getSession: (sessionId) => ({ id: sessionId, status: 'offline' }),
+    restartSession: async (sessionId) => {
+      activeStarts += 1
+      maxActiveStarts = Math.max(maxActiveStarts, activeStarts)
+      events.push(`start:${sessionId}`)
+      await new Promise((resolve) => queueMicrotask(resolve))
+      events.push(`ready:${sessionId}`)
+      activeStarts -= 1
+    },
+    attachSession: async () => {}
+  })
+
+  assert.equal(maxActiveStarts, 1)
+  assert.deepEqual(events, [
+    'start:codex-a',
+    'ready:codex-a',
+    'start:codex-b',
+    'ready:codex-b'
+  ])
+})
+
+test('a failed restored pane does not prevent a later pane from activating', async () => {
+  const activated = []
+  const failures = []
+  await restoreAssignedPaneSessions([
+    { paneIndex: 0, sessionId: 'broken' },
+    { paneIndex: 1, sessionId: 'healthy' }
+  ], {
+    getSession: (sessionId) => ({ id: sessionId, status: 'offline' }),
+    restartSession: async (sessionId) => {
+      if (sessionId === 'broken') throw new Error('startup failed')
+      activated.push(sessionId)
+    },
+    attachSession: async () => {},
+    onError: (error, pane) => failures.push([pane.sessionId, error.message])
+  })
+
+  assert.deepEqual(activated, ['healthy'])
+  assert.deepEqual(failures, [['broken', 'startup failed']])
 })
 
 test('pane fullscreen enters and exits through the document fullscreen API', async () => {
