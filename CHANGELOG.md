@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-08-05
+
+### Fixed
+
+- Windows upgrades now close legacy same-name UCLI processes before invoking an older uninstaller, including hidden tray and path-unavailable remnants.
+- The scoped installer process check now uses the extension-free PowerShell process name and is covered by real-process regression tests.
+
 ## [0.7.3] - 2026-08-05
 
 ### Fixed
