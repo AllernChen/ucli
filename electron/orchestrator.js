@@ -14,7 +14,7 @@ import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
-import { annotateImportedSessions, isSafeNativeSessionId, isSafeProviderName, listClaudeTranscriptFiles, resolveCodexResumeProvider } from './sessionDiscovery.js'
+import { annotateImportedSessions, isSafeNativeSessionId, isSafeProviderName, listClaudeTranscriptFiles, resolveCodexResumeProvider, resolveCodexTranscriptSessionInHome } from './sessionDiscovery.js'
 import { readCodexRuntimeSnapshot, resolveCodexHome } from './codexRuntimeConfig.js'
 import { normaliseCodexProviderPolicy, reconcileCodexRuntimeProvider, requiresCodexProcessRestart, resolveCodexProviderPolicy } from './codexProviderPolicy.js'
 import { createCodexConfigWatcher } from './codexConfigWatcher.js'
@@ -260,6 +260,13 @@ export function createOrchestrator() {
       let sourceProvider = s.sourceProvider || null
       let providerPolicy = s.providerPolicy || null
       let explicitProvider = s.explicitProvider || null
+      if (cliSessionId && s.adapterId === 'codex') {
+        const latest = resolveCodexTranscriptSessionInHome(getCodexHome(), cliSessionId)
+        if (latest?.sessionId && latest.sessionId !== cliSessionId) {
+          cliSessionId = latest.sessionId
+          db.updateSession(s.id, { native_session_id: cliSessionId })
+        }
+      }
       if (!cliSessionId && s.cwd && s.adapterId === 'claude') {
         const found = findClaudeSessionIndex(s.cwd, s.createdAt)
         if (found) {
@@ -588,7 +595,7 @@ export function createOrchestrator() {
         break
       case 'init':
         // cliSessionId discovered from PTY output (new session) or from transcript
-        if (evt.cliSessionId && !entry.session.cliSessionId) {
+        if (evt.cliSessionId) {
           entry.session.cliSessionId = evt.cliSessionId
           const db = getDb()
           if (db) { db.updateSession(sessionId, { native_session_id: evt.cliSessionId }); db.flush() }
@@ -1311,6 +1318,9 @@ export function createOrchestrator() {
         }
       }
       const result = await e.adapter.resume(cliSessionId)
+      const resumedSessionId = e.session.cliSessionId || cliSessionId
+      const db = getDb()
+      if (db) { db.updateSession(sessionId, { native_session_id: resumedSessionId }); db.flush() }
       await gatewayManager?.resyncSession(sessionId)
       return result
     })

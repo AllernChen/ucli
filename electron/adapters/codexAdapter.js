@@ -5,7 +5,9 @@ import { BaseAdapter } from './cliAdapter.js'
 import {
   findCodexTranscriptFileInHome,
   isSafeProviderName,
-  listCodexTranscriptSessionsInHome
+  listCodexTranscriptSessionsInHome,
+  readCodexSessionMetadataFromFile,
+  resolveCodexTranscriptSessionInHome
 } from '../sessionDiscovery.js'
 import { resolveCodexHome } from '../codexRuntimeConfig.js'
 import {
@@ -19,6 +21,8 @@ const DISPLAY_NAME = 'Codex'
 const STATS_IDLE_DELAY_MS = 2000
 const STATS_MAX_WAIT_MS = 30000
 const STATS_FALLBACK_INTERVAL_MS = 30000
+const LINEAGE_SCAN_INTERVAL_MS = 30000
+const NATIVE_RESUME_CAPTURE_TTL_MS = 60 * 1000
 const ICON = '🟢'
 const OSC9_PREFIX = '\x1b]9;'
 
@@ -45,7 +49,7 @@ export function parseCodexTranscriptStats(lines) {
     try { obj = typeof line === 'string' ? JSON.parse(line) : line } catch { continue }
 
     if (obj.type === 'session_meta' && obj.payload) {
-      cliSessionId = obj.payload.session_id || obj.payload.id || cliSessionId
+      cliSessionId = cliSessionId || obj.payload.id || obj.payload.session_id || null
       lastModel = obj.payload.model || obj.payload.model_provider || lastModel
       continue
     }
@@ -188,6 +192,14 @@ function transcriptText(content) {
   return JSON.stringify(content)
 }
 
+function gatewayEventKey(event) {
+  if (event?.type === 'decision_required' && event.decision?.decisionId) {
+    return `${event.type}:${event.decision.decisionId}`
+  }
+  if (event?.turnId) return `${event.type}:${event.turnId}`
+  return null
+}
+
 /**
  * CodexAdapter — PTY terminal mode, like ClaudeAdapter.
  *
@@ -211,14 +223,98 @@ export class CodexAdapter extends BaseAdapter {
     this._lastModel = null
     this._lastCompletedTurns = -1
     this._startedAt = Date.now()
+    this._lastLineageScanAt = 0
+    this._sessionResolver = settings.codexSessionResolver || resolveCodexTranscriptSessionInHome
+    this._sessionLister = settings.codexSessionLister || listCodexTranscriptSessionsInHome
+    this._terminalInputLine = ''
+    this._nativeResumeCapture = null
     this._osc9Pending = ''
     this._gatewayCursor = 0
     this._gatewayDecision = null
     this._gatewayRespondedDecisions = new Set()
+    this._gatewaySeenEventKeys = new Set()
   }
 
   _findTranscript(cliSessionId) {
-    return findCodexTranscriptFileInHome(this.codexHome, cliSessionId)
+    return resolveCodexTranscriptSessionInHome(this.codexHome, cliSessionId)?.path || null
+  }
+
+  _captureNativeResumeSelection() {
+    try {
+      const knownSessionIds = new Set(
+        this._sessionLister(this.codexHome, this.session.cwd).map((item) => item.sessionId)
+      )
+      const startedAt = Date.now()
+      this._nativeResumeCapture = {
+        knownSessionIds,
+        startedAt,
+        expiresAt: startedAt + NATIVE_RESUME_CAPTURE_TTL_MS
+      }
+    } catch {
+      this._nativeResumeCapture = null
+    }
+  }
+
+  _observeTerminalInput(data) {
+    const input = String(data || '')
+    if ((input === '\x1b' || input === '\x03') && this._nativeResumeCapture) {
+      this._nativeResumeCapture = null
+    }
+    for (const char of input) {
+      if (char === '\r' || char === '\n') {
+        if (this._terminalInputLine.trim() === '/resume') this._captureNativeResumeSelection()
+        this._terminalInputLine = ''
+      } else if (char === '\x7f' || char === '\b') {
+        this._terminalInputLine = this._terminalInputLine.slice(0, -1)
+      } else if (char >= ' ' && char !== '\x7f') {
+        this._terminalInputLine = (this._terminalInputLine + char).slice(-64)
+      }
+    }
+  }
+
+  _resolveCapturedNativeResume(now) {
+    const capture = this._nativeResumeCapture
+    if (!capture) return null
+    if (now > capture.expiresAt) {
+      this._nativeResumeCapture = null
+      return null
+    }
+    const candidates = this._sessionLister(this.codexHome, this.session.cwd)
+      .filter((item) => !capture.knownSessionIds.has(item.sessionId))
+      .filter((item) => (item.startedAt || 0) >= capture.startedAt - 2000)
+      .filter((item) => item.forkedFromId && capture.knownSessionIds.has(item.forkedFromId))
+    if (candidates.length !== 1) return null
+    this._nativeResumeCapture = null
+    return this._sessionResolver(this.codexHome, candidates[0].sessionId)
+  }
+
+  _syncTranscriptBinding({ force = false } = {}) {
+    const currentId = this.session.cliSessionId
+    if (!currentId) return null
+    const now = Date.now()
+    let resolved = this._resolveCapturedNativeResume(now)
+    if (!resolved) {
+      if (!force && now - this._lastLineageScanAt < LINEAGE_SCAN_INTERVAL_MS) {
+        return this._transcriptPath
+      }
+      this._lastLineageScanAt = now
+      resolved = this._sessionResolver(this.codexHome, currentId)
+    }
+    if (!resolved) return null
+    if (resolved.path !== this._transcriptPath) {
+      const previousPath = this._transcriptPath
+      if (resolved.forkedFromId) {
+        const ancestorPath = findCodexTranscriptFileInHome(this.codexHome, resolved.forkedFromId)
+        if (ancestorPath && ancestorPath !== previousPath) this._rememberGatewayHistory(ancestorPath)
+      }
+      this._transcriptPath = resolved.path
+      if (previousPath) this._gatewayCursor = 0
+    }
+    if (resolved.sessionId !== currentId) {
+      this.session.cliSessionId = resolved.sessionId
+      this.emitEvent({ type: 'init', cliSessionId: resolved.sessionId })
+    }
+    return resolved.path
   }
 
   _findLatestTranscript() {
@@ -243,11 +339,9 @@ export class CodexAdapter extends BaseAdapter {
             try { stat = statSync(full) } catch { continue }
             if (stat.mtimeMs < this._startedAt - 10000 || stat.mtimeMs < newestMtime) continue
             try {
-              const head = readFileSync(full, 'utf8').slice(0, 65536)
-              const firstLine = head.slice(0, head.indexOf('\n') >= 0 ? head.indexOf('\n') : head.length)
-              const meta = JSON.parse(firstLine)
-              const metaCwd = (meta.payload?.cwd || '').replace(/\\/g, '/').toLowerCase()
-              if (meta.type === 'session_meta' && metaCwd === normCwd) {
+              const meta = readCodexSessionMetadataFromFile(full)
+              const metaCwd = (meta?.cwd || '').replace(/\\/g, '/').toLowerCase()
+              if (meta && !meta.isSubagent && metaCwd === normCwd) {
                 newest = full
                 newestMtime = stat.mtimeMs
               }
@@ -372,8 +466,8 @@ export class CodexAdapter extends BaseAdapter {
 
   _extractStats() {
     this._lastStatsScanAt = Date.now()
+    let path = this._syncTranscriptBinding() || this._transcriptPath
     const cliSessionId = this.session.cliSessionId
-    let path = this._transcriptPath
     if (path && !existsSync(path)) {
       path = null
       this._transcriptPath = null
@@ -385,7 +479,7 @@ export class CodexAdapter extends BaseAdapter {
       const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
       this._scanGatewayState(lines)
       const stats = parseCodexTranscriptStats(lines)
-      if (stats.cliSessionId && !this.session.cliSessionId) {
+      if (stats.cliSessionId && stats.cliSessionId !== this.session.cliSessionId) {
         this.session.cliSessionId = stats.cliSessionId
         this.emitEvent({ type: 'init', cliSessionId: stats.cliSessionId, model: stats.lastModel })
       }
@@ -430,7 +524,12 @@ export class CodexAdapter extends BaseAdapter {
       !this._gatewayRespondedDecisions.has(state.currentDecision.decisionId)
       ? state.currentDecision
       : null
-    for (const event of state.events) this.emitGatewayEvent(event)
+    for (const event of state.events) {
+      const key = gatewayEventKey(event)
+      if (key && this._gatewaySeenEventKeys.has(key)) continue
+      if (key) this._gatewaySeenEventKeys.add(key)
+      this.emitGatewayEvent(event)
+    }
   }
 
   _gatewayTranscriptLines() {
@@ -450,7 +549,22 @@ export class CodexAdapter extends BaseAdapter {
 
   _primeGatewayCursor() {
     if (!this.session.cliSessionId) return
-    this._gatewayCursor = this._gatewayTranscriptLines().length
+    const lines = this._gatewayTranscriptLines()
+    this._rememberGatewayEvents(lines)
+    this._gatewayCursor = lines.length
+  }
+
+  _rememberGatewayEvents(lines) {
+    for (const event of parseCodexGatewayState(lines).events) {
+      const key = gatewayEventKey(event)
+      if (key) this._gatewaySeenEventKeys.add(key)
+    }
+  }
+
+  _rememberGatewayHistory(path) {
+    try {
+      this._rememberGatewayEvents(readFileSync(path, 'utf8').split('\n').filter(Boolean))
+    } catch { /* a missing ancestor must not block terminal resume */ }
   }
 
   get gatewayCapabilities() {
@@ -508,6 +622,8 @@ export class CodexAdapter extends BaseAdapter {
   async start() {
     this._disposed = false
     this._startedAt = Date.now()
+    this._gatewaySeenEventKeys.clear()
+    this._syncTranscriptBinding({ force: true })
     this._primeGatewayCursor()
     if (!pty) {
       this._write('\x1b[31mnode-pty 未加载，无法启动 Codex 终端模式\x1b[0m\r\n')
@@ -576,7 +692,11 @@ export class CodexAdapter extends BaseAdapter {
 
   writeInput(data) {
     if (this.ptyProc) {
-      try { this.ptyProc.write(data); return true } catch {}
+      try {
+        this._observeTerminalInput(data)
+        this.ptyProc.write(data)
+        return true
+      } catch {}
     }
     return false
   }
@@ -598,6 +718,9 @@ export class CodexAdapter extends BaseAdapter {
   async resume(cliSessionId) {
     // Codex resumes through the `resume <thread-id>` startup form.
     if (cliSessionId) this.session.cliSessionId = cliSessionId
+    this._nativeResumeCapture = null
+    this._terminalInputLine = ''
+    this._lastLineageScanAt = 0
     await this.dispose()
     this._transcriptPath = null
     this._gatewayCursor = 0
@@ -614,6 +737,8 @@ export class CodexAdapter extends BaseAdapter {
     this._statsFallbackTimer = null
     this._osc9Pending = ''
     this._gatewayDecision = null
+    this._nativeResumeCapture = null
+    this._terminalInputLine = ''
     if (this.ptyProc) {
       try { this.ptyProc.kill() } catch {}
       this.ptyProc = null

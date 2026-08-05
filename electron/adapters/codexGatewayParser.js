@@ -1,3 +1,5 @@
+import { parseCodexSessionMetadata } from '../codexSessionMetadata.js'
+
 function parseRecord(line) {
   if (line && typeof line === 'object') return line
   try {
@@ -23,7 +25,7 @@ function recordsOf(lines) {
 
 function nativeSessionIdOf(records) {
   const meta = records.find(({ record }) => record.type === 'session_meta')?.record
-  return meta?.payload?.session_id || meta?.payload?.id || null
+  return parseCodexSessionMetadata(meta)?.sessionId || null
 }
 
 function messageText(payload) {

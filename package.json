@@ -1,6 +1,6 @@
 {
   "name": "ucli",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "UCLI — 多 CLI 编排工作台 GUI（Claude Code / Codex 等的卡片式编排与权限管控）",
   "author": "ucli",
   "license": "MIT",

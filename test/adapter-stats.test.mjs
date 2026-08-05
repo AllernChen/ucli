@@ -10,6 +10,9 @@ import {
   parseCodexTranscriptStats
 } from '../electron/adapters/codexAdapter.js'
 import { OpenCodeAdapter } from '../electron/adapters/openCodeAdapter.js'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 test('parses Claude transcript stats from assistant usage and result modelUsage', () => {
   const stats = parseClaudeTranscriptStats([
@@ -98,6 +101,276 @@ test('parses Codex token_count events and session metadata', () => {
   assert.equal(stats.turnsCount, 1)
   assert.equal(stats.completedTurnsCount, 1)
   assert.equal(stats.lastModel, 'gpt-5.5')
+})
+
+test('Codex stats keep the current rollout ID when resumed history contains ancestor metadata', () => {
+  const currentId = '019fcac6-0c62-7da1-92ff-454e53dab197'
+  const ancestorId = '019fb7c7-daa8-7c31-af6e-a8372324ec6e'
+  const stats = parseCodexTranscriptStats([
+    JSON.stringify({
+      type: 'session_meta',
+      payload: { id: currentId, session_id: ancestorId }
+    }),
+    JSON.stringify({ type: 'session_meta', payload: { id: ancestorId } })
+  ])
+
+  assert.equal(stats.cliSessionId, currentId)
+})
+
+test('Codex transcript scan emits a rebind when a newer resumed rollout is found', async () => {
+  const codexHome = mkdtempSync(join(tmpdir(), 'ucli-codex-adapter-lineage-'))
+  const cwd = 'F:\\projects\\ucli'
+  const originalId = '019fb7c7-daa8-7c31-af6e-a8372324ec6e'
+  const currentId = '019fcac6-0c62-7da1-92ff-454e53dab197'
+  const originalDir = join(codexHome, 'sessions', '2026', '07', '31')
+  const currentDir = join(codexHome, 'sessions', '2026', '08', '04')
+  mkdirSync(originalDir, { recursive: true })
+  mkdirSync(currentDir, { recursive: true })
+  writeFileSync(join(originalDir, `rollout-${originalId}.jsonl`), JSON.stringify({
+    type: 'session_meta',
+    timestamp: '2026-07-31T10:45:56.141Z',
+    payload: { id: originalId, timestamp: '2026-07-31T10:45:56.141Z', cwd }
+  }) + '\n')
+  writeFileSync(join(currentDir, `rollout-${currentId}.jsonl`), [
+    JSON.stringify({
+      type: 'session_meta',
+      timestamp: '2026-08-04T03:16:45.513Z',
+      payload: {
+        id: currentId,
+        forked_from_id: originalId,
+        timestamp: '2026-08-04T03:16:44.963Z',
+        cwd
+      }
+    }),
+    JSON.stringify({ type: 'session_meta', payload: { id: originalId, cwd } })
+  ].join('\n') + '\n')
+
+  const session = { id: 'ucli-session', cwd, cliSessionId: originalId }
+  const adapter = new CodexAdapter({ session, engine: null, settings: { codexHome } })
+  const initEvents = []
+  adapter.on('event', (event) => {
+    if (event.type === 'init') initEvents.push(event)
+  })
+  try {
+    adapter._extractStats()
+    assert.equal(session.cliSessionId, currentId)
+    assert.deepEqual(initEvents.map((event) => event.cliSessionId), [currentId])
+  } finally {
+    await adapter.dispose()
+    rmSync(codexHome, { recursive: true, force: true })
+  }
+})
+
+test('Codex latest transcript discovery ignores newer subagent rollouts', async () => {
+  const codexHome = mkdtempSync(join(tmpdir(), 'ucli-codex-main-rollout-'))
+  const cwd = 'F:\\projects\\ucli'
+  const mainId = '019fcac6-0c62-7da1-92ff-454e53dab197'
+  const subagentId = '019fd0c3-a019-7ad0-a634-489043a4f49c'
+  const dir = join(codexHome, 'sessions', '2026', '08', '05')
+  mkdirSync(dir, { recursive: true })
+  const mainPath = join(dir, `rollout-main-${mainId}.jsonl`)
+  writeFileSync(mainPath, JSON.stringify({
+    type: 'session_meta',
+    payload: { id: mainId, timestamp: '2026-08-05T07:10:00.000Z', cwd }
+  }) + '\n')
+  writeFileSync(join(dir, `rollout-subagent-${subagentId}.jsonl`), JSON.stringify({
+    type: 'session_meta',
+    payload: {
+      id: subagentId,
+      session_id: mainId,
+      parent_thread_id: mainId,
+      timestamp: '2026-08-05T07:11:49.365Z',
+      cwd,
+      thread_source: 'subagent'
+    }
+  }) + '\n')
+
+  const adapter = new CodexAdapter({
+    session: { id: 'ucli-session', cwd, cliSessionId: null },
+    engine: null,
+    settings: { codexHome }
+  })
+  adapter._startedAt = Date.parse('2026-08-05T07:00:00.000Z')
+  try {
+    assert.equal(adapter._findLatestTranscript(), mainPath)
+  } finally {
+    await adapter.dispose()
+    rmSync(codexHome, { recursive: true, force: true })
+  }
+})
+
+test('Codex native /resume rebinds to the uniquely created non-descendant rollout', async () => {
+  const codexHome = mkdtempSync(join(tmpdir(), 'ucli-codex-native-resume-'))
+  const cwd = 'F:\\projects\\ucli'
+  const boundId = '019fb7c7-daa8-7c31-af6e-a8372324ec6e'
+  const selectedId = '019fd111-1111-7111-8111-111111111111'
+  const unrelatedRootId = '019fd222-2222-7222-8222-222222222222'
+  const unrelatedId = '019faaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa'
+  const dir = join(codexHome, 'sessions', '2026', '08', '05')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, `rollout-bound-${boundId}.jsonl`), JSON.stringify({
+    type: 'session_meta', payload: { id: boundId, timestamp: '2026-08-05T06:00:00.000Z', cwd }
+  }) + '\n')
+  writeFileSync(join(dir, `rollout-unrelated-${unrelatedId}.jsonl`), JSON.stringify({
+    type: 'session_meta', payload: { id: unrelatedId, timestamp: '2026-08-05T06:30:00.000Z', cwd }
+  }) + '\n')
+
+  const session = { id: 'ucli-session', cwd, cliSessionId: boundId }
+  const adapter = new CodexAdapter({ session, engine: null, settings: { codexHome } })
+  adapter.ptyProc = { write() {} }
+  const initEvents = []
+  adapter.on('event', (event) => {
+    if (event.type === 'init') initEvents.push(event.cliSessionId)
+  })
+  try {
+    adapter.writeInput('/res')
+    adapter.writeInput('ume\r')
+    writeFileSync(join(dir, `rollout-selected-${selectedId}.jsonl`), JSON.stringify({
+      type: 'session_meta',
+      payload: {
+        id: selectedId,
+        forked_from_id: unrelatedId,
+        timestamp: new Date(Date.now() + 1000).toISOString(),
+        cwd
+      }
+    }) + '\n')
+    writeFileSync(join(dir, `rollout-root-${unrelatedRootId}.jsonl`), JSON.stringify({
+      type: 'session_meta',
+      payload: {
+        id: unrelatedRootId,
+        timestamp: new Date(Date.now() + 1500).toISOString(),
+        cwd
+      }
+    }) + '\n')
+    adapter._extractStats()
+
+    assert.equal(session.cliSessionId, selectedId)
+    assert.deepEqual(initEvents, [selectedId])
+  } finally {
+    adapter.ptyProc = null
+    await adapter.dispose()
+    rmSync(codexHome, { recursive: true, force: true })
+  }
+})
+
+test('Codex cancels native /resume binding capture when the picker is dismissed', async () => {
+  const codexHome = mkdtempSync(join(tmpdir(), 'ucli-codex-native-resume-cancel-'))
+  const cwd = 'F:\\projects\\ucli'
+  const boundId = '019fb7c7-daa8-7c31-af6e-a8372324ec6e'
+  const candidateId = '019fd333-3333-7333-8333-333333333333'
+  const unrelatedId = '019faaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa'
+  const dir = join(codexHome, 'sessions', '2026', '08', '05')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, `rollout-bound-${boundId}.jsonl`), JSON.stringify({
+    type: 'session_meta', payload: { id: boundId, timestamp: '2026-08-05T06:00:00.000Z', cwd }
+  }) + '\n')
+  writeFileSync(join(dir, `rollout-unrelated-${unrelatedId}.jsonl`), JSON.stringify({
+    type: 'session_meta', payload: { id: unrelatedId, timestamp: '2026-08-05T06:30:00.000Z', cwd }
+  }) + '\n')
+
+  const session = { id: 'ucli-session', cwd, cliSessionId: boundId }
+  const adapter = new CodexAdapter({ session, engine: null, settings: { codexHome } })
+  adapter.ptyProc = { write() {} }
+  try {
+    adapter.writeInput('/resume\r')
+    adapter.writeInput('\x1b')
+    writeFileSync(join(dir, `rollout-candidate-${candidateId}.jsonl`), JSON.stringify({
+      type: 'session_meta',
+      payload: {
+        id: candidateId,
+        forked_from_id: unrelatedId,
+        timestamp: new Date(Date.now() + 1000).toISOString(),
+        cwd
+      }
+    }) + '\n')
+    adapter._extractStats()
+
+    assert.equal(session.cliSessionId, boundId)
+  } finally {
+    adapter.ptyProc = null
+    await adapter.dispose()
+    rmSync(codexHome, { recursive: true, force: true })
+  }
+})
+
+test('Codex live transcript rebinding does not replay copied Gateway lifecycle events', async () => {
+  const codexHome = mkdtempSync(join(tmpdir(), 'ucli-codex-gateway-rebind-'))
+  const cwd = 'F:\\projects\\ucli'
+  const originalId = '019fb7c7-daa8-7c31-af6e-a8372324ec6e'
+  const currentId = '019fcac6-0c62-7da1-92ff-454e53dab197'
+  const originalDir = join(codexHome, 'sessions', '2026', '07', '31')
+  const currentDir = join(codexHome, 'sessions', '2026', '08', '04')
+  mkdirSync(originalDir, { recursive: true })
+  mkdirSync(currentDir, { recursive: true })
+  const originalPath = join(originalDir, `rollout-${originalId}.jsonl`)
+  const copiedEvents = [
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'historical-turn' } }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 'historical-turn' } })
+  ]
+  writeFileSync(originalPath, [
+    JSON.stringify({
+      type: 'session_meta', payload: { id: originalId, timestamp: '2026-07-31T10:45:56.141Z', cwd }
+    }),
+    ...copiedEvents
+  ].join('\n') + '\n')
+  writeFileSync(join(currentDir, `rollout-${currentId}.jsonl`), [
+    JSON.stringify({
+      type: 'session_meta',
+      payload: { id: currentId, forked_from_id: originalId, timestamp: '2026-08-04T03:16:44.963Z', cwd }
+    }),
+    ...copiedEvents,
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'new-turn' } }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 'new-turn' } })
+  ].join('\n') + '\n')
+
+  const adapter = new CodexAdapter({
+    session: { id: 'ucli-session', cwd, cliSessionId: originalId },
+    engine: null,
+    settings: { codexHome }
+  })
+  adapter._transcriptPath = originalPath
+  adapter._primeGatewayCursor()
+  const events = []
+  adapter.on('gateway-event', (event) => events.push(event.type))
+  try {
+    adapter._extractStats()
+    assert.deepEqual(events, ['turn_started', 'turn_completed'])
+  } finally {
+    await adapter.dispose()
+    rmSync(codexHome, { recursive: true, force: true })
+  }
+})
+
+test('Codex transcript stats throttle full lineage scans independently from terminal updates', async () => {
+  const codexHome = mkdtempSync(join(tmpdir(), 'ucli-codex-lineage-throttle-'))
+  const cwd = 'F:\\projects\\ucli'
+  const sessionId = '019fb7c7-daa8-7c31-af6e-a8372324ec6e'
+  const dir = join(codexHome, 'sessions', '2026', '08', '05')
+  mkdirSync(dir, { recursive: true })
+  const transcript = join(dir, `rollout-${sessionId}.jsonl`)
+  writeFileSync(transcript, JSON.stringify({
+    type: 'session_meta', payload: { id: sessionId, cwd }
+  }) + '\n')
+  let scans = 0
+  const adapter = new CodexAdapter({
+    session: { id: 'ucli-session', cwd, cliSessionId: sessionId },
+    engine: null,
+    settings: {
+      codexHome,
+      codexSessionResolver: () => {
+        scans += 1
+        return { sessionId, path: transcript }
+      }
+    }
+  })
+  try {
+    adapter._extractStats()
+    adapter._extractStats()
+    assert.equal(scans, 1)
+  } finally {
+    await adapter.dispose()
+    rmSync(codexHome, { recursive: true, force: true })
+  }
 })
 
 test('Codex transcript scan has a max wait during continuous TUI output', async (t) => {

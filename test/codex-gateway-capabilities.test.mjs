@@ -171,6 +171,21 @@ test('Codex adapter verifies current decisions and owns provider input', async (
   await adapter.dispose()
 })
 
+test('Codex Gateway identifies a resumed rollout by its current ID, not its ancestor session_id', async () => {
+  const { parseCodexGatewayState } = await parser()
+  const state = parseCodexGatewayState([
+    JSON.stringify({
+      type: 'session_meta',
+      payload: {
+        id: '019fcac6-0c62-7da1-92ff-454e53dab197',
+        session_id: '019fb7c7-daa8-7c31-af6e-a8372324ec6e'
+      }
+    })
+  ])
+
+  assert.equal(state.nativeSessionId, '019fcac6-0c62-7da1-92ff-454e53dab197')
+})
+
 test('Codex adapter writes the second approval choice back to the TUI', async () => {
   const adapter = new CodexAdapter({
     session: { id: 'session-1', cwd: 'F:\\projects\\ucli' },
