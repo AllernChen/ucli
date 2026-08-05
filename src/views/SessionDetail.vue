@@ -168,6 +168,12 @@
             <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
             <a-space size="small">
               <a-button
+                v-if="pane.sessionId && isCodexSession(pane.sessionId)"
+                size="small"
+                type="text"
+                @click.stop="openSessionDiagnostics(i)"
+              >诊断</a-button>
+              <a-button
                 v-if="pane.sessionId"
                 size="small"
                 type="text"
@@ -247,6 +253,11 @@
     <a-modal v-model:open="noteVisible" title="会话备注" @ok="saveNote" okText="保存" cancelText="取消">
       <a-textarea v-model:value="noteDraft" :rows="6" placeholder="标记进度、下一步计划…" />
     </a-modal>
+
+    <SessionDiagnosticsModal
+      v-model:open="sessionDiagnosticsVisible"
+      :session-id="sessionDiagnosticsSessionId"
+    />
 
     <!-- Import historical sessions modal -->
     <a-modal v-model:open="showImport" title="导入历史会话" :footer="null" width="640px">
@@ -347,6 +358,7 @@ import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldBlockDuplicate
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { compactPaneSessionIds } from '../paneCompaction.js'
 import PaneHistory from '../components/PaneHistory.vue'
+import SessionDiagnosticsModal from '../components/SessionDiagnosticsModal.vue'
 import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
 import GatewayRelayToggle from '../components/gateway/GatewayRelayToggle.vue'
 import GatewayChannelIcon from '../components/gateway/GatewayChannelIcon.vue'
@@ -966,6 +978,15 @@ async function saveNote() {
   if (!noteSessionId.value) return
   await sessions.updateNote(noteSessionId.value, noteDraft.value.trim())
   noteVisible.value = false
+}
+
+const sessionDiagnosticsVisible = ref(false)
+const sessionDiagnosticsSessionId = ref('')
+function openSessionDiagnostics(i) {
+  const sessionId = panes.value[i]?.sessionId
+  if (!sessionId || !isCodexSession(sessionId)) return
+  sessionDiagnosticsSessionId.value = sessionId
+  sessionDiagnosticsVisible.value = true
 }
 
 // Import historical sessions
