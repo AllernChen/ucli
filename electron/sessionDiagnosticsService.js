@@ -98,6 +98,13 @@ export function createSessionDiagnosticsService({
 
     const entry = resolveSession(sessionId)
     const previousNativeSessionId = entry.session.cliSessionId || null
+    if (previousNativeSessionId !== before.storedNativeSessionId) {
+      return {
+        changed: false,
+        previousNativeSessionId,
+        diagnostic: await get(sessionId)
+      }
+    }
     const nativeSessionId = before.resolvedNativeSessionId
     entry.session.cliSessionId = nativeSessionId
     try {

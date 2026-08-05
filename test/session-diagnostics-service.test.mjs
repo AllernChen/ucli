@@ -173,6 +173,28 @@ test('repair persists and publishes the latest descendant exactly once', async (
   }
 })
 
+test('repair never overwrites a binding changed concurrently by native resume', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-session-repair-race-'))
+  const codexHome = join(root, 'codex-home')
+  try {
+    writeRollout(codexHome, '01', ORIGINAL_ID)
+    writeRollout(codexHome, '03', CURRENT_ID, { forkedFromId: ORIGINAL_ID })
+    const { entry, persisted, published, service } = createHarness(codexHome)
+
+    const repairPromise = service.repair(entry.session.id)
+    entry.session.cliSessionId = CURRENT_ID
+    const result = await repairPromise
+
+    assert.equal(result.changed, false)
+    assert.equal(result.diagnostic.bindingState, 'current')
+    assert.equal(entry.session.cliSessionId, CURRENT_ID)
+    assert.deepEqual(persisted, [])
+    assert.deepEqual(published, [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('repair rejects bindings that cannot be resolved safely', async () => {
   const { service } = createHarness('F:\\missing-codex-home')
   await assert.rejects(
