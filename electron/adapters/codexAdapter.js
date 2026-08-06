@@ -165,7 +165,17 @@ export function buildCodexArgs(session) {
     '-c', 'tui.notification_method="osc9"',
     '-c', 'tui.notification_condition="always"'
   ]
+  const hasProfile = Boolean(session.profileId)
+  if (hasProfile) {
+    if (!/^ucli-[a-f0-9]{32}$/.test(session.nativeProfileName || '')) {
+      throw Object.assign(new TypeError('Native Codex profile name is invalid'), {
+        code: 'INVALID_NATIVE_PROFILE_NAME'
+      })
+    }
+    args.push('--profile', session.nativeProfileName)
+  }
   if (session.cliSessionId) args.push('resume', session.cliSessionId)
+  if (hasProfile) return args
   const providerOverride = session.providerPolicy === 'live'
     ? null
     : (session.providerOverride ?? session.provider)
@@ -174,6 +184,28 @@ export function buildCodexArgs(session) {
   }
   if (session.model) args.push('--model', session.model)
   return args
+}
+
+const PROFILE_SECRET_ENV_PATTERN = /^UCLI_CODEX_PROFILE_[A-F0-9]{8}_[A-F0-9]{4}_[A-F0-9]{4}_[A-F0-9]{4}_[A-F0-9]{12}$/
+
+export function buildCodexEnvironment(session, settings = {}) {
+  const env = { ...(settings.baseEnv || process.env) }
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('UCLI_CODEX_PROFILE_')) delete env[key]
+  }
+  Object.assign(env, {
+    CODEX_HOME: settings.codexHome || resolveCodexHome(),
+    UCLI_SESSION_ID: session.id,
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor'
+  })
+  const profileEnvironment = settings.profileEnvironment || session.profileEnvironment || {}
+  for (const [key, value] of Object.entries(profileEnvironment)) {
+    if (PROFILE_SECRET_ENV_PATTERN.test(key) && typeof value === 'string' && value) {
+      env[key] = value
+    }
+  }
+  return env
 }
 
 function transcriptText(content) {
@@ -212,6 +244,7 @@ export class CodexAdapter extends BaseAdapter {
     super({ id: 'codex', displayName: DISPLAY_NAME, session, engine })
     this.hookPort = settings.hookPort
     this.codexHome = settings.codexHome || resolveCodexHome()
+    this.profileEnvironment = settings.profileEnvironment || {}
     this.ptyProc = null
     this._settingsDir = null
     this._statsTimer = null
@@ -628,7 +661,7 @@ export class CodexAdapter extends BaseAdapter {
     if (!pty) {
       this._write('\x1b[31mnode-pty 未加载，无法启动 Codex 终端模式\x1b[0m\r\n')
       this.emitEvent({ type: 'error', message: 'node-pty not available' })
-      return
+      return false
     }
 
     this._replayHistory()
@@ -637,13 +670,10 @@ export class CodexAdapter extends BaseAdapter {
     // UCLI when the historical provider no longer exists in current config.
     const args = buildCodexArgs(this.session)
 
-    const env = {
-      ...process.env,
-      CODEX_HOME: this.codexHome,
-      UCLI_SESSION_ID: this.session.id,
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor'
-    }
+    const env = buildCodexEnvironment(this.session, {
+      codexHome: this.codexHome,
+      profileEnvironment: this.profileEnvironment
+    })
 
     try {
       // Use cmd.exe to resolve the codex.cmd shim on Windows
@@ -684,9 +714,11 @@ export class CodexAdapter extends BaseAdapter {
         model: this.session.model || null
       })
       this.emitEvent({ type: 'ready' })
+      return true
     } catch (err) {
       this._write(`\x1b[31mCodex PTY spawn failed: ${err?.message}\x1b[0m\r\n`)
       this.emitEvent({ type: 'error', message: 'Codex PTY spawn failed: ' + (err?.message || String(err)) })
+      return false
     }
   }
 
@@ -699,6 +731,10 @@ export class CodexAdapter extends BaseAdapter {
       } catch {}
     }
     return false
+  }
+
+  setProfileEnvironment(profileEnvironment = {}) {
+    this.profileEnvironment = { ...profileEnvironment }
   }
 
   resize(cols, rows) {

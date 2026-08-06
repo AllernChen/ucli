@@ -61,7 +61,11 @@ export function createCodexProfileAdapter() {
       return {
         args: ['--profile', profile.nativeProfileName],
         env,
-        artifact: { nativeProfileName: profile.nativeProfileName }
+        artifact: {
+          nativeProfileName: profile.nativeProfileName,
+          model: profile.model || null,
+          providerId: profile.providerId || null
+        }
       }
     },
 

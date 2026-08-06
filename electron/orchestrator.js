@@ -153,6 +153,50 @@ export function createOrchestrator() {
     }
   }
 
+  function prepareCodexSessionRuntime(session, { imported = false, explicitProfileId } = {}) {
+    const selection = profileService?.resolveSessionProfile({
+      adapterId: 'codex',
+      cwd: session.cwd,
+      imported,
+      explicitProfileId: explicitProfileId || session.profileId || null
+    })
+    if (selection?.canStart === false) {
+      throw new Error('The selected Codex profile is no longer available. Choose another profile before starting.')
+    }
+    if (selection?.profileId) {
+      const launch = profileService.resolveCodexLaunchProfile(selection.profileId)
+      return {
+        session: {
+          ...session,
+          profileId: selection.profileId,
+          nativeProfileName: launch.artifact.nativeProfileName,
+          model: launch.artifact.model,
+          provider: launch.artifact.providerId,
+          sourceProvider: null,
+          providerPolicy: null,
+          explicitProvider: null,
+          providerOverride: null,
+          providerWarning: null,
+          profileStatus: 'ready',
+          pendingProfileId: null,
+          restartRequired: false,
+          canStart: true
+        },
+        profileEnvironment: launch.env
+      }
+    }
+    return {
+      session: applyCodexProviderPolicy({
+        ...session,
+        profileId: null,
+        nativeProfileName: null,
+        profileStatus: null,
+        pendingProfileId: null
+      }, { imported }),
+      profileEnvironment: {}
+    }
+  }
+
   function hasActiveCodexProcess(entry) {
     return Boolean(entry.adapter && entry.status !== 'offline' && entry.status !== 'starting')
   }
@@ -177,6 +221,7 @@ export function createOrchestrator() {
   function publishCodexRuntime(snapshot) {
     for (const [sessionId, entry] of sessions) {
       if (entry.session.adapterId !== 'codex') continue
+      if (entry.session.profileId) continue
       const next = refreshCodexProviderRuntime(entry, { imported: Boolean(entry.session.cliSessionId) })
       const db = getDb()
       if (db && !next.restartRequired) {
@@ -563,8 +608,14 @@ export function createOrchestrator() {
       name: config.name || null,
       taskNote: ''
     }
+    let profileEnvironment = {}
     if (adapterId === 'codex') {
-      session = applyCodexProviderPolicy(session, { imported: Boolean(session.cliSessionId) })
+      const prepared = prepareCodexSessionRuntime(session, {
+        imported: Boolean(session.cliSessionId),
+        explicitProfileId: config.profileId || null
+      })
+      session = prepared.session
+      profileEnvironment = prepared.profileEnvironment
       assertCodexSessionCanStart(session)
     }
     engine.setSession(sessionId, { tier, rulesetId, ruleset: rulesets[rulesetId] })
@@ -575,7 +626,8 @@ export function createOrchestrator() {
         hookRunnerPath,
         hookPort: null,
         ruleset: rulesets[rulesetId],
-        codexHome: adapterId === 'codex' ? getCodexHome() : null
+        codexHome: adapterId === 'codex' ? getCodexHome() : null,
+        profileEnvironment
       }
     })
     const costAvailable = descriptor.costAvailable !== false
@@ -1113,12 +1165,22 @@ export function createOrchestrator() {
     const descriptor = adapters.get(entry.session.adapterId)
     if (!descriptor) throw new Error('unknown adapter: ' + entry.session.adapterId)
     engine.setSession(sessionId, { tier: entry.session.tier, rulesetId: entry.session.rulesetId, ruleset: rulesets[entry.session.rulesetId] })
+    let profileEnvironment = {}
     if (entry.session.adapterId === 'codex') {
-      const next = refreshCodexProviderRuntime(entry, {
-        imported: Boolean(entry.session.cliSessionId),
-        isActive: false
-      })
-      assertCodexSessionCanStart(next)
+      if (entry.session.profileId) {
+        const prepared = prepareCodexSessionRuntime(entry.session, {
+          imported: Boolean(entry.session.cliSessionId),
+          explicitProfileId: entry.session.profileId
+        })
+        Object.assign(entry.session, prepared.session)
+        profileEnvironment = prepared.profileEnvironment
+      } else {
+        const next = refreshCodexProviderRuntime(entry, {
+          imported: Boolean(entry.session.cliSessionId),
+          isActive: false
+        })
+        assertCodexSessionCanStart(next)
+      }
       const db = getDb()
       if (db) {
         db.updateSession(sessionId, {
@@ -1137,7 +1199,8 @@ export function createOrchestrator() {
         hookRunnerPath,
         hookPort: null,
         ruleset: rulesets[entry.session.rulesetId],
-        codexHome: entry.session.adapterId === 'codex' ? getCodexHome() : null
+        codexHome: entry.session.adapterId === 'codex' ? getCodexHome() : null,
+        profileEnvironment
       }
     })
     entry.adapter = adapter
@@ -1150,7 +1213,19 @@ export function createOrchestrator() {
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
     wireAdapterGateway(sessionId, adapter)
     adapter.hookPort = hookPort
-    await adapter.start()
+    const started = await adapter.start()
+    if (started === false) {
+      entry.status = 'error'
+      entry.adapter = null
+      const db = getDb()
+      if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+      return false
+    }
+    if (entry.session.profileId) {
+      entry.session.activeProfileId = entry.session.profileId
+      entry.session.pendingProfileId = null
+      entry.session.restartRequired = false
+    }
     const db = getDb()
     if (db) { db.updateSession(sessionId, { status: 'idle' }); scheduleFlush() }
     send('session:event', { sessionId, type: 'ready', status: entry.status })
@@ -1161,6 +1236,7 @@ export function createOrchestrator() {
     const entry = sessions.get(sessionId)
     if (!entry) throw new Error('no session')
     if (entry.session.adapterId !== 'codex') throw new Error('provider policy is only available for Codex')
+    if (entry.session.profileId) throw new Error('provider policy is unavailable while a Codex profile is selected')
     if (!['source', 'live', 'explicit'].includes(policy)) throw new Error('invalid Codex provider policy')
     if (explicitProvider && !isSafeProviderName(explicitProvider)) throw new Error('invalid Codex provider')
 
@@ -1262,27 +1338,47 @@ export function createOrchestrator() {
       const e = sessions.get(sessionId)
       if (!e || !e.adapter) return false
       if (e.session.adapterId === 'codex') {
-        const next = refreshCodexProviderRuntime(e, {
-          imported: Boolean(e.session.cliSessionId),
-          isActive: false
-        })
-        send('session:event', {
-          sessionId,
-          type: 'codex-runtime',
-          provider: next.provider,
-          providerPolicy: next.providerPolicy,
-          explicitProvider: next.explicitProvider,
-          providerWarning: next.providerWarning,
-          pendingProvider: next.pendingProvider,
-          pendingProviderWarning: next.pendingProviderWarning,
-          restartRequired: next.restartRequired,
-          canStart: next.canStart
-        })
-        assertCodexSessionCanStart(next)
+        if (e.session.profileId) {
+          const prepared = prepareCodexSessionRuntime(e.session, {
+            imported: Boolean(e.session.cliSessionId),
+            explicitProfileId: e.session.profileId
+          })
+          Object.assign(e.session, prepared.session)
+          e.adapter.setProfileEnvironment?.(prepared.profileEnvironment)
+        } else {
+          const next = refreshCodexProviderRuntime(e, {
+            imported: Boolean(e.session.cliSessionId),
+            isActive: false
+          })
+          send('session:event', {
+            sessionId,
+            type: 'codex-runtime',
+            provider: next.provider,
+            providerPolicy: next.providerPolicy,
+            explicitProvider: next.explicitProvider,
+            providerWarning: next.providerWarning,
+            pendingProvider: next.pendingProvider,
+            pendingProviderWarning: next.pendingProviderWarning,
+            restartRequired: next.restartRequired,
+            canStart: next.canStart
+          })
+          assertCodexSessionCanStart(next)
+        }
       }
       await hookReady
       e.adapter.hookPort = hookPort
-      await e.adapter.start()
+      const started = await e.adapter.start()
+      if (started === false) {
+        e.status = 'error'
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+        return false
+      }
+      if (e.session.profileId) {
+        e.session.activeProfileId = e.session.profileId
+        e.session.pendingProfileId = null
+        e.session.restartRequired = false
+      }
       return true
     })
     ipcMain.handle('session:send-turn', (_e, sessionId, text) => {
@@ -1333,7 +1429,7 @@ export function createOrchestrator() {
       if (!e) throw new Error('no session')
       if (!e.adapter) throw new Error('会话已离线，请先重新启动')
       if (!isSafeNativeSessionId(cliSessionId)) throw new Error('invalid native session id')
-      if (e.session.adapterId === 'codex') {
+      if (e.session.adapterId === 'codex' && !e.session.profileId) {
         const next = refreshCodexProviderRuntime(e, {
           imported: Boolean(e.session.cliSessionId),
           isActive: hasActiveCodexProcess(e)
