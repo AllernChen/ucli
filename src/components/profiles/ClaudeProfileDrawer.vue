@@ -100,7 +100,11 @@ watch(() => [props.open, props.profile], () => {
 const modeView = computed(() => claudeConnectionModePresentation(form.connectionMode))
 const secretLabel = computed(() => modeView.value.secretLabel)
 const requiresBaseUrl = computed(() => form.connectionMode === 'bearer' && modeView.value.requiresBaseUrl)
-const needsSecret = computed(() => form.connectionMode !== 'subscription' && (props.mode !== 'edit' || !props.profile?.hasSecret))
+const needsSecret = computed(() => form.connectionMode !== 'subscription' && (
+  props.mode !== 'edit' ||
+  !props.profile?.hasSecret ||
+  form.connectionMode !== props.profile?.connectionMode
+))
 const canSave = computed(() => Boolean(
   form.name.trim() &&
   (!requiresBaseUrl.value || form.baseUrl.trim()) &&

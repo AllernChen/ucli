@@ -203,8 +203,8 @@ const profileKindLabel = (profile) => profile.adapterId === 'claude'
 const profileServiceLabel = (profile) => {
   if (profile.adapterId === 'claude') {
     return profile.connectionMode === 'subscription'
-      ? 'Claude 登录态'
-      : (profileEndpointLabel(profile.baseUrl) || 'Anthropic 官方地址')
+      ? '使用现有 Claude 登录态'
+      : (profile.baseUrl ? profileEndpointLabel(profile.baseUrl) : 'Anthropic 官方地址')
   }
   return profile.kind === 'managed' ? profileEndpointLabel(profile.baseUrl) : profile.providerId
 }
