@@ -132,6 +132,64 @@ export function buildClaudeProfileEnvironment({
   return env
 }
 
+export function prepareClaudeProfileSession({ session = {}, selection = {}, launch = null } = {}) {
+  if (selection.canStart === false) {
+    throw claudeProfileError('PROFILE_NOT_READY')
+  }
+  if (!selection.profileId) {
+    return {
+      session: {
+        ...session,
+        profileId: null,
+        activeProfileId: null,
+        pendingProfileId: null,
+        profileStatus: null,
+        profileRuntimeRevision: null,
+        pendingProfileRuntimeRevision: null,
+        restartRequired: false,
+        canStart: true,
+        actualModel: null,
+        profileWarning: null
+      },
+      profileLaunch: null
+    }
+  }
+  if (!launch || launch.status !== 'ready') {
+    throw claudeProfileError('PROFILE_NOT_READY')
+  }
+  return {
+    session: {
+      ...session,
+      profileId: selection.profileId,
+      model: launch.artifact?.model || session.model || null,
+      activeProfileId: null,
+      pendingProfileId: null,
+      profileStatus: launch.status,
+      profileRuntimeRevision: launch.runtimeRevision || null,
+      pendingProfileRuntimeRevision: null,
+      restartRequired: false,
+      canStart: true,
+      actualModel: null,
+      profileWarning: null
+    },
+    profileLaunch: {
+      args: [...launch.args],
+      env: { ...launch.env }
+    }
+  }
+}
+
+export function describeClaudeModelSelection({ requestedModel, actualModel } = {}) {
+  const safeActualModel = isSafeClaudeModel(actualModel) ? actualModel : null
+  const safeRequestedModel = isSafeClaudeModel(requestedModel) ? requestedModel : null
+  return {
+    actualModel: safeActualModel,
+    profileWarning: safeActualModel && safeRequestedModel && safeActualModel !== safeRequestedModel
+      ? 'model_substituted'
+      : null
+  }
+}
+
 export function createClaudeProfileAdapter() {
   return {
     id: 'claude',

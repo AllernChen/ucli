@@ -1,4 +1,4 @@
-import { sanitiseProfileError } from './contracts.js'
+import { sanitiseProfileError, validateProfileBaseUrl } from './contracts.js'
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/
 const ADAPTER_IDS = new Set(['codex', 'claude', 'opencode', 'ucode'])
@@ -8,7 +8,8 @@ const PROFILE_FIELDS = [
   'reasoningEffort', 'contextWindow', 'secret'
 ]
 const PROFILE_PATCH_FIELDS = [
-  'name', 'kind', 'providerId', 'baseUrl', 'model', 'reasoningEffort', 'contextWindow'
+  'name', 'kind', 'providerId', 'baseUrl', 'model', 'reasoningEffort', 'contextWindow',
+  'connectionMode'
 ]
 
 function ipcError(message) {
@@ -53,8 +54,24 @@ function copyDefinedFields(value, fields) {
     .map((field) => [field, source[field]]))
 }
 
-function safeProfile(profile = {}) {
+function copyProfileDraft(value) {
+  const source = requireObject(value, 'profile')
+  const draft = copyFields(source, PROFILE_FIELDS)
+  if (draft.adapterId === 'claude') draft.connectionMode = source.connectionMode
+  return draft
+}
+
+function safeClaudeConfig(config = {}) {
+  const modes = new Set(['subscription', 'api_key', 'bearer'])
+  const baseUrl = validateProfileBaseUrl(config.baseUrl)
   return {
+    connectionMode: modes.has(config.connectionMode) ? config.connectionMode : 'subscription',
+    baseUrl: baseUrl.ok ? baseUrl.value : null
+  }
+}
+
+function safeProfile(profile = {}) {
+  const result = {
     id: typeof profile.id === 'string' ? profile.id : null,
     adapterId: typeof profile.adapterId === 'string' ? profile.adapterId : null,
     name: typeof profile.name === 'string' ? profile.name : '',
@@ -73,6 +90,8 @@ function safeProfile(profile = {}) {
     isProjectDefault: profile.isProjectDefault === true,
     updatedAt: Number.isFinite(profile.updatedAt) ? profile.updatedAt : null
   }
+  if (result.adapterId === 'claude') result.config = safeClaudeConfig(profile.config)
+  return result
 }
 
 function safeRevision(revision = {}) {
@@ -125,6 +144,17 @@ function safeRuntime(runtime = {}) {
   }
 }
 
+function safeClaudeRuntime(runtime = {}) {
+  const authModes = new Set(['api_key', 'bearer', 'cloud_provider', 'login_or_unknown'])
+  return {
+    configDir: typeof runtime.configDir === 'string' ? runtime.configDir : '',
+    settingsMtimeMs: Number.isFinite(runtime.settingsMtimeMs) ? runtime.settingsMtimeMs : 0,
+    inheritedAuthMode: authModes.has(runtime.inheritedAuthMode)
+      ? runtime.inheritedAuthMode
+      : 'login_or_unknown'
+  }
+}
+
 async function safeCall(operation) {
   try {
     return await operation()
@@ -135,7 +165,13 @@ async function safeCall(operation) {
   }
 }
 
-export function registerAiCliProfileIpc({ ipcMain, service, inspectCliTools, getCodexRuntime }) {
+export function registerAiCliProfileIpc({
+  ipcMain,
+  service,
+  inspectCliTools,
+  getCodexRuntime,
+  getClaudeRuntime = () => ({})
+}) {
   ipcMain.handle('ai-cli-profiles:get-state', (_event, options = {}) => safeCall(async () => {
     if (options !== undefined) requireObject(options, 'options')
     const cwd = typeof options.cwd === 'string' && options.cwd.length <= 4096 && !options.cwd.includes('\0')
@@ -143,18 +179,25 @@ export function registerAiCliProfileIpc({ ipcMain, service, inspectCliTools, get
       : undefined
     const [cliInventory] = await Promise.all([inspectCliTools()])
     const cliConfiguration = service.listCliConfigurationState({ cwd }).map(safeCliConfiguration)
-    const projectBinding = cliConfiguration.find((item) => item.adapterId === 'codex')?.projectBinding || null
+    const profileAdapters = cliConfiguration
+      .filter((item) => item.mode === 'profiles')
+      .map((item) => item.adapterId)
+    const projectBindings = new Map(cliConfiguration.map((item) => [item.adapterId, item.projectBinding]))
     return {
       cliConfiguration,
       cliInventory: cliInventory.map(safeInventory),
-      profiles: service.listProfiles({ adapterId: 'codex' })
+      profiles: profileAdapters.flatMap((adapterId) => service.listProfiles({ adapterId }))
         .map(safeProfile)
-        .map((profile) => ({ ...profile, isProjectDefault: profile.id === projectBinding })),
-      codexRuntime: safeRuntime(getCodexRuntime())
+        .map((profile) => ({
+          ...profile,
+          isProjectDefault: profile.id === projectBindings.get(profile.adapterId)
+        })),
+      codexRuntime: safeRuntime(getCodexRuntime()),
+      claudeRuntime: safeClaudeRuntime(getClaudeRuntime())
     }
   }))
   ipcMain.handle('ai-cli-profiles:create', (_event, draft) => safeCall(async () =>
-    safeProfile(await service.createProfile(copyFields(draft, PROFILE_FIELDS)))
+    safeProfile(await service.createProfile(copyProfileDraft(draft)))
   ))
   ipcMain.handle('ai-cli-profiles:update', (_event, profileId, patch) => safeCall(async () =>
     safeProfile(await service.updateProfile(requireId(profileId, 'profileId'), copyDefinedFields(patch, PROFILE_PATCH_FIELDS)))

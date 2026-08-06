@@ -17,9 +17,13 @@ const IDS = [
 
 function safeStorage() {
   return {
+    decryptCount: 0,
     isEncryptionAvailable: () => true,
     encryptString: (value) => Buffer.from(`encrypted:${value}`, 'utf8'),
-    decryptString: (value) => value.toString('utf8').replace(/^encrypted:/, '')
+    decryptString(value) {
+      this.decryptCount += 1
+      return value.toString('utf8').replace(/^encrypted:/, '')
+    }
   }
 }
 
@@ -28,7 +32,8 @@ async function harness() {
   const codexHome = join(root, '.codex')
   mkdirSync(codexHome)
   const db = await openDb(join(root, 'ucli.db'))
-  const secretStore = new ProfileSecretStore({ db, safeStorage: safeStorage(), now: () => 100 })
+  const storage = safeStorage()
+  const secretStore = new ProfileSecretStore({ db, safeStorage: storage, now: () => 100 })
   let idIndex = 0
   const service = createProfileService({
     db,
@@ -45,6 +50,7 @@ async function harness() {
     root,
     db,
     secretStore,
+    storage,
     service,
     close() {
       db.close()
@@ -95,6 +101,7 @@ test('Claude launch decrypts once and keeps the credential in the target environ
       model: 'sonnet',
       secret: 'bearer-secret'
     })
+    const decryptsBeforeLaunch = context.storage.decryptCount
     const launch = context.service.resolveLaunchProfile({
       profileId: created.id,
       session: { cliSessionId: 'native-session', model: 'haiku' },
@@ -105,6 +112,7 @@ test('Claude launch decrypts once and keeps the credential in the target environ
     assert.equal(launch.env.ANTHROPIC_AUTH_TOKEN, 'bearer-secret')
     assert.equal(launch.env.ANTHROPIC_API_KEY, undefined)
     assert.equal(launch.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, '1')
+    assert.equal(context.storage.decryptCount - decryptsBeforeLaunch, 1)
     assert.equal(JSON.stringify(context.service.listProfiles({ adapterId: 'claude' })).includes('bearer-secret'), false)
   } finally {
     context.close()

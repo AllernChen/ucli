@@ -3,7 +3,9 @@ import test from 'node:test'
 
 import {
   buildClaudeProfileArgs,
-  buildClaudeProfileEnvironment
+  buildClaudeProfileEnvironment,
+  describeClaudeModelSelection,
+  prepareClaudeProfileSession
 } from '../electron/aiCliProfiles/claudeProfileAdapter.js'
 import {
   buildClaudeAdapterLaunch,
@@ -122,4 +124,48 @@ test('Claude adapter launch keeps secrets out of argv and temporary settings', (
   assert.equal(launch.env.UCLI_SESSION_ID, 'ucli-session')
   assert.equal(JSON.stringify(launch.args).includes(secret), false)
   assert.equal(JSON.stringify(buildClaudeSettings('runner.js')).includes(secret), false)
+})
+
+test('Claude session preparation keeps launch credentials outside persisted session state', () => {
+  const prepared = prepareClaudeProfileSession({
+    session: { id: 'session-1', adapterId: 'claude', model: 'haiku' },
+    selection: { profileId: 'profile-1', canStart: true },
+    launch: {
+      args: ['--model', 'sonnet'],
+      env: { ANTHROPIC_API_KEY: 'session-secret' },
+      artifact: { model: 'sonnet', connectionMode: 'api_key' },
+      status: 'ready',
+      runtimeRevision: 123
+    }
+  })
+
+  assert.equal(prepared.session.profileId, 'profile-1')
+  assert.equal(prepared.session.model, 'sonnet')
+  assert.equal(prepared.session.profileRuntimeRevision, 123)
+  assert.equal(prepared.profileLaunch.env.ANTHROPIC_API_KEY, 'session-secret')
+  assert.equal(JSON.stringify(prepared.session).includes('session-secret'), false)
+
+  const system = prepareClaudeProfileSession({
+    session: prepared.session,
+    selection: { profileId: null, canStart: true }
+  })
+  assert.equal(system.session.profileId, null)
+  assert.equal(system.profileLaunch, null)
+})
+
+test('Claude actual model reports substitution without replacing the requested model', () => {
+  assert.deepEqual(describeClaudeModelSelection({
+    requestedModel: 'sonnet',
+    actualModel: 'claude-sonnet-5-20260801'
+  }), {
+    actualModel: 'claude-sonnet-5-20260801',
+    profileWarning: 'model_substituted'
+  })
+  assert.deepEqual(describeClaudeModelSelection({
+    requestedModel: 'sonnet',
+    actualModel: 'sonnet'
+  }), {
+    actualModel: 'sonnet',
+    profileWarning: null
+  })
 })

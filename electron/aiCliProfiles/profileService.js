@@ -107,9 +107,9 @@ export function createProfileService({
     }
   }
 
-  function runtimeStateFor(profile) {
+  function runtimeStateFor(profile, { secretState: suppliedSecretState } = {}) {
     const adapter = adapterFor(profile.adapterId)
-    const secretState = secretStateFor(profile)
+    const secretState = suppliedSecretState || secretStateFor(profile)
     const runtime = profile.adapterId === 'codex'
       ? readCodexRuntime()
       : profile.adapterId === 'claude'
@@ -347,9 +347,25 @@ export function createProfileService({
     resolveLaunchProfile({ profileId, session = {}, baseEnv = process.env }) {
       const profile = db.getAiCliProfile(profileId)
       if (!profile) throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
-      const state = runtimeStateFor(profile)
+      let secret = null
+      let state
+      if (profile.kind === 'managed') {
+        try {
+          secret = secretStore.getSecret(profileId)
+        } catch {
+          throw serviceError('Profile secret is unavailable', 'PROFILE_SECRET_UNAVAILABLE')
+        }
+        state = runtimeStateFor(profile, {
+          secretState: {
+            hasSecret: Boolean(secret),
+            secretSuffix: null,
+            encryptionAvailable: secretStore.isEncryptionAvailable?.() !== false
+          }
+        })
+      } else {
+        state = runtimeStateFor(profile)
+      }
       if (!state.canStart) throw serviceError('Profile is not ready', 'PROFILE_NOT_READY')
-      const secret = profile.kind === 'managed' ? secretStore.getSecret(profileId) : null
       return {
         ...adapterFor(profile.adapterId).resolveLaunch({ profile, secret, session, baseEnv }),
         status: state.status,
@@ -362,6 +378,10 @@ export function createProfileService({
     },
 
     resolveCodexProfileRuntime(profileId) {
+      return service.resolveProfileRuntime(profileId)
+    },
+
+    resolveProfileRuntime(profileId) {
       const profile = db.getAiCliProfile(profileId)
       if (!profile) {
         return {

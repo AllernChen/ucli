@@ -83,7 +83,8 @@ test('renderer merges only allowlisted profile runtime fields', async () => {
   const store = useSessionsStore()
   store.sessions.push({
     id: 'session-1',
-    adapterId: 'codex',
+    adapterId: 'claude',
+    model: 'sonnet',
     stats: { tokens: { input: 0, output: 0 } }
   })
 
@@ -109,4 +110,28 @@ test('renderer merges only allowlisted profile runtime fields', async () => {
   assert.equal('profileEnvironment' in row, false)
   assert.equal('secret' in row, false)
   assert.equal(JSON.stringify(row).includes('must-not-leak'), false)
+
+  store._onEvent({
+    sessionId: 'session-1',
+    type: 'profile-model',
+    actualModel: 'claude-sonnet-5-20260801',
+    profileWarning: 'model_substituted',
+    requestedModel: 'must-not-enter-renderer',
+    profileLaunch: { env: { ANTHROPIC_API_KEY: 'must-not-leak' } }
+  })
+  assert.equal(row.actualModel, 'claude-sonnet-5-20260801')
+  assert.equal(row.profileWarning, 'model_substituted')
+  assert.equal('requestedModel' in row, false)
+  assert.equal('profileLaunch' in row, false)
+
+  store._onEvent({
+    sessionId: 'session-1',
+    type: 'stats_update',
+    usage: { inputTokens: 10, outputTokens: 5 },
+    model: 'claude-sonnet-5-20260801',
+    actualModel: 'claude-sonnet-5-20260801',
+    profileWarning: 'model_substituted'
+  })
+  assert.equal(row.model, 'sonnet')
+  assert.equal(row.actualModel, 'claude-sonnet-5-20260801')
 })

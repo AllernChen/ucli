@@ -44,6 +44,15 @@ function nativeSessionIdOf(records) {
   ))?.record.session_id || null
 }
 
+function actualModelOf(records) {
+  return records.find(({ record }) => (
+    record?.type === 'system' &&
+    record?.subtype === 'init' &&
+    typeof record.model === 'string' &&
+    /^[a-zA-Z0-9][a-zA-Z0-9._:@/+~-]{0,255}$/.test(record.model)
+  ))?.record.model || null
+}
+
 function questionDecision(toolUse) {
   const questions = Array.isArray(toolUse.input?.questions)
     ? toolUse.input.questions
@@ -184,7 +193,8 @@ export function parseClaudeGatewayState(lines = [], previousCursor = 0) {
     events,
     cursor: Array.from(lines || []).length,
     currentDecision,
-    nativeSessionId: nativeSessionIdOf(records)
+    nativeSessionId: nativeSessionIdOf(records),
+    actualModel: actualModelOf(records)
   }
 }
 

@@ -8,6 +8,7 @@ export const useAiCliProfilesStore = defineStore('ai-cli-profiles', {
     cliInventory: [],
     cliConfiguration: [],
     codexRuntime: null,
+    claudeRuntime: null,
     revisionsByProfileId: {},
     cwd: '',
     loading: false,
@@ -34,6 +35,7 @@ export const useAiCliProfilesStore = defineStore('ai-cli-profiles', {
         this.cliInventory = state.cliInventory || []
         this.cliConfiguration = state.cliConfiguration || []
         this.codexRuntime = state.codexRuntime || null
+        this.claudeRuntime = state.claudeRuntime || null
         return state
       } catch (error) {
         this.error = { code: error?.code || 'PROFILE_OPERATION_FAILED', message: error?.message || '加载配置档案失败' }

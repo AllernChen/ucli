@@ -299,6 +299,10 @@ export class ClaudeAdapter extends BaseAdapter {
       this.session.cliSessionId = state.nativeSessionId
       this.emitEvent({ type: 'init', cliSessionId: state.nativeSessionId })
     }
+    if (state.actualModel && state.actualModel !== this._lastModel) {
+      this._lastModel = state.actualModel
+      this.emitEvent({ type: 'profile-model', actualModel: state.actualModel })
+    }
     this._gatewayDecision = state.currentDecision &&
       !this._gatewayRespondedDecisions.has(state.currentDecision.decisionId)
       ? state.currentDecision

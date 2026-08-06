@@ -74,6 +74,8 @@ test('Claude parser emits completion only from an explicit end-turn record', asy
   const lines = fixtureLines('claude-result')
   const state = parseClaudeGatewayState(lines)
 
+  assert.equal(state.actualModel, 'claude-sonnet')
+
   assert.deepEqual(state.events.map((event) => event.type), [
     'turn_started',
     'turn_completed'
