@@ -76,6 +76,10 @@ export function createOrchestrator() {
     inspectCliTools,
     getPersistence: () => ({ available: Boolean(getDb()), recoveryInfo: persistenceRecovery }),
     getGateway: () => gatewayManager?.getDiagnostics() || null,
+    getAiCliProfiles: () => profileService?.getDiagnosticSummary() || {
+      total: 0, ready: 0, drifted: 0, missing: 0,
+      codexHomeWritable: false, lastReconcileAt: null
+    },
     showSaveDialog: (options) => dialog.showSaveDialog(mainWindow, options),
     writeFile: writeFileSync
   })
@@ -244,7 +248,21 @@ export function createOrchestrator() {
   function publishCodexRuntime(snapshot) {
     for (const [sessionId, entry] of sessions) {
       if (entry.session.adapterId !== 'codex') continue
-      if (entry.session.profileId) continue
+      if (entry.session.profileId) {
+        const resolved = profileService?.resolveCodexProfileRuntime(entry.session.profileId) || {
+          profileId: entry.session.profileId,
+          status: 'missing_profile',
+          canStart: false,
+          runtimeRevision: null
+        }
+        Object.assign(entry.session, reconcileActiveProfile({
+          session: entry.session,
+          resolved,
+          isActive: hasActiveCodexProcess(entry)
+        }))
+        publishProfileRuntime(sessionId, entry.session)
+        continue
+      }
       const next = refreshCodexProviderRuntime(entry, { imported: Boolean(entry.session.cliSessionId) })
       const db = getDb()
       if (db && !next.restartRequired) {

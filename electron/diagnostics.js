@@ -11,7 +11,8 @@ export function buildDiagnosticReport({
   nodeVersion,
   cliTools = [],
   persistence,
-  gateway
+  gateway,
+  aiCliProfiles
 }) {
   return {
     schemaVersion: 1,
@@ -34,8 +35,24 @@ export function buildDiagnosticReport({
         ? (persistence.recoveryInfo ? 'recovered' : 'ready')
         : 'unavailable'
     },
+    ...(aiCliProfiles ? {
+      aiCliProfiles: {
+        total: safeCount(aiCliProfiles.total),
+        ready: safeCount(aiCliProfiles.ready),
+        drifted: safeCount(aiCliProfiles.drifted),
+        missing: safeCount(aiCliProfiles.missing),
+        codexHomeWritable: aiCliProfiles.codexHomeWritable === true,
+        lastReconcileAt: Number.isFinite(aiCliProfiles.lastReconcileAt)
+          ? aiCliProfiles.lastReconcileAt
+          : null
+      }
+    } : {}),
     ...(gateway ? { gateway } : {})
   }
+}
+
+function safeCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0
 }
 
 export function diagnosticReportFileName(report) {

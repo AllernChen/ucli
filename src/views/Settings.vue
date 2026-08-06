@@ -192,6 +192,8 @@
         <span class="muted">仅包含版本、CLI 可用性与本地数据状态，不包含对话内容或路径。</span>
         <a-space>
           <a-button size="small" :loading="diagnosticsLoading" @click="loadDiagnostics">刷新</a-button>
+          <a-button size="small" :loading="profileRechecking" @click="recheckProfiles">一键重新检查配置档案</a-button>
+          <a-button size="small" type="link" @click="router.push('/profiles')">前往配置档案</a-button>
           <a-button size="small" type="primary" :loading="diagnosticsExporting" @click="exportDiagnostics">导出 JSON</a-button>
         </a-space>
       </div>
@@ -199,6 +201,7 @@
         <a-descriptions-item label="UCLI">{{ diagnostics.application.version }}</a-descriptions-item>
         <a-descriptions-item label="本地数据">{{ persistenceStatusLabel(diagnostics.persistence.status) }}</a-descriptions-item>
         <a-descriptions-item label="CLI">{{ diagnosticCliSummary }}</a-descriptions-item>
+        <a-descriptions-item v-if="diagnostics.aiCliProfiles" label="配置档案">{{ diagnosticProfileSummary }}</a-descriptions-item>
       </a-descriptions>
     </a-card>
 
@@ -223,7 +226,7 @@ import { useGatewayStore } from '../stores/gateway.js'
 import GatewayConfigDrawer from '../components/gateway/GatewayConfigDrawer.vue'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
-import { formatCliDiagnosticSummary, persistenceStatusLabel } from '../diagnosticsPresentation.js'
+import { formatCliDiagnosticSummary, persistenceStatusLabel, profileDiagnosticSummary } from '../diagnosticsPresentation.js'
 import { updateProgressText, updateStatusLabel, visibleReleaseNotes } from '../updatePresentation.js'
 import {
   gatewayPhaseLabel,
@@ -247,6 +250,7 @@ const lastCliResult = ref(null)
 const diagnostics = ref(null)
 const diagnosticsLoading = ref(false)
 const diagnosticsExporting = ref(false)
+const profileRechecking = ref(false)
 const updateState = ref(null)
 let stopUpdateListener = null
 const codexRuntime = ref(null)
@@ -257,6 +261,7 @@ const lastCliOutput = computed(() => {
   return [result.stdout, result.stderr].filter(Boolean).join('\n').trim()
 })
 const diagnosticCliSummary = computed(() => formatCliDiagnosticSummary(diagnostics.value?.cliTools || []))
+const diagnosticProfileSummary = computed(() => profileDiagnosticSummary(diagnostics.value?.aiCliProfiles || {}))
 
 onMounted(async () => {
   stopUpdateListener = ipc.on('update:state', (state) => { updateState.value = state })
@@ -388,6 +393,19 @@ function confirmCliAction(item, action) {
 async function pickDir() {
   const dir = await ipc.pickDirectory()
   if (dir) local.value.defaultCwd = dir
+}
+
+async function recheckProfiles() {
+  profileRechecking.value = true
+  try {
+    const result = await ipc.reconcileAiCliProfiles()
+    await loadDiagnostics()
+    message.success(result.recovered?.length ? `已恢复 ${result.recovered.length} 个配置档案` : '配置档案检查完成')
+  } catch (e) {
+    message.error('重新检查配置档案失败：' + (e?.message || e))
+  } finally {
+    profileRechecking.value = false
+  }
 }
 
 async function loadCodexRuntime() {

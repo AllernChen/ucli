@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { readdirSync } from 'node:fs'
+import { accessSync, constants, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import { createCodexProfileAdapter } from './codexProfileAdapter.js'
@@ -48,6 +48,7 @@ export function createProfileService({
   now = Date.now,
   flush = () => db.flush()
 }) {
+  let lastReconcileAt = null
   async function persistOrThrow() {
     try {
       const result = await flush()
@@ -333,6 +334,19 @@ export function createProfileService({
       }
     },
 
+    resolveCodexProfileRuntime(profileId) {
+      const profile = db.getAiCliProfile(profileId)
+      if (!profile) {
+        return {
+          profileId,
+          status: 'missing_profile',
+          canStart: false,
+          runtimeRevision: null
+        }
+      }
+      return runtimeStateFor(profile)
+    },
+
     async repairProfile(profileId) {
       const profile = db.getAiCliProfile(profileId)
       if (!profile) throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
@@ -429,7 +443,25 @@ export function createProfileService({
       const visible = db.listAiCliProfiles({ adapterId: 'codex' })
         .filter((profile) => !duplicates.has(profile.nativeProfileName))
         .map(rendererProfile)
+      lastReconcileAt = now()
       return { profiles: visible, recovered, warnings }
+    },
+
+    getDiagnosticSummary() {
+      const visible = db.listAiCliProfiles({ adapterId: 'codex' }).map(rendererProfile)
+      let codexHomeWritable = false
+      try {
+        accessSync(resolveCodexHome(), constants.W_OK)
+        codexHomeWritable = true
+      } catch { /* report only the aggregate result */ }
+      return {
+        total: visible.length,
+        ready: visible.filter((profile) => profile.status === 'ready').length,
+        drifted: visible.filter((profile) => profile.status === 'drifted').length,
+        missing: visible.filter((profile) => !['ready', 'drifted'].includes(profile.status)).length,
+        codexHomeWritable,
+        lastReconcileAt
+      }
     }
   }
 

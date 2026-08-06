@@ -65,3 +65,33 @@ test('diagnostic report represents recovered and unavailable storage without pat
   assert.equal(unavailable.persistence.status, 'unavailable')
   assert.doesNotMatch(serializeDiagnosticReport(recovered), /secret|ucli\.db/)
 })
+
+test('diagnostic report includes only aggregate AI CLI profile health', () => {
+  const report = buildDiagnosticReport({
+    ...runtime,
+    cliTools: [],
+    persistence: { available: true },
+    aiCliProfiles: {
+      total: 4,
+      ready: 2,
+      drifted: 1,
+      missing: 1,
+      codexHomeWritable: true,
+      lastReconcileAt: 1785970000000,
+      baseUrl: 'https://secret.example.com',
+      secretSuffix: '1234',
+      ciphertext: 'encrypted-leak',
+      toml: 'model_provider = "secret"'
+    }
+  })
+
+  assert.deepEqual(report.aiCliProfiles, {
+    total: 4,
+    ready: 2,
+    drifted: 1,
+    missing: 1,
+    codexHomeWritable: true,
+    lastReconcileAt: 1785970000000
+  })
+  assert.doesNotMatch(serializeDiagnosticReport(report), /secret\.example|1234|encrypted-leak|model_provider/)
+})

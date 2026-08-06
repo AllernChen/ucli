@@ -106,11 +106,13 @@ export function createDiagnosticsService({
   inspectCliTools,
   getPersistence,
   getGateway = null,
+  getAiCliProfiles = null,
   showSaveDialog,
   writeFile
 }) {
   async function getReport() {
     let gateway = null
+    let aiCliProfiles
     if (getGateway) {
       try {
         gateway = sanitizeGatewayDiagnostics(await getGateway())
@@ -118,11 +120,26 @@ export function createDiagnosticsService({
         gateway = unavailableGatewayDiagnostics()
       }
     }
+    if (getAiCliProfiles) {
+      try {
+        aiCliProfiles = await getAiCliProfiles()
+      } catch {
+        aiCliProfiles = {
+          total: 0,
+          ready: 0,
+          drifted: 0,
+          missing: 0,
+          codexHomeWritable: false,
+          lastReconcileAt: null
+        }
+      }
+    }
     return buildDiagnosticReport({
       ...getRuntime(),
       cliTools: await inspectCliTools(),
       persistence: getPersistence(),
-      gateway
+      gateway,
+      aiCliProfiles
     })
   }
 
