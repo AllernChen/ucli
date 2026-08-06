@@ -155,13 +155,15 @@ export function createOrchestrator() {
     }
   }
 
-  function prepareCodexSessionRuntime(session, { imported = false, explicitProfileId } = {}) {
-    const selection = profileService?.resolveSessionProfile({
-      adapterId: 'codex',
-      cwd: session.cwd,
-      imported,
-      explicitProfileId: explicitProfileId || session.profileId || null
-    })
+  function prepareCodexSessionRuntime(session, { imported = false, explicitProfileId, forceSystem = false } = {}) {
+    const selection = forceSystem
+      ? { profileId: null, canStart: true, selectionSource: 'system' }
+      : profileService?.resolveSessionProfile({
+          adapterId: 'codex',
+          cwd: session.cwd,
+          imported,
+          explicitProfileId: explicitProfileId || session.profileId || null
+        })
     if (selection?.canStart === false) {
       throw new Error('The selected Codex profile is no longer available. Choose another profile before starting.')
     }
@@ -196,7 +198,7 @@ export function createOrchestrator() {
         nativeProfileName: null,
         profileStatus: null,
         pendingProfileId: null
-      }, { imported }),
+      }, { imported: forceSystem ? false : imported }),
       profileEnvironment: {}
     }
   }
@@ -656,7 +658,8 @@ export function createOrchestrator() {
     if (adapterId === 'codex') {
       const prepared = prepareCodexSessionRuntime(session, {
         imported: Boolean(session.cliSessionId),
-        explicitProfileId: config.profileId || null
+        explicitProfileId: config.profileId || null,
+        forceSystem: config.profileSelection === 'system'
       })
       session = prepared.session
       profileEnvironment = prepared.profileEnvironment
