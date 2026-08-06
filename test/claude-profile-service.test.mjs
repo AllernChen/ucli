@@ -102,6 +102,10 @@ test('Claude launch decrypts once and keeps the credential in the target environ
       secret: 'bearer-secret'
     })
     const decryptsBeforeLaunch = context.storage.decryptCount
+    const stamp = context.service.getClaudeProfileLaunchStamp(created.id)
+    assert.equal(stamp.profileId, created.id)
+    assert.equal(stamp.runtimeRevision, context.db.getAiCliProfile(created.id).updatedAt)
+    assert.equal(context.storage.decryptCount, decryptsBeforeLaunch)
     const launch = context.service.resolveLaunchProfile({
       profileId: created.id,
       session: { cliSessionId: 'native-session', model: 'haiku' },
@@ -141,6 +145,26 @@ test('Claude connection mode and replacement credential update atomically', asyn
     assert.equal(launch.env.ANTHROPIC_AUTH_TOKEN, 'replacement-bearer')
     assert.equal(launch.env.ANTHROPIC_API_KEY, undefined)
     assert.equal(JSON.stringify(context.db.listAiCliProfiles()).includes('replacement-bearer'), false)
+  } finally {
+    context.close()
+  }
+})
+
+test('Claude managed profiles can return to subscription mode and delete the old credential', async () => {
+  const context = await harness()
+  try {
+    const created = await context.service.createProfile({
+      adapterId: 'claude', name: 'Company Claude', connectionMode: 'api_key',
+      baseUrl: 'https://gateway.example.com', secret: 'old-api-key'
+    })
+    const updated = await context.service.updateProfile(created.id, {
+      connectionMode: 'subscription',
+      baseUrl: null
+    })
+
+    assert.equal(updated.connectionMode, 'subscription')
+    assert.equal(updated.hasSecret, false)
+    assert.equal(context.db.getAiCliProfileSecretRecord(created.id), null)
   } finally {
     context.close()
   }

@@ -146,12 +146,13 @@ export function createProfileService({
     const current = db.getAiCliProfile(profileId)
     if (!current) throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
     const adapter = adapterFor(current.adapterId)
+    const nextConnectionMode = patch.connectionMode ?? patch.config?.connectionMode ?? current.config?.connectionMode
     const draft = adapter.validateDraft({
       ...profileSnapshot(current),
       ...patch,
       id: current.id,
       adapterId: current.adapterId,
-      keepSecret: patch.secret === undefined && current.hasSecretHint
+      keepSecret: patch.secret === undefined && current.hasSecretHint && nextConnectionMode !== 'subscription'
     })
     if (draft.common.kind === 'managed' && draft.secretAction.type === 'none' && !current.hasSecretHint) {
       throw serviceError('Managed profile secret is required', 'PROFILE_SECRET_REQUIRED')
@@ -344,6 +345,18 @@ export function createProfileService({
         profiles: db.listAiCliProfiles({ adapterId: options.adapterId }),
         bindings: db.listAiCliProfileBindings({ adapterId: options.adapterId })
       })
+    },
+
+    getClaudeProfileLaunchStamp(profileId) {
+      if (!profileId) return { profileId: null, runtimeRevision: null }
+      const profile = db.getAiCliProfile(profileId)
+      if (!profile || profile.adapterId !== 'claude') {
+        return { profileId, runtimeRevision: null }
+      }
+      return {
+        profileId,
+        runtimeRevision: profile.updatedAt || null
+      }
     },
 
     resolveLaunchProfile({ profileId, session = {}, baseEnv = process.env }) {

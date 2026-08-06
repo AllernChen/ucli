@@ -28,6 +28,10 @@ import {
   describeClaudeModelSelection,
   prepareClaudeProfileSession
 } from './aiCliProfiles/claudeProfileAdapter.js'
+import {
+  armClaudeProfileLaunch,
+  claudeProfileLaunchStamp
+} from './aiCliProfiles/claudeLaunchCoordinator.js'
 import { registerAiCliProfileIpc } from './aiCliProfiles/ipc.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
@@ -246,6 +250,19 @@ export function createOrchestrator() {
         })
       : null
     return prepareClaudeProfileSession({ session, selection, launch })
+  }
+
+  function armClaudeSessionLaunch(entry) {
+    const desiredStamp = profileService.getClaudeProfileLaunchStamp(entry.session.profileId || null)
+    return armClaudeProfileLaunch({
+      entry,
+      desiredStamp,
+      prepareRuntime: () => prepareClaudeSessionRuntime(entry.session, {
+        imported: Boolean(entry.session.cliSessionId),
+        explicitProfileId: entry.session.profileId || null,
+        forceSystem: !entry.session.profileId
+      })
+    })
   }
 
   function hasActiveCodexProcess(entry) {
@@ -786,7 +803,10 @@ export function createOrchestrator() {
       _lastCumTokens: null,
       _lastCompletedTurns: session.cliSessionId ? null : 0,
       _lastNotification: null,
-      _gatewayTurnActive: false
+      _gatewayTurnActive: false,
+      _claudeProfileLaunchStamp: adapterId === 'claude'
+        ? claudeProfileLaunchStamp(session)
+        : null
     }
     sessions.set(sessionId, entry)
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
@@ -1386,6 +1406,9 @@ export function createOrchestrator() {
     })
     entry.adapter = adapter
     entry.status = 'starting'
+    entry._claudeProfileLaunchStamp = entry.session.adapterId === 'claude'
+      ? claudeProfileLaunchStamp(entry.session)
+      : null
     entry._dirtyStats = null
     entry._lastCumTokens = null
     entry._lastCompletedTurns = entry.session.cliSessionId ? null : 0
@@ -1395,19 +1418,7 @@ export function createOrchestrator() {
     wireAdapterGateway(sessionId, adapter)
     adapter.hookPort = hookPort
     if (entry.session.adapterId === 'claude') {
-      const prepared = prepareClaudeSessionRuntime(entry.session, {
-        imported: Boolean(entry.session.cliSessionId),
-        explicitProfileId: entry.session.profileId || null,
-        forceSystem: !entry.session.profileId
-      })
-      Object.assign(entry.session, prepared.session, {
-        activeProfileId: prepared.session.profileId || null,
-        pendingProfileId: null,
-        pendingProfileRuntimeRevision: null,
-        restartRequired: false
-      })
-      adapter.setProfileLaunch(prepared.profileLaunch)
-      entry.status = 'launching'
+      armClaudeSessionLaunch(entry)
     }
     const started = await adapter.start()
     if (started === false) {
@@ -1659,19 +1670,7 @@ export function createOrchestrator() {
       await hookReady
       e.adapter.hookPort = hookPort
       if (e.session.adapterId === 'claude') {
-        const prepared = prepareClaudeSessionRuntime(e.session, {
-          imported: Boolean(e.session.cliSessionId),
-          explicitProfileId: e.session.profileId || null,
-          forceSystem: !e.session.profileId
-        })
-        Object.assign(e.session, prepared.session, {
-          activeProfileId: prepared.session.profileId || null,
-          pendingProfileId: null,
-          pendingProfileRuntimeRevision: null,
-          restartRequired: false
-        })
-        e.adapter.setProfileLaunch(prepared.profileLaunch)
-        e.status = 'launching'
+        armClaudeSessionLaunch(e)
       }
       const started = await e.adapter.start()
       if (started === false) {

@@ -46,7 +46,11 @@ export function normaliseClaudeProfileDraft(draft = {}) {
     throw claudeProfileError('INVALID_CLAUDE_MODEL')
   }
 
-  const baseUrlInput = String(draft.baseUrl ?? draft.config?.baseUrl ?? '').trim()
+  const baseUrlInput = String(
+    Object.hasOwn(draft, 'baseUrl')
+      ? (draft.baseUrl ?? '')
+      : (draft.config?.baseUrl ?? '')
+  ).trim()
   const baseUrlResult = validateProfileBaseUrl(baseUrlInput)
   if (!baseUrlResult.ok) {
     throw claudeProfileError('INVALID_PROFILE_BASE_URL')

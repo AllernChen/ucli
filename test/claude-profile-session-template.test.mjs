@@ -22,14 +22,15 @@ test('Claude panes switch profiles with the shared restart decision and show act
   assert.match(sessionDetail, /下次重启生效/)
 })
 
-test('Claude launch is recompiled immediately before start to avoid stale starting profiles', () => {
+test('Claude launch is conditionally recompiled immediately before start to avoid stale profiles', () => {
   assert.match(sessionDetail, /setSessionProfile/)
   const orchestrator = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
   const adapter = readFileSync(new URL('../electron/adapters/claudeAdapter.js', import.meta.url), 'utf8')
-  assert.match(orchestrator, /prepareClaudeSessionRuntime\(e\.session/)
-  assert.match(orchestrator, /e\.adapter\.setProfileLaunch/)
-  assert.match(orchestrator, /adapter\.setProfileLaunch\(prepared\.profileLaunch\)/)
-  assert.match(orchestrator, /entry\.status = 'launching'/)
-  assert.match(orchestrator, /status = 'launching'/)
+  const coordinator = readFileSync(new URL('../electron/aiCliProfiles/claudeLaunchCoordinator.js', import.meta.url), 'utf8')
+  assert.match(orchestrator, /armClaudeSessionLaunch\(e\)/)
+  assert.match(orchestrator, /getClaudeProfileLaunchStamp/)
+  assert.match(coordinator, /prepareRuntime\(\)/)
+  assert.match(coordinator, /entry\.adapter\.setProfileLaunch\(prepared\.profileLaunch\)/)
+  assert.match(coordinator, /entry\.status = 'launching'/)
   assert.match(adapter, /setProfileLaunch\(profileLaunch\)/)
 })
