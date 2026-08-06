@@ -81,9 +81,26 @@ export function createOrchestrator() {
     inspectCliTools,
     getPersistence: () => ({ available: Boolean(getDb()), recoveryInfo: persistenceRecovery }),
     getGateway: () => gatewayManager?.getDiagnostics() || null,
-    getAiCliProfiles: () => profileService?.getDiagnosticSummary() || {
-      total: 0, ready: 0, drifted: 0, missing: 0,
-      codexHomeWritable: false, lastReconcileAt: null
+    getAiCliProfiles: () => {
+      const summary = profileService?.getDiagnosticSummary() || {
+        total: 0, ready: 0, drifted: 0, missing: 0,
+        codexHomeWritable: false, lastReconcileAt: null,
+        claude: {
+          total: 0,
+          connectionModes: { subscription: 0, apiKey: 0, bearer: 0 },
+          missingSecret: 0,
+          modelSubstitutions: 0
+        }
+      }
+      return {
+        ...summary,
+        claude: {
+          ...summary.claude,
+          modelSubstitutions: Array.from(sessions.values()).filter((entry) =>
+            entry.session?.adapterId === 'claude' && entry.session?.profileWarning === 'model_substituted'
+          ).length
+        }
+      }
     },
     showSaveDialog: (options) => dialog.showSaveDialog(mainWindow, options),
     writeFile: writeFileSync
