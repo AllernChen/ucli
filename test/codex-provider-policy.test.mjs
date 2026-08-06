@@ -125,3 +125,16 @@ test('an unchanged Codex runtime can resume without rebuilding its adapter', () 
   assert.equal(requiresCodexProcessRestart({ canStart: true, restartRequired: false }), false)
   assert.equal(requiresCodexProcessRestart({ canStart: false, restartRequired: false }), true)
 })
+
+test('legacy provider policy ignores profile selection fields and remains backward compatible', () => {
+  assert.deepEqual(resolveCodexProviderPolicy({
+    policy: 'source',
+    sourceProvider: 'legacy_gateway',
+    profileId: 'profile-explicit',
+    runtime
+  }), {
+    providerOverride: 'legacy_gateway',
+    effectiveProvider: 'legacy_gateway',
+    warning: null
+  })
+})
