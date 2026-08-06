@@ -53,6 +53,8 @@ const api = {
     ipcRenderer.invoke('session:resume', sessionId, cliSessionId),
   stopSession: (sessionId) => ipcRenderer.invoke('session:stop', sessionId),
   restartSession: (sessionId) => ipcRenderer.invoke('session:restart', sessionId),
+  setSessionProfile: (sessionId, profileId) =>
+    ipcRenderer.invoke('session:set-profile', sessionId, profileId),
   deleteSession: (sessionId) => ipcRenderer.invoke('session:delete', sessionId),
   listSessions: () => ipcRenderer.invoke('session:list'),
   updateSessionNote: (sessionId, note) => ipcRenderer.invoke('session:update-note', sessionId, note),

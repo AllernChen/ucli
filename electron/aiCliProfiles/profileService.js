@@ -326,7 +326,11 @@ export function createProfileService({
       const state = runtimeStateFor(profile)
       if (!state.canStart) throw serviceError('Profile is not ready', 'PROFILE_NOT_READY')
       const secret = profile.kind === 'managed' ? secretStore.getSecret(profileId) : null
-      return adapterFor('codex').resolveLaunch({ profile, secret })
+      return {
+        ...adapterFor('codex').resolveLaunch({ profile, secret }),
+        status: state.status,
+        runtimeRevision: state.runtimeRevision
+      }
     },
 
     async repairProfile(profileId) {

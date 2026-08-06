@@ -39,10 +39,12 @@ export const ipc = {
   resumeSession: (sessionId, cliSessionId) => u.resumeSession(sessionId, cliSessionId),
   stopSession: (sessionId) => u.stopSession(sessionId),
   restartSession: (sessionId) => u.restartSession(sessionId),
+  setSessionProfile: (sessionId, profileId) => u.setSessionProfile(sessionId, profileId),
   deleteSession: (sessionId) => u.deleteSession(sessionId),
   listSessions: () => u.listSessions(),
   updateSessionNote: (sessionId, note) => u.updateSessionNote(sessionId, note),
   updateSessionName: (sessionId, name) => u.updateSessionName(sessionId, name),
+  updateCodexProviderPolicy: (sessionId, policy) => u.updateCodexProviderPolicy(sessionId, policy),
   // rules
   getRules: () => u.getRules(),
   updateRules: (config) => u.updateRules(config),

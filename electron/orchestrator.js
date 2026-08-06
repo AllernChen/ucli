@@ -22,6 +22,7 @@ import { createCodexConfigWatcher } from './codexConfigWatcher.js'
 import * as codexProfileFiles from './aiCliProfiles/codexProfileFile.js'
 import { ProfileSecretStore } from './aiCliProfiles/profileSecretStore.js'
 import { createProfileService } from './aiCliProfiles/profileService.js'
+import { reconcileActiveProfile } from './aiCliProfiles/profileResolver.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
@@ -178,6 +179,8 @@ export function createOrchestrator() {
           providerOverride: null,
           providerWarning: null,
           profileStatus: 'ready',
+          profileRuntimeRevision: launch.runtimeRevision || null,
+          pendingProfileRuntimeRevision: null,
           pendingProfileId: null,
           restartRequired: false,
           canStart: true
@@ -216,6 +219,23 @@ export function createOrchestrator() {
     if (session.canStart === false) {
       throw new Error('The selected Codex provider is no longer available. Choose another provider before starting.')
     }
+  }
+
+  function profileRuntimeView(session) {
+    return {
+      profileId: session.profileId || null,
+      activeProfileId: session.activeProfileId || null,
+      pendingProfileId: session.pendingProfileId || null,
+      profileStatus: session.profileStatus || null,
+      restartRequired: Boolean(session.restartRequired),
+      canStart: session.canStart !== false
+    }
+  }
+
+  function publishProfileRuntime(sessionId, session) {
+    const result = profileRuntimeView(session)
+    send('session:event', { sessionId, type: 'profile-runtime', ...result })
+    return result
   }
 
   function publishCodexRuntime(snapshot) {
@@ -372,8 +392,24 @@ export function createOrchestrator() {
           providerPolicy = 'source'
         }
       }
-      const restoredSession = s.adapterId === 'codex'
-        ? applyCodexProviderPolicy({ provider, sourceProvider, providerPolicy, explicitProvider }, { imported: Boolean(cliSessionId) })
+      const storedProfile = s.adapterId === 'codex' && s.profileId
+        ? profileService.listProfiles({ adapterId: 'codex' }).find((profile) => profile.id === s.profileId) || null
+        : null
+      const restoredSession = s.adapterId === 'codex' && s.profileId
+        ? {
+            profileId: s.profileId,
+            nativeProfileName: storedProfile?.nativeProfileName || null,
+            provider: storedProfile?.providerId || provider,
+            sourceProvider: null,
+            providerPolicy: null,
+            explicitProvider: null,
+            providerOverride: null,
+            providerWarning: null,
+            profileStatus: storedProfile?.status || 'missing_profile',
+            canStart: storedProfile?.canStart === true
+          }
+        : s.adapterId === 'codex'
+          ? applyCodexProviderPolicy({ provider, sourceProvider, providerPolicy, explicitProvider }, { imported: Boolean(cliSessionId) })
         : { provider, sourceProvider, providerPolicy: null, explicitProvider: null, providerOverride: null, providerWarning: null }
       provider = restoredSession.provider
       sourceProvider = restoredSession.sourceProvider
@@ -403,6 +439,13 @@ export function createOrchestrator() {
           pendingProviderOverride: null,
           pendingProviderWarning: null,
           pendingRuntimeRevision: null,
+          profileId: restoredSession.profileId || null,
+          activeProfileId: null,
+          pendingProfileId: null,
+          profileStatus: restoredSession.profileStatus || null,
+          nativeProfileName: restoredSession.nativeProfileName || null,
+          profileRuntimeRevision: null,
+          pendingProfileRuntimeRevision: null,
           restartRequired: false,
           canStart: restoredSession.canStart,
           cliSessionId,
@@ -664,6 +707,7 @@ export function createOrchestrator() {
         provider: session.provider, source_provider: session.sourceProvider,
         provider_policy: session.providerPolicy,
         explicit_provider: session.explicitProvider,
+        profile_id: session.profileId || null,
         status: 'starting', created_at: entry.createdAt
       })
       db.flush()
@@ -1029,6 +1073,10 @@ export function createOrchestrator() {
       explicitProvider: e.session.explicitProvider || null,
       pendingProvider: e.session.pendingProvider || null,
       pendingProviderWarning: e.session.pendingProviderWarning || null,
+      profileId: e.session.profileId || null,
+      activeProfileId: e.session.activeProfileId || null,
+      pendingProfileId: e.session.pendingProfileId || null,
+      profileStatus: e.session.profileStatus || null,
       restartRequired: Boolean(e.session.restartRequired),
       canStart: e.session.canStart !== false,
       tier: e.session.tier,
@@ -1187,7 +1235,8 @@ export function createOrchestrator() {
           provider: entry.session.provider,
           source_provider: entry.session.sourceProvider,
           provider_policy: entry.session.providerPolicy,
-          explicit_provider: entry.session.explicitProvider
+          explicit_provider: entry.session.explicitProvider,
+          profile_id: entry.session.profileId || null
         })
         scheduleFlush()
       }
@@ -1224,7 +1273,9 @@ export function createOrchestrator() {
     if (entry.session.profileId) {
       entry.session.activeProfileId = entry.session.profileId
       entry.session.pendingProfileId = null
+      entry.session.pendingProfileRuntimeRevision = null
       entry.session.restartRequired = false
+      publishProfileRuntime(sessionId, entry.session)
     }
     const db = getDb()
     if (db) { db.updateSession(sessionId, { status: 'idle' }); scheduleFlush() }
@@ -1274,6 +1325,72 @@ export function createOrchestrator() {
     }
     send('session:event', { sessionId, type: 'codex-runtime', ...result })
     return result
+  }
+
+  function setSessionProfile(sessionId, profileId) {
+    const entry = sessions.get(sessionId)
+    if (!entry) throw new Error('no session')
+    if (entry.session.adapterId !== 'codex') throw new Error('profiles are only available for Codex sessions')
+    if (!profileService) throw new Error('profile service is unavailable')
+
+    const desiredProfileId = profileId || null
+    let resolved
+    let desiredSession
+    if (desiredProfileId) {
+      const launch = profileService.resolveCodexLaunchProfile(desiredProfileId)
+      resolved = {
+        profileId: desiredProfileId,
+        status: launch.status,
+        canStart: true,
+        runtimeRevision: launch.runtimeRevision
+      }
+      desiredSession = {
+        nativeProfileName: launch.artifact.nativeProfileName,
+        model: launch.artifact.model,
+        provider: launch.artifact.providerId,
+        sourceProvider: null,
+        providerPolicy: null,
+        explicitProvider: null,
+        providerOverride: null,
+        providerWarning: null
+      }
+    } else {
+      resolved = {
+        profileId: null,
+        status: null,
+        canStart: true,
+        runtimeRevision: null
+      }
+      desiredSession = {
+        ...applyCodexProviderPolicy({
+          ...entry.session,
+          profileId: null,
+          nativeProfileName: null
+        }, { imported: Boolean(entry.session.cliSessionId) }),
+        nativeProfileName: null
+      }
+    }
+
+    const runtime = reconcileActiveProfile({
+      session: entry.session,
+      resolved,
+      isActive: hasActiveCodexProcess(entry)
+    })
+    Object.assign(entry.session, desiredSession, runtime)
+
+    const db = getDb()
+    if (db) {
+      db.updateSession(sessionId, {
+        profile_id: desiredProfileId,
+        model: entry.session.model,
+        provider: entry.session.provider,
+        source_provider: entry.session.sourceProvider,
+        provider_policy: entry.session.providerPolicy,
+        explicit_provider: entry.session.explicitProvider
+      })
+      scheduleFlush()
+    }
+    return publishProfileRuntime(sessionId, entry.session)
   }
 
   // ---- IPC registration ----
@@ -1377,7 +1494,9 @@ export function createOrchestrator() {
       if (e.session.profileId) {
         e.session.activeProfileId = e.session.profileId
         e.session.pendingProfileId = null
+        e.session.pendingProfileRuntimeRevision = null
         e.session.restartRequired = false
+        publishProfileRuntime(sessionId, e.session)
       }
       return true
     })
@@ -1458,6 +1577,9 @@ export function createOrchestrator() {
       return result
     })
     ipcMain.handle('session:restart', (_e, sessionId) => restartSession(sessionId))
+    ipcMain.handle('session:set-profile', (_e, sessionId, profileId) =>
+      setSessionProfile(sessionId, profileId)
+    )
     ipcMain.handle('session:stop', (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (e) {
@@ -1469,6 +1591,13 @@ export function createOrchestrator() {
         if (e.adapter) e.adapter.dispose()
         e.adapter = null
         e.status = 'offline'
+        if (e.session.adapterId === 'codex') {
+          e.session.activeProfileId = null
+          e.session.pendingProfileId = null
+          e.session.pendingProfileRuntimeRevision = null
+          e.session.restartRequired = false
+          publishProfileRuntime(sessionId, e.session)
+        }
         const db = getDb()
         if (db) { db.updateSession(sessionId, { status: 'offline' }); scheduleFlush() }
       }
