@@ -103,6 +103,22 @@ test('Codex profile paths are deterministic and reject names outside the UCLI na
   })
 })
 
+test('profile inspection maps missing and oversized files to stable errors', () => {
+  withCodexHome((codexHome) => {
+    const path = resolveCodexProfilePath(codexHome, NATIVE_PROFILE)
+    assert.throws(
+      () => inspectCodexProfileFile(path),
+      { code: 'PROFILE_FILE_MISSING' }
+    )
+
+    writeFileSync(path, `# ucli-profile-id: ${PROFILE_ID}\n# ${'x'.repeat(1024 * 1024)}\n`)
+    assert.throws(
+      () => inspectCodexProfileFile(path),
+      { code: 'PROFILE_FILE_TOO_LARGE' }
+    )
+  })
+})
+
 test('atomic profile writes can be inspected and leave no temporary files', () => {
   withCodexHome((codexHome) => {
     const result = writeCodexProfileFileAtomic({

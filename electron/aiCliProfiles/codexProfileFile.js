@@ -18,6 +18,7 @@ import { isSafeNativeProfileName, normaliseProfileDraft } from './contracts.js'
 const PROFILE_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const OWNED_FILE_PATTERN = /^(ucli-[a-f0-9]{32})\.config\.toml$/
 const MARKER_PATTERN = /^# ucli-profile-id: ([a-f0-9-]+)$/
+const MAX_PROFILE_FILE_BYTES = 1024 * 1024
 
 function fileError(message, code) {
   return Object.assign(new Error(message), { code })
@@ -44,9 +45,15 @@ function managedProviderId(profileId) {
 }
 
 function assertRegularOwnedTarget(path) {
+  if (!existsSync(path)) {
+    throw fileError('Codex profile file is missing', 'PROFILE_FILE_MISSING')
+  }
   const stat = lstatSync(path)
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw fileError('Codex profile file is not owned by UCLI', 'PROFILE_FILE_NOT_OWNED')
+  }
+  if (stat.size > MAX_PROFILE_FILE_BYTES) {
+    throw fileError('Codex profile file is too large', 'PROFILE_FILE_TOO_LARGE')
   }
 }
 
