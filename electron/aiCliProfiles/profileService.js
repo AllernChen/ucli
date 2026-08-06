@@ -3,6 +3,7 @@ import { accessSync, constants, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import { createCodexProfileAdapter } from './codexProfileAdapter.js'
+import { createClaudeProfileAdapter } from './claudeProfileAdapter.js'
 import { codexNativeProfileName } from './codexProfileFile.js'
 import { sanitiseProfile } from './contracts.js'
 import { createProfileAdapterRegistry } from './profileAdapterRegistry.js'
@@ -41,8 +42,12 @@ export function createProfileService({
   secretStore,
   resolveCodexHome,
   readCodexRuntime,
+  readClaudeRuntime = () => ({}),
   fileOps,
-  adapterRegistry = createProfileAdapterRegistry([createCodexProfileAdapter()]),
+  adapterRegistry = createProfileAdapterRegistry([
+    createCodexProfileAdapter(),
+    createClaudeProfileAdapter()
+  ]),
   listFiles = (directory) => readdirSync(directory),
   uuid = randomUUID,
   now = Date.now,
@@ -65,6 +70,9 @@ export function createProfileService({
   }
 
   function fileStateFor(profile, codexHome) {
+    if (!profile.nativeProfileName) {
+      return { exists: true, owned: true, sha256: null }
+    }
     try {
       const path = fileOps.resolveCodexProfilePath(codexHome, profile.nativeProfileName)
       const inspected = fileOps.inspectCodexProfileFile(path)
@@ -102,9 +110,14 @@ export function createProfileService({
   function runtimeStateFor(profile) {
     const adapter = adapterFor(profile.adapterId)
     const secretState = secretStateFor(profile)
+    const runtime = profile.adapterId === 'codex'
+      ? readCodexRuntime()
+      : profile.adapterId === 'claude'
+        ? readClaudeRuntime()
+        : {}
     const runtimeState = adapter.reconcile({
       profile,
-      runtime: readCodexRuntime(),
+      runtime,
       fileState: fileStateFor(profile, resolveCodexHome()),
       secretState
     })
@@ -112,15 +125,19 @@ export function createProfileService({
   }
 
   function rendererProfile(profile) {
+    const adapter = adapterFor(profile.adapterId)
     const state = runtimeStateFor(profile)
-    return sanitiseProfile(profile, {
+    return {
+      ...sanitiseProfile(profile, {
       ...state,
       secretSuffix: state.secretSuffix,
       isAppDefault: db.listAiCliProfileBindings({ profileId: profile.id })
         .some((binding) => binding.scopeType === 'app'),
       isProjectDefault: db.listAiCliProfileBindings({ profileId: profile.id })
         .some((binding) => binding.scopeType === 'project')
-    })
+      }),
+      config: adapter.sanitiseConfig(profile.config)
+    }
   }
 
   async function updateInternal(profileId, patch, reason) {
@@ -166,12 +183,14 @@ export function createProfileService({
         config: draft.config,
         id: profileId
       }
-      const written = fileOps.writeCodexProfileFileAtomic({
-        codexHome: resolveCodexHome(),
-        profile: projected,
-        expectedSha256: current.fileSha256
-      })
-      db.updateAiCliProfile(profileId, { fileSha256: written.sha256, updatedAt: timestamp })
+      if (projected.nativeProfileName) {
+        const written = fileOps.writeCodexProfileFileAtomic({
+          codexHome: resolveCodexHome(),
+          profile: projected,
+          expectedSha256: current.fileSha256
+        })
+        db.updateAiCliProfile(profileId, { fileSha256: written.sha256, updatedAt: timestamp })
+      }
     })
     await persistOrThrow()
     return rendererProfile(db.getAiCliProfile(profileId))
@@ -218,12 +237,14 @@ export function createProfileService({
           secretStore.setSecret(id, draft.secretAction.value)
         }
         const profile = db.getAiCliProfile(id)
-        const written = fileOps.writeCodexProfileFileAtomic({
-          codexHome: resolveCodexHome(),
-          profile,
-          expectedSha256: null
-        })
-        db.updateAiCliProfile(id, { fileSha256: written.sha256, updatedAt: timestamp })
+        if (profile.nativeProfileName) {
+          const written = fileOps.writeCodexProfileFileAtomic({
+            codexHome: resolveCodexHome(),
+            profile,
+            expectedSha256: null
+          })
+          db.updateAiCliProfile(id, { fileSha256: written.sha256, updatedAt: timestamp })
+        }
       })
       await persistOrThrow()
       return rendererProfile(db.getAiCliProfile(id))
@@ -269,11 +290,13 @@ export function createProfileService({
           db.deleteAiCliProfileRevision(revision.id)
         }
         secretStore.deleteSecret(profileId)
-        fileOps.removeCodexProfileFile({
-          codexHome: resolveCodexHome(),
-          profile,
-          expectedSha256: profile.fileSha256
-        })
+        if (profile.nativeProfileName) {
+          fileOps.removeCodexProfileFile({
+            codexHome: resolveCodexHome(),
+            profile,
+            expectedSha256: profile.fileSha256
+          })
+        }
       })
       await persistOrThrow()
       return true
@@ -321,17 +344,21 @@ export function createProfileService({
       })
     },
 
-    resolveCodexLaunchProfile(profileId) {
+    resolveLaunchProfile({ profileId, session = {}, baseEnv = process.env }) {
       const profile = db.getAiCliProfile(profileId)
       if (!profile) throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
       const state = runtimeStateFor(profile)
       if (!state.canStart) throw serviceError('Profile is not ready', 'PROFILE_NOT_READY')
       const secret = profile.kind === 'managed' ? secretStore.getSecret(profileId) : null
       return {
-        ...adapterFor('codex').resolveLaunch({ profile, secret }),
+        ...adapterFor(profile.adapterId).resolveLaunch({ profile, secret, session, baseEnv }),
         status: state.status,
         runtimeRevision: state.runtimeRevision
       }
+    },
+
+    resolveCodexLaunchProfile(profileId) {
+      return service.resolveLaunchProfile({ profileId })
     },
 
     resolveCodexProfileRuntime(profileId) {
@@ -350,6 +377,7 @@ export function createProfileService({
     async repairProfile(profileId) {
       const profile = db.getAiCliProfile(profileId)
       if (!profile) throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
+      if (!profile.nativeProfileName) return rendererProfile(profile)
       let expectedSha256 = null
       try {
         const path = fileOps.resolveCodexProfilePath(resolveCodexHome(), profile.nativeProfileName)

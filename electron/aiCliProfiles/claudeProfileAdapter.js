@@ -33,7 +33,7 @@ export function normaliseClaudeProfileDraft(draft = {}) {
     throw claudeProfileError('INVALID_CLAUDE_PROFILE')
   }
 
-  const connectionMode = String(draft.connectionMode || '')
+  const connectionMode = String(draft.connectionMode || draft.config?.connectionMode || '')
   if (!CONNECTION_MODES.has(connectionMode)) {
     throw claudeProfileError('INVALID_CLAUDE_PROFILE')
   }
@@ -45,7 +45,7 @@ export function normaliseClaudeProfileDraft(draft = {}) {
     throw claudeProfileError('INVALID_CLAUDE_MODEL')
   }
 
-  const baseUrlInput = String(draft.baseUrl || '').trim()
+  const baseUrlInput = String(draft.baseUrl ?? draft.config?.baseUrl ?? '').trim()
   const baseUrlResult = validateProfileBaseUrl(baseUrlInput)
   if (!baseUrlResult.ok) {
     throw claudeProfileError('INVALID_PROFILE_BASE_URL')
@@ -130,4 +130,60 @@ export function buildClaudeProfileEnvironment({
   if (baseUrlResult.value) env.ANTHROPIC_BASE_URL = baseUrlResult.value
   env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = '1'
   return env
+}
+
+export function createClaudeProfileAdapter() {
+  return {
+    id: 'claude',
+
+    validateDraft(draft = {}) {
+      return normaliseClaudeProfileDraft(draft)
+    },
+
+    sanitiseConfig(config = {}) {
+      const connectionMode = CONNECTION_MODES.has(config.connectionMode)
+        ? config.connectionMode
+        : 'subscription'
+      const baseUrlResult = validateProfileBaseUrl(config.baseUrl)
+      return {
+        connectionMode,
+        baseUrl: baseUrlResult.ok ? baseUrlResult.value : null
+      }
+    },
+
+    resolveLaunch({ profile, secret, session = {}, baseEnv = process.env }) {
+      return {
+        args: buildClaudeProfileArgs({ session, profile }),
+        env: buildClaudeProfileEnvironment({ baseEnv, profile, secret }),
+        artifact: {
+          model: profile.model || null,
+          connectionMode: profile.config?.connectionMode || null
+        }
+      }
+    },
+
+    reconcile({ profile, secretState = {} }) {
+      if (!profile) {
+        return { profileId: null, status: 'missing_profile', canStart: false, runtimeRevision: null }
+      }
+      if (profile.kind === 'managed' && (
+        secretState.hasSecret !== true ||
+        secretState.encryptionAvailable !== true ||
+        secretState.decryptionFailed
+      )) {
+        return {
+          profileId: profile.id,
+          status: 'secret_unavailable',
+          canStart: false,
+          runtimeRevision: null
+        }
+      }
+      return {
+        profileId: profile.id,
+        status: 'ready',
+        canStart: true,
+        runtimeRevision: profile.updatedAt || null
+      }
+    }
+  }
 }
