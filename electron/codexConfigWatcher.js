@@ -11,20 +11,26 @@ export function createCodexConfigWatcher({
   let handle = null
   let timer = null
   let snapshot = null
+  let revision = 0
+  let pendingForce = false
 
-  function refresh() {
+  function refresh({ force = false } = {}) {
     const next = readSnapshot(snapshot?.codexHome)
-    const changed = !sameIdentity(snapshot, next)
-    snapshot = next
-    if (changed) onChange(next)
-    return next
+    const changed = force || !sameIdentity(snapshot, next)
+    if (changed) revision += 1
+    snapshot = { ...next, revision }
+    if (changed) onChange(snapshot)
+    return snapshot
   }
 
-  function scheduleRefresh() {
+  function scheduleRefresh(force = false) {
+    pendingForce ||= force
     if (timer) clearTimeout(timer)
     timer = setTimeout(() => {
       timer = null
-      refresh()
+      const forceRefresh = pendingForce
+      pendingForce = false
+      refresh({ force: forceRefresh })
     }, debounceMs)
     timer.unref?.()
   }
@@ -32,10 +38,13 @@ export function createCodexConfigWatcher({
   return {
     start(codexHome) {
       this.stop()
-      snapshot = readSnapshot(codexHome)
+      revision = 0
+      snapshot = { ...readSnapshot(codexHome), revision }
       try {
         handle = watchDirectory(snapshot.codexHome, (_eventType, filename) => {
-          if (!filename || String(filename).toLowerCase() === 'config.toml') scheduleRefresh()
+          const name = filename ? String(filename).toLowerCase() : ''
+          if (!name || name === 'config.toml') scheduleRefresh()
+          else if (/^ucli-[a-f0-9]{32}\.config\.toml$/.test(name)) scheduleRefresh(true)
         })
       } catch {
         handle = null
@@ -46,6 +55,7 @@ export function createCodexConfigWatcher({
     stop() {
       if (timer) clearTimeout(timer)
       timer = null
+      pendingForce = false
       try { handle?.close?.() } catch { /* watcher is already closed */ }
       handle = null
     },
@@ -57,5 +67,6 @@ function sameIdentity(previous, next) {
   if (!previous || !next) return false
   return previous.mtimeMs === next.mtimeMs &&
     previous.currentProvider === next.currentProvider &&
-    JSON.stringify(previous.availableProviders) === JSON.stringify(next.availableProviders)
+    JSON.stringify(previous.availableProviders) === JSON.stringify(next.availableProviders) &&
+    JSON.stringify(previous.providerCatalog) === JSON.stringify(next.providerCatalog)
 }

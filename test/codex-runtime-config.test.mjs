@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  parseCodexProviderCatalog,
   parseCodexProviderIdentity,
   readCodexRuntimeSnapshot,
   resolveCodexHome
@@ -69,6 +70,12 @@ name = "Ignored"
     assert.equal(snapshot.configPath, join(codexHome, 'config.toml'))
     assert.equal(snapshot.currentProvider, 'work_gateway')
     assert.deepEqual(snapshot.availableProviders, ['openai', 'work_gateway', 'legacy_gateway'])
+    assert.deepEqual(snapshot.providerCatalog, [
+      { id: 'openai', displayName: 'OpenAI' },
+      { id: 'work_gateway', displayName: 'Work Gateway' },
+      { id: 'legacy_gateway', displayName: 'Legacy Gateway' }
+    ])
+    assert.equal(snapshot.revision, 0)
     assert.equal('content' in snapshot, false)
     assert.equal(JSON.stringify(snapshot).includes('test-secret-must-not-leak'), false)
   } finally {
@@ -84,6 +91,8 @@ test('invalid or missing Codex config safely falls back to openai', () => {
       configPath: join(root, 'config.toml'),
       currentProvider: 'openai',
       availableProviders: ['openai'],
+      providerCatalog: [{ id: 'openai', displayName: 'OpenAI' }],
+      revision: 0,
       mtimeMs: 0
     })
     writeFileSync(join(root, 'config.toml'), 'model_provider = [')
@@ -93,5 +102,30 @@ test('invalid or missing Codex config safely falls back to openai', () => {
     })
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('provider catalog exposes only bounded identity from credential-bearing config', () => {
+  const content = readFileSync(
+    new URL('./fixtures/codex-profiles/config-existing-provider.toml', import.meta.url),
+    'utf8'
+  )
+  const catalog = parseCodexProviderCatalog(content)
+
+  assert.deepEqual(catalog, [
+    { id: 'openai', displayName: 'OpenAI' },
+    { id: 'work_gateway', displayName: 'Work Gateway' },
+    { id: 'local_ollama', displayName: 'Local Ollama' }
+  ])
+  const serialised = JSON.stringify(catalog)
+  for (const decoy of [
+    'gateway.example.com',
+    'must-not-leak',
+    'DECOY_SECRET_ENV_NAME',
+    'static-secret',
+    'experimental_bearer_token',
+    'unsafe;provider'
+  ]) {
+    assert.equal(serialised.includes(decoy), false)
   }
 })

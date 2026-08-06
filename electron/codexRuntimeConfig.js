@@ -15,24 +15,41 @@ export function resolveCodexHome({ configuredDir, env = process.env, userHome } 
 
 /** Parse only the non-sensitive provider identity needed by UCLI. */
 export function parseCodexProviderIdentity(content = '') {
+  const providerCatalog = parseCodexProviderCatalog(content)
+  const availableProviders = providerCatalog.map((provider) => provider.id)
+  try {
+    const config = parse(String(content || ''))
+    const declared = typeof config?.model_provider === 'string' ? config.model_provider : DEFAULT_PROVIDER
+    return {
+      currentProvider: availableProviders.includes(declared) ? declared : DEFAULT_PROVIDER,
+      availableProviders
+    }
+  } catch {
+    return { currentProvider: DEFAULT_PROVIDER, availableProviders }
+  }
+}
+
+/** Return only safe provider labels. Endpoint, headers, environment keys and
+ * all other provider fields remain inside the main process. */
+export function parseCodexProviderCatalog(content = '') {
+  const catalog = [{ id: DEFAULT_PROVIDER, displayName: 'OpenAI' }]
   try {
     const config = parse(String(content || ''))
     const providers = config?.model_providers && typeof config.model_providers === 'object'
       ? config.model_providers
       : {}
-    const available = new Set([DEFAULT_PROVIDER])
-    for (const provider of Object.keys(providers)) {
-      if (isSafeProviderName(provider)) available.add(provider)
-    }
-
-    const declared = typeof config?.model_provider === 'string' ? config.model_provider : DEFAULT_PROVIDER
-    return {
-      currentProvider: available.has(declared) ? declared : DEFAULT_PROVIDER,
-      availableProviders: Array.from(available)
+    for (const [id, provider] of Object.entries(providers)) {
+      if (!isSafeProviderName(id)) continue
+      const candidate = typeof provider?.name === 'string' ? provider.name.trim() : ''
+      const displayName = candidate && candidate.length <= 80 && !/[\u0000-\u001f\u007f]/.test(candidate)
+        ? candidate
+        : id
+      catalog.push({ id, displayName })
     }
   } catch {
-    return { currentProvider: DEFAULT_PROVIDER, availableProviders: [DEFAULT_PROVIDER] }
+    // Invalid config safely falls back to the built-in provider.
   }
+  return catalog
 }
 
 /** Return a sanitised runtime snapshot. Config contents and credentials must
@@ -45,15 +62,20 @@ export function readCodexRuntimeSnapshot(codexHome) {
       codexHome: resolvedHome,
       configPath,
       ...parseCodexProviderIdentity(),
+      providerCatalog: parseCodexProviderCatalog(),
+      revision: 0,
       mtimeMs: 0
     }
   }
 
   try {
+    const content = readFileSync(configPath, 'utf8')
     return {
       codexHome: resolvedHome,
       configPath,
-      ...parseCodexProviderIdentity(readFileSync(configPath, 'utf8')),
+      ...parseCodexProviderIdentity(content),
+      providerCatalog: parseCodexProviderCatalog(content),
+      revision: 0,
       mtimeMs: statSync(configPath).mtimeMs
     }
   } catch {
@@ -61,6 +83,8 @@ export function readCodexRuntimeSnapshot(codexHome) {
       codexHome: resolvedHome,
       configPath,
       ...parseCodexProviderIdentity(),
+      providerCatalog: parseCodexProviderCatalog(),
+      revision: 0,
       mtimeMs: 0
     }
   }
