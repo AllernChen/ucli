@@ -106,6 +106,32 @@ test('saved sessions repopulate empty pane instances during workbench restoratio
   assert.equal(restored.panes[1].sessionId, 'codex-b')
 })
 
+test('a fresh renderer reconstructs and activates every saved 1, 2, and 4 pane layout', async () => {
+  const fixtures = [
+    { splitCount: 1, sessionIds: ['codex-a'] },
+    { splitCount: 2, sessionIds: ['codex-a', 'claude-b'] },
+    { splitCount: 4, sessionIds: ['codex-a', 'claude-b', 'opencode-c', 'ucode-d'] }
+  ]
+
+  for (const { splitCount, sessionIds } of fixtures) {
+    const restored = reconcileSessionPanes([], splitCount, (index) => sessionIds[index])
+    const activated = []
+
+    await restoreAssignedPaneSessions(
+      restored.panes.map((pane, paneIndex) => ({ paneIndex, sessionId: pane.sessionId })),
+      {
+        getSession: (sessionId) => ({ id: sessionId, status: 'offline' }),
+        restartSession: async (sessionId, paneIndex) => activated.push({ sessionId, paneIndex }),
+        attachSession: async () => {}
+      }
+    )
+
+    assert.equal(restored.panes.length, splitCount)
+    assert.deepEqual(restored.panes.map((pane) => pane.sessionId), sessionIds)
+    assert.deepEqual(activated, sessionIds.map((sessionId, paneIndex) => ({ sessionId, paneIndex })))
+  }
+})
+
 test('restored panes activate in layout order without overlapping session starts', async () => {
   const events = []
   let activeStarts = 0
