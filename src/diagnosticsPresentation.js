@@ -14,3 +14,7 @@ export function formatCliDiagnosticSummary(cliTools = []) {
     return `${id}: ${status}`
   }).join(' · ')
 }
+
+export function profileDiagnosticSummary(summary = {}) {
+  return `${summary.total || 0} 个档案 · ${summary.ready || 0} 可用 · ${summary.drifted || 0} 漂移 · ${summary.missing || 0} 缺失 · ${summary.codexHomeWritable ? '配置目录可写' : '配置目录不可写'}`
+}

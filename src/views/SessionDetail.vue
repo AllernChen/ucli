@@ -163,6 +163,7 @@
             <span v-if="pane.sessionId" class="pane-session">
               {{ (sessions.byId(pane.sessionId)?.icon) || '•' }}
               {{ (sessions.byId(pane.sessionId)?.displayName || pane.sessionId.slice(0,8)) }}
+              <a-tag v-if="isCodexSession(pane.sessionId)" color="purple">档案：{{ profileNameForSession(pane.sessionId) }}</a-tag>
               <span :class="['status-dot', sessions.byId(pane.sessionId)?.status]"></span>
             </span>
             <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
@@ -211,6 +212,20 @@
             <span class="pi-item">{{ sessions.byId(pane.sessionId)?.stats?.turns || 0 }} 轮</span>
             <a-select
               v-if="isCodexSession(pane.sessionId)"
+              :value="sessions.byId(pane.sessionId)?.profileId || 'system'"
+              size="small"
+              style="width: 150px"
+              @click.stop
+              @change="setCodexProfile(pane.sessionId, $event)"
+            >
+              <a-select-option value="system">系统 / 来源策略</a-select-option>
+              <a-select-option v-for="profile in aiProfiles.profiles" :key="profile.id" :value="profile.id" :disabled="!profile.canStart">
+                {{ profile.name }}{{ profile.canStart ? '' : '（不可用）' }}
+              </a-select-option>
+            </a-select>
+            <span v-if="isCodexSession(pane.sessionId) && sessions.byId(pane.sessionId)?.profileId" class="pi-item">由档案管理</span>
+            <a-select
+              v-if="isCodexSession(pane.sessionId) && !sessions.byId(pane.sessionId)?.profileId"
               :value="sessions.byId(pane.sessionId)?.providerPolicy || 'live'"
               size="small"
               style="width: 108px"
@@ -222,7 +237,7 @@
               <a-select-option value="explicit">显式指定</a-select-option>
             </a-select>
             <a-select
-              v-if="isCodexSession(pane.sessionId) && sessions.byId(pane.sessionId)?.providerPolicy === 'explicit'"
+              v-if="isCodexSession(pane.sessionId) && !sessions.byId(pane.sessionId)?.profileId && sessions.byId(pane.sessionId)?.providerPolicy === 'explicit'"
               :value="sessions.byId(pane.sessionId)?.explicitProvider || codexRuntime?.currentProvider"
               size="small"
               style="width: 130px"
@@ -231,7 +246,11 @@
             >
               <a-select-option v-for="provider in codexRuntime?.availableProviders || []" :key="provider" :value="provider">{{ provider }}</a-select-option>
             </a-select>
-            <span v-if="isCodexSession(pane.sessionId) && codexProviderStatus(pane.sessionId)" class="pi-item provider-warning">{{ codexProviderStatus(pane.sessionId) }}</span>
+            <span v-if="isCodexSession(pane.sessionId) && !sessions.byId(pane.sessionId)?.profileId && codexProviderStatus(pane.sessionId)" class="pi-item provider-warning">{{ codexProviderStatus(pane.sessionId) }}</span>
+            <span v-if="isCodexSession(pane.sessionId) && profileRuntimeNoticeForSession(pane.sessionId)" class="pi-item provider-warning">
+              {{ profileRuntimeNoticeForSession(pane.sessionId) }}
+              <a-button v-if="sessions.byId(pane.sessionId)?.restartRequired" type="link" size="small" @click.stop="restartWithPendingProfile(pane.sessionId)">立即重启</a-button>
+            </span>
             <span class="pi-item sid">{{ sessions.byId(pane.sessionId)?.id?.slice(0,8) }}</span>
           </div>
           <!-- Terminal container -->
@@ -258,6 +277,15 @@
       v-model:open="sessionDiagnosticsVisible"
       :session-id="sessionDiagnosticsSessionId"
     />
+
+    <a-modal :open="profileSwitch.open" title="切换 Codex 档案" :footer="null" :closable="false">
+      <p>该会话正在运行。可以保留当前进程并在下次重启时生效，也可以现在重启。</p>
+      <div class="modal-footer">
+        <a-button @click="cancelProfileSwitch">取消</a-button>
+        <a-button @click="applyProfileSwitch(false)">下次重启生效</a-button>
+        <a-button type="primary" @click="applyProfileSwitch(true)">立即重启</a-button>
+      </div>
+    </a-modal>
 
     <!-- Import historical sessions modal -->
     <a-modal v-model:open="showImport" title="导入历史会话" :footer="null" width="640px">
@@ -312,6 +340,15 @@
             <a-radio value="ask-everything">逐次确认</a-radio>
           </a-radio-group>
         </a-form-item>
+        <a-form-item label="Codex 配置档案">
+          <a-select v-model:value="importProfileSelection">
+            <a-select-option value="history">保持历史来源</a-select-option>
+            <a-select-option value="system">跟随当前</a-select-option>
+            <a-select-option v-for="profile in aiProfiles.profiles" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
+              {{ profile.name }}{{ profile.canStart ? '' : '（不可用）' }}
+            </a-select-option>
+          </a-select>
+        </a-form-item>
       </a-form>
       <div class="modal-footer">
         <a-button @click="showImport = false">取消</a-button>
@@ -350,6 +387,8 @@ import {
 import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { useGatewayStore } from '../stores/gateway.js'
+import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
+import { profileRuntimeNotice } from '../profilePresentation.js'
 import { matchesBinding } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { groupSessionsByProject } from '../sessionGrouping.js'
@@ -383,6 +422,7 @@ const router = useRouter()
 const sessions = useSessionsStore()
 const settings = useSettingsStore()
 const gateway = useGatewayStore()
+const aiProfiles = useAiCliProfilesStore()
 
 function relayView(session) {
   return deriveGatewayRelayControl({
@@ -421,6 +461,73 @@ let stopCodexRuntimeListener = null
 
 function isCodexSession(sessionId) {
   return sessions.byId(sessionId)?.adapterId === 'codex'
+}
+
+function profileName(profileId) {
+  return aiProfiles.profileById(profileId)?.name || (profileId ? '不可用档案' : '系统当前')
+}
+
+function profileNameForSession(sessionId) {
+  const session = sessions.byId(sessionId)
+  if (!session) return '系统当前'
+  if (session.activeProfileId && session.activeProfileId !== session.profileId) {
+    return `${profileName(session.activeProfileId)} → ${profileName(session.profileId)}`
+  }
+  if (session.profileId) return profileName(session.profileId)
+  return session.providerPolicy === 'source' ? '历史来源' : '系统当前'
+}
+
+function profileRuntimeNoticeForSession(sessionId) {
+  return profileRuntimeNotice(sessions.byId(sessionId) || {})
+}
+
+const profileSwitch = ref({ open: false, sessionId: '', profileId: null })
+
+async function setCodexProfile(sessionId, value) {
+  const session = sessions.byId(sessionId)
+  const profileId = value === 'system' ? null : value
+  if (!session || session.profileId === profileId) return
+  const active = !['offline', 'exited', 'error'].includes(session.status)
+  if (active) {
+    profileSwitch.value = { open: true, sessionId, profileId }
+    return
+  }
+  try {
+    await sessions.setProfile(sessionId, profileId)
+  } catch (error) {
+    message.error('切换档案失败：' + (error?.message || error))
+  }
+}
+
+function cancelProfileSwitch() {
+  profileSwitch.value = { open: false, sessionId: '', profileId: null }
+}
+
+async function applyProfileSwitch(restartNow) {
+  const { sessionId, profileId } = profileSwitch.value
+  cancelProfileSwitch()
+  if (!sessionId) return
+  try {
+    await sessions.setProfile(sessionId, profileId)
+    if (restartNow) {
+      await sessions.stop(sessionId)
+      await sessions.restart(sessionId)
+    } else {
+      message.info('档案已保存，将在下次重启生效')
+    }
+  } catch (error) {
+    message.error('切换档案失败：' + (error?.message || error))
+  }
+}
+
+async function restartWithPendingProfile(sessionId) {
+  try {
+    const session = sessions.byId(sessionId)
+    if (session?.status !== 'offline') await sessions.stop(sessionId)
+    await sessions.restart(sessionId)
+  } catch (error) {
+    message.error('重启失败：' + (error?.message || error))
+  }
 }
 
 function codexProviderStatus(sessionId) {
@@ -995,6 +1102,7 @@ const importCwd = ref('')
 const importDiscovered = ref({ claude: [], codex: [], opencode: [], ucode: [] })
 const importSelection = ref({})
 const importTier = ref('safety-rules')
+const importProfileSelection = ref('history')
 const importing = ref(false)
 const discoveringImport = ref(false)
 const importError = ref('')
@@ -1035,7 +1143,8 @@ async function discoverImport(dir) {
   importDiscovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
   importSelection.value = {}
   try {
-    importDiscovered.value = await ipc.discoverSessions(dir)
+    const [found] = await Promise.all([ipc.discoverSessions(dir), aiProfiles.load(dir)])
+    importDiscovered.value = found
   } catch (e) {
     importDiscovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
     importError.value = e?.message || String(e)
@@ -1061,6 +1170,12 @@ async function doImport() {
           cliSessionId: sid,
           provider: cs?.resumeProvider || undefined,
           sourceProvider: cs?.sourceProvider || undefined
+        }
+        if (group.id === 'codex') {
+          if (importProfileSelection.value === 'system') config.profileSelection = 'system'
+          else if (importProfileSelection.value.startsWith('profile:')) {
+            config.profileId = importProfileSelection.value.slice('profile:'.length)
+          }
         }
         if (cs?.name) config.name = cs.name
         if (cs?.startedAt) config.startedAt = cs.startedAt
@@ -1118,7 +1233,7 @@ onActivated(activateWorkbench)
 onDeactivated(deactivateWorkbench)
 
 onMounted(async () => {
-  await Promise.all([sessions.init(), settings.load(), gateway.init()])
+  await Promise.all([sessions.init(), settings.load(), gateway.init(), aiProfiles.load()])
   codexRuntime.value = await ipc.getCodexRuntime().catch(() => null)
   stopCodexRuntimeListener = ipc.onCodexRuntime((snapshot) => { codexRuntime.value = snapshot })
   await sessions.loadWorkbench()

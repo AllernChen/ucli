@@ -107,6 +107,36 @@
         </div>
       </div>
 
+      <div class="new-section">
+        <div class="section-title">Codex 配置档案</div>
+        <div class="profile-choice-row">
+          <span>新建 Codex</span>
+          <a-select v-model:value="form.profileSelection" style="width: 280px">
+            <a-select-option value="inherit">按项目默认</a-select-option>
+            <a-select-option :value="appDefaultProfile ? `profile:${appDefaultProfile.id}` : 'app-unavailable'" :disabled="!appDefaultProfile">按应用默认</a-select-option>
+            <a-select-option value="system">跟随当前</a-select-option>
+            <a-select-opt-group label="具体档案">
+              <a-select-option v-for="profile in aiProfiles.profiles" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
+                {{ profile.name }}{{ profile.canStart ? '' : '（当前不可用）' }}
+              </a-select-option>
+            </a-select-opt-group>
+          </a-select>
+        </div>
+        <div class="profile-choice-row">
+          <span>导入 Codex</span>
+          <a-select v-model:value="importProfileSelection" style="width: 280px">
+            <a-select-option value="history">保持历史来源</a-select-option>
+            <a-select-option value="system">跟随当前</a-select-option>
+            <a-select-opt-group label="具体档案">
+              <a-select-option v-for="profile in aiProfiles.profiles" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
+                {{ profile.name }}{{ profile.canStart ? '' : '（当前不可用）' }}
+              </a-select-option>
+            </a-select-opt-group>
+          </a-select>
+        </div>
+        <div class="profile-choice-help">项目默认：{{ projectDefaultProfile?.name || '未设置' }}；应用默认：{{ appDefaultProfile?.name || '未设置' }}</div>
+      </div>
+
       <!-- Tier selector (always visible) -->
       <div class="new-section">
         <div class="section-title">权限模式</div>
@@ -142,6 +172,7 @@ import {
 import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { useGatewayStore } from '../stores/gateway.js'
+import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import SessionCard from '../components/SessionCard.vue'
 import { groupSessionsByProject } from '../sessionGrouping.js'
 import { ipc } from '../ipc.js'
@@ -150,6 +181,7 @@ const router = useRouter()
 const sessions = useSessionsStore()
 const settings = useSettingsStore()
 const gateway = useGatewayStore()
+const aiProfiles = useAiCliProfilesStore()
 
 const showNew = ref(false)
 const creating = ref(false)
@@ -157,9 +189,10 @@ const discovering = ref(false)
 const discoverError = ref('')
 const filterTier = ref(undefined)
 
-const form = ref({ adapterId: 'claude', cwd: '', model: undefined, tier: 'safety-rules' })
+const form = ref({ adapterId: 'claude', cwd: '', model: undefined, tier: 'safety-rules', profileSelection: 'inherit' })
 const discovered = ref({ claude: [], codex: [], opencode: [], ucode: [] })
 const selectedSessions = ref({})
+const importProfileSelection = ref('history')
 
 const filtered = computed(() =>
   filterTier.value ? sessions.sessions.filter((s) => s.tier === filterTier.value) : sessions.sessions
@@ -190,6 +223,8 @@ const cliGroups = computed(() => {
   }
   return groups
 })
+const projectDefaultProfile = computed(() => aiProfiles.profiles.find((profile) => profile.isProjectDefault) || null)
+const appDefaultProfile = computed(() => aiProfiles.profiles.find((profile) => profile.isAppDefault) || null)
 
 onMounted(async () => {
   await Promise.all([sessions.init(), settings.load(), gateway.init()])
@@ -197,11 +232,14 @@ onMounted(async () => {
   form.value.tier = settings.defaultTier || 'safety-rules'
   form.value.cwd = settings.defaultCwd || ''
   selectedSessions.value = {}
+  await aiProfiles.load(form.value.cwd)
   if (form.value.cwd) discover(form.value.cwd)
 })
 
 function openNew() {
   selectedSessions.value = {}
+  form.value.profileSelection = 'inherit'
+  importProfileSelection.value = 'history'
   discovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
   if (form.value.cwd) discover(form.value.cwd)
   showNew.value = true
@@ -258,13 +296,26 @@ async function discover(cwd) {
   discovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
   selectedSessions.value = {}
   try {
-    discovered.value = await ipc.discoverSessions(cwd)
+    const [sessionsFound] = await Promise.all([
+      ipc.discoverSessions(cwd),
+      aiProfiles.load(cwd)
+    ])
+    discovered.value = sessionsFound
   } catch (e) {
     discovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
     discoverError.value = e?.message || String(e)
   } finally {
     discovering.value = false
   }
+}
+
+function profileConfigForSelection(imported) {
+  const selection = imported ? importProfileSelection.value : form.value.profileSelection
+  if (selection === 'system') return { profileSelection: 'system' }
+  if (typeof selection === 'string' && selection.startsWith('profile:')) {
+    return { profileId: selection.slice('profile:'.length) }
+  }
+  return {}
 }
 
 function fmtTime(ts) {
@@ -291,6 +342,11 @@ async function importSelected() {
           provider: cs?.resumeProvider || undefined,
           sourceProvider: cs?.sourceProvider || undefined
         }
+        if (group.id === 'codex') {
+          const profileConfig = profileConfigForSelection(true)
+          if (profileConfig.profileId) config.profileId = profileConfig.profileId
+          if (profileConfig.profileSelection) config.profileSelection = profileConfig.profileSelection
+        }
         if (cs?.name) config.name = cs.name
         if (cs?.startedAt) config.startedAt = cs.startedAt
         lastId = await sessions.createSession(config)
@@ -315,6 +371,11 @@ async function newSession(adapter) {
       adapterId: adapter.id,
       cwd: form.value.cwd,
       tier: form.value.tier
+    }
+    if (adapter.id === 'codex') {
+      const profileConfig = profileConfigForSelection(false)
+      if (profileConfig.profileId) config.profileId = profileConfig.profileId
+      if (profileConfig.profileSelection) config.profileSelection = profileConfig.profileSelection
     }
     const sessionId = await sessions.createSession(config)
     message.success(`已创建 ${adapter.displayName} 会话`)
@@ -377,6 +438,8 @@ async function newSession(adapter) {
 .sess-item-name { font-weight: 500; margin-right: 8px; }
 .sess-item-meta { font-size: 11px; color: #8c8c8c; margin-right: 8px; }
 .provider-change { color: #d46b08; }
+.profile-choice-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.profile-choice-help { color: #8c8c8c; font-size: 12px; }
 .sess-item-preview { font-size: 11px; color: #595959; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 480px; }
 
 .cli-group-actions { display: flex; gap: 8px; }

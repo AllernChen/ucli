@@ -67,6 +67,10 @@ export const useSessionsStore = defineStore('sessions', {
         sourceProvider: config.sourceProvider || null,
         providerPolicy: config.providerPolicy || (config.cliSessionId ? 'source' : 'live'),
         explicitProvider: config.explicitProvider || null,
+        profileId: config.profileId || null,
+        activeProfileId: null,
+        pendingProfileId: null,
+        profileStatus: null,
         tier: config.tier,
         status: 'starting',
         createdAt: Date.now(),
@@ -125,6 +129,12 @@ export const useSessionsStore = defineStore('sessions', {
       const row = this.sessions.find((s) => s.id === id)
       if (row) row.displayName = name
       await ipc.updateSessionName(id, name)
+    },
+    async setProfile(id, profileId) {
+      const result = await ipc.setSessionProfile(id, profileId || null)
+      const row = this.sessions.find((session) => session.id === id)
+      if (row) Object.assign(row, result)
+      return result
     },
     async updateCodexProviderPolicy(id, policy) {
       const result = await ipc.updateCodexProviderPolicy(id, policy)
@@ -213,6 +223,8 @@ export const useSessionsStore = defineStore('sessions', {
           providerPolicy: s.providerPolicy || null, explicitProvider: s.explicitProvider || null,
           providerWarning: s.providerWarning || null, pendingProvider: s.pendingProvider || null,
           pendingProviderWarning: s.pendingProviderWarning || null,
+          profileId: s.profileId || null, activeProfileId: s.activeProfileId || null,
+          pendingProfileId: s.pendingProfileId || null, profileStatus: s.profileStatus || null,
           restartRequired: Boolean(s.restartRequired), canStart: s.canStart !== false,
           startedAt: s.startedAt || null,
           lastActivity: isImport ? ('📋 已离线 · ' + fmtShort(s.startedAt)) : '已离线',
@@ -236,6 +248,10 @@ export const useSessionsStore = defineStore('sessions', {
         if (s.providerWarning !== undefined) row.providerWarning = s.providerWarning
         if (s.pendingProvider !== undefined) row.pendingProvider = s.pendingProvider
         if (s.pendingProviderWarning !== undefined) row.pendingProviderWarning = s.pendingProviderWarning
+        if (s.profileId !== undefined) row.profileId = s.profileId
+        if (s.activeProfileId !== undefined) row.activeProfileId = s.activeProfileId
+        if (s.pendingProfileId !== undefined) row.pendingProfileId = s.pendingProfileId
+        if (s.profileStatus !== undefined) row.profileStatus = s.profileStatus
         if (s.restartRequired !== undefined) row.restartRequired = s.restartRequired
         if (s.canStart !== undefined) row.canStart = s.canStart
         if (s.createdAt) row.createdAt = s.createdAt
@@ -267,6 +283,13 @@ export const useSessionsStore = defineStore('sessions', {
           if (evt.pendingProviderWarning !== undefined) row.pendingProviderWarning = evt.pendingProviderWarning
           if (evt.restartRequired !== undefined) row.restartRequired = evt.restartRequired
           if (evt.canStart !== undefined) row.canStart = evt.canStart
+        } else if (evt.type === 'profile-runtime') {
+          if (evt.profileId !== undefined) row.profileId = evt.profileId
+          if (evt.activeProfileId !== undefined) row.activeProfileId = evt.activeProfileId
+          if (evt.pendingProfileId !== undefined) row.pendingProfileId = evt.pendingProfileId
+          if (evt.profileStatus !== undefined) row.profileStatus = evt.profileStatus
+          if (evt.restartRequired !== undefined) row.restartRequired = Boolean(evt.restartRequired)
+          if (evt.canStart !== undefined) row.canStart = evt.canStart !== false
         } else if (evt.type === 'stats_update') {
           // Live stats from transcript extraction
           row.stats.tokens = { input: evt.usage.inputTokens, output: evt.usage.outputTokens }

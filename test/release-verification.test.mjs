@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,6 +11,18 @@ import { verifyReleaseArtifacts as verifyReleaseArtifactsForPlatform } from '../
 function verifyReleaseArtifacts({ rootDir }) {
   return verifyReleaseArtifactsForPlatform({ rootDir, platform: 'win32', arch: 'x64' })
 }
+
+test('0.8.0 release package and user documentation agree', async () => {
+  const [packageSource, readme, changelog] = await Promise.all([
+    readFile(new URL('../package.json', import.meta.url), 'utf8'),
+    readFile(new URL('../README.md', import.meta.url), 'utf8'),
+    readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
+  ])
+  assert.equal(JSON.parse(packageSource).version, '0.8.0')
+  assert.match(readme, /配置档案/)
+  assert.match(readme, /CC Switch/)
+  assert.match(changelog, /## \[0\.8\.0\]/)
+})
 
 test('Gateway release acceptance documents every required Feishu prerequisite', async () => {
   const acceptance = await import('node:fs/promises')

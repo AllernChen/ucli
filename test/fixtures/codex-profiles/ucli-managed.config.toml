@@ -1,0 +1,13 @@
+# ucli-profile-id: 550e8400-e29b-41d4-a716-446655440000
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+model_context_window = 400000
+model_provider = "ucli_550e8400e29b"
+
+[model_providers]
+[model_providers.ucli_550e8400e29b]
+name = "Company Gateway"
+base_url = "https://gateway.example.com/v1"
+env_key = "UCLI_CODEX_PROFILE_550E8400_E29B_41D4_A716_446655440000"
+wire_api = "responses"
+requires_openai_auth = false

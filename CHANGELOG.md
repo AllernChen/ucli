@@ -4,6 +4,32 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-06
+
+### 配置档案中心
+
+- 新增一级“配置档案”页面，按 Codex、Claude Code、OpenCode 和 U-Code 展示真实支持状态。
+- Codex 支持引用现有 Provider 和 UCLI 托管档案，可创建、编辑、复制、删除、设置应用/项目默认并回滚最近十个非敏感版本。
+- 支持检测外部修改、缺失文件和孤立的 UCLI 档案文件，并提供显式重新读取、覆盖或重新生成操作。
+
+### Codex 会话级档案
+
+- 新建、导入和每个分屏会话均可独立选择档案；历史导入默认保持来源 Provider。
+- Codex 使用官方 `--profile` 启动机制，档案绑定随本地会话和工作台一起恢复。
+- 运行中切换只保存期望档案，由用户决定下次重启生效、立即重启或取消。
+
+### 安全与兼容
+
+- 托管密钥使用 Electron `safeStorage` 和操作系统密钥设施加密，不写入 TOML、命令行、Renderer、日志或诊断报告。
+- UCLI 只写入带所有权标记的 `ucli-*.config.toml`，继续只读用户/CC Switch 管理的 `config.toml` 和 Codex `auth.json`。
+- 诊断仅输出档案计数、健康状态、目录可写性和最近检查时间；保留 0.7.x Provider policy、会话恢复、Gateway 和安装升级行为。
+
+### 已知限制
+
+- 0.8.0 仅为 Codex 提供完整档案管理；Claude Code、OpenCode 和 U-Code 仍沿用系统配置。
+- UCLI 不管理 OAuth/ChatGPT 登录态，不提供代理、协议转换、测速、熔断或自动故障转移。
+- Windows 与 macOS 安装包仍未进行代码签名。
+
 ## [0.7.8] - 2026-08-06
 
 ### Added

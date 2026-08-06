@@ -158,6 +158,7 @@ class Db {
         source_provider   TEXT,
         provider_policy   TEXT,
         explicit_provider TEXT,
+        profile_id        TEXT,
         status            TEXT DEFAULT 'offline',
         created_at        INTEGER NOT NULL,
         updated_at        INTEGER NOT NULL
@@ -180,6 +181,9 @@ class Db {
     }
     if (!sessionColumns.some((column) => column.name === 'explicit_provider')) {
       this.sql.run('ALTER TABLE sessions ADD COLUMN explicit_provider TEXT')
+    }
+    if (!sessionColumns.some((column) => column.name === 'profile_id')) {
+      this.sql.run('ALTER TABLE sessions ADD COLUMN profile_id TEXT')
     }
     // In pre-0.7 records, a stored Codex provider means the session was
     // imported/resumed; fresh UCLI sessions did not store a provider override.
@@ -281,6 +285,52 @@ class Db {
         resolved_at INTEGER NOT NULL
       )
     `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS ai_cli_profiles (
+        id                  TEXT PRIMARY KEY,
+        adapter_id          TEXT NOT NULL,
+        name                TEXT NOT NULL,
+        kind                TEXT NOT NULL,
+        native_profile_name TEXT UNIQUE,
+        provider_id         TEXT,
+        base_url            TEXT,
+        model               TEXT,
+        reasoning_effort    TEXT,
+        context_window      INTEGER,
+        config_json         TEXT NOT NULL DEFAULT '{}',
+        has_secret_hint     INTEGER NOT NULL DEFAULT 0,
+        file_sha256         TEXT,
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS ai_cli_profile_bindings (
+        scope_type TEXT NOT NULL,
+        scope_key  TEXT NOT NULL,
+        adapter_id TEXT NOT NULL,
+        profile_id TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (scope_type, scope_key, adapter_id)
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS ai_cli_profile_revisions (
+        id          TEXT PRIMARY KEY,
+        profile_id  TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        file_sha256 TEXT,
+        reason      TEXT NOT NULL,
+        created_at  INTEGER NOT NULL
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS ai_cli_profile_secrets (
+        profile_id TEXT PRIMARY KEY,
+        ciphertext TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `)
   }
 
   // ---- projects ----
@@ -300,11 +350,11 @@ class Db {
   // ---- sessions ----
   insertSession(s) {
     this.sql.run(
-      `INSERT INTO sessions (id, project_path, adapter_id, native_session_id, name, task_note, tier, model, provider, source_provider, provider_policy, explicit_provider, status, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO sessions (id, project_path, adapter_id, native_session_id, name, task_note, tier, model, provider, source_provider, provider_policy, explicit_provider, profile_id, status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [s.id, s.project_path, s.adapter_id, s.native_session_id || null, s.name || null,
        s.task_note || '', s.tier, s.model || null, s.provider || null, s.source_provider || null, s.provider_policy || null, s.explicit_provider || null,
-       s.status, s.created_at, Date.now()]
+       s.profile_id || null, s.status, s.created_at, Date.now()]
     )
     this.sql.run(
       `INSERT OR IGNORE INTO session_stats (session_id) VALUES (?)`, [s.id]
@@ -312,7 +362,7 @@ class Db {
   }
 
   updateSession(sessionId, fields) {
-    const allowed = ['native_session_id', 'name', 'task_note', 'status', 'model', 'provider', 'source_provider', 'provider_policy', 'explicit_provider']
+    const allowed = ['native_session_id', 'name', 'task_note', 'status', 'model', 'provider', 'source_provider', 'provider_policy', 'explicit_provider', 'profile_id']
     const sets = []
     const vals = []
     for (const k of allowed) {
@@ -484,6 +534,233 @@ class Db {
 
   saveWorkbench(state) {
     this.sql.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)', ['workbench', JSON.stringify(state)])
+  }
+
+  // ---- AI CLI profiles ----
+  listAiCliProfiles({ adapterId } = {}) {
+    const result = adapterId
+      ? this.sql.exec(
+          'SELECT * FROM ai_cli_profiles WHERE adapter_id = ? ORDER BY updated_at DESC, id',
+          [adapterId]
+        )
+      : this.sql.exec('SELECT * FROM ai_cli_profiles ORDER BY updated_at DESC, id')
+    return rows(result).map(rowToAiCliProfile)
+  }
+
+  getAiCliProfile(profileId) {
+    const result = this.sql.exec('SELECT * FROM ai_cli_profiles WHERE id = ?', [profileId])
+    return rows(result).map(rowToAiCliProfile)[0] || null
+  }
+
+  insertAiCliProfile(profile) {
+    const createdAt = Number.isFinite(profile.createdAt) ? profile.createdAt : Date.now()
+    const updatedAt = Number.isFinite(profile.updatedAt) ? profile.updatedAt : createdAt
+    this.sql.run(
+      `INSERT INTO ai_cli_profiles (
+         id, adapter_id, name, kind, native_profile_name, provider_id, base_url,
+         model, reasoning_effort, context_window, config_json, has_secret_hint,
+         file_sha256, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        profile.id,
+        profile.adapterId,
+        profile.name,
+        profile.kind,
+        profile.nativeProfileName || null,
+        profile.providerId || null,
+        profile.baseUrl || null,
+        profile.model || null,
+        profile.reasoningEffort || null,
+        profile.contextWindow ?? null,
+        stringifyJsonObject(profile.config),
+        profile.hasSecretHint ? 1 : 0,
+        profile.fileSha256 || null,
+        createdAt,
+        updatedAt
+      ]
+    )
+  }
+
+  updateAiCliProfile(profileId, fields = {}) {
+    const columns = {
+      adapterId: 'adapter_id',
+      name: 'name',
+      kind: 'kind',
+      nativeProfileName: 'native_profile_name',
+      providerId: 'provider_id',
+      baseUrl: 'base_url',
+      model: 'model',
+      reasoningEffort: 'reasoning_effort',
+      contextWindow: 'context_window',
+      fileSha256: 'file_sha256'
+    }
+    const sets = []
+    const values = []
+    for (const [field, column] of Object.entries(columns)) {
+      if (fields[field] !== undefined) {
+        sets.push(`${column} = ?`)
+        values.push(fields[field])
+      }
+    }
+    if (fields.config !== undefined) {
+      sets.push('config_json = ?')
+      values.push(stringifyJsonObject(fields.config))
+    }
+    if (fields.hasSecretHint !== undefined) {
+      sets.push('has_secret_hint = ?')
+      values.push(fields.hasSecretHint ? 1 : 0)
+    }
+    if (!sets.length) return false
+    sets.push('updated_at = ?')
+    values.push(Number.isFinite(fields.updatedAt) ? fields.updatedAt : Date.now(), profileId)
+    this.sql.run(`UPDATE ai_cli_profiles SET ${sets.join(', ')} WHERE id = ?`, values)
+    return this.sql.getRowsModified() > 0
+  }
+
+  deleteAiCliProfile(profileId) {
+    this.sql.run('DELETE FROM ai_cli_profiles WHERE id = ?', [profileId])
+    return this.sql.getRowsModified() > 0
+  }
+
+  listAiCliProfileBindings({ adapterId, profileId } = {}) {
+    const conditions = []
+    const values = []
+    if (adapterId) {
+      conditions.push('adapter_id = ?')
+      values.push(adapterId)
+    }
+    if (profileId) {
+      conditions.push('profile_id = ?')
+      values.push(profileId)
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+    const result = this.sql.exec(
+      `SELECT * FROM ai_cli_profile_bindings ${where} ORDER BY scope_type, scope_key`,
+      values
+    )
+    return rows(result).map(rowToAiCliProfileBinding)
+  }
+
+  getAiCliProfileBinding(scopeType, scopeKey, adapterId) {
+    const result = this.sql.exec(
+      `SELECT * FROM ai_cli_profile_bindings
+       WHERE scope_type = ? AND scope_key = ? AND adapter_id = ?`,
+      [scopeType, scopeKey, adapterId]
+    )
+    return rows(result).map(rowToAiCliProfileBinding)[0] || null
+  }
+
+  upsertAiCliProfileBinding(binding) {
+    this.sql.run(
+      `INSERT INTO ai_cli_profile_bindings (
+         scope_type, scope_key, adapter_id, profile_id, updated_at
+       ) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(scope_type, scope_key, adapter_id) DO UPDATE SET
+         profile_id = excluded.profile_id,
+         updated_at = excluded.updated_at`,
+      [
+        binding.scopeType,
+        binding.scopeKey,
+        binding.adapterId,
+        binding.profileId || null,
+        Number.isFinite(binding.updatedAt) ? binding.updatedAt : Date.now()
+      ]
+    )
+  }
+
+  deleteAiCliProfileBinding(scopeType, scopeKey, adapterId) {
+    this.sql.run(
+      `DELETE FROM ai_cli_profile_bindings
+       WHERE scope_type = ? AND scope_key = ? AND adapter_id = ?`,
+      [scopeType, scopeKey, adapterId]
+    )
+    return this.sql.getRowsModified() > 0
+  }
+
+  insertAiCliProfileRevision(revision) {
+    this.sql.run(
+      `INSERT INTO ai_cli_profile_revisions (
+         id, profile_id, config_json, file_sha256, reason, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        revision.id,
+        revision.profileId,
+        stringifyJsonObject(revision.config),
+        revision.fileSha256 || null,
+        revision.reason,
+        Number.isFinite(revision.createdAt) ? revision.createdAt : Date.now()
+      ]
+    )
+    this.sql.run(
+      `DELETE FROM ai_cli_profile_revisions
+       WHERE profile_id = ? AND id NOT IN (
+         SELECT id FROM ai_cli_profile_revisions
+         WHERE profile_id = ?
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT 10
+       )`,
+      [revision.profileId, revision.profileId]
+    )
+  }
+
+  listAiCliProfileRevisions(profileId) {
+    const result = this.sql.exec(
+      `SELECT * FROM ai_cli_profile_revisions
+       WHERE profile_id = ? ORDER BY created_at DESC, rowid DESC`,
+      [profileId]
+    )
+    return rows(result).map(rowToAiCliProfileRevision)
+  }
+
+  getAiCliProfileRevision(revisionId) {
+    const result = this.sql.exec(
+      'SELECT * FROM ai_cli_profile_revisions WHERE id = ?',
+      [revisionId]
+    )
+    return rows(result).map(rowToAiCliProfileRevision)[0] || null
+  }
+
+  deleteAiCliProfileRevision(revisionId) {
+    this.sql.run('DELETE FROM ai_cli_profile_revisions WHERE id = ?', [revisionId])
+    return this.sql.getRowsModified() > 0
+  }
+
+  saveAiCliProfileSecretCiphertext(profileId, ciphertext, updatedAt = Date.now()) {
+    this.sql.run(
+      `INSERT INTO ai_cli_profile_secrets (profile_id, ciphertext, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(profile_id) DO UPDATE SET
+         ciphertext = excluded.ciphertext,
+         updated_at = excluded.updated_at`,
+      [profileId, ciphertext, updatedAt]
+    )
+  }
+
+  getAiCliProfileSecretRecord(profileId) {
+    const result = this.sql.exec(
+      'SELECT * FROM ai_cli_profile_secrets WHERE profile_id = ?',
+      [profileId]
+    )
+    return rows(result).map(rowToAiCliProfileSecret)[0] || null
+  }
+
+  deleteAiCliProfileSecret(profileId) {
+    this.sql.run('DELETE FROM ai_cli_profile_secrets WHERE profile_id = ?', [profileId])
+    return this.sql.getRowsModified() > 0
+  }
+
+  getAiCliProfileUsage(profileId) {
+    const result = this.sql.exec(
+      `SELECT
+         (SELECT COUNT(*) FROM sessions WHERE profile_id = ?) AS session_count,
+         (SELECT COUNT(*) FROM ai_cli_profile_bindings WHERE profile_id = ?) AS binding_count`,
+      [profileId, profileId]
+    )
+    const values = result[0]?.values?.[0] || [0, 0]
+    return {
+      sessionCount: Number(values[0]) || 0,
+      bindingCount: Number(values[1]) || 0
+    }
   }
 
   // ---- Gateway configuration and routes ----
@@ -776,7 +1053,10 @@ class Db {
         }
       }
       replaceFileAtomically(this.path, data)
-    } catch { /* best effort */ }
+      return true
+    } catch {
+      return false
+    }
   }
 
   close() {
@@ -795,6 +1075,69 @@ function rows(result) {
     columns.forEach((c, i) => { obj[c] = vals[i] })
     return obj
   })
+}
+
+function parseJsonObject(value) {
+  if (typeof value !== 'string' || !value) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function stringifyJsonObject(value) {
+  return JSON.stringify(value && typeof value === 'object' && !Array.isArray(value) ? value : {})
+}
+
+function rowToAiCliProfile(row) {
+  return {
+    id: row.id,
+    adapterId: row.adapter_id,
+    name: row.name,
+    kind: row.kind,
+    nativeProfileName: row.native_profile_name || null,
+    providerId: row.provider_id || null,
+    baseUrl: row.base_url || null,
+    model: row.model || null,
+    reasoningEffort: row.reasoning_effort || null,
+    contextWindow: row.context_window ?? null,
+    config: parseJsonObject(row.config_json),
+    hasSecretHint: row.has_secret_hint === 1,
+    fileSha256: row.file_sha256 || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }
+}
+
+function rowToAiCliProfileBinding(row) {
+  return {
+    scopeType: row.scope_type,
+    scopeKey: row.scope_key,
+    adapterId: row.adapter_id,
+    profileId: row.profile_id || null,
+    updatedAt: row.updated_at
+  }
+}
+
+function rowToAiCliProfileRevision(row) {
+  return {
+    id: row.id,
+    profileId: row.profile_id,
+    config: parseJsonObject(row.config_json),
+    fileSha256: row.file_sha256 || null,
+    reason: row.reason,
+    createdAt: row.created_at
+  }
+}
+
+function rowToAiCliProfileSecret(row) {
+  return {
+    profileId: row.profile_id,
+    ciphertext: row.ciphertext,
+    updatedAt: row.updated_at
+  }
 }
 
 function gatewaySessionRoute(row) {
@@ -839,6 +1182,7 @@ function rowToSession(row) {
     sourceProvider: row.source_provider || null,
     providerPolicy: row.provider_policy || null,
     explicitProvider: row.explicit_provider || null,
+    profileId: row.profile_id || null,
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

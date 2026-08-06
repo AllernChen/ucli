@@ -1,12 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { formatCliDiagnosticSummary, persistenceStatusLabel } from '../src/diagnosticsPresentation.js'
+import { formatCliDiagnosticSummary, persistenceStatusLabel, profileDiagnosticSummary } from '../src/diagnosticsPresentation.js'
 
 test('persistence labels are localized and safe for every report status', () => {
   assert.equal(persistenceStatusLabel('ready'), '正常')
   assert.equal(persistenceStatusLabel('recovered'), '已从备份恢复')
   assert.equal(persistenceStatusLabel('unavailable'), '当前不可用')
   assert.equal(persistenceStatusLabel('unknown'), '未知')
+})
+
+test('profile diagnostic summary uses counts and health only', () => {
+  assert.equal(profileDiagnosticSummary({
+    total: 4, ready: 2, drifted: 1, missing: 1, codexHomeWritable: true
+  }), '4 个档案 · 2 可用 · 1 漂移 · 1 缺失 · 配置目录可写')
 })
 
 test('CLI diagnostic summary shows availability without paths or errors', () => {

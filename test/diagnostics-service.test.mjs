@@ -52,3 +52,22 @@ test('diagnostics export does not write when the user cancels the save dialog', 
   assert.deepEqual(await service.exportReport(), { canceled: true })
   assert.equal(writeCount, 0)
 })
+
+test('diagnostics service tolerates unavailable profile health without leaking errors', async () => {
+  const service = createDiagnosticsService({
+    getRuntime: () => runtime,
+    inspectCliTools: async () => [],
+    getPersistence: () => ({ available: true }),
+    getAiCliProfiles: () => {
+      throw new Error('https://secret.example.com key-1234')
+    },
+    showSaveDialog: async () => ({ canceled: true }),
+    writeFile: () => {}
+  })
+  const report = await service.getReport()
+  assert.deepEqual(report.aiCliProfiles, {
+    total: 0, ready: 0, drifted: 0, missing: 0,
+    codexHomeWritable: false, lastReconcileAt: null
+  })
+  assert.doesNotMatch(JSON.stringify(report), /secret\.example|key-1234/)
+})

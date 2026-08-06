@@ -5,8 +5,9 @@ import { createCodexConfigWatcher } from '../electron/codexConfigWatcher.js'
 
 test('Codex config watcher emits a sanitised snapshot only when provider identity changes', async () => {
   const snapshots = [
-    { codexHome: 'C:/codex', configPath: 'C:/codex/config.toml', currentProvider: 'first', availableProviders: ['openai', 'first'], mtimeMs: 1 },
-    { codexHome: 'C:/codex', configPath: 'C:/codex/config.toml', currentProvider: 'next', availableProviders: ['openai', 'next'], mtimeMs: 2 }
+    { codexHome: 'C:/codex', configPath: 'C:/codex/config.toml', currentProvider: 'first', availableProviders: ['openai', 'first'], providerCatalog: [{ id: 'openai', displayName: 'OpenAI' }, { id: 'first', displayName: 'First' }], revision: 0, mtimeMs: 1 },
+    { codexHome: 'C:/codex', configPath: 'C:/codex/config.toml', currentProvider: 'next', availableProviders: ['openai', 'next'], providerCatalog: [{ id: 'openai', displayName: 'OpenAI' }, { id: 'next', displayName: 'Next' }], revision: 0, mtimeMs: 2 },
+    { codexHome: 'C:/codex', configPath: 'C:/codex/config.toml', currentProvider: 'next', availableProviders: ['openai', 'next'], providerCatalog: [{ id: 'openai', displayName: 'OpenAI' }, { id: 'next', displayName: 'Next' }], revision: 0, mtimeMs: 2 }
   ]
   let readCount = 0
   let callback = null
@@ -22,7 +23,7 @@ test('Codex config watcher emits a sanitised snapshot only when provider identit
     onChange: (snapshot) => changes.push(snapshot)
   })
 
-  assert.equal(watcher.start('C:/codex').currentProvider, 'first')
+  assert.deepEqual(watcher.start('C:/codex'), { ...snapshots[0], revision: 0 })
   callback('change', 'other.toml')
   await new Promise((resolve) => setTimeout(resolve, 5))
   assert.deepEqual(changes, [])
@@ -34,8 +35,18 @@ test('Codex config watcher emits a sanitised snapshot only when provider identit
     configPath: 'C:/codex/config.toml',
     currentProvider: 'next',
     availableProviders: ['openai', 'next'],
+    providerCatalog: [{ id: 'openai', displayName: 'OpenAI' }, { id: 'next', displayName: 'Next' }],
+    revision: 1,
     mtimeMs: 2
   }])
+
+  callback('change', 'ucli-company.config.toml')
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(changes.length, 1)
+
+  callback('change', 'ucli-550e8400e29b41d4a716446655440000.config.toml')
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.deepEqual(changes.at(-1), { ...snapshots[2], revision: 2 })
   assert.equal(JSON.stringify(changes).includes('content'), false)
 
   watcher.stop()

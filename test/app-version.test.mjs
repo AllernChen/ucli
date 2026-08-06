@@ -7,6 +7,10 @@ import config from '../electron.vite.config.mjs'
 const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 
+test('release package version is 0.8.0', () => {
+  assert.equal(packageJson.version, '0.8.0')
+})
+
 test('sidebar version is injected from the package version during renderer build', () => {
   assert.ok(config.renderer.define, 'renderer build must define app version metadata')
   assert.equal(
