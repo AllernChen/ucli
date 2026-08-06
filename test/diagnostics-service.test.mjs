@@ -67,7 +67,13 @@ test('diagnostics service tolerates unavailable profile health without leaking e
   const report = await service.getReport()
   assert.deepEqual(report.aiCliProfiles, {
     total: 0, ready: 0, drifted: 0, missing: 0,
-    codexHomeWritable: false, lastReconcileAt: null
+    codexHomeWritable: false, lastReconcileAt: null,
+    claude: {
+      total: 0,
+      connectionModes: { subscription: 0, apiKey: 0, bearer: 0 },
+      missingSecret: 0,
+      modelSubstitutions: 0
+    }
   })
   assert.doesNotMatch(JSON.stringify(report), /secret\.example|key-1234/)
 })

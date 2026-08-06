@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-06
+
+### Claude Code 配置档案
+
+- 新增 Claude 登录态、Anthropic API Key 和 Bearer Token 网关三种连接档案，支持应用默认、项目默认、新建/导入选择以及运行中会话切换。
+- 每个 Claude 会话独立编译启动参数与环境；历史导入默认保持历史连接，UCLI 重启后恢复同一原生会话和档案绑定。
+- 档案可设置首选模型；当 Claude 组织策略替换模型时，会话显示实际模型但不修改档案。
+
+### 安全与兼容
+
+- UCLI 不读取 Claude OAuth token，不修改 Claude 全局设置；API Key 与 Bearer Token 使用系统安全存储，只注入目标子进程并启用凭据清理。
+- 诊断仅输出 Claude 档案数、连接方式、缺少凭据数和模型替换数，不包含密钥、Bearer Token、Base URL、环境变量或会话内容。
+- “系统当前”继续继承现有环境；Bedrock、Vertex 与 Foundry 继续沿用系统配置。OpenCode 和 U-Code 的档案管理保持后续 0.8.x 计划。
+- Claude Code 的 fallback model 参数只适用于非交互打印模式，因此 UCLI 交互终端不提供无效的 fallback model 设置。
+
 ## [0.8.0] - 2026-08-06
 
 ### 配置档案中心
