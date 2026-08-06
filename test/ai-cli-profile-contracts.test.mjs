@@ -122,6 +122,7 @@ test('sanitiseProfile exposes only the renderer contract and never sensitive val
     updatedAt: 1785970000000
   }, {
     status: 'drifted',
+    canStart: false,
     secretSuffix: '1234',
     isAppDefault: true,
     isProjectDefault: false
@@ -141,6 +142,7 @@ test('sanitiseProfile exposes only the renderer contract and never sensitive val
     hasSecret: true,
     secretSuffix: '1234',
     status: 'drifted',
+    canStart: false,
     isAppDefault: true,
     isProjectDefault: false,
     updatedAt: 1785970000000

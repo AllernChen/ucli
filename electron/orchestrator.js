@@ -23,6 +23,7 @@ import * as codexProfileFiles from './aiCliProfiles/codexProfileFile.js'
 import { ProfileSecretStore } from './aiCliProfiles/profileSecretStore.js'
 import { createProfileService } from './aiCliProfiles/profileService.js'
 import { reconcileActiveProfile } from './aiCliProfiles/profileResolver.js'
+import { registerAiCliProfileIpc } from './aiCliProfiles/ipc.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
@@ -1396,6 +1397,12 @@ export function createOrchestrator() {
   // ---- IPC registration ----
   function registerIpc() {
     registerGatewayIpc({ ipcMain, manager: gatewayManager })
+    registerAiCliProfileIpc({
+      ipcMain,
+      service: profileService,
+      inspectCliTools,
+      getCodexRuntime: () => codexConfigWatcher?.getSnapshot() || readCodexRuntimeSnapshot(getCodexHome())
+    })
     ipcMain.handle('adapters:list', () =>
       Array.from(adapters.values()).map((d) => ({ id: d.id, displayName: d.displayName, icon: d.icon, models: d.models }))
     )

@@ -20,6 +20,18 @@ export const ipc = {
   getDiagnostics: () => u.getDiagnostics(),
   exportDiagnostics: () => u.exportDiagnostics(),
   getCodexRuntime: () => u.getCodexRuntime(),
+  // AI CLI profiles
+  getAiCliProfileState: (options) => u.getAiCliProfileState(options),
+  createAiCliProfile: (draft) => u.createAiCliProfile(draft),
+  updateAiCliProfile: (profileId, patch) => u.updateAiCliProfile(profileId, patch),
+  setAiCliProfileSecret: (profileId, secret) => u.setAiCliProfileSecret(profileId, secret),
+  deleteAiCliProfileSecret: (profileId) => u.deleteAiCliProfileSecret(profileId),
+  deleteAiCliProfile: (profileId) => u.deleteAiCliProfile(profileId),
+  setAiCliProfileBinding: (binding) => u.setAiCliProfileBinding(binding),
+  listAiCliProfileRevisions: (profileId) => u.listAiCliProfileRevisions(profileId),
+  rollbackAiCliProfile: (profileId, revisionId) => u.rollbackAiCliProfile(profileId, revisionId),
+  repairAiCliProfile: (profileId) => u.repairAiCliProfile(profileId),
+  reconcileAiCliProfiles: () => u.reconcileAiCliProfiles(),
   // dialog
   pickDirectory: () => u.pickDirectory(),
   scanClaudeSessions: (cwd) => u.scanClaudeSessions(cwd),

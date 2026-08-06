@@ -158,6 +158,7 @@ export function sanitiseProfile(profile = {}, runtimeState = {}) {
     hasSecret: Boolean(profile.hasSecret ?? profile.hasSecretHint),
     secretSuffix: suffixValue ? suffixValue.slice(-4) : null,
     status,
+    canStart: runtimeState.canStart !== false,
     isAppDefault: Boolean(runtimeState.isAppDefault),
     isProjectDefault: Boolean(runtimeState.isProjectDefault),
     updatedAt: Number.isFinite(profile.updatedAt) ? profile.updatedAt : null
@@ -165,8 +166,16 @@ export function sanitiseProfile(profile = {}, runtimeState = {}) {
 }
 
 export function sanitiseProfileError(error) {
-  const code = typeof error?.code === 'string' && error.code.startsWith('INVALID_')
-    ? error.code
+  const publicCodes = new Set([
+    'PROFILE_NOT_FOUND', 'PROFILE_IN_USE', 'PROFILE_NOT_READY',
+    'PROFILE_SECRET_REQUIRED', 'PROFILE_SECRET_UNAVAILABLE',
+    'PROFILE_REVISION_NOT_FOUND', 'PROFILE_FILE_MISSING',
+    'PROFILE_FILE_DRIFTED', 'PROFILE_FILE_NOT_OWNED',
+    'PROFILE_PERSISTENCE_PENDING', 'PROFILE_ADAPTER_UNAVAILABLE'
+  ])
+  const candidate = typeof error?.code === 'string' ? error.code : ''
+  const code = candidate.startsWith('INVALID_') || publicCodes.has(candidate)
+    ? candidate
     : null
   if (!code) {
     return {
@@ -174,8 +183,21 @@ export function sanitiseProfileError(error) {
       message: 'AI CLI profile operation failed'
     }
   }
+  const messages = {
+    PROFILE_NOT_FOUND: 'AI CLI profile was not found',
+    PROFILE_IN_USE: 'AI CLI profile is still in use',
+    PROFILE_NOT_READY: 'AI CLI profile is not ready',
+    PROFILE_SECRET_REQUIRED: 'AI CLI profile secret is required',
+    PROFILE_SECRET_UNAVAILABLE: 'AI CLI profile secret is unavailable',
+    PROFILE_REVISION_NOT_FOUND: 'AI CLI profile revision was not found',
+    PROFILE_FILE_MISSING: 'AI CLI profile file is missing',
+    PROFILE_FILE_DRIFTED: 'AI CLI profile file was changed outside UCLI',
+    PROFILE_FILE_NOT_OWNED: 'AI CLI profile file is not managed by UCLI',
+    PROFILE_PERSISTENCE_PENDING: 'AI CLI profile changes are pending persistence',
+    PROFILE_ADAPTER_UNAVAILABLE: 'AI CLI profile adapter is unavailable'
+  }
   return {
     code,
-    message: typeof error?.message === 'string' ? error.message : 'AI CLI profile operation failed'
+    message: messages[code] || (typeof error?.message === 'string' ? error.message : 'AI CLI profile operation failed')
   }
 }

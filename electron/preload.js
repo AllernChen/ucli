@@ -28,6 +28,19 @@ const api = {
   exportDiagnostics: () => ipcRenderer.invoke('diagnostics:export'),
   getCodexRuntime: () => ipcRenderer.invoke('codex:runtime:get'),
 
+  // ---- AI CLI profiles ----
+  getAiCliProfileState: (options) => ipcRenderer.invoke('ai-cli-profiles:get-state', options || {}),
+  createAiCliProfile: (draft) => ipcRenderer.invoke('ai-cli-profiles:create', draft),
+  updateAiCliProfile: (profileId, patch) => ipcRenderer.invoke('ai-cli-profiles:update', profileId, patch),
+  setAiCliProfileSecret: (profileId, secret) => ipcRenderer.invoke('ai-cli-profiles:set-secret', profileId, secret),
+  deleteAiCliProfileSecret: (profileId) => ipcRenderer.invoke('ai-cli-profiles:delete-secret', profileId),
+  deleteAiCliProfile: (profileId) => ipcRenderer.invoke('ai-cli-profiles:delete', profileId),
+  setAiCliProfileBinding: (binding) => ipcRenderer.invoke('ai-cli-profiles:set-binding', binding),
+  listAiCliProfileRevisions: (profileId) => ipcRenderer.invoke('ai-cli-profiles:list-revisions', profileId),
+  rollbackAiCliProfile: (profileId, revisionId) => ipcRenderer.invoke('ai-cli-profiles:rollback', profileId, revisionId),
+  repairAiCliProfile: (profileId) => ipcRenderer.invoke('ai-cli-profiles:repair', profileId),
+  reconcileAiCliProfiles: () => ipcRenderer.invoke('ai-cli-profiles:reconcile'),
+
   // ---- dialog ----
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
   scanClaudeSessions: (cwd) => ipcRenderer.invoke('session:scan-claude', cwd),
