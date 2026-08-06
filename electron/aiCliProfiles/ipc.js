@@ -100,6 +100,15 @@ function safeInventory(tool = {}) {
   }
 }
 
+function safeCliConfiguration(configuration = {}) {
+  return {
+    adapterId: ADAPTER_IDS.has(configuration.adapterId) ? configuration.adapterId : '',
+    mode: configuration.mode === 'profiles' ? 'profiles' : 'system',
+    profileCount: Number.isSafeInteger(configuration.profileCount) ? configuration.profileCount : 0,
+    projectBinding: typeof configuration.projectBinding === 'string' ? configuration.projectBinding : null
+  }
+}
+
 function safeRuntime(runtime = {}) {
   return {
     currentProvider: typeof runtime.currentProvider === 'string' ? runtime.currentProvider : 'openai',
@@ -133,10 +142,14 @@ export function registerAiCliProfileIpc({ ipcMain, service, inspectCliTools, get
       ? options.cwd
       : undefined
     const [cliInventory] = await Promise.all([inspectCliTools()])
+    const cliConfiguration = service.listCliConfigurationState({ cwd }).map(safeCliConfiguration)
+    const projectBinding = cliConfiguration.find((item) => item.adapterId === 'codex')?.projectBinding || null
     return {
-      cliConfiguration: service.listCliConfigurationState({ cwd }),
+      cliConfiguration,
       cliInventory: cliInventory.map(safeInventory),
-      profiles: service.listProfiles({ adapterId: 'codex' }).map(safeProfile),
+      profiles: service.listProfiles({ adapterId: 'codex' })
+        .map(safeProfile)
+        .map((profile) => ({ ...profile, isProjectDefault: profile.id === projectBinding })),
       codexRuntime: safeRuntime(getCodexRuntime())
     }
   }))

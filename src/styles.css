@@ -92,3 +92,34 @@ html, body, #app {
 .activity-item.replay { opacity: 0.72; border-left: 2px dashed #d9d9d9; }
 .token-mini { font-size: 11px; color: #8c8c8c; }
 .token-mini.sid { font-family: 'Cascadia Code', Consolas, monospace; font-size: 10px; color: #bfbfbf; }
+
+/* AI CLI profile center */
+.profile-center { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.profile-page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.profile-page-heading h2 { margin: 0 0 4px; font-size: 22px; }
+.profile-page-heading p { margin: 0; color: #6b7280; }
+.profile-cli-grid { display: grid; grid-template-columns: repeat(4, minmax(170px, 1fr)); gap: 12px; }
+.profile-cli-card { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; padding: 14px; text-align: left; color: #374151; background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; cursor: pointer; }
+.profile-cli-card:hover, .profile-cli-card.active { border-color: #722ed1; box-shadow: 0 0 0 2px rgba(114, 46, 209, 0.08); }
+.profile-cli-name { font-size: 15px; font-weight: 650; color: #111827; }
+.profile-cli-version { color: #8c8c8c; font-size: 12px; }
+.profile-runtime-card { border-radius: 10px; }
+.profile-runtime-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.profile-runtime-row p { margin: 4px 0; color: #595959; }
+.profile-path, .profile-project-path { color: #8c8c8c; font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px; word-break: break-all; }
+.profile-project-path { margin-top: 12px; padding-top: 10px; border-top: 1px solid #f0f0f0; }
+.profile-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 14px; }
+.profile-card { border-radius: 10px; }
+.profile-card-title { display: flex; align-items: center; gap: 8px; }
+.profile-card-body { display: grid; gap: 8px; }
+.profile-card-body > div:not(.profile-kind) { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.profile-card-body span, .profile-kind { color: #8c8c8c; font-size: 12px; }
+.profile-card-body strong { text-align: right; word-break: break-word; }
+.profile-badges { margin-top: 12px; }
+.profile-card .ant-alert { margin-top: 12px; }
+.profile-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+
+@media (max-width: 900px) {
+  .profile-cli-grid { grid-template-columns: repeat(2, minmax(170px, 1fr)); }
+  .profile-runtime-row { align-items: flex-start; flex-direction: column; }
+}

@@ -32,6 +32,10 @@
           <SafetyOutlined />
           <span>规则</span>
         </a-menu-item>
+        <a-menu-item key="/profiles">
+          <DatabaseOutlined />
+          <span>配置档案</span>
+        </a-menu-item>
         <a-menu-item key="/settings">
           <SettingOutlined />
           <span>设置</span>
@@ -77,6 +81,7 @@ import {
   DesktopOutlined,
   BarChartOutlined,
   SafetyOutlined,
+  DatabaseOutlined,
   SettingOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined
@@ -104,6 +109,7 @@ const title = computed(() => {
   if (route.path.startsWith('/session')) return '会话工作台'
   if (route.path === '/stats') return '运行统计'
   if (route.path === '/rules') return '安全规则'
+  if (route.path === '/profiles') return '配置档案'
   if (route.path === '/settings') return '设置'
   return '会话'
 })

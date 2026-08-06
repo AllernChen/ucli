@@ -184,7 +184,7 @@ export function createProfileService({
         profileCount: adapterRegistry.has(adapterId)
           ? db.listAiCliProfiles({ adapterId }).length
           : 0,
-        projectBinding: adapterRegistry.has(adapterId)
+        projectBinding: adapterRegistry.has(adapterId) && cwd
           ? db.getAiCliProfileBinding('project', projectScopeKey(cwd), adapterId)?.profileId || null
           : null
       }))
