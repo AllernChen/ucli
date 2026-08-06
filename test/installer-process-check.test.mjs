@@ -15,10 +15,15 @@ const powershell = isWindows
   : ''
 const processScript = fileURLToPath(new URL('../build/installer-process.ps1', import.meta.url))
 
-async function startFixture(directory) {
+async function createFixtureExecutable(directory) {
   await mkdir(directory, { recursive: true })
   const executable = join(directory, 'UcliProcessFixture.exe')
   await copyFile(process.execPath, executable)
+  return executable
+}
+
+async function startFixture(directory) {
+  const executable = await createFixtureExecutable(directory)
   const child = spawn(executable, ['-e', 'setInterval(() => {}, 1000)'], {
     stdio: 'ignore',
     windowsHide: true
@@ -30,17 +35,31 @@ async function startFixture(directory) {
   return { child, executable }
 }
 
-async function stopWithInstallerScript(targetPath, legacy = false) {
+function installerScriptArgs(action, targetPath, legacy = false) {
   const args = [
     '-NoProfile',
     '-NonInteractive',
     '-ExecutionPolicy', 'Bypass',
     '-File', processScript,
-    '-Action', 'Stop',
+    '-Action', action,
     '-TargetPath', targetPath
   ]
   if (legacy) args.push('-Legacy')
-  await execFileAsync(powershell, args, { windowsHide: true })
+  return args
+}
+
+async function stopWithInstallerScript(targetPath, legacy = false) {
+  await execFileAsync(powershell, installerScriptArgs('Stop', targetPath, legacy), { windowsHide: true })
+}
+
+async function findWithInstallerScript(targetPath) {
+  try {
+    await execFileAsync(powershell, installerScriptArgs('Find', targetPath), { windowsHide: true })
+    return true
+  } catch (error) {
+    if (error?.code === 1) return false
+    throw error
+  }
 }
 
 async function waitForExit(child) {
@@ -69,6 +88,24 @@ test('installer process stop is scoped to the target executable path', { skip: !
   await stopWithInstallerScript(target.executable)
   await waitForExit(target.child)
   assert.equal(portable.child.exitCode, null)
+})
+
+test('installer process find detects the executable at the selected install path', { skip: !isWindows }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-installer-find-target-'))
+  const target = await startFixture(join(root, 'installed'))
+  t.after(() => cleanupFixtures([target], root))
+
+  assert.equal(await findWithInstallerScript(target.executable), true)
+})
+
+test('installer process find ignores a same-name portable executable at another path', { skip: !isWindows }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-installer-find-portable-'))
+  const targetExecutable = await createFixtureExecutable(join(root, 'installed'))
+  const portable = await startFixture(join(root, 'portable'))
+  t.after(() => cleanupFixtures([portable], root))
+
+  assert.equal(basename(targetExecutable), basename(portable.executable))
+  assert.equal(await findWithInstallerScript(targetExecutable), false)
 })
 
 test('legacy upgrade stops every same-name process before invoking the old uninstaller', { skip: !isWindows }, async (t) => {
