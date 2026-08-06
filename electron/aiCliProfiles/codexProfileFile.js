@@ -36,12 +36,13 @@ function sha256(data) {
   return createHash('sha256').update(data).digest('hex')
 }
 
-function secretEnvName(profileId) {
-  return `UCLI_CODEX_PROFILE_${profileId.replaceAll('-', '_').toUpperCase()}`
+export function codexProfileSecretEnvName(profileId) {
+  const value = assertProfileId(profileId)
+  return `UCLI_CODEX_PROFILE_${value.replaceAll('-', '_').toUpperCase()}`
 }
 
-function managedProviderId(profileId) {
-  return `ucli_${profileId.replaceAll('-', '').slice(0, 12)}`
+export function codexManagedProviderId(profileId) {
+  return `ucli_${assertProfileId(profileId).replaceAll('-', '').slice(0, 12)}`
 }
 
 function assertRegularOwnedTarget(path) {
@@ -107,7 +108,7 @@ export function renderCodexProfileFile(profile) {
   if (normalised.contextWindow) config.model_context_window = normalised.contextWindow
 
   if (normalised.kind === 'managed') {
-    const providerId = managedProviderId(profileId)
+    const providerId = codexManagedProviderId(profileId)
     if (!normalised.baseUrl) {
       throw fileError('Managed Codex profiles require a base URL', 'INVALID_BASE_URL')
     }
@@ -116,7 +117,7 @@ export function renderCodexProfileFile(profile) {
       [providerId]: {
         name: normalised.name,
         base_url: normalised.baseUrl,
-        env_key: secretEnvName(profileId),
+        env_key: codexProfileSecretEnvName(profileId),
         wire_api: 'responses',
         requires_openai_auth: false
       }

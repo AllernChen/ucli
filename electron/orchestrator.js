@@ -19,6 +19,9 @@ import { annotateImportedSessions, isSafeNativeSessionId, isSafeProviderName, li
 import { readCodexRuntimeSnapshot, resolveCodexHome } from './codexRuntimeConfig.js'
 import { normaliseCodexProviderPolicy, reconcileCodexRuntimeProvider, requiresCodexProcessRestart, resolveCodexProviderPolicy } from './codexProviderPolicy.js'
 import { createCodexConfigWatcher } from './codexConfigWatcher.js'
+import * as codexProfileFiles from './aiCliProfiles/codexProfileFile.js'
+import { ProfileSecretStore } from './aiCliProfiles/profileSecretStore.js'
+import { createProfileService } from './aiCliProfiles/profileService.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
@@ -53,6 +56,7 @@ export function createOrchestrator() {
   let rulesets = { default: structuredClone(DEFAULT_RULESET) }
   let settings = { ...DEFAULT_SETTINGS }
   let codexConfigWatcher = null
+  let profileService = null
   let persistenceRecovery = null
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
@@ -266,6 +270,20 @@ export function createOrchestrator() {
       settings = { ...DEFAULT_SETTINGS, ...dbSettings }
     } else {
       db.saveSettings(settings)
+    }
+
+    profileService = createProfileService({
+      db,
+      secretStore: new ProfileSecretStore({ db, safeStorage }),
+      resolveCodexHome: getCodexHome,
+      readCodexRuntime: () => readCodexRuntimeSnapshot(getCodexHome()),
+      fileOps: codexProfileFiles,
+      flush: () => db.flush()
+    })
+    try {
+      await profileService.reconcileCodexProfiles()
+    } catch (error) {
+      log('AI CLI profile reconcile deferred:', error?.code || 'PROFILE_RECONCILE_FAILED')
     }
 
     // Restore session entries (metadata only — no running adapters)

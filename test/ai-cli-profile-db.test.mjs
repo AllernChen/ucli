@@ -227,3 +227,15 @@ test('profile secret persistence stores ciphertext only and supports deletion', 
     assert.equal(db.deleteAiCliProfileSecret('profile-1'), false)
   })
 })
+
+test('database flush reports a persistence failure instead of swallowing it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-profile-db-flush-'))
+  const missingParent = join(root, 'missing-parent')
+  const db = await openDb(join(missingParent, 'ucli.db'))
+  try {
+    assert.equal(db.flush(), false)
+  } finally {
+    db.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})

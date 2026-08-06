@@ -1053,7 +1053,10 @@ class Db {
         }
       }
       replaceFileAtomically(this.path, data)
-    } catch { /* best effort */ }
+      return true
+    } catch {
+      return false
+    }
   }
 
   close() {
