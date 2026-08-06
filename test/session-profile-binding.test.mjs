@@ -37,6 +37,35 @@ test('session profile binding survives database restart and native binding repai
   }
 })
 
+test('Claude system model survives profile model persistence and database restart', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-session-system-model-'))
+  const path = join(root, 'ucli.db')
+  let db = await openDb(path)
+  try {
+    db.insertSession({
+      id: 'claude-session',
+      project_path: 'F:\\projects\\demo',
+      adapter_id: 'claude',
+      native_session_id: 'native-session',
+      model: 'profile-sonnet',
+      system_model: 'history-haiku',
+      profile_id: 'profile-1',
+      tier: 'safety-rules',
+      status: 'offline',
+      created_at: 1
+    })
+    assert.equal(db.flush(), true)
+    db.close()
+
+    db = await openDb(path)
+    assert.equal(db.getSession('claude-session').model, 'profile-sonnet')
+    assert.equal(db.getSession('claude-session').systemModel, 'history-haiku')
+  } finally {
+    db.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('active profile switching changes only desired and pending state until restart', () => {
   const adapter = { id: 'existing-adapter' }
   const active = reconcileActiveProfile({

@@ -45,12 +45,16 @@ function nativeSessionIdOf(records) {
 }
 
 function actualModelOf(records) {
-  return records.find(({ record }) => (
-    record?.type === 'system' &&
-    record?.subtype === 'init' &&
-    typeof record.model === 'string' &&
-    /^[a-zA-Z0-9][a-zA-Z0-9._:@/+~-]{0,255}$/.test(record.model)
-  ))?.record.model || null
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]?.record
+    if (
+      record?.type === 'system' &&
+      record?.subtype === 'init' &&
+      typeof record.model === 'string' &&
+      /^[a-zA-Z0-9][a-zA-Z0-9._:@/+~-]{0,255}$/.test(record.model)
+    ) return record.model
+  }
+  return null
 }
 
 function questionDecision(toolUse) {

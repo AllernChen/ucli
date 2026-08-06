@@ -92,11 +92,13 @@ test('Claude profile IPC accepts documented draft fields and drops forged runtim
   await handlers.get('ai-cli-profiles:update')({}, 'claude-profile', {
     name: 'Renamed',
     connectionMode: 'bearer',
+    secret: 'replacement-bearer',
     env: { ANTHROPIC_AUTH_TOKEN: 'forged' }
   })
   assert.deepEqual(calls[1], ['update', 'claude-profile', {
     name: 'Renamed',
-    connectionMode: 'bearer'
+    connectionMode: 'bearer',
+    secret: 'replacement-bearer'
   }])
 })
 

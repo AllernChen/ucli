@@ -9,7 +9,8 @@ const CLOUD_PROVIDER_KEYS = [
 ]
 
 function hasEnvironmentValue(env, key) {
-  return typeof env?.[key] === 'string' && env[key].trim().length > 0
+  const entry = Object.entries(env || {}).find(([candidate]) => candidate.toUpperCase() === key)
+  return typeof entry?.[1] === 'string' && entry[1].trim().length > 0
 }
 
 export function resolveClaudeConfigDir({ env = process.env, userHome } = {}) {

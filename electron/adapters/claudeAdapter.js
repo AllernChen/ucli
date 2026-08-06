@@ -155,6 +155,12 @@ export class ClaudeAdapter extends BaseAdapter {
     this._gatewayRespondedDecisions = new Set()
   }
 
+  setProfileLaunch(profileLaunch) {
+    if (this.ptyProc) return false
+    this.profileLaunch = profileLaunch || null
+    return true
+  }
+
   /** Shared: return the matched ~/.claude/projects/<hash> directory, or null. */
   _projectDir() {
     const home = process.env.HOME || process.env.USERPROFILE || '~'

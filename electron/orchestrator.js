@@ -476,7 +476,7 @@ export function createOrchestrator() {
         : s.adapterId === 'claude' && s.profileId
           ? {
               profileId: s.profileId,
-              model: storedProfile?.model || s.model,
+              model: storedProfile?.model ?? s.systemModel ?? null,
               profileStatus: storedProfile?.status || 'missing_profile',
               canStart: storedProfile?.canStart === true,
               provider,
@@ -506,7 +506,9 @@ export function createOrchestrator() {
         session: {
           id: s.id, adapterId: s.adapterId,
           cwd: s.cwd || s.projectPath,
-          model: restoredSession.model || s.model, tier: s.tier, rulesetId: 'default',
+          model: restoredSession.model ?? s.systemModel ?? null,
+          systemModel: s.systemModel ?? null,
+          tier: s.tier, rulesetId: 'default',
           provider,
           sourceProvider,
           providerPolicy,
@@ -722,7 +724,9 @@ export function createOrchestrator() {
 
     let session = {
       id: sessionId, adapterId, cwd,
-      model: config.model || null, tier, rulesetId,
+      model: config.model || null,
+      systemModel: config.model || null,
+      tier, rulesetId,
       provider: config.provider || null,
       sourceProvider: config.sourceProvider || null,
       providerPolicy: config.providerPolicy || null,
@@ -795,6 +799,7 @@ export function createOrchestrator() {
       db.insertSession({
         id: sessionId, project_path: cwd, adapter_id: adapterId,
         native_session_id: session.cliSessionId, name: session.name, task_note: '', tier, model: session.model,
+        system_model: session.systemModel,
         provider: session.provider, source_provider: session.sourceProvider,
         provider_policy: session.providerPolicy,
         explicit_provider: session.explicitProvider,
@@ -1389,6 +1394,21 @@ export function createOrchestrator() {
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
     wireAdapterGateway(sessionId, adapter)
     adapter.hookPort = hookPort
+    if (entry.session.adapterId === 'claude') {
+      const prepared = prepareClaudeSessionRuntime(entry.session, {
+        imported: Boolean(entry.session.cliSessionId),
+        explicitProfileId: entry.session.profileId || null,
+        forceSystem: !entry.session.profileId
+      })
+      Object.assign(entry.session, prepared.session, {
+        activeProfileId: prepared.session.profileId || null,
+        pendingProfileId: null,
+        pendingProfileRuntimeRevision: null,
+        restartRequired: false
+      })
+      adapter.setProfileLaunch(prepared.profileLaunch)
+      entry.status = 'launching'
+    }
     const started = await adapter.start()
     if (started === false) {
       entry.status = 'error'
@@ -1397,11 +1417,13 @@ export function createOrchestrator() {
       if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
       return false
     }
-    if (entry.session.profileId) {
-      entry.session.activeProfileId = entry.session.profileId
-      entry.session.pendingProfileId = null
-      entry.session.pendingProfileRuntimeRevision = null
-      entry.session.restartRequired = false
+    if (['codex', 'claude'].includes(entry.session.adapterId)) {
+      if (entry.session.adapterId === 'codex') {
+        entry.session.activeProfileId = entry.session.profileId || null
+        entry.session.pendingProfileId = null
+        entry.session.pendingProfileRuntimeRevision = null
+        entry.session.restartRequired = false
+      }
       publishProfileRuntime(sessionId, entry.session)
     }
     const db = getDb()
@@ -1488,7 +1510,7 @@ export function createOrchestrator() {
             providerWarning: null
           }
         : {
-            model: profile.model || entry.session.model,
+            model: profile.model ?? entry.session.systemModel ?? null,
             actualModel: null,
             profileWarning: null
           }
@@ -1510,6 +1532,7 @@ export function createOrchestrator() {
           }
         : {
             profileId: null,
+            model: entry.session.systemModel ?? null,
             actualModel: null,
             profileWarning: null
           }
@@ -1635,6 +1658,21 @@ export function createOrchestrator() {
       }
       await hookReady
       e.adapter.hookPort = hookPort
+      if (e.session.adapterId === 'claude') {
+        const prepared = prepareClaudeSessionRuntime(e.session, {
+          imported: Boolean(e.session.cliSessionId),
+          explicitProfileId: e.session.profileId || null,
+          forceSystem: !e.session.profileId
+        })
+        Object.assign(e.session, prepared.session, {
+          activeProfileId: prepared.session.profileId || null,
+          pendingProfileId: null,
+          pendingProfileRuntimeRevision: null,
+          restartRequired: false
+        })
+        e.adapter.setProfileLaunch(prepared.profileLaunch)
+        e.status = 'launching'
+      }
       const started = await e.adapter.start()
       if (started === false) {
         e.status = 'error'
@@ -1642,11 +1680,13 @@ export function createOrchestrator() {
         if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
         return false
       }
-      if (e.session.profileId) {
-        e.session.activeProfileId = e.session.profileId
-        e.session.pendingProfileId = null
-        e.session.pendingProfileRuntimeRevision = null
-        e.session.restartRequired = false
+      if (['codex', 'claude'].includes(e.session.adapterId)) {
+        if (e.session.adapterId === 'codex') {
+          e.session.activeProfileId = e.session.profileId || null
+          e.session.pendingProfileId = null
+          e.session.pendingProfileRuntimeRevision = null
+          e.session.restartRequired = false
+        }
         publishProfileRuntime(sessionId, e.session)
       }
       return true

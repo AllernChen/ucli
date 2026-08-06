@@ -151,7 +151,7 @@ export function createProfileService({
       ...patch,
       id: current.id,
       adapterId: current.adapterId,
-      keepSecret: patch.secret === undefined
+      keepSecret: patch.secret === undefined && current.hasSecretHint
     })
     if (draft.common.kind === 'managed' && draft.secretAction.type === 'none' && !current.hasSecretHint) {
       throw serviceError('Managed profile secret is required', 'PROFILE_SECRET_REQUIRED')

@@ -282,7 +282,7 @@
       :session-id="sessionDiagnosticsSessionId"
     />
 
-    <a-modal :open="profileSwitch.open" title="切换 Codex 档案" :footer="null" :closable="false">
+    <a-modal :open="profileSwitch.open" title="切换配置档案" :footer="null" :closable="false">
       <p>该会话正在运行。可以保留当前进程并在下次重启时生效，也可以现在重启。</p>
       <div class="modal-footer">
         <a-button @click="cancelProfileSwitch">取消</a-button>

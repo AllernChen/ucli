@@ -73,6 +73,9 @@ test('Claude inherited auth detection uses stable presence-only precedence', () 
     [{ CLAUDE_CODE_USE_VERTEX: '1' }, 'cloud_provider'],
     [{ CLAUDE_CODE_USE_FOUNDRY: '1' }, 'cloud_provider'],
     [{ CLAUDE_CODE_USE_MANTLE: '1' }, 'cloud_provider'],
+    [{ Anthropic_Api_Key: 'mixed-case-key' }, 'api_key'],
+    [{ anthropic_auth_token: 'mixed-case-token' }, 'bearer'],
+    [{ Claude_Code_Use_Bedrock: '1' }, 'cloud_provider'],
     [{}, 'login_or_unknown']
   ]
 

@@ -15,6 +15,7 @@ test('Claude profile editor offers login, API Key, and Bearer modes with honest 
   assert.match(drawer, /requiresBaseUrl/)
   assert.doesNotMatch(drawer, /fallback/i)
   assert.doesNotMatch(drawer, /读取 Claude 登录 token|显示密钥|查看密钥/)
+  assert.doesNotMatch(page, /profiles\.setSecret/)
 })
 
 test('profile center enables Claude profiles while OpenCode and U-Code remain system managed', () => {

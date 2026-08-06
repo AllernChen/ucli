@@ -119,6 +119,33 @@ test('Claude launch decrypts once and keeps the credential in the target environ
   }
 })
 
+test('Claude connection mode and replacement credential update atomically', async () => {
+  const context = await harness()
+  try {
+    const created = await context.service.createProfile({
+      adapterId: 'claude', name: 'Company Claude', connectionMode: 'api_key',
+      baseUrl: 'https://gateway.example.com', secret: 'old-api-key'
+    })
+    const updated = await context.service.updateProfile(created.id, {
+      connectionMode: 'bearer',
+      baseUrl: 'https://gateway.example.com',
+      secret: 'replacement-bearer'
+    })
+    const launch = context.service.resolveLaunchProfile({
+      profileId: updated.id,
+      session: {},
+      baseEnv: {}
+    })
+
+    assert.equal(updated.connectionMode, 'bearer')
+    assert.equal(launch.env.ANTHROPIC_AUTH_TOKEN, 'replacement-bearer')
+    assert.equal(launch.env.ANTHROPIC_API_KEY, undefined)
+    assert.equal(JSON.stringify(context.db.listAiCliProfiles()).includes('replacement-bearer'), false)
+  } finally {
+    context.close()
+  }
+})
+
 test('Claude subscription profile starts without a secret and reports managed secret loss', async () => {
   const context = await harness()
   try {

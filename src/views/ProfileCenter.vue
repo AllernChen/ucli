@@ -242,8 +242,10 @@ async function saveProfile(draft) {
   try {
     if (editorMode.value === 'edit') {
       const { secret, adapterId, ...patch } = draft
-      await profiles.update(editorSeed.value.id, patch)
-      if (secret) await profiles.setSecret(editorSeed.value.id, secret)
+      await profiles.update(editorSeed.value.id, {
+        ...patch,
+        ...(secret ? { secret } : {})
+      })
     } else {
       await profiles.create(draft)
     }

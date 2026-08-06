@@ -9,7 +9,7 @@ const PROFILE_FIELDS = [
 ]
 const PROFILE_PATCH_FIELDS = [
   'name', 'kind', 'providerId', 'baseUrl', 'model', 'reasoningEffort', 'contextWindow',
-  'connectionMode'
+  'connectionMode', 'secret'
 ]
 
 function ipcError(message) {
@@ -49,9 +49,11 @@ function copyFields(value, fields) {
 
 function copyDefinedFields(value, fields) {
   const source = requireObject(value, 'profile')
-  return Object.fromEntries(fields
+  const copy = Object.fromEntries(fields
     .filter((field) => source[field] !== undefined)
     .map((field) => [field, source[field]]))
+  if (copy.secret !== undefined) copy.secret = requireSecret(copy.secret)
+  return copy
 }
 
 function copyProfileDraft(value) {

@@ -21,3 +21,15 @@ test('Claude panes switch profiles with the shared restart decision and show act
   assert.match(sessionDetail, /立即重启/)
   assert.match(sessionDetail, /下次重启生效/)
 })
+
+test('Claude launch is recompiled immediately before start to avoid stale starting profiles', () => {
+  assert.match(sessionDetail, /setSessionProfile/)
+  const orchestrator = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+  const adapter = readFileSync(new URL('../electron/adapters/claudeAdapter.js', import.meta.url), 'utf8')
+  assert.match(orchestrator, /prepareClaudeSessionRuntime\(e\.session/)
+  assert.match(orchestrator, /e\.adapter\.setProfileLaunch/)
+  assert.match(orchestrator, /adapter\.setProfileLaunch\(prepared\.profileLaunch\)/)
+  assert.match(orchestrator, /entry\.status = 'launching'/)
+  assert.match(orchestrator, /status = 'launching'/)
+  assert.match(adapter, /setProfileLaunch\(profileLaunch\)/)
+})

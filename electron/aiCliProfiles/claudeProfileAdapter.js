@@ -19,6 +19,7 @@ const ROUTING_KEYS = [
   'CLAUDE_CODE_USE_FOUNDRY',
   'CLAUDE_CODE_USE_MANTLE'
 ]
+const ROUTING_KEY_SET = new Set(ROUTING_KEYS)
 
 function claudeProfileError(code, message = code) {
   return Object.assign(new TypeError(message), { code })
@@ -111,7 +112,9 @@ export function buildClaudeProfileEnvironment({
   const env = { ...baseEnv }
   if (!profile) return env
 
-  for (const key of ROUTING_KEYS) delete env[key]
+  for (const key of Object.keys(env)) {
+    if (ROUTING_KEY_SET.has(key.toUpperCase())) delete env[key]
+  }
   const connectionMode = profile.config?.connectionMode
   if (connectionMode === 'subscription') return env
   if (!['api_key', 'bearer'].includes(connectionMode)) {
@@ -140,6 +143,7 @@ export function prepareClaudeProfileSession({ session = {}, selection = {}, laun
     return {
       session: {
         ...session,
+        model: session.systemModel ?? session.model ?? null,
         profileId: null,
         activeProfileId: null,
         pendingProfileId: null,
@@ -161,7 +165,7 @@ export function prepareClaudeProfileSession({ session = {}, selection = {}, laun
     session: {
       ...session,
       profileId: selection.profileId,
-      model: launch.artifact?.model || session.model || null,
+      model: launch.artifact?.model ?? session.systemModel ?? session.model ?? null,
       activeProfileId: null,
       pendingProfileId: null,
       profileStatus: launch.status,

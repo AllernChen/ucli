@@ -58,6 +58,35 @@ test('subscription profile removes inherited Claude routing without mutating the
   assert.equal(baseEnv.CLAUDE_CODE_USE_BEDROCK, '1')
 })
 
+test('Claude profiles scrub inherited routing case-insensitively for Windows environments', () => {
+  const baseEnv = {
+    PATH: 'C:\\tools',
+    Anthropic_Api_Key: 'mixed-api-key',
+    anthropic_auth_token: 'mixed-token',
+    Claude_Code_Use_Bedrock: '1',
+    claude_code_use_vertex: '1'
+  }
+
+  const subscription = buildClaudeProfileEnvironment({
+    baseEnv,
+    profile: { config: { connectionMode: 'subscription' } }
+  })
+  const managed = buildClaudeProfileEnvironment({
+    baseEnv,
+    profile: { config: { connectionMode: 'api_key', baseUrl: null } },
+    secret: 'new-secret'
+  })
+
+  for (const env of [subscription, managed]) {
+    const keys = Object.keys(env).map((key) => key.toUpperCase())
+    assert.equal(keys.includes('ANTHROPIC_AUTH_TOKEN'), false)
+    assert.equal(keys.includes('CLAUDE_CODE_USE_BEDROCK'), false)
+    assert.equal(keys.includes('CLAUDE_CODE_USE_VERTEX'), false)
+  }
+  assert.equal(managed.ANTHROPIC_API_KEY, 'new-secret')
+  assert.equal(Object.keys(managed).filter((key) => key.toUpperCase() === 'ANTHROPIC_API_KEY').length, 1)
+})
+
 test('managed Claude modes inject exactly one credential into the target environment', () => {
   const baseEnv = {
     PATH: '/usr/bin',
@@ -151,6 +180,33 @@ test('Claude session preparation keeps launch credentials outside persisted sess
   })
   assert.equal(system.session.profileId, null)
   assert.equal(system.profileLaunch, null)
+})
+
+test('Claude profile removal and model-less profiles restore the persisted system model', () => {
+  const session = {
+    id: 'session-1', adapterId: 'claude',
+    model: 'profile-sonnet', systemModel: 'history-haiku', profileId: 'profile-old'
+  }
+  const system = prepareClaudeProfileSession({
+    session,
+    selection: { profileId: null, canStart: true, selectionSource: 'system' }
+  })
+  assert.equal(system.session.model, 'history-haiku')
+  assert.equal(system.session.profileId, null)
+  assert.equal(system.profileLaunch, null)
+
+  const modelLess = prepareClaudeProfileSession({
+    session,
+    selection: { profileId: 'profile-no-model', canStart: true },
+    launch: {
+      args: ['--resume', 'native-session'],
+      env: { PATH: 'C:\\tools' },
+      artifact: { model: null, connectionMode: 'subscription' },
+      status: 'ready',
+      runtimeRevision: 456
+    }
+  })
+  assert.equal(modelLess.session.model, 'history-haiku')
 })
 
 test('Claude actual model reports substitution without replacing the requested model', () => {

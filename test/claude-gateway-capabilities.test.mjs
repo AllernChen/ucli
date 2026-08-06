@@ -233,3 +233,14 @@ test('Claude hook passes user-decision tools through to the native prompt', () =
     assert.equal(child.stdout, '{}')
   }
 })
+
+test('Claude parser reports the latest valid init model after resume', async () => {
+  const { parseClaudeGatewayState } = await parser()
+  const state = parseClaudeGatewayState([
+    { type: 'system', subtype: 'init', session_id: 'session-1', model: 'claude-old' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'before resume' }] } },
+    { type: 'system', subtype: 'init', session_id: 'session-1', model: 'claude-new' }
+  ])
+
+  assert.equal(state.actualModel, 'claude-new')
+})
