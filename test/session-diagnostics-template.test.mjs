@@ -65,7 +65,11 @@ test('session diagnostics modal renders the safe binding contract and gates repa
   ])
 
   const buttons = findElements(ast, (node) => node.tag === 'a-button')
+  const copy = buttons.find((node) => staticText(node) === '复制诊断信息')
   const repair = buttons.find((node) => staticText(node) === '修复绑定')
+  assert.ok(copy)
+  assert.equal(directive(copy, 'bind', 'disabled')?.exp?.content, '!diagnostic')
+  assert.equal(directive(copy, 'on')?.exp?.content, 'copyDiagnostics')
   assert.ok(repair)
   assert.equal(directive(repair, 'bind', 'disabled')?.exp?.content, '!diagnostic?.repairAvailable')
   assert.equal(directive(repair, 'on')?.exp?.content, 'repairBinding')

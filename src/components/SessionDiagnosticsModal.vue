@@ -60,6 +60,7 @@
     <div class="diagnostic-footer">
       <span class="resume-hint">在 Codex 中使用 /resume 选择会话后，UCLI 会自动保存新绑定。</span>
       <a-space>
+        <a-button :disabled="!diagnostic" @click="copyDiagnostics">复制诊断信息</a-button>
         <a-button @click="close">关闭</a-button>
         <a-button
           type="primary"
@@ -77,6 +78,7 @@ import { ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import {
+  formatSessionDiagnosticsForClipboard,
   sessionBindingAlertType,
   sessionBindingStateLabel
 } from '../sessionDiagnosticsPresentation.js'
@@ -122,6 +124,16 @@ async function repairBinding() {
     error.value = '修复会话绑定失败：' + (cause?.message || cause)
   } finally {
     repairing.value = false
+  }
+}
+
+async function copyDiagnostics() {
+  if (!diagnostic.value) return
+  try {
+    await navigator.clipboard.writeText(formatSessionDiagnosticsForClipboard(diagnostic.value))
+    message.success('诊断信息已复制')
+  } catch {
+    message.error('复制诊断信息失败')
   }
 }
 

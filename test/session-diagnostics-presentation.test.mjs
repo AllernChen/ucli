@@ -1,10 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import {
+import * as diagnosticsPresentation from '../src/sessionDiagnosticsPresentation.js'
+
+const {
   sessionBindingAlertType,
   sessionBindingStateLabel
-} from '../src/sessionDiagnosticsPresentation.js'
+} = diagnosticsPresentation
 
 test('session binding states have stable localized explanations', () => {
   const cases = [
@@ -30,4 +32,45 @@ test('session binding alerts distinguish safe, repairable, and invalid states', 
   assert.equal(sessionBindingAlertType('unbound'), 'info')
   assert.equal(sessionBindingAlertType('unsupported'), 'info')
   assert.equal(sessionBindingAlertType('unknown'), 'info')
+})
+
+test('copied session diagnostics expose only the support allowlist', () => {
+  const text = diagnosticsPresentation.formatSessionDiagnosticsForClipboard({
+    schemaVersion: 1,
+    sessionId: 'ucli-session',
+    adapterId: 'codex',
+    cwd: 'C:\\Users\\private\\secret-project',
+    status: 'offline',
+    storedNativeSessionId: 'codex-original',
+    resolvedNativeSessionId: 'codex-current',
+    bindingState: 'stale',
+    repairAvailable: true,
+    lineage: [{
+      sessionId: 'codex-current',
+      forkedFromId: 'codex-original',
+      startedAt: 1767225600000,
+      updatedAt: 1767312000000,
+      transcriptPath: 'C:\\Users\\private\\transcript.jsonl'
+    }],
+    prompt: 'private prompt',
+    messageBody: 'private message'
+  })
+
+  assert.deepEqual(JSON.parse(text), {
+    schemaVersion: 1,
+    sessionId: 'ucli-session',
+    adapterId: 'codex',
+    status: 'offline',
+    bindingState: 'stale',
+    storedNativeSessionId: 'codex-original',
+    resolvedNativeSessionId: 'codex-current',
+    repairAvailable: true,
+    lineage: [{
+      sessionId: 'codex-current',
+      forkedFromId: 'codex-original',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z'
+    }]
+  })
+  assert.doesNotMatch(text, /secret-project|transcript\.jsonl|private prompt|private message/)
 })
