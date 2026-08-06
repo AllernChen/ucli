@@ -127,6 +127,7 @@ export function createProfileService({
   function rendererProfile(profile) {
     const adapter = adapterFor(profile.adapterId)
     const state = runtimeStateFor(profile)
+    const config = adapter.sanitiseConfig(profile.config)
     return {
       ...sanitiseProfile(profile, {
       ...state,
@@ -136,7 +137,8 @@ export function createProfileService({
       isProjectDefault: db.listAiCliProfileBindings({ profileId: profile.id })
         .some((binding) => binding.scopeType === 'project')
       }),
-      config: adapter.sanitiseConfig(profile.config)
+      config,
+      ...(profile.adapterId === 'claude' ? { connectionMode: config.connectionMode } : {})
     }
   }
 
@@ -496,7 +498,8 @@ export function createProfileService({
     },
 
     getDiagnosticSummary() {
-      const visible = db.listAiCliProfiles({ adapterId: 'codex' }).map(rendererProfile)
+      const visible = db.listAiCliProfiles().map(rendererProfile)
+      const claudeProfiles = visible.filter((profile) => profile.adapterId === 'claude')
       let codexHomeWritable = false
       try {
         accessSync(resolveCodexHome(), constants.W_OK)
@@ -508,7 +511,17 @@ export function createProfileService({
         drifted: visible.filter((profile) => profile.status === 'drifted').length,
         missing: visible.filter((profile) => !['ready', 'drifted'].includes(profile.status)).length,
         codexHomeWritable,
-        lastReconcileAt
+        lastReconcileAt,
+        claude: {
+          total: claudeProfiles.length,
+          connectionModes: {
+            subscription: claudeProfiles.filter((profile) => profile.connectionMode === 'subscription').length,
+            apiKey: claudeProfiles.filter((profile) => profile.connectionMode === 'api_key').length,
+            bearer: claudeProfiles.filter((profile) => profile.connectionMode === 'bearer').length
+          },
+          missingSecret: claudeProfiles.filter((profile) => profile.kind === 'managed' && !profile.hasSecret).length,
+          modelSubstitutions: 0
+        }
       }
     }
   }

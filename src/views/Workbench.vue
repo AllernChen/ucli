@@ -107,34 +107,34 @@
         </div>
       </div>
 
-      <div class="new-section">
-        <div class="section-title">Codex 配置档案</div>
+      <div v-for="adapterId in profileAdapterIds" :key="adapterId" class="new-section">
+        <div class="section-title">{{ adapterName(adapterId) }} 配置档案</div>
         <div class="profile-choice-row">
-          <span>新建 Codex</span>
-          <a-select v-model:value="form.profileSelection" style="width: 280px">
+          <span>新建 {{ adapterName(adapterId) }}</span>
+          <a-select v-model:value="form.profileSelections[adapterId]" style="width: 280px">
             <a-select-option value="inherit">按项目默认</a-select-option>
-            <a-select-option :value="appDefaultProfile ? `profile:${appDefaultProfile.id}` : 'app-unavailable'" :disabled="!appDefaultProfile">按应用默认</a-select-option>
+            <a-select-option :value="defaultProfile(adapterId, 'app') ? `profile:${defaultProfile(adapterId, 'app').id}` : 'app-unavailable'" :disabled="!defaultProfile(adapterId, 'app')">按应用默认</a-select-option>
             <a-select-option value="system">跟随当前</a-select-option>
             <a-select-opt-group label="具体档案">
-              <a-select-option v-for="profile in aiProfiles.profiles" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
+              <a-select-option v-for="profile in profilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
                 {{ profile.name }}{{ profile.canStart ? '' : '（当前不可用）' }}
               </a-select-option>
             </a-select-opt-group>
           </a-select>
         </div>
         <div class="profile-choice-row">
-          <span>导入 Codex</span>
-          <a-select v-model:value="importProfileSelection" style="width: 280px">
-            <a-select-option value="history">保持历史来源</a-select-option>
+          <span>导入 {{ adapterName(adapterId) }}</span>
+          <a-select v-model:value="importProfileSelections[adapterId]" style="width: 280px">
+            <a-select-option value="history">保持历史连接</a-select-option>
             <a-select-option value="system">跟随当前</a-select-option>
             <a-select-opt-group label="具体档案">
-              <a-select-option v-for="profile in aiProfiles.profiles" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
+              <a-select-option v-for="profile in profilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
                 {{ profile.name }}{{ profile.canStart ? '' : '（当前不可用）' }}
               </a-select-option>
             </a-select-opt-group>
           </a-select>
         </div>
-        <div class="profile-choice-help">项目默认：{{ projectDefaultProfile?.name || '未设置' }}；应用默认：{{ appDefaultProfile?.name || '未设置' }}</div>
+        <div class="profile-choice-help">项目默认：{{ defaultProfile(adapterId, 'project')?.name || '未设置' }}；应用默认：{{ defaultProfile(adapterId, 'app')?.name || '未设置' }}</div>
       </div>
 
       <!-- Tier selector (always visible) -->
@@ -189,10 +189,13 @@ const discovering = ref(false)
 const discoverError = ref('')
 const filterTier = ref(undefined)
 
-const form = ref({ adapterId: 'claude', cwd: '', model: undefined, tier: 'safety-rules', profileSelection: 'inherit' })
+const form = ref({
+  adapterId: 'claude', cwd: '', model: undefined, tier: 'safety-rules',
+  profileSelections: { codex: 'inherit', claude: 'inherit' }
+})
 const discovered = ref({ claude: [], codex: [], opencode: [], ucode: [] })
 const selectedSessions = ref({})
-const importProfileSelection = ref('history')
+const importProfileSelections = ref({ codex: 'history', claude: 'history' })
 
 const filtered = computed(() =>
   filterTier.value ? sessions.sessions.filter((s) => s.tier === filterTier.value) : sessions.sessions
@@ -223,8 +226,12 @@ const cliGroups = computed(() => {
   }
   return groups
 })
-const projectDefaultProfile = computed(() => aiProfiles.profiles.find((profile) => profile.isProjectDefault) || null)
-const appDefaultProfile = computed(() => aiProfiles.profiles.find((profile) => profile.isAppDefault) || null)
+const profilesForAdapter = (adapterId) => aiProfiles.profiles.filter((profile) => profile.adapterId === adapterId)
+const profileCapableAdapter = (adapterId) => ['codex', 'claude'].includes(adapterId)
+const profileAdapterIds = ['codex', 'claude']
+const adapterName = (adapterId) => sessions.adapters.find((adapter) => adapter.id === adapterId)?.displayName || adapterId
+const defaultProfile = (adapterId, scope) => profilesForAdapter(adapterId)
+  .find((profile) => scope === 'project' ? profile.isProjectDefault : profile.isAppDefault) || null
 
 onMounted(async () => {
   await Promise.all([sessions.init(), settings.load(), gateway.init()])
@@ -238,8 +245,8 @@ onMounted(async () => {
 
 function openNew() {
   selectedSessions.value = {}
-  form.value.profileSelection = 'inherit'
-  importProfileSelection.value = 'history'
+  form.value.profileSelections = { codex: 'inherit', claude: 'inherit' }
+  importProfileSelections.value = { codex: 'history', claude: 'history' }
   discovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
   if (form.value.cwd) discover(form.value.cwd)
   showNew.value = true
@@ -309,11 +316,15 @@ async function discover(cwd) {
   }
 }
 
-function profileConfigForSelection(imported) {
-  const selection = imported ? importProfileSelection.value : form.value.profileSelection
+function profileConfigForSelection(imported, adapterId) {
+  const selection = imported
+    ? importProfileSelections.value[adapterId]
+    : form.value.profileSelections[adapterId]
   if (selection === 'system') return { profileSelection: 'system' }
   if (typeof selection === 'string' && selection.startsWith('profile:')) {
-    return { profileId: selection.slice('profile:'.length) }
+    const profileId = selection.slice('profile:'.length)
+    const profile = aiProfiles.profileById(profileId)
+    return profile?.adapterId === adapterId ? { profileId } : {}
   }
   return {}
 }
@@ -342,8 +353,8 @@ async function importSelected() {
           provider: cs?.resumeProvider || undefined,
           sourceProvider: cs?.sourceProvider || undefined
         }
-        if (group.id === 'codex') {
-          const profileConfig = profileConfigForSelection(true)
+        if (profileCapableAdapter(group.id)) {
+          const profileConfig = profileConfigForSelection(true, group.id)
           if (profileConfig.profileId) config.profileId = profileConfig.profileId
           if (profileConfig.profileSelection) config.profileSelection = profileConfig.profileSelection
         }
@@ -372,8 +383,9 @@ async function newSession(adapter) {
       cwd: form.value.cwd,
       tier: form.value.tier
     }
-    if (adapter.id === 'codex') {
-      const profileConfig = profileConfigForSelection(false)
+    if (profileCapableAdapter(adapter.id)) {
+      form.value.adapterId = adapter.id
+      const profileConfig = profileConfigForSelection(false, adapter.id)
       if (profileConfig.profileId) config.profileId = profileConfig.profileId
       if (profileConfig.profileSelection) config.profileSelection = profileConfig.profileSelection
     }

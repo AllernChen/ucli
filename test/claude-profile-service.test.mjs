@@ -180,3 +180,36 @@ test('Claude profile selection uses explicit, project, app, then system while im
     context.close()
   }
 })
+
+test('Claude diagnostics expose aggregate connection health without routing or credentials', async () => {
+  const context = await harness()
+  try {
+    const subscription = await context.service.createProfile({
+      adapterId: 'claude', name: 'Login', connectionMode: 'subscription'
+    })
+    const apiKey = await context.service.createProfile({
+      adapterId: 'claude', name: 'API', connectionMode: 'api_key',
+      baseUrl: 'https://private.example.com', secret: 'api-secret'
+    })
+    await context.service.createProfile({
+      adapterId: 'claude', name: 'Bearer', connectionMode: 'bearer',
+      baseUrl: 'https://gateway.example.com', secret: 'bearer-secret'
+    })
+    await context.service.deleteProfileSecret(apiKey.id)
+
+    const summary = context.service.getDiagnosticSummary()
+    assert.deepEqual(summary.claude, {
+      total: 3,
+      connectionModes: { subscription: 1, apiKey: 1, bearer: 1 },
+      missingSecret: 1,
+      modelSubstitutions: 0
+    })
+    assert.equal(summary.total, 3)
+    assert.equal(summary.ready, 2)
+    assert.equal(summary.missing, 1)
+    assert.equal(context.service.listProfiles({ adapterId: 'claude' }).find((profile) => profile.id === subscription.id).connectionMode, 'subscription')
+    assert.doesNotMatch(JSON.stringify(summary), /private\.example|gateway\.example|api-secret|bearer-secret|ANTHROPIC_/)
+  } finally {
+    context.close()
+  }
+})

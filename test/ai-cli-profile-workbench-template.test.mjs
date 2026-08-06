@@ -10,11 +10,11 @@ test('new Codex sessions can choose project, app, system, or a concrete profile'
   }
   assert.match(source, /profileSelection/)
   assert.match(source, /config\.profileId/)
-  assert.match(source, /group\.id === 'codex'/)
+  assert.match(source, /profileCapableAdapter\(group\.id\)/)
 })
 
 test('Codex imports preserve history unless the user explicitly selects a profile', () => {
-  assert.match(source, /保持历史来源/)
-  assert.match(source, /profileConfigForSelection\(true\)/)
-  assert.match(source, /adapter\.id === 'codex'/)
+  assert.match(source, /保持历史连接/)
+  assert.match(source, /profileConfigForSelection\(true, group\.id\)/)
+  assert.match(source, /profileCapableAdapter\(adapter\.id\)/)
 })

@@ -163,13 +163,13 @@
             <span v-if="pane.sessionId" class="pane-session">
               {{ (sessions.byId(pane.sessionId)?.icon) || '•' }}
               {{ (sessions.byId(pane.sessionId)?.displayName || pane.sessionId.slice(0,8)) }}
-              <a-tag v-if="isCodexSession(pane.sessionId)" color="purple">档案：{{ profileNameForSession(pane.sessionId) }}</a-tag>
+              <a-tag v-if="isProfileSession(pane.sessionId)" color="purple">档案：{{ profileNameForSession(pane.sessionId) }}</a-tag>
               <span :class="['status-dot', sessions.byId(pane.sessionId)?.status]"></span>
             </span>
             <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
             <a-space size="small">
               <a-button
-                v-if="pane.sessionId && isCodexSession(pane.sessionId)"
+                v-if="pane.sessionId && isProfileSession(pane.sessionId)"
                 size="small"
                 type="text"
                 @click.stop="openSessionDiagnostics(i)"
@@ -205,25 +205,29 @@
           </div>
           <!-- Pane info bar -->
           <div v-if="pane.sessionId" class="pane-info">
+            <span
+              v-if="sessions.byId(pane.sessionId)?.actualModel && sessions.byId(pane.sessionId)?.actualModel !== sessions.byId(pane.sessionId)?.model"
+              class="pi-item provider-warning"
+            >实际模型：{{ sessions.byId(pane.sessionId)?.actualModel }}</span>
             <span class="pi-item">🔹 {{ sessions.byId(pane.sessionId)?.model || '—' }}</span>
             <span class="pi-item">↑{{ fmtNum(sessions.byId(pane.sessionId)?.stats?.tokens?.input) }}</span>
             <span class="pi-item">↓{{ fmtNum(sessions.byId(pane.sessionId)?.stats?.tokens?.output) }}</span>
             <span class="pi-item" v-if="sessions.byId(pane.sessionId)?.stats?.costUsd">${{ sessions.byId(pane.sessionId).stats.costUsd.toFixed(4) }}</span>
             <span class="pi-item">{{ sessions.byId(pane.sessionId)?.stats?.turns || 0 }} 轮</span>
             <a-select
-              v-if="isCodexSession(pane.sessionId)"
+              v-if="isProfileSession(pane.sessionId)"
               :value="sessions.byId(pane.sessionId)?.profileId || 'system'"
               size="small"
               style="width: 150px"
               @click.stop
-              @change="setCodexProfile(pane.sessionId, $event)"
+              @change="setSessionProfile(pane.sessionId, $event)"
             >
               <a-select-option value="system">系统 / 来源策略</a-select-option>
-              <a-select-option v-for="profile in aiProfiles.profiles" :key="profile.id" :value="profile.id" :disabled="!profile.canStart">
+              <a-select-option v-for="profile in profilesForSession(pane.sessionId)" :key="profile.id" :value="profile.id" :disabled="!profile.canStart">
                 {{ profile.name }}{{ profile.canStart ? '' : '（不可用）' }}
               </a-select-option>
             </a-select>
-            <span v-if="isCodexSession(pane.sessionId) && sessions.byId(pane.sessionId)?.profileId" class="pi-item">由档案管理</span>
+            <span v-if="isProfileSession(pane.sessionId) && sessions.byId(pane.sessionId)?.profileId" class="pi-item">由档案管理</span>
             <a-select
               v-if="isCodexSession(pane.sessionId) && !sessions.byId(pane.sessionId)?.profileId"
               :value="sessions.byId(pane.sessionId)?.providerPolicy || 'live'"
@@ -247,7 +251,7 @@
               <a-select-option v-for="provider in codexRuntime?.availableProviders || []" :key="provider" :value="provider">{{ provider }}</a-select-option>
             </a-select>
             <span v-if="isCodexSession(pane.sessionId) && !sessions.byId(pane.sessionId)?.profileId && codexProviderStatus(pane.sessionId)" class="pi-item provider-warning">{{ codexProviderStatus(pane.sessionId) }}</span>
-            <span v-if="isCodexSession(pane.sessionId) && profileRuntimeNoticeForSession(pane.sessionId)" class="pi-item provider-warning">
+            <span v-if="isProfileSession(pane.sessionId) && profileRuntimeNoticeForSession(pane.sessionId)" class="pi-item provider-warning">
               {{ profileRuntimeNoticeForSession(pane.sessionId) }}
               <a-button v-if="sessions.byId(pane.sessionId)?.restartRequired" type="link" size="small" @click.stop="restartWithPendingProfile(pane.sessionId)">立即重启</a-button>
             </span>
@@ -340,11 +344,11 @@
             <a-radio value="ask-everything">逐次确认</a-radio>
           </a-radio-group>
         </a-form-item>
-        <a-form-item label="Codex 配置档案">
-          <a-select v-model:value="importProfileSelection">
-            <a-select-option value="history">保持历史来源</a-select-option>
+        <a-form-item v-for="adapterId in profileAdapterIds" :key="adapterId" :label="`${profileAdapterName(adapterId)} 配置档案`">
+          <a-select v-model:value="importProfileSelections[adapterId]">
+            <a-select-option value="history">保持历史连接</a-select-option>
             <a-select-option value="system">跟随当前</a-select-option>
-            <a-select-option v-for="profile in aiProfiles.profiles" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
+            <a-select-option v-for="profile in profilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
               {{ profile.name }}{{ profile.canStart ? '' : '（不可用）' }}
             </a-select-option>
           </a-select>
@@ -463,6 +467,19 @@ function isCodexSession(sessionId) {
   return sessions.byId(sessionId)?.adapterId === 'codex'
 }
 
+function isProfileSession(sessionId) {
+  return ['codex', 'claude'].includes(sessions.byId(sessionId)?.adapterId)
+}
+
+function profilesForSession(sessionId) {
+  const adapterId = sessions.byId(sessionId)?.adapterId
+  return profilesForAdapter(adapterId)
+}
+
+const profileAdapterIds = ['codex', 'claude']
+const profilesForAdapter = (adapterId) => aiProfiles.profiles.filter((profile) => profile.adapterId === adapterId)
+const profileAdapterName = (adapterId) => sessions.adapters.find((adapter) => adapter.id === adapterId)?.displayName || adapterId
+
 function profileName(profileId) {
   return aiProfiles.profileById(profileId)?.name || (profileId ? '不可用档案' : '系统当前')
 }
@@ -483,7 +500,7 @@ function profileRuntimeNoticeForSession(sessionId) {
 
 const profileSwitch = ref({ open: false, sessionId: '', profileId: null })
 
-async function setCodexProfile(sessionId, value) {
+async function setSessionProfile(sessionId, value) {
   const session = sessions.byId(sessionId)
   const profileId = value === 'system' ? null : value
   if (!session || session.profileId === profileId) return
@@ -1091,7 +1108,7 @@ const sessionDiagnosticsVisible = ref(false)
 const sessionDiagnosticsSessionId = ref('')
 function openSessionDiagnostics(i) {
   const sessionId = panes.value[i]?.sessionId
-  if (!sessionId || !isCodexSession(sessionId)) return
+  if (!sessionId || !isProfileSession(sessionId)) return
   sessionDiagnosticsSessionId.value = sessionId
   sessionDiagnosticsVisible.value = true
 }
@@ -1102,7 +1119,7 @@ const importCwd = ref('')
 const importDiscovered = ref({ claude: [], codex: [], opencode: [], ucode: [] })
 const importSelection = ref({})
 const importTier = ref('safety-rules')
-const importProfileSelection = ref('history')
+const importProfileSelections = ref({ codex: 'history', claude: 'history' })
 const importing = ref(false)
 const discoveringImport = ref(false)
 const importError = ref('')
@@ -1171,10 +1188,12 @@ async function doImport() {
           provider: cs?.resumeProvider || undefined,
           sourceProvider: cs?.sourceProvider || undefined
         }
-        if (group.id === 'codex') {
-          if (importProfileSelection.value === 'system') config.profileSelection = 'system'
-          else if (importProfileSelection.value.startsWith('profile:')) {
-            config.profileId = importProfileSelection.value.slice('profile:'.length)
+        if (['codex', 'claude'].includes(group.id)) {
+          const profileSelection = importProfileSelections.value[group.id]
+          if (profileSelection === 'system') config.profileSelection = 'system'
+          else if (profileSelection.startsWith('profile:')) {
+            const profileId = profileSelection.slice('profile:'.length)
+            if (aiProfiles.profileById(profileId)?.adapterId === group.id) config.profileId = profileId
           }
         }
         if (cs?.name) config.name = cs.name

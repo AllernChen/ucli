@@ -90,7 +90,10 @@ function safeProfile(profile = {}) {
     isProjectDefault: profile.isProjectDefault === true,
     updatedAt: Number.isFinite(profile.updatedAt) ? profile.updatedAt : null
   }
-  if (result.adapterId === 'claude') result.config = safeClaudeConfig(profile.config)
+  if (result.adapterId === 'claude') {
+    result.config = safeClaudeConfig(profile.config)
+    result.connectionMode = result.config.connectionMode
+  }
   return result
 }
 

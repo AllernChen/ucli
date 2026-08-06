@@ -110,6 +110,7 @@ test('profile IPC state returns Claude configuration metadata without credential
     connectionMode: 'api_key',
     baseUrl: 'https://gateway.example.com'
   })
+  assert.equal(claude.connectionMode, 'api_key')
   assert.equal(claude.isProjectDefault, true)
   assert.deepEqual(state.claudeRuntime, {
     configDir: 'C:\\Users\\Ada\\.claude',

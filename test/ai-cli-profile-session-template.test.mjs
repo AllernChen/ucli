@@ -8,7 +8,9 @@ test('each Codex pane shows its profile and hides legacy provider controls for m
   assert.match(source, /profileNameForSession/)
   assert.match(source, /由档案管理/)
   assert.match(source, /!sessions\.byId\(pane\.sessionId\)\?\.profileId/)
-  assert.match(source, /setCodexProfile/)
+  assert.match(source, /setSessionProfile/)
+  assert.match(source, /isProfileSession/)
+  assert.match(source, /profilesForSession/)
   assert.match(source, /profile\.canStart/)
 })
 

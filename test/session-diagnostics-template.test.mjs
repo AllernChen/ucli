@@ -42,7 +42,7 @@ test('each populated Codex pane exposes the session diagnostics entry', () => {
   const diagnosticButton = buttons.find((node) => staticText(node) === '诊断')
 
   assert.ok(diagnosticButton)
-  assert.equal(directive(diagnosticButton, 'if')?.exp?.content, 'pane.sessionId && isCodexSession(pane.sessionId)')
+  assert.equal(directive(diagnosticButton, 'if')?.exp?.content, 'pane.sessionId && isProfileSession(pane.sessionId)')
   assert.equal(directive(diagnosticButton, 'on')?.exp?.content, 'openSessionDiagnostics(i)')
 
   const modal = findElements(ast, (node) => node.tag === 'SessionDiagnosticsModal')[0]
