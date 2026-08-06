@@ -10,6 +10,15 @@ const PROVIDER_BY_MODE = {
   api_key: 'anthropic-api',
   bearer: 'anthropic-bearer'
 }
+const ROUTING_KEYS = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_MANTLE'
+]
 
 function claudeProfileError(code, message = code) {
   return Object.assign(new TypeError(message), { code })
@@ -80,4 +89,45 @@ export function normaliseClaudeProfileDraft(draft = {}) {
         ? { type: 'keep' }
         : { type: 'none' }
   }
+}
+
+export function buildClaudeProfileArgs({ session = {}, profile = null } = {}) {
+  const requestedModel = profile?.model || session.model || null
+  if (requestedModel && !isSafeClaudeModel(requestedModel)) {
+    throw claudeProfileError('INVALID_CLAUDE_MODEL')
+  }
+
+  const args = []
+  if (requestedModel) args.push('--model', requestedModel)
+  if (session.cliSessionId) args.push('--resume', String(session.cliSessionId))
+  return args
+}
+
+export function buildClaudeProfileEnvironment({
+  baseEnv = process.env,
+  profile = null,
+  secret = null
+} = {}) {
+  const env = { ...baseEnv }
+  if (!profile) return env
+
+  for (const key of ROUTING_KEYS) delete env[key]
+  const connectionMode = profile.config?.connectionMode
+  if (connectionMode === 'subscription') return env
+  if (!['api_key', 'bearer'].includes(connectionMode)) {
+    throw claudeProfileError('INVALID_CLAUDE_PROFILE')
+  }
+  if (typeof secret !== 'string' || !secret.trim()) {
+    throw claudeProfileError('PROFILE_SECRET_REQUIRED')
+  }
+
+  const baseUrlResult = validateProfileBaseUrl(profile.config?.baseUrl)
+  if (!baseUrlResult.ok || (connectionMode === 'bearer' && !baseUrlResult.value)) {
+    throw claudeProfileError('INVALID_PROFILE_BASE_URL')
+  }
+  if (connectionMode === 'api_key') env.ANTHROPIC_API_KEY = secret
+  if (connectionMode === 'bearer') env.ANTHROPIC_AUTH_TOKEN = secret
+  if (baseUrlResult.value) env.ANTHROPIC_BASE_URL = baseUrlResult.value
+  env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = '1'
+  return env
 }

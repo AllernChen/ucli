@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
 import { findClaudeProjectDirectory } from '../sessionDiscovery.js'
+import { buildClaudeProfileArgs } from '../aiCliProfiles/claudeProfileAdapter.js'
 import {
   encodeClaudeDecisionResponse,
   extractClaudePlanSnapshot,
@@ -85,7 +86,7 @@ export function parseClaudeTranscriptStats(lines) {
   return { inputTokens, outputTokens, turnsCount, completedTurnsCount, costUsd, lastModel, modelBreakdown }
 }
 
-function buildSettings(hookRunnerPath) {
+export function buildClaudeSettings(hookRunnerPath) {
   const cmd = `node "${hookRunnerPath}"`
   return {
     hooks: {
@@ -96,6 +97,30 @@ function buildSettings(hookRunnerPath) {
         'Bash(rm -rf /:*)', 'Bash(rm -rf /*:*)', 'Bash(rm -rf ~:*)',
         'Bash(rm -rf $HOME:*)', 'Bash(mkfs:*)', 'Bash(format C:*)', 'Bash(shutdown:*)'
       ]
+    }
+  }
+}
+
+export function buildClaudeAdapterLaunch({
+  session,
+  settingsFile,
+  hookPort,
+  baseEnv = process.env,
+  profileLaunch = null
+}) {
+  const profileArgs = profileLaunch?.args || buildClaudeProfileArgs({ session })
+  return {
+    args: [
+      '--permission-mode', 'default',
+      '--settings', settingsFile,
+      ...profileArgs
+    ],
+    env: {
+      ...(profileLaunch?.env || baseEnv),
+      UCLI_HOOK_PORT: String(hookPort ?? ''),
+      UCLI_SESSION_ID: session.id,
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor'
     }
   }
 }
@@ -115,6 +140,7 @@ export class ClaudeAdapter extends BaseAdapter {
     super({ id: 'claude', displayName: DISPLAY_NAME, session, engine })
     this.hookRunnerPath = settings.hookRunnerPath
     this.hookPort = settings.hookPort
+    this.profileLaunch = settings.profileLaunch || null
     this.ptyProc = null
     this._settingsDir = null
     this._statsTimer = null
@@ -412,22 +438,15 @@ export class ClaudeAdapter extends BaseAdapter {
 
     this._settingsDir = mkdtempSync(join(tmpdir(), 'ucli-claude-'))
     const settingsFile = join(this._settingsDir, 'settings.json')
-    writeFileSync(settingsFile, JSON.stringify(buildSettings(this.hookRunnerPath)))
+    writeFileSync(settingsFile, JSON.stringify(buildClaudeSettings(this.hookRunnerPath)))
 
-    const args = [
-      '--permission-mode', 'default',
-      '--settings', settingsFile
-    ]
-    if (this.session.model) args.push('--model', this.session.model)
-    if (this.session.cliSessionId) args.push('--resume', this.session.cliSessionId)
-
-    const env = {
-      ...process.env,
-      UCLI_HOOK_PORT: String(this.hookPort),
-      UCLI_SESSION_ID: this.session.id,
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor'
-    }
+    const { args, env } = buildClaudeAdapterLaunch({
+      session: this.session,
+      settingsFile,
+      hookPort: this.hookPort,
+      baseEnv: process.env,
+      profileLaunch: this.profileLaunch
+    })
 
     try {
       // On Windows, use cmd.exe to resolve the claude.cmd shim. Avoid
