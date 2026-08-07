@@ -19,7 +19,7 @@
         <span class="profile-cli-name">{{ cli.name }}</span>
         <a-tag :color="cli.installed ? 'green' : 'default'">{{ cli.installed ? '已安装' : '未检测到' }}</a-tag>
         <span class="profile-cli-version">{{ cli.version || '版本未知' }}</span>
-        <span>{{ ['codex', 'claude'].includes(cli.id) ? '支持配置档案' : '0.8.1 沿用系统配置' }}</span>
+        <span>{{ ['codex', 'claude'].includes(cli.id) ? '支持配置档案' : `${appVersion} 沿用系统配置` }}</span>
       </button>
     </div>
 
@@ -27,7 +27,7 @@
       v-if="!profileCapableCli"
       type="info"
       show-icon
-      :message="`${selectedEntry.name} 在 0.8.1 沿用系统配置`"
+      :message="`${selectedEntry.name} 在 ${appVersion} 沿用系统配置`"
       description="当前版本只展示安装状态、版本和路径，不提供尚未生效的配置按钮。"
     />
 
@@ -173,6 +173,7 @@ import {
 } from '../profilePresentation.js'
 import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 
+const appVersion = __UCLI_VERSION__
 const profiles = useAiCliProfilesStore()
 const selectedCli = ref('codex')
 const projectPath = ref('')

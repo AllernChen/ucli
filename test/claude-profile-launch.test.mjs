@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   buildClaudeProfileArgs,
   buildClaudeProfileEnvironment,
+  createClaudeProfileAdapter,
   describeClaudeModelSelection,
   prepareClaudeProfileSession
 } from '../electron/aiCliProfiles/claudeProfileAdapter.js'
@@ -121,6 +122,34 @@ test('managed Claude modes inject exactly one credential into the target environ
   assert.equal(JSON.stringify(baseEnv).includes('new-bearer-token'), false)
 })
 
+test('managed Claude profiles exclude user settings while subscription profiles keep defaults', () => {
+  const adapter = createClaudeProfileAdapter()
+  for (const connectionMode of ['api_key', 'bearer']) {
+    const managed = adapter.resolveLaunch({
+      profile: {
+        model: 'mimo-v2.5-pro',
+        config: {
+          connectionMode,
+          baseUrl: 'https://token-plan-cn.xiaomimimo.com/anthropic'
+        }
+      },
+      secret: 'managed-token',
+      baseEnv: { PATH: 'C:\\tools' }
+    })
+
+    assert.deepEqual(managed.settingSources, ['project', 'local'])
+  }
+  const subscription = adapter.resolveLaunch({
+    profile: {
+      model: 'sonnet',
+      config: { connectionMode: 'subscription', baseUrl: null }
+    },
+    baseEnv: { PATH: 'C:\\tools' }
+  })
+
+  assert.equal('settingSources' in subscription, false)
+})
+
 test('Claude temporary settings contain hooks and deny rules but no profile connection data', () => {
   const settings = buildClaudeSettings('F:\\ucli\\hook-runner.js')
   assert.equal(Array.isArray(settings.hooks.PreToolUse), true)
@@ -138,13 +167,15 @@ test('Claude adapter launch keeps secrets out of argv and temporary settings', (
     baseEnv: { PATH: 'C:\\tools' },
     profileLaunch: {
       args: ['--model', 'sonnet', '--resume', 'native-session'],
-      env: { PATH: 'C:\\tools', ANTHROPIC_API_KEY: secret }
+      env: { PATH: 'C:\\tools', ANTHROPIC_API_KEY: secret },
+      settingSources: ['project', 'local']
     }
   })
 
   assert.deepEqual(launch.args, [
     '--permission-mode', 'default',
     '--settings', 'C:\\temp\\settings.json',
+    '--setting-sources', 'project,local',
     '--model', 'sonnet',
     '--resume', 'native-session'
   ])
@@ -162,6 +193,7 @@ test('Claude session preparation keeps launch credentials outside persisted sess
     launch: {
       args: ['--model', 'sonnet'],
       env: { ANTHROPIC_API_KEY: 'session-secret' },
+      settingSources: ['project', 'local'],
       artifact: { model: 'sonnet', connectionMode: 'api_key' },
       status: 'ready',
       runtimeRevision: 123
@@ -172,6 +204,7 @@ test('Claude session preparation keeps launch credentials outside persisted sess
   assert.equal(prepared.session.model, 'sonnet')
   assert.equal(prepared.session.profileRuntimeRevision, 123)
   assert.equal(prepared.profileLaunch.env.ANTHROPIC_API_KEY, 'session-secret')
+  assert.deepEqual(prepared.profileLaunch.settingSources, ['project', 'local'])
   assert.equal(JSON.stringify(prepared.session).includes('session-secret'), false)
 
   const system = prepareClaudeProfileSession({
@@ -180,6 +213,17 @@ test('Claude session preparation keeps launch credentials outside persisted sess
   })
   assert.equal(system.session.profileId, null)
   assert.equal(system.profileLaunch, null)
+})
+
+test('Claude system launch does not suppress user settings', () => {
+  const launch = buildClaudeAdapterLaunch({
+    session: { id: 'system-session', model: 'sonnet' },
+    settingsFile: 'C:\\temp\\settings.json',
+    hookPort: 43123,
+    baseEnv: { PATH: 'C:\\tools' }
+  })
+
+  assert.equal(launch.args.includes('--setting-sources'), false)
 })
 
 test('Claude profile removal and model-less profiles restore the persisted system model', () => {

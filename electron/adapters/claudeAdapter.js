@@ -109,10 +109,14 @@ export function buildClaudeAdapterLaunch({
   profileLaunch = null
 }) {
   const profileArgs = profileLaunch?.args || buildClaudeProfileArgs({ session })
+  const settingSources = Array.isArray(profileLaunch?.settingSources)
+    ? [...new Set(profileLaunch.settingSources.filter((source) => ['project', 'local'].includes(source)))]
+    : []
   return {
     args: [
       '--permission-mode', 'default',
       '--settings', settingsFile,
+      ...(settingSources.length ? ['--setting-sources', settingSources.join(',')] : []),
       ...profileArgs
     ],
     env: {

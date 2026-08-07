@@ -26,7 +26,7 @@ UCLI 是一个支持 macOS 与 Windows 的本地 AI CLI 工作台。它在用户
 
 ## 配置档案
 
-0.8.1 的一级页面“配置档案”支持 Codex 与 Claude Code。Codex 支持两种可保存档案：
+0.8.2 的一级页面“配置档案”支持 Codex 与 Claude Code。Codex 支持两种可保存档案：
 
 - 引用档案：引用 Codex `config.toml` 中已有的 Provider，不复制 Provider 端点、请求头或密钥。
 - UCLI 托管档案：保存 Base URL、模型、推理强度和上下文窗口，并为该档案生成 UCLI 自有的 Codex profile 文件。API Key 使用操作系统安全存储加密，只在启动目标 Codex 进程时注入该进程的环境。
@@ -39,9 +39,9 @@ Claude Code 支持三种连接方式：
 
 档案只对由 UCLI 启动或重启的会话生效。选择“系统当前”时保留当前环境和 CLI 自身配置；Bedrock、Vertex 与 Foundry 继续使用系统配置。UCLI 不读取 Claude OAuth token，不修改 Claude 全局设置，也不读取或写入 Codex/ChatGPT 的 OAuth 登录状态、`auth.json` 或 CC Switch 数据库。
 
-托管 API Key 与 Bearer Token 使用操作系统安全存储加密，只在启动目标 Claude Code 子进程时注入，并启用子进程凭据清理；密钥不会进入命令行、临时设置、页面状态、会话记录、日志或诊断报告。历史会话默认保持历史连接，除非用户明确选择具体档案或“跟随当前”。运行中的会话切换档案不会自动重启，用户可以选择下次重启生效或立即重启。Claude Code 交互模式不支持可靠的 fallback model 参数，因此 UCLI 只提供首选模型；若组织策略替换模型，会在会话中显示实际模型。
+托管 API Key 与 Bearer Token 使用操作系统安全存储加密，只在启动目标 Claude Code 子进程时注入，并启用子进程凭据清理；密钥不会进入命令行、临时设置、页面状态、会话记录、日志或诊断报告。托管档案不会加载 Claude 的用户级 settings（包括其中的 Provider 路由、hooks、permissions 等），避免 cc-switch 的全局 Provider 覆盖当前档案；项目级、本地级以及 UCLI 临时 settings 仍会加载，“系统当前”模式则保留完整用户配置。历史会话默认保持历史连接，除非用户明确选择具体档案或“跟随当前”。运行中的会话切换档案不会自动重启，用户可以选择下次重启生效或立即重启。Claude Code 交互模式不支持可靠的 fallback model 参数，因此 UCLI 只提供首选模型；若组织策略替换模型，会在会话中显示实际模型。
 
-OpenCode 和 U-Code 在 0.8.1 中继续沿用各自系统配置；配置档案页面只展示它们的安装状态、版本和路径。
+OpenCode 和 U-Code 在 0.8.2 中继续沿用各自系统配置；配置档案页面只展示它们的安装状态、版本和路径。
 
 ## 下载与安装
 

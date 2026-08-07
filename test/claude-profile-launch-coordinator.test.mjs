@@ -61,7 +61,11 @@ test('Claude launch coordinator recompiles exactly once when profile or revision
           profileId: 'profile-2',
           profileRuntimeRevision: 202
         },
-        profileLaunch: { args: ['--model', 'sonnet'], env: {} }
+        profileLaunch: {
+          args: ['--model', 'sonnet'],
+          env: {},
+          settingSources: ['project', 'local']
+        }
       }
     }
   })
@@ -69,6 +73,7 @@ test('Claude launch coordinator recompiles exactly once when profile or revision
   assert.equal(refreshed, true)
   assert.equal(prepareCount, 1)
   assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].settingSources, ['project', 'local'])
   assert.deepEqual(entry._claudeProfileLaunchStamp, claudeProfileLaunchStamp(entry.session))
   assert.equal(entry.session.activeProfileId, 'profile-2')
 })

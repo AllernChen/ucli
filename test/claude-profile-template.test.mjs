@@ -25,5 +25,6 @@ test('profile center enables Claude profiles while OpenCode and U-Code remain sy
   assert.match(page, /profile\.adapterId/)
   assert.match(page, /使用现有 Claude 登录态/)
   assert.match(page, /Anthropic 官方地址/)
-  assert.match(page, /OpenCode.*0\.8\.1|0\.8\.1 沿用系统配置/s)
+  assert.match(page, /OpenCode/)
+  assert.match(page, /\$\{appVersion\}/)
 })

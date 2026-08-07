@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-08-06
+
+### Fixed
+
+- Claude Code 托管档案启动时不再加载用户级 Claude settings（包括 Provider 路由、hooks、permissions 等），避免 cc-switch 写入 `~/.claude/settings.json` 的 DeepSeek 地址覆盖 UCLI 当前选择的 MiMo 等档案。
+- 托管档案继续保留项目级和本地级 Claude 设置；系统当前/订阅模式仍沿用完整的 Claude 用户配置。
+- API Key 与 Bearer Token 仍只注入目标子进程环境，不进入命令行、临时 settings、会话记录或日志。
+
 ## [0.8.1] - 2026-08-06
 
 ### Claude Code 配置档案

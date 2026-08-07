@@ -10,6 +10,7 @@ const PROVIDER_BY_MODE = {
   api_key: 'anthropic-api',
   bearer: 'anthropic-bearer'
 }
+const MANAGED_SETTING_SOURCES = Object.freeze(['project', 'local'])
 const ROUTING_KEYS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
@@ -182,7 +183,10 @@ export function prepareClaudeProfileSession({ session = {}, selection = {}, laun
     },
     profileLaunch: {
       args: [...launch.args],
-      env: { ...launch.env }
+      env: { ...launch.env },
+      ...(Array.isArray(launch.settingSources)
+        ? { settingSources: [...launch.settingSources] }
+        : {})
     }
   }
 }
@@ -218,12 +222,16 @@ export function createClaudeProfileAdapter() {
     },
 
     resolveLaunch({ profile, secret, session = {}, baseEnv = process.env }) {
+      const connectionMode = profile.config?.connectionMode || null
       return {
         args: buildClaudeProfileArgs({ session, profile }),
         env: buildClaudeProfileEnvironment({ baseEnv, profile, secret }),
+        ...(['api_key', 'bearer'].includes(connectionMode)
+          ? { settingSources: [...MANAGED_SETTING_SOURCES] }
+          : {}),
         artifact: {
           model: profile.model || null,
-          connectionMode: profile.config?.connectionMode || null
+          connectionMode
         }
       }
     },

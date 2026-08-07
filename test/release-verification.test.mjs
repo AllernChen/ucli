@@ -12,20 +12,22 @@ function verifyReleaseArtifacts({ rootDir }) {
   return verifyReleaseArtifactsForPlatform({ rootDir, platform: 'win32', arch: 'x64' })
 }
 
-test('0.8.1 release package and user documentation agree', async () => {
+test('0.8.2 release package and user documentation agree', async () => {
   const [packageSource, readme, changelog] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../README.md', import.meta.url), 'utf8'),
     readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
   ])
-  assert.equal(JSON.parse(packageSource).version, '0.8.1')
+  assert.equal(JSON.parse(packageSource).version, '0.8.2')
   assert.match(readme, /配置档案/)
   assert.match(readme, /CC Switch/)
   assert.match(readme, /Claude 登录态/)
   assert.match(readme, /Bearer Token/)
   assert.match(readme, /不读取.*OAuth/s)
   assert.match(readme, /Bedrock.*Vertex.*Foundry/s)
-  assert.match(changelog, /## \[0\.8\.1\]/)
+  assert.doesNotMatch(readme, /\uFFFD/)
+  assert.doesNotMatch(changelog, /\uFFFD/)
+  assert.match(changelog, /## \[0\.8\.2\]/)
 })
 
 test('Gateway release acceptance documents every required Feishu prerequisite', async () => {

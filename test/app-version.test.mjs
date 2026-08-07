@@ -5,10 +5,11 @@ import { readFileSync } from 'node:fs'
 import config from '../electron.vite.config.mjs'
 
 const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
+const profileCenterSource = readFileSync(new URL('../src/views/ProfileCenter.vue', import.meta.url), 'utf8')
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 
-test('release package version is 0.8.1', () => {
-  assert.equal(packageJson.version, '0.8.1')
+test('release package version is 0.8.2', () => {
+  assert.equal(packageJson.version, '0.8.2')
 })
 
 test('sidebar version is injected from the package version during renderer build', () => {
@@ -20,6 +21,11 @@ test('sidebar version is injected from the package version during renderer build
   assert.match(appSource, /const appVersion = __UCLI_VERSION__/)
   assert.match(appSource, /\{\{ appVersion \}\}/)
   assert.doesNotMatch(appSource, /v0\.3\.1/)
+})
+
+test('profile center derives user-visible version labels from the package version', () => {
+  assert.match(profileCenterSource, /const appVersion = __UCLI_VERSION__/)
+  assert.doesNotMatch(profileCenterSource, /0\.8\.1/)
 })
 
 test('header does not show fixed CLI provider tags', () => {
