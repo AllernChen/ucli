@@ -44,7 +44,19 @@ export function buildDiagnosticReport({
         codexHomeWritable: aiCliProfiles.codexHomeWritable === true,
         lastReconcileAt: Number.isFinite(aiCliProfiles.lastReconcileAt)
           ? aiCliProfiles.lastReconcileAt
-          : null
+          : null,
+        ...(aiCliProfiles.claude && typeof aiCliProfiles.claude === 'object' ? {
+          claude: {
+            total: safeCount(aiCliProfiles.claude.total),
+            connectionModes: {
+              subscription: safeCount(aiCliProfiles.claude.connectionModes?.subscription),
+              apiKey: safeCount(aiCliProfiles.claude.connectionModes?.apiKey),
+              bearer: safeCount(aiCliProfiles.claude.connectionModes?.bearer)
+            },
+            missingSecret: safeCount(aiCliProfiles.claude.missingSecret),
+            modelSubstitutions: safeCount(aiCliProfiles.claude.modelSubstitutions)
+          }
+        } : {})
       }
     } : {}),
     ...(gateway ? { gateway } : {})

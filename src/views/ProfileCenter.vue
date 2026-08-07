@@ -19,15 +19,15 @@
         <span class="profile-cli-name">{{ cli.name }}</span>
         <a-tag :color="cli.installed ? 'green' : 'default'">{{ cli.installed ? '已安装' : '未检测到' }}</a-tag>
         <span class="profile-cli-version">{{ cli.version || '版本未知' }}</span>
-        <span>{{ cli.id === 'codex' ? '支持配置档案' : '0.8.0 沿用系统配置' }}</span>
+        <span>{{ ['codex', 'claude'].includes(cli.id) ? '支持配置档案' : `${appVersion} 沿用系统配置` }}</span>
       </button>
     </div>
 
     <a-alert
-      v-if="selectedCli !== 'codex'"
+      v-if="!profileCapableCli"
       type="info"
       show-icon
-      :message="`${selectedEntry.name} 在 0.8.0 沿用系统配置`"
+      :message="`${selectedEntry.name} 在 ${appVersion} 沿用系统配置`"
       description="当前版本只展示安装状态、版本和路径，不提供尚未生效的配置按钮。"
     />
 
@@ -35,12 +35,13 @@
       <a-card class="profile-runtime-card" :bordered="false">
         <div class="profile-runtime-row">
           <div>
-            <strong>Codex 状态</strong>
+            <strong>{{ selectedEntry.name }} 状态</strong>
             <p>
               {{ selectedEntry.installed ? '已安装' : '未检测到' }}
-              · 当前系统 Provider：{{ profiles.codexRuntime?.currentProvider || 'openai' }}
+              <template v-if="selectedCli === 'codex'"> · 当前系统 Provider：{{ profiles.codexRuntime?.currentProvider || 'openai' }}</template>
+              <template v-else> · {{ claudeInheritedAuthPresentation(profiles.claudeRuntime?.inheritedAuthMode) }}</template>
             </p>
-            <span class="profile-path">{{ profiles.codexRuntime?.configPath || selectedEntry.path || '配置路径未知' }}</span>
+            <span class="profile-path">{{ runtimePath }}</span>
           </div>
           <a-space>
             <a-button @click="chooseProject">选择项目</a-button>
@@ -62,8 +63,8 @@
       />
 
       <a-spin :spinning="profiles.loading">
-        <div v-if="profiles.profiles.length" class="profile-card-grid">
-          <a-card v-for="profile in profiles.profiles" :key="profile.id" class="profile-card">
+        <div v-if="visibleProfiles.length" class="profile-card-grid">
+          <a-card v-for="profile in visibleProfiles" :key="profile.id" class="profile-card">
             <template #title>
               <div class="profile-card-title">
                 <span>{{ profile.name }}</span>
@@ -86,11 +87,11 @@
             </template>
 
             <div class="profile-card-body">
-              <div class="profile-kind">{{ profile.kind === 'managed' ? 'UCLI 托管' : '引用现有 Provider' }}</div>
-              <div><span>服务</span><strong>{{ profile.kind === 'managed' ? profileEndpointLabel(profile.baseUrl) : profile.providerId }}</strong></div>
+              <div class="profile-kind">{{ profileKindLabel(profile) }}</div>
+              <div><span>服务</span><strong>{{ profileServiceLabel(profile) }}</strong></div>
               <div><span>模型</span><strong>{{ profile.model || '跟随 Provider' }}</strong></div>
-              <div v-if="profile.kind === 'managed'"><span>密钥</span><strong>{{ profileSecretLabel(profile) }}</strong></div>
-              <div><span>推理强度</span><strong>{{ profile.reasoningEffort || '默认' }}</strong></div>
+              <div v-if="profile.connectionMode !== 'subscription' && (profile.kind === 'managed' || profile.adapterId === 'claude')"><span>密钥</span><strong>{{ profileSecretLabel(profile) }}</strong></div>
+              <div v-if="profile.adapterId === 'codex'"><span>推理强度</span><strong>{{ profile.reasoningEffort || '默认' }}</strong></div>
             </div>
 
             <div v-if="profileBadges(profile).length" class="profile-badges">
@@ -113,7 +114,7 @@
                 {{ profile.isProjectDefault ? '取消项目默认' : '设为项目默认' }}
               </a-button>
               <a-button
-                v-if="['drifted', 'missing_file'].includes(profile.status)"
+                v-if="profile.adapterId === 'codex' && ['drifted', 'missing_file'].includes(profile.status)"
                 size="small"
                 danger
                 @click="confirmRepair(profile)"
@@ -122,17 +123,26 @@
             </div>
           </a-card>
         </div>
-        <a-empty v-else description="还没有 Codex 档案">
+        <a-empty v-else :description="`还没有 ${selectedEntry.name} 档案`">
           <a-button type="primary" @click="openCreate">新建档案</a-button>
         </a-empty>
       </a-spin>
     </template>
 
     <CodexProfileDrawer
+      v-if="selectedCli === 'codex'"
       v-model:open="editorOpen"
       :profile="editorSeed"
       :mode="editorMode"
       :provider-catalog="profiles.codexRuntime?.providerCatalog || []"
+      :saving="profiles.saving"
+      @save="saveProfile"
+    />
+    <ClaudeProfileDrawer
+      v-else-if="selectedCli === 'claude'"
+      v-model:open="editorOpen"
+      :profile="editorSeed"
+      :mode="editorMode"
       :saving="profiles.saving"
       @save="saveProfile"
     />
@@ -150,9 +160,12 @@ import { computed, onMounted, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 
 import CodexProfileDrawer from '../components/profiles/CodexProfileDrawer.vue'
+import ClaudeProfileDrawer from '../components/profiles/ClaudeProfileDrawer.vue'
 import ProfileRevisionDrawer from '../components/profiles/ProfileRevisionDrawer.vue'
 import { ipc } from '../ipc.js'
 import {
+  claudeConnectionModePresentation,
+  claudeInheritedAuthPresentation,
   profileBadges,
   profileEndpointLabel,
   profileSecretLabel,
@@ -160,6 +173,7 @@ import {
 } from '../profilePresentation.js'
 import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 
+const appVersion = __UCLI_VERSION__
 const profiles = useAiCliProfilesStore()
 const selectedCli = ref('codex')
 const projectPath = ref('')
@@ -177,8 +191,24 @@ const cliEntries = computed(() => ['codex', 'claude', 'opencode', 'ucode'].map((
   ...profiles.cliById(id)
 })))
 const selectedEntry = computed(() => cliEntries.value.find((item) => item.id === selectedCli.value) || cliEntries.value[0])
+const profileCapableCli = computed(() => ['codex', 'claude'].includes(selectedCli.value))
+const visibleProfiles = computed(() => profiles.profiles.filter((profile) => profile.adapterId === selectedCli.value))
+const runtimePath = computed(() => selectedCli.value === 'claude'
+  ? (profiles.claudeRuntime?.configDir || selectedEntry.value.path || '配置路径未知')
+  : (profiles.codexRuntime?.configPath || selectedEntry.value.path || '配置路径未知'))
 
 const statusView = (profile) => profileStatusPresentation(profile.status)
+const profileKindLabel = (profile) => profile.adapterId === 'claude'
+  ? claudeConnectionModePresentation(profile.connectionMode).label
+  : (profile.kind === 'managed' ? 'UCLI 托管' : '引用现有 Provider')
+const profileServiceLabel = (profile) => {
+  if (profile.adapterId === 'claude') {
+    return profile.connectionMode === 'subscription'
+      ? '使用现有 Claude 登录态'
+      : (profile.baseUrl ? profileEndpointLabel(profile.baseUrl) : 'Anthropic 官方地址')
+  }
+  return profile.kind === 'managed' ? profileEndpointLabel(profile.baseUrl) : profile.providerId
+}
 
 async function reload() {
   await profiles.load(projectPath.value)
@@ -213,8 +243,10 @@ async function saveProfile(draft) {
   try {
     if (editorMode.value === 'edit') {
       const { secret, adapterId, ...patch } = draft
-      await profiles.update(editorSeed.value.id, patch)
-      if (secret) await profiles.setSecret(editorSeed.value.id, secret)
+      await profiles.update(editorSeed.value.id, {
+        ...patch,
+        ...(secret ? { secret } : {})
+      })
     } else {
       await profiles.create(draft)
     }
@@ -227,7 +259,7 @@ async function saveProfile(draft) {
 
 async function toggleAppDefault(profile) {
   await profiles.setBinding({
-    scopeType: 'app', scopeKey: '*', adapterId: 'codex',
+    scopeType: 'app', scopeKey: '*', adapterId: profile.adapterId,
     profileId: profile.isAppDefault ? null : profile.id
   })
 }
@@ -235,7 +267,7 @@ async function toggleAppDefault(profile) {
 async function toggleProjectDefault(profile) {
   if (!projectPath.value) return
   await profiles.setBinding({
-    scopeType: 'project', scopeKey: projectPath.value, adapterId: 'codex',
+    scopeType: 'project', scopeKey: projectPath.value, adapterId: profile.adapterId,
     profileId: profile.isProjectDefault ? null : profile.id
   })
 }

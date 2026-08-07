@@ -44,6 +44,19 @@ function nativeSessionIdOf(records) {
   ))?.record.session_id || null
 }
 
+function actualModelOf(records) {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]?.record
+    if (
+      record?.type === 'system' &&
+      record?.subtype === 'init' &&
+      typeof record.model === 'string' &&
+      /^[a-zA-Z0-9][a-zA-Z0-9._:@/+~-]{0,255}$/.test(record.model)
+    ) return record.model
+  }
+  return null
+}
+
 function questionDecision(toolUse) {
   const questions = Array.isArray(toolUse.input?.questions)
     ? toolUse.input.questions
@@ -184,7 +197,8 @@ export function parseClaudeGatewayState(lines = [], previousCursor = 0) {
     events,
     cursor: Array.from(lines || []).length,
     currentDecision,
-    nativeSessionId: nativeSessionIdOf(records)
+    nativeSessionId: nativeSessionIdOf(records),
+    actualModel: actualModelOf(records)
   }
 }
 

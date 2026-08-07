@@ -71,6 +71,8 @@ export const useSessionsStore = defineStore('sessions', {
         activeProfileId: null,
         pendingProfileId: null,
         profileStatus: null,
+        actualModel: null,
+        profileWarning: null,
         tier: config.tier,
         status: 'starting',
         createdAt: Date.now(),
@@ -225,6 +227,7 @@ export const useSessionsStore = defineStore('sessions', {
           pendingProviderWarning: s.pendingProviderWarning || null,
           profileId: s.profileId || null, activeProfileId: s.activeProfileId || null,
           pendingProfileId: s.pendingProfileId || null, profileStatus: s.profileStatus || null,
+          actualModel: s.actualModel || null, profileWarning: s.profileWarning || null,
           restartRequired: Boolean(s.restartRequired), canStart: s.canStart !== false,
           startedAt: s.startedAt || null,
           lastActivity: isImport ? ('📋 已离线 · ' + fmtShort(s.startedAt)) : '已离线',
@@ -252,6 +255,8 @@ export const useSessionsStore = defineStore('sessions', {
         if (s.activeProfileId !== undefined) row.activeProfileId = s.activeProfileId
         if (s.pendingProfileId !== undefined) row.pendingProfileId = s.pendingProfileId
         if (s.profileStatus !== undefined) row.profileStatus = s.profileStatus
+        if (s.actualModel !== undefined) row.actualModel = s.actualModel
+        if (s.profileWarning !== undefined) row.profileWarning = s.profileWarning
         if (s.restartRequired !== undefined) row.restartRequired = s.restartRequired
         if (s.canStart !== undefined) row.canStart = s.canStart
         if (s.createdAt) row.createdAt = s.createdAt
@@ -290,12 +295,21 @@ export const useSessionsStore = defineStore('sessions', {
           if (evt.profileStatus !== undefined) row.profileStatus = evt.profileStatus
           if (evt.restartRequired !== undefined) row.restartRequired = Boolean(evt.restartRequired)
           if (evt.canStart !== undefined) row.canStart = evt.canStart !== false
+        } else if (evt.type === 'profile-model') {
+          if (typeof evt.actualModel === 'string') row.actualModel = evt.actualModel
+          if (evt.profileWarning === 'model_substituted' || evt.profileWarning === null) {
+            row.profileWarning = evt.profileWarning
+          }
         } else if (evt.type === 'stats_update') {
           // Live stats from transcript extraction
           row.stats.tokens = { input: evt.usage.inputTokens, output: evt.usage.outputTokens }
           if (evt.costUsd != null) row.stats.costUsd = evt.costUsd
           if (evt.turns != null) row.stats.turns = evt.turns
-          if (evt.model) row.model = evt.model
+          if (evt.model && !(row.adapterId === 'claude' && row.profileId)) row.model = evt.model
+          if (typeof evt.actualModel === 'string') row.actualModel = evt.actualModel
+          if (evt.profileWarning === 'model_substituted' || evt.profileWarning === null) {
+            row.profileWarning = evt.profileWarning
+          }
           if (evt.contextWindow) row.contextWindow = evt.contextWindow
           row.lastActivity = `↑${evt.usage.inputTokens.toLocaleString()} ↓${evt.usage.outputTokens.toLocaleString()}`
         }

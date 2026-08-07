@@ -154,6 +154,7 @@ class Db {
         task_note         TEXT DEFAULT '',
         tier              TEXT NOT NULL DEFAULT 'safety-rules',
         model             TEXT,
+        system_model      TEXT,
         provider          TEXT,
         source_provider   TEXT,
         provider_policy   TEXT,
@@ -184,6 +185,10 @@ class Db {
     }
     if (!sessionColumns.some((column) => column.name === 'profile_id')) {
       this.sql.run('ALTER TABLE sessions ADD COLUMN profile_id TEXT')
+    }
+    if (!sessionColumns.some((column) => column.name === 'system_model')) {
+      this.sql.run('ALTER TABLE sessions ADD COLUMN system_model TEXT')
+      this.sql.run('UPDATE sessions SET system_model = model')
     }
     // In pre-0.7 records, a stored Codex provider means the session was
     // imported/resumed; fresh UCLI sessions did not store a provider override.
@@ -350,10 +355,12 @@ class Db {
   // ---- sessions ----
   insertSession(s) {
     this.sql.run(
-      `INSERT INTO sessions (id, project_path, adapter_id, native_session_id, name, task_note, tier, model, provider, source_provider, provider_policy, explicit_provider, profile_id, status, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO sessions (id, project_path, adapter_id, native_session_id, name, task_note, tier, model, system_model, provider, source_provider, provider_policy, explicit_provider, profile_id, status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [s.id, s.project_path, s.adapter_id, s.native_session_id || null, s.name || null,
-       s.task_note || '', s.tier, s.model || null, s.provider || null, s.source_provider || null, s.provider_policy || null, s.explicit_provider || null,
+       s.task_note || '', s.tier, s.model || null,
+       Object.hasOwn(s, 'system_model') ? (s.system_model || null) : (s.model || null),
+       s.provider || null, s.source_provider || null, s.provider_policy || null, s.explicit_provider || null,
        s.profile_id || null, s.status, s.created_at, Date.now()]
     )
     this.sql.run(
@@ -362,7 +369,7 @@ class Db {
   }
 
   updateSession(sessionId, fields) {
-    const allowed = ['native_session_id', 'name', 'task_note', 'status', 'model', 'provider', 'source_provider', 'provider_policy', 'explicit_provider', 'profile_id']
+    const allowed = ['native_session_id', 'name', 'task_note', 'status', 'model', 'system_model', 'provider', 'source_provider', 'provider_policy', 'explicit_provider', 'profile_id']
     const sets = []
     const vals = []
     for (const k of allowed) {
@@ -1178,6 +1185,7 @@ function rowToSession(row) {
     taskNote: row.task_note,
     tier: row.tier,
     model: row.model,
+    systemModel: row.system_model ?? null,
     provider: row.provider || null,
     sourceProvider: row.source_provider || null,
     providerPolicy: row.provider_policy || null,

@@ -12,7 +12,7 @@ test('profile center is a first-level route with four honest CLI entries', () =>
   assert.match(app, /key="\/profiles"/)
   assert.match(app, /配置档案/)
   for (const cli of ['Codex', 'Claude Code', 'OpenCode', 'U-Code']) assert.match(page, new RegExp(cli))
-  assert.match(page, /0\.8\.0 沿用系统配置/)
+  assert.match(page, /\$\{appVersion\}/)
 })
 
 test('profile center exposes cards, defaults, revisions, and explicit repair without showing secrets', () => {

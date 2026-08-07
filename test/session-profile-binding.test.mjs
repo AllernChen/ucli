@@ -37,6 +37,35 @@ test('session profile binding survives database restart and native binding repai
   }
 })
 
+test('Claude system model survives profile model persistence and database restart', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-session-system-model-'))
+  const path = join(root, 'ucli.db')
+  let db = await openDb(path)
+  try {
+    db.insertSession({
+      id: 'claude-session',
+      project_path: 'F:\\projects\\demo',
+      adapter_id: 'claude',
+      native_session_id: 'native-session',
+      model: 'profile-sonnet',
+      system_model: 'history-haiku',
+      profile_id: 'profile-1',
+      tier: 'safety-rules',
+      status: 'offline',
+      created_at: 1
+    })
+    assert.equal(db.flush(), true)
+    db.close()
+
+    db = await openDb(path)
+    assert.equal(db.getSession('claude-session').model, 'profile-sonnet')
+    assert.equal(db.getSession('claude-session').systemModel, 'history-haiku')
+  } finally {
+    db.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('active profile switching changes only desired and pending state until restart', () => {
   const adapter = { id: 'existing-adapter' }
   const active = reconcileActiveProfile({
@@ -83,7 +112,8 @@ test('renderer merges only allowlisted profile runtime fields', async () => {
   const store = useSessionsStore()
   store.sessions.push({
     id: 'session-1',
-    adapterId: 'codex',
+    adapterId: 'claude',
+    model: 'sonnet',
     stats: { tokens: { input: 0, output: 0 } }
   })
 
@@ -109,4 +139,28 @@ test('renderer merges only allowlisted profile runtime fields', async () => {
   assert.equal('profileEnvironment' in row, false)
   assert.equal('secret' in row, false)
   assert.equal(JSON.stringify(row).includes('must-not-leak'), false)
+
+  store._onEvent({
+    sessionId: 'session-1',
+    type: 'profile-model',
+    actualModel: 'claude-sonnet-5-20260801',
+    profileWarning: 'model_substituted',
+    requestedModel: 'must-not-enter-renderer',
+    profileLaunch: { env: { ANTHROPIC_API_KEY: 'must-not-leak' } }
+  })
+  assert.equal(row.actualModel, 'claude-sonnet-5-20260801')
+  assert.equal(row.profileWarning, 'model_substituted')
+  assert.equal('requestedModel' in row, false)
+  assert.equal('profileLaunch' in row, false)
+
+  store._onEvent({
+    sessionId: 'session-1',
+    type: 'stats_update',
+    usage: { inputTokens: 10, outputTokens: 5 },
+    model: 'claude-sonnet-5-20260801',
+    actualModel: 'claude-sonnet-5-20260801',
+    profileWarning: 'model_substituted'
+  })
+  assert.equal(row.model, 'sonnet')
+  assert.equal(row.actualModel, 'claude-sonnet-5-20260801')
 })

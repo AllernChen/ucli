@@ -78,6 +78,14 @@ test('diagnostic report includes only aggregate AI CLI profile health', () => {
       missing: 1,
       codexHomeWritable: true,
       lastReconcileAt: 1785970000000,
+      claude: {
+        total: 3,
+        connectionModes: { subscription: 1, apiKey: 1, bearer: 1 },
+        missingSecret: 1,
+        modelSubstitutions: 2,
+        baseUrl: 'https://nested-secret.example.com',
+        env: { ANTHROPIC_API_KEY: 'nested-key' }
+      },
       baseUrl: 'https://secret.example.com',
       secretSuffix: '1234',
       ciphertext: 'encrypted-leak',
@@ -91,7 +99,13 @@ test('diagnostic report includes only aggregate AI CLI profile health', () => {
     drifted: 1,
     missing: 1,
     codexHomeWritable: true,
-    lastReconcileAt: 1785970000000
+    lastReconcileAt: 1785970000000,
+    claude: {
+      total: 3,
+      connectionModes: { subscription: 1, apiKey: 1, bearer: 1 },
+      missingSecret: 1,
+      modelSubstitutions: 2
+    }
   })
-  assert.doesNotMatch(serializeDiagnosticReport(report), /secret\.example|1234|encrypted-leak|model_provider/)
+  assert.doesNotMatch(serializeDiagnosticReport(report), /secret\.example|nested-secret|nested-key|ANTHROPIC_|1234|encrypted-leak|model_provider/)
 })

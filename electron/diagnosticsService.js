@@ -130,7 +130,13 @@ export function createDiagnosticsService({
           drifted: 0,
           missing: 0,
           codexHomeWritable: false,
-          lastReconcileAt: null
+          lastReconcileAt: null,
+          claude: {
+            total: 0,
+            connectionModes: { subscription: 0, apiKey: 0, bearer: 0 },
+            missingSecret: 0,
+            modelSubstitutions: 0
+          }
         }
       }
     }

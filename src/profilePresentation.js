@@ -33,9 +33,31 @@ export function profileBadges(profile = {}) {
   ].filter(Boolean)
 }
 
+const CLAUDE_CONNECTION_MODES = {
+  subscription: { label: 'Claude 登录态', secretLabel: null, requiresBaseUrl: false },
+  api_key: { label: 'Anthropic API Key', secretLabel: 'API Key', requiresBaseUrl: false },
+  bearer: { label: 'Bearer Token 网关', secretLabel: 'Bearer Token', requiresBaseUrl: true }
+}
+
+export function claudeConnectionModePresentation(mode) {
+  return CLAUDE_CONNECTION_MODES[mode] || CLAUDE_CONNECTION_MODES.subscription
+}
+
+export function claudeInheritedAuthPresentation(mode) {
+  return {
+    api_key: '检测到继承的 API Key',
+    bearer: '检测到继承的 Bearer Token',
+    cloud_provider: '检测到云服务商路由',
+    login_or_unknown: '使用 Claude 登录态或系统默认'
+  }[mode] || '使用 Claude 登录态或系统默认'
+}
+
 export function profileRuntimeNotice(session = {}) {
   if (session.profileStatus && session.profileStatus !== 'ready') {
     return '当前档案不可启动，请先处理配置问题'
+  }
+  if (session.profileWarning === 'model_substituted') {
+    return '实际模型已被 Claude 组织策略替换'
   }
   if (session.restartRequired) return '档案将在重启会话后生效'
   return ''
