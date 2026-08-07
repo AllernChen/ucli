@@ -32,8 +32,22 @@ export const ipc = {
   rollbackAiCliProfile: (profileId, revisionId) => u.rollbackAiCliProfile(profileId, revisionId),
   repairAiCliProfile: (profileId) => u.repairAiCliProfile(profileId),
   reconcileAiCliProfiles: () => u.reconcileAiCliProfiles(),
+  // Skills
+  getSkillsState: (options) => u.getSkillsState(options),
+  inspectSkillSource: (source) => u.inspectSkillSource(source),
+  installSkill: (request) => u.installSkill(request),
+  checkSkillUpdates: (packageIds) => u.checkSkillUpdates(packageIds),
+  previewSkillUpdate: (packageId) => u.previewSkillUpdate(packageId),
+  updateSkill: (packageId, expectedRevision) => u.updateSkill(packageId, expectedRevision),
+  setSkillEnabled: (installationId, enabled) => u.setSkillEnabled(installationId, enabled),
+  removeSkillInstallation: (installationId) => u.removeSkillInstallation(installationId),
+  resolveSkillDrift: (installationId, resolution) => u.resolveSkillDrift(installationId, resolution),
+  adoptSkill: (request) => u.adoptSkill(request),
+  getSkillAffectedSessions: (installationIds) => u.getSkillAffectedSessions(installationIds),
+  restartSkillSessions: (sessionIds) => u.restartSkillSessions(sessionIds),
   // dialog
   pickDirectory: () => u.pickDirectory(),
+  pickSkillArchive: () => u.pickSkillArchive(),
   scanClaudeSessions: (cwd) => u.scanClaudeSessions(cwd),
   discoverSessions: (cwd) => u.discoverSessions(cwd),
   // sessions

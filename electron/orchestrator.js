@@ -33,6 +33,10 @@ import {
   claudeProfileLaunchStamp
 } from './aiCliProfiles/claudeLaunchCoordinator.js'
 import { registerAiCliProfileIpc } from './aiCliProfiles/ipc.js'
+import { createSkillSourceLoader } from './skills/sourceLoader.js'
+import { createSkillsService } from './skills/service.js'
+import { registerSkillsIpc } from './skills/ipc.js'
+import { listUCodeSkills } from './skills/ucodeDiscovery.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
@@ -68,6 +72,7 @@ export function createOrchestrator() {
   let settings = { ...DEFAULT_SETTINGS }
   let codexConfigWatcher = null
   let profileService = null
+  let skillsService = null
   let persistenceRecovery = null
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
@@ -426,6 +431,17 @@ export function createOrchestrator() {
       readClaudeRuntime: () => readClaudeRuntimeSnapshot({ env: process.env }),
       fileOps: codexProfileFiles,
       flush: () => db.flush()
+    })
+    skillsService = createSkillsService({
+      db,
+      userDataPath: app.getPath('userData'),
+      sourceLoader: createSkillSourceLoader({
+        stagingRoot: join(app.getPath('userData'), 'skills', '.source-staging')
+      }),
+      flush: () => db.flush(),
+      listSessions,
+      restartSession: restartSessionForSkills,
+      discoverUCodeSkills: listUCodeSkills
     })
     try {
       await profileService.reconcileCodexProfiles()
@@ -1443,6 +1459,19 @@ export function createOrchestrator() {
     await gatewayManager?.resyncSession(sessionId)
   }
 
+  async function restartSessionForSkills(sessionId) {
+    const entry = sessions.get(sessionId)
+    if (!entry) throw new Error('no session')
+    if (entry.adapter) {
+      entry.adapter.dispose()
+      entry.adapter = null
+      entry.status = 'offline'
+      const db = getDb()
+      if (db) db.updateSession(sessionId, { status: 'offline' })
+    }
+    return restartSession(sessionId)
+  }
+
   function updateCodexProviderPolicy(sessionId, { policy, explicitProvider } = {}) {
     const entry = sessions.get(sessionId)
     if (!entry) throw new Error('no session')
@@ -1581,6 +1610,7 @@ export function createOrchestrator() {
       getCodexRuntime: () => codexConfigWatcher?.getSnapshot() || readCodexRuntimeSnapshot(getCodexHome()),
       getClaudeRuntime: () => readClaudeRuntimeSnapshot({ env: process.env })
     })
+    if (skillsService) registerSkillsIpc({ ipcMain, service: skillsService })
     ipcMain.handle('adapters:list', () =>
       Array.from(adapters.values()).map((d) => ({ id: d.id, displayName: d.displayName, icon: d.icon, models: d.models }))
     )
@@ -1596,6 +1626,14 @@ export function createOrchestrator() {
 
     ipcMain.handle('dialog:pick-directory', async () => {
       const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
+      return result.canceled ? null : result.filePaths[0]
+    })
+
+    ipcMain.handle('dialog:pick-skill-archive', async () => {
+      const result = await dialog.showOpenDialog(mainWindow, {
+        properties: ['openFile'],
+        filters: [{ name: 'Skill ZIP', extensions: ['zip'] }]
+      })
       return result.canceled ? null : result.filePaths[0]
     })
 
