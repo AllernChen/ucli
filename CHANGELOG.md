@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-08-07
+
+### Changed
+
+- OpenCode 的安装和升级统一使用 `npm install -g opencode-ai`。
+- U-Code 的安装和升级改为 `npm install -g @allenchen77/ucode-cli`，不再从 GitHub Release 下载原生二进制。
+- U-Code 启动时优先使用 npm 全局可执行文件；旧 `~/.ucode/bin` 安装仅作为兼容回退，不再被强制插入 PATH 首位。
+
 ## [0.8.2] - 2026-08-06
 
 ### Fixed

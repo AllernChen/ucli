@@ -6,8 +6,11 @@ import { spawnSync } from 'child_process'
 import { OpenCodeAdapter } from './openCodeAdapter.js'
 import { listSessionsWithLaunch } from '../openCodeSessions.js'
 
-function findUCodeOnPath() {
-  const result = spawnSync('where.exe', ['ucode'], {
+function findUCodeOnPath(platform = process.platform) {
+  const command = platform === 'win32'
+    ? { file: 'where.exe', args: ['ucode'] }
+    : { file: '/bin/sh', args: ['-lc', 'command -v ucode'] }
+  const result = spawnSync(command.file, command.args, {
     encoding: 'utf8',
     windowsHide: true,
     timeout: 5000
@@ -26,6 +29,27 @@ function findNodeOnPath() {
   return result.status === 0
     ? result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
     : []
+}
+
+function findNpmUCode(platform = process.platform) {
+  const command = platform === 'win32'
+    ? {
+        file: process.env.ComSpec || 'cmd.exe',
+        args: ['/d', '/s', '/c', 'npm prefix -g']
+      }
+    : { file: '/bin/sh', args: ['-lc', 'npm prefix -g'] }
+  const result = spawnSync(command.file, command.args, {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 5000
+  })
+  if (result.status !== 0) return []
+  const prefix = result.stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
+  const pathApi = platform === 'win32' ? win32 : posix
+  if (!prefix || !pathApi.isAbsolute(prefix)) return []
+  return [platform === 'win32'
+    ? pathApi.join(prefix, 'ucode.cmd')
+    : pathApi.join(prefix, 'bin', 'ucode')]
 }
 
 function expandShimPath(value, shimDirectory) {
@@ -65,7 +89,7 @@ export function resolveUCodeCmdShim(
 
   const entry = candidates.find((path) =>
     path.toLowerCase().endsWith(
-      `${win32.sep}node_modules${win32.sep}@ucode${win32.sep}cli${win32.sep}bin${win32.sep}ucode`
+      `${win32.sep}node_modules${win32.sep}@allenchen77${win32.sep}ucode-cli${win32.sep}bin${win32.sep}ucode`
     )
   )
   if (!entry) return null
@@ -83,29 +107,38 @@ export function resolveUCodeLaunch(
   pathExists = existsSync,
   platform = process.platform,
   readShim = readFileSync,
-  homeDirectory = homedir()
+  homeDirectory = homedir(),
+  findOnPath = findUCodeOnPath,
+  findNpm = findNpmUCode
 ) {
+  const legacy = platform === 'win32'
+    ? win32.join(homeDirectory, '.ucode', 'bin', 'ucode.exe')
+    : posix.join(homeDirectory, '.ucode', 'bin', 'ucode')
+  const paths = [...new Set([
+    ...findNpm(platform),
+    ...(candidates || findOnPath(platform))
+  ])]
   if (platform !== 'win32') {
-    const installed = posix.join(homeDirectory, '.ucode', 'bin', 'ucode')
+    const npmExecutable = paths.find((path) => pathExists(path))
+    if (npmExecutable) return { file: npmExecutable, prefixArgs: [] }
     return {
-      file: pathExists(installed) ? installed : 'ucode',
+      file: pathExists(legacy) ? legacy : 'ucode',
       prefixArgs: []
     }
   }
-  const installed = win32.join(homeDirectory, '.ucode', 'bin', 'ucode.exe')
-  if (pathExists(installed)) return { file: installed, prefixArgs: [] }
-  const paths = candidates || findUCodeOnPath()
-  const direct = paths.find((path) =>
-    path.toLowerCase().endsWith('.exe') && pathExists(path)
-  )
-  if (direct) return { file: direct, prefixArgs: [] }
-
   for (const shim of paths.filter((path) => path.toLowerCase().endsWith('.cmd'))) {
     try {
       const launch = resolveUCodeCmdShim(shim, readShim(shim, 'utf8'), pathExists)
       if (launch) return launch
     } catch {}
   }
+  const direct = paths.find((path) =>
+    path.toLowerCase().endsWith('.exe') &&
+    win32.normalize(path).toLowerCase() !== legacy.toLowerCase() &&
+    pathExists(path)
+  )
+  if (direct) return { file: direct, prefixArgs: [] }
+  if (pathExists(legacy)) return { file: legacy, prefixArgs: [] }
   throw new Error('safe U-Code executable not found')
 }
 

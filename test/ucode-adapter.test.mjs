@@ -38,11 +38,11 @@ test('U-Code runtime exposes a first-class adapter and safe Windows npm launcher
   const shim = [
     '@ECHO off',
     'SETLOCAL',
-    'endLocal & goto #_undefined_# 2>NUL || "%_prog%" "%~dp0node_modules\\@ucode\\cli\\bin\\ucode" %*'
+    'endLocal & goto #_undefined_# 2>NUL || "%_prog%" "%~dp0node_modules\\@allenchen77\\ucode-cli\\bin\\ucode" %*'
   ].join('\r\n')
   const existing = new Set([
     'F:\\tools\\node.exe',
-    'F:\\tools\\node_modules\\@ucode\\cli\\bin\\ucode'
+    'F:\\tools\\node_modules\\@allenchen77\\ucode-cli\\bin\\ucode'
   ])
 
   assert.deepEqual(ucodeAdapter.resolveUCodeCmdShim(
@@ -51,14 +51,14 @@ test('U-Code runtime exposes a first-class adapter and safe Windows npm launcher
     (path) => existing.has(path)
   ), {
     file: 'F:\\tools\\node.exe',
-    prefixArgs: ['F:\\tools\\node_modules\\@ucode\\cli\\bin\\ucode']
+    prefixArgs: ['F:\\tools\\node_modules\\@allenchen77\\ucode-cli\\bin\\ucode']
   })
 })
 
 test('U-Code launcher resolves the system Node executable for a global npm shim', () => {
-  const shim = '"%_prog%" "%~dp0node_modules\\@ucode\\cli\\bin\\ucode" %*'
+  const shim = '"%_prog%" "%~dp0node_modules\\@allenchen77\\ucode-cli\\bin\\ucode" %*'
   const existing = new Set([
-    'C:\\Users\\Ada\\AppData\\Roaming\\npm\\node_modules\\@ucode\\cli\\bin\\ucode',
+    'C:\\Users\\Ada\\AppData\\Roaming\\npm\\node_modules\\@allenchen77\\ucode-cli\\bin\\ucode',
     'C:\\Program Files\\nodejs\\node.exe'
   ])
 
@@ -70,8 +70,68 @@ test('U-Code launcher resolves the system Node executable for a global npm shim'
   ), {
     file: 'C:\\Program Files\\nodejs\\node.exe',
     prefixArgs: [
-      'C:\\Users\\Ada\\AppData\\Roaming\\npm\\node_modules\\@ucode\\cli\\bin\\ucode'
+      'C:\\Users\\Ada\\AppData\\Roaming\\npm\\node_modules\\@allenchen77\\ucode-cli\\bin\\ucode'
     ]
+  })
+})
+
+test('U-Code launcher prefers the npm executable over a legacy macOS release install', () => {
+  const npmExecutable = '/opt/homebrew/bin/ucode'
+  const legacyExecutable = '/Users/Ada/.ucode/bin/ucode'
+
+  assert.deepEqual(ucodeAdapter.resolveUCodeLaunch(
+    null,
+    (path) => [npmExecutable, legacyExecutable].includes(path),
+    'darwin',
+    undefined,
+    '/Users/Ada',
+    () => [legacyExecutable],
+    () => [npmExecutable]
+  ), {
+    file: npmExecutable,
+    prefixArgs: []
+  })
+})
+
+test('U-Code launcher prefers the npm shim over a legacy Windows release install', () => {
+  const shimPath = 'C:\\Users\\Ada\\AppData\\Roaming\\npm\\ucode.cmd'
+  const entry = 'C:\\Users\\Ada\\AppData\\Roaming\\npm\\node_modules\\@allenchen77\\ucode-cli\\bin\\ucode'
+  const node = 'C:\\Users\\Ada\\AppData\\Roaming\\npm\\node.exe'
+  const legacyExecutable = 'C:\\Users\\Ada\\.ucode\\bin\\ucode.exe'
+  const existing = new Set([entry, node, legacyExecutable])
+  const shim = '"%_prog%" "%~dp0node_modules\\@allenchen77\\ucode-cli\\bin\\ucode" %*'
+
+  assert.deepEqual(ucodeAdapter.resolveUCodeLaunch(
+    [legacyExecutable, shimPath],
+    (path) => existing.has(path),
+    'win32',
+    () => shim,
+    'C:\\Users\\Ada'
+  ), {
+    file: node,
+    prefixArgs: [entry]
+  })
+})
+
+test('U-Code launcher finds the npm shim even when it is absent from process PATH', () => {
+  const shimPath = 'C:\\Users\\Ada\\AppData\\Roaming\\npm\\ucode.cmd'
+  const entry = 'C:\\Users\\Ada\\AppData\\Roaming\\npm\\node_modules\\@allenchen77\\ucode-cli\\bin\\ucode'
+  const node = 'C:\\Program Files\\nodejs\\node.exe'
+  const legacyExecutable = 'C:\\Users\\Ada\\.ucode\\bin\\ucode.exe'
+  const existing = new Set([entry, node, legacyExecutable])
+  const shim = '"%_prog%" "%~dp0node_modules\\@allenchen77\\ucode-cli\\bin\\ucode" %*'
+
+  assert.deepEqual(ucodeAdapter.resolveUCodeLaunch(
+    null,
+    (path) => existing.has(path),
+    'win32',
+    () => shim,
+    'C:\\Users\\Ada',
+    () => [legacyExecutable],
+    () => [shimPath]
+  ), {
+    file: node,
+    prefixArgs: [entry]
   })
 })
 
