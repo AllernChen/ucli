@@ -36,6 +36,10 @@
           <DatabaseOutlined />
           <span>配置档案</span>
         </a-menu-item>
+        <a-menu-item key="/skills">
+          <ToolOutlined />
+          <span>Skills</span>
+        </a-menu-item>
         <a-menu-item key="/settings">
           <SettingOutlined />
           <span>设置</span>
@@ -82,6 +86,7 @@ import {
   BarChartOutlined,
   SafetyOutlined,
   DatabaseOutlined,
+  ToolOutlined,
   SettingOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined
@@ -106,6 +111,7 @@ watch(() => route.path, (p) => {
 
 const waitingCount = computed(() => sessions.totalWaiting)
 const title = computed(() => {
+  if (route.path === '/skills') return 'Skills 管理'
   if (route.path.startsWith('/session')) return '会话工作台'
   if (route.path === '/stats') return '运行统计'
   if (route.path === '/rules') return '安全规则'

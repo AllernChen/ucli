@@ -336,6 +336,43 @@ class Db {
         updated_at INTEGER NOT NULL
       )
     `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS skill_packages (
+        id                TEXT PRIMARY KEY,
+        name              TEXT NOT NULL,
+        description       TEXT NOT NULL,
+        source_type       TEXT NOT NULL,
+        source_locator    TEXT NOT NULL,
+        source_ref        TEXT,
+        source_ref_type   TEXT NOT NULL DEFAULT 'default',
+        source_subdir     TEXT,
+        resolved_revision TEXT,
+        manifest_json     TEXT NOT NULL DEFAULT '{}',
+        content_sha256    TEXT NOT NULL,
+        last_checked_at   INTEGER,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL
+      )
+    `)
+    const skillPackageColumns = rows(this.sql.exec('PRAGMA table_info(skill_packages)'))
+    if (!skillPackageColumns.some((column) => column.name === 'source_ref_type')) {
+      this.sql.run("ALTER TABLE skill_packages ADD COLUMN source_ref_type TEXT NOT NULL DEFAULT 'default'")
+    }
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS skill_installations (
+        id                TEXT PRIMARY KEY,
+        package_id        TEXT NOT NULL,
+        target_adapter_id TEXT NOT NULL,
+        scope_type        TEXT NOT NULL,
+        scope_key         TEXT NOT NULL,
+        target_path       TEXT NOT NULL UNIQUE,
+        enabled           INTEGER NOT NULL DEFAULT 1,
+        deployed_sha256   TEXT,
+        status            TEXT NOT NULL,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL
+      )
+    `)
   }
 
   // ---- projects ----
@@ -756,6 +793,110 @@ class Db {
     return this.sql.getRowsModified() > 0
   }
 
+  // ---- Skills ----
+  listSkillPackages() {
+    return rows(this.sql.exec('SELECT * FROM skill_packages ORDER BY updated_at DESC, id'))
+      .map(rowToSkillPackage)
+  }
+
+  getSkillPackage(packageId) {
+    return rows(this.sql.exec('SELECT * FROM skill_packages WHERE id = ?', [packageId]))
+      .map(rowToSkillPackage)[0] || null
+  }
+
+  insertSkillPackage(pkg) {
+    const createdAt = Number.isFinite(pkg.createdAt) ? pkg.createdAt : Date.now()
+    const updatedAt = Number.isFinite(pkg.updatedAt) ? pkg.updatedAt : createdAt
+    this.sql.run(
+      `INSERT INTO skill_packages (
+        id, name, description, source_type, source_locator, source_ref, source_ref_type, source_subdir,
+        resolved_revision, manifest_json, content_sha256, last_checked_at, created_at, updated_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        pkg.id, pkg.name, pkg.description, pkg.sourceType, pkg.sourceLocator,
+        pkg.sourceRef || null, pkg.sourceRefType || 'default', pkg.sourceSubdir || null, pkg.resolvedRevision || null,
+        stringifyJsonObject(pkg.manifest), pkg.contentSha256, pkg.lastCheckedAt ?? null,
+        createdAt, updatedAt
+      ]
+    )
+  }
+
+  updateSkillPackage(packageId, fields = {}) {
+    const columns = {
+      name: 'name', description: 'description', sourceType: 'source_type',
+      sourceLocator: 'source_locator', sourceRef: 'source_ref', sourceRefType: 'source_ref_type', sourceSubdir: 'source_subdir',
+      resolvedRevision: 'resolved_revision', manifest: 'manifest_json',
+      contentSha256: 'content_sha256', lastCheckedAt: 'last_checked_at', updatedAt: 'updated_at'
+    }
+    const sets = []
+    const values = []
+    for (const [key, column] of Object.entries(columns)) {
+      if (fields[key] === undefined) continue
+      sets.push(`${column} = ?`)
+      values.push(key === 'manifest' ? stringifyJsonObject(fields[key]) : fields[key])
+    }
+    if (!sets.length) return false
+    values.push(packageId)
+    this.sql.run(`UPDATE skill_packages SET ${sets.join(', ')} WHERE id = ?`, values)
+    return this.sql.getRowsModified() > 0
+  }
+
+  deleteSkillPackage(packageId) {
+    this.sql.run('DELETE FROM skill_packages WHERE id = ?', [packageId])
+    return this.sql.getRowsModified() > 0
+  }
+
+  listSkillInstallations({ packageId } = {}) {
+    const result = packageId
+      ? this.sql.exec('SELECT * FROM skill_installations WHERE package_id = ? ORDER BY created_at, id', [packageId])
+      : this.sql.exec('SELECT * FROM skill_installations ORDER BY created_at, id')
+    return rows(result).map(rowToSkillInstallation)
+  }
+
+  getSkillInstallation(installationId) {
+    return rows(this.sql.exec('SELECT * FROM skill_installations WHERE id = ?', [installationId]))
+      .map(rowToSkillInstallation)[0] || null
+  }
+
+  insertSkillInstallation(item) {
+    const createdAt = Number.isFinite(item.createdAt) ? item.createdAt : Date.now()
+    const updatedAt = Number.isFinite(item.updatedAt) ? item.updatedAt : createdAt
+    this.sql.run(
+      `INSERT INTO skill_installations (
+        id, package_id, target_adapter_id, scope_type, scope_key, target_path,
+        enabled, deployed_sha256, status, created_at, updated_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        item.id, item.packageId, item.targetAdapterId, item.scopeType, item.scopeKey,
+        item.targetPath, item.enabled === false ? 0 : 1, item.deployedSha256 || null,
+        item.status, createdAt, updatedAt
+      ]
+    )
+  }
+
+  updateSkillInstallation(installationId, fields = {}) {
+    const columns = {
+      enabled: 'enabled', deployedSha256: 'deployed_sha256', status: 'status',
+      targetPath: 'target_path', updatedAt: 'updated_at'
+    }
+    const sets = []
+    const values = []
+    for (const [key, column] of Object.entries(columns)) {
+      if (fields[key] === undefined) continue
+      sets.push(`${column} = ?`)
+      values.push(key === 'enabled' ? (fields[key] ? 1 : 0) : fields[key])
+    }
+    if (!sets.length) return false
+    values.push(installationId)
+    this.sql.run(`UPDATE skill_installations SET ${sets.join(', ')} WHERE id = ?`, values)
+    return this.sql.getRowsModified() > 0
+  }
+
+  deleteSkillInstallation(installationId) {
+    this.sql.run('DELETE FROM skill_installations WHERE id = ?', [installationId])
+    return this.sql.getRowsModified() > 0
+  }
+
   getAiCliProfileUsage(profileId) {
     const result = this.sql.exec(
       `SELECT
@@ -1143,6 +1284,41 @@ function rowToAiCliProfileSecret(row) {
   return {
     profileId: row.profile_id,
     ciphertext: row.ciphertext,
+    updatedAt: row.updated_at
+  }
+}
+
+function rowToSkillPackage(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    sourceType: row.source_type,
+    sourceLocator: row.source_locator,
+    sourceRef: row.source_ref || '',
+    sourceRefType: row.source_ref_type || 'default',
+    sourceSubdir: row.source_subdir || '',
+    resolvedRevision: row.resolved_revision || null,
+    manifest: parseJsonObject(row.manifest_json),
+    contentSha256: row.content_sha256,
+    lastCheckedAt: row.last_checked_at ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }
+}
+
+function rowToSkillInstallation(row) {
+  return {
+    id: row.id,
+    packageId: row.package_id,
+    targetAdapterId: row.target_adapter_id,
+    scopeType: row.scope_type,
+    scopeKey: row.scope_key,
+    targetPath: row.target_path,
+    enabled: row.enabled === 1,
+    deployedSha256: row.deployed_sha256 || null,
+    status: row.status,
+    createdAt: row.created_at,
     updatedAt: row.updated_at
   }
 }
