@@ -116,7 +116,7 @@ test('U-Code launcher prefers the npm shim over a legacy Windows release install
 test('U-Code launcher finds the npm shim even when it is absent from process PATH', () => {
   const shimPath = 'C:\\Users\\Ada\\AppData\\Roaming\\npm\\ucode.cmd'
   const entry = 'C:\\Users\\Ada\\AppData\\Roaming\\npm\\node_modules\\@allenchen77\\ucode-cli\\bin\\ucode'
-  const node = 'C:\\Program Files\\nodejs\\node.exe'
+  const node = 'C:\\Users\\Ada\\AppData\\Roaming\\npm\\node.exe'
   const legacyExecutable = 'C:\\Users\\Ada\\.ucode\\bin\\ucode.exe'
   const existing = new Set([entry, node, legacyExecutable])
   const shim = '"%_prog%" "%~dp0node_modules\\@allenchen77\\ucode-cli\\bin\\ucode" %*'
