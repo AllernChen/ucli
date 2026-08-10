@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 import { buildSkillVisibility, planSkillProjections, resolveSkillRoot, SKILL_ADAPTERS } from './adapters.js'
+import { sanitiseGitHubSource } from './contracts.js'
+import { createSkillDiscovery } from './discovery.js'
 import { copySkillDirectoryAtomic, diffSkillDirectories, inspectSkillDirectory, removeManagedSkillDirectory } from './fileOps.js'
 
 function serviceError(message, code) {
@@ -38,6 +40,52 @@ function sourceRefType(source, prepared) {
   return prepared.source.ref ? 'branch' : 'default'
 }
 
+function samePreparedSource(pkg, source = {}) {
+  if (pkg.sourceType !== source.type) return false
+  const packageLocator = String(pkg.sourceLocator || '')
+  const sourceLocator = String(source.locator || '')
+  const locatorMatches = ['local', 'zip'].includes(source.type)
+    ? normalizedPath(packageLocator) === normalizedPath(sourceLocator)
+    : packageLocator.replace(/\/$/, '').toLowerCase() === sourceLocator.replace(/\/$/, '').toLowerCase()
+  return locatorMatches &&
+    String(pkg.sourceRef || '') === String(source.ref || '') &&
+    String(pkg.sourceSubdir || '') === String(source.subdir || '')
+}
+
+function readSkillSourceProjects(root) {
+  const projects = new Map()
+  try {
+    const lock = JSON.parse(readFileSync(join(root, '.agents', '.skill-lock.json'), 'utf8'))
+    for (const [skillName, metadata] of Object.entries(lock?.skills || {})) {
+      if (metadata?.sourceType !== 'github') continue
+      const locator = metadata.sourceUrl || (/^[\w.-]+\/[\w.-]+$/.test(metadata.source || '')
+        ? `https://github.com/${metadata.source}.git`
+        : '')
+      if (!locator) continue
+      try {
+        const source = sanitiseGitHubSource({ url: locator })
+        projects.set(skillName, { type: 'github', locator: source.url })
+      } catch { /* ignore malformed or unsafe installer metadata */ }
+    }
+  } catch { /* lock file is optional */ }
+  return projects
+}
+
+function readUcliSourceProjects(path) {
+  const projects = new Map()
+  try {
+    const registry = JSON.parse(readFileSync(path, 'utf8'))
+    for (const [skillName, metadata] of Object.entries(registry?.associations || {})) {
+      if (metadata?.sourceType !== 'github' || !metadata.sourceUrl) continue
+      try {
+        const source = sanitiseGitHubSource({ url: metadata.sourceUrl })
+        projects.set(skillName, { type: 'github', locator: source.url })
+      } catch { /* ignore malformed or unsafe registry entries */ }
+    }
+  } catch { /* registry is optional */ }
+  return projects
+}
+
 export function createSkillsService({
   db,
   userDataPath,
@@ -59,6 +107,11 @@ export function createSkillsService({
   mkdirSync(packagesRoot, { recursive: true })
   mkdirSync(updateStagingRoot, { recursive: true })
 
+  const userSourceProjects = () => new Map([
+    ...readSkillSourceProjects(skillHome),
+    ...readUcliSourceProjects(join(skillsRoot, 'source-projects.json'))
+  ])
+
   const packageDirectory = (packageId) => join(packagesRoot, packageId, 'current')
 
   async function persistOrThrow() {
@@ -71,16 +124,16 @@ export function createSkillsService({
   }
 
   function inspectInstallation(item) {
-    if (!item.enabled) return { ...item, status: 'disabled' }
-    if (!existsSync(item.targetPath)) return { ...item, status: 'missing' }
+    if (!item.enabled) return { ...item, status: 'disabled', visibility: buildSkillVisibility([]) }
+    if (!existsSync(item.targetPath)) return { ...item, status: 'missing', visibility: buildSkillVisibility([]) }
     try {
       const inspection = inspectSkillDirectory(item.targetPath)
       const status = inspection.contentSha256 === item.deployedSha256
         ? (item.status === 'update_available' ? 'update_available' : 'ready')
         : 'drifted'
-      return { ...item, status }
+      return { ...item, status, visibility: buildSkillVisibility([item.targetAdapterId]) }
     } catch {
-      return { ...item, status: 'invalid' }
+      return { ...item, status: 'invalid', visibility: buildSkillVisibility([]) }
     }
   }
 
@@ -109,134 +162,114 @@ export function createSkillsService({
     }
   }
 
-  /** Resolve whether a directory entry points at a real directory, following
-   *  symlinks (Claude Code keeps ~/.claude/skills entries as links into
-   *  shared skill stores). Returns false for dangling links. */
-  function entryIsDirectory(path) {
-    try { return statSync(path).isDirectory() } catch { return false }
+  function installedMatches(preview) {
+    const priority = {
+      same_source_and_content: 0,
+      same_content: 1,
+      same_source_changed: 2
+    }
+    return db.listSkillPackages().flatMap((pkg) => {
+      const sourceMatches = samePreparedSource(pkg, preview.source)
+      const contentMatches = pkg.contentSha256 === preview.contentSha256
+      if (!sourceMatches && !contentMatches) return []
+      const view = packageView(pkg)
+      return [{
+        packageId: pkg.id,
+        name: pkg.name,
+        description: pkg.description,
+        matchType: sourceMatches && contentMatches
+          ? 'same_source_and_content'
+          : contentMatches ? 'same_content' : 'same_source_changed',
+        installations: view.installations,
+        visibility: view.visibility
+      }]
+    }).sort((left, right) => priority[left.matchType] - priority[right.matchType])
   }
 
-  /** Scan a directory of skill folders, following symlinked skill entries. */
-  function scanRoot(adapterId, scopeType, scopeKey, root, managedPaths, results, forcedOrigin = null) {
-    if (!existsSync(root)) return
-    let entries = []
-    try { entries = readdirSync(root, { withFileTypes: true }) } catch { return }
-    for (const entry of entries) {
-      const path = join(root, entry.name)
-      if (entry.isDirectory() || entry.isSymbolicLink()) {
-        if (!entryIsDirectory(path)) continue
-      } else {
-        continue
-      }
+  function inspectTargetMatches(preview, context = {}) {
+    if (!Array.isArray(context.targetAdapterIds) || !context.targetAdapterIds.length) return []
+    if (!['user', 'project'].includes(context.scopeType)) return []
+    const projectionIds = planSkillProjections(context.targetAdapterIds)
+    return projectionIds.flatMap((adapterId) => {
+      let targetPath
       try {
-        const inspected = inspectSkillDirectory(path)
-        const installation = managedPaths.get(normalizedPath(path))
-        results.push({
-          key: `${adapterId}:${scopeType}:${normalizedPath(path)}`,
+        targetPath = join(resolveSkillRoot({
           adapterId,
-          scopeType,
-          scopeKey,
-          path,
-          name: inspected.name,
-          description: inspected.description,
-          contentSha256: inspected.contentSha256,
-          fileList: inspected.fileList,
-          origin: forcedOrigin || (installation ? 'managed' : 'external'),
-          installationId: installation?.id || null,
-          visibility: buildSkillVisibility([adapterId])
-        })
+          scopeType: context.scopeType,
+          projectPath: context.projectPath,
+          home: skillHome,
+          env
+        }), preview.name)
+      } catch { return [] }
+      if (!existsSync(targetPath)) return []
+      try {
+        const existing = inspectSkillDirectory(targetPath)
+        return [{
+          adapterId,
+          targetPath,
+          matchType: existing.contentSha256 === preview.contentSha256 ? 'same_content' : 'conflict'
+        }]
       } catch {
-        if (!existsSync(join(path, 'SKILL.md'))) continue
-        const installation = managedPaths.get(normalizedPath(path))
-        results.push({
-          key: `${adapterId}:${scopeType}:${normalizedPath(path)}`,
-          adapterId,
-          scopeType,
-          scopeKey,
-          path,
-          name: basename(path),
-          description: 'SKILL.md 清单无效',
-          contentSha256: null,
-          fileList: ['SKILL.md'],
-          status: 'invalid',
-          origin: forcedOrigin || (installation ? 'managed' : 'external'),
-          installationId: installation?.id || null,
-          visibility: buildSkillVisibility([adapterId])
-        })
+        return [{ adapterId, targetPath, matchType: 'invalid' }]
       }
-    }
+    })
   }
 
-  /** Scan a plugin/marketplace cache tree for any directory named `skills`
-   *  whose children are skill folders. Used for both Claude Code
-   *  (~/.claude/plugins/cache/.../skills) and OpenCode
-   *  (~/.cache/opencode/packages/<spec>/node_modules/<plugin>/skills). */
-  function scanPluginSkills(adapterId, pluginsRoot, managedPaths, occurrences) {
-    if (!existsSync(pluginsRoot)) return
-    const visitedSkillsRoots = new Set()
-    function walk(directory, depth) {
-      if (depth > 8) return
-      let entries = []
-      try { entries = readdirSync(directory, { withFileTypes: true }) } catch { return }
-      for (const entry of entries) {
-        const path = join(directory, entry.name)
-        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
-        if (!entryIsDirectory(path)) continue
-        if (entry.name === 'skills' && !visitedSkillsRoots.has(normalizedPath(path))) {
-          visitedSkillsRoots.add(normalizedPath(path))
-          scanRoot(adapterId, 'system', '*', path, managedPaths, occurrences, 'bundled')
-          continue // do not recurse further into a skills container
+  function packageInScope(pkg, scopeType, scopeKey) {
+    return db.listSkillInstallations({ packageId: pkg.id }).some((item) =>
+      item.scopeType === scopeType && normalizedPath(item.scopeKey) === normalizedPath(scopeKey)
+    )
+  }
+
+  async function reuseManagedPackage(pkg, targetAdapterIds, matchType) {
+    const canonical = inspectSkillDirectory(packageDirectory(pkg.id))
+    if (canonical.contentSha256 !== pkg.contentSha256) {
+      throw serviceError('Managed package was modified outside UCLI', 'SKILL_DRIFTED')
+    }
+    let view = packageView(pkg)
+    const missingAdapterIds = targetAdapterIds.filter((adapterId) => !view.visibility[adapterId]?.visible)
+    const projectionIds = planSkillProjections(missingAdapterIds)
+    const appliedAdapterIds = []
+    for (const adapterId of projectionIds) {
+      const existing = view.installations.find((item) => item.targetAdapterId === adapterId)
+      if (existing) {
+        if (existing.status !== 'disabled') {
+          throw serviceError('Existing managed projection requires attention', 'SKILL_TARGET_EXISTS')
         }
-        walk(path, depth + 1)
+        await setEnabled(existing.id, true)
+      } else {
+        await applyToAdapter(pkg.id, adapterId)
+      }
+      appliedAdapterIds.push(adapterId)
+      view = packageView(db.getSkillPackage(pkg.id))
+    }
+    return {
+      ...view,
+      installOutcome: {
+        kind: appliedAdapterIds.length ? 'applied_existing' : 'already_installed',
+        matchType,
+        appliedAdapterIds
       }
     }
-    walk(pluginsRoot, 0)
   }
 
-  /** Read ~/.claude/plugins/installed_plugins.json — the source of truth for
-   *  which Claude Code plugins are actually enabled. Returns install paths. */
-  function readInstalledClaudePlugins() {
-    const file = join(skillHome, '.claude', 'plugins', 'installed_plugins.json')
-    try {
-      const raw = JSON.parse(readFileSync(file, 'utf8'))
-      const plugins = raw?.plugins || {}
-      return Object.values(plugins).flat().map((entry) => entry?.installPath || '').filter(Boolean)
-    } catch { return [] }
-  }
-
-  /** Claude Code only loads skills from plugins listed in installed_plugins.json,
-   *  not from every cache/marketplace copy on disk. Scan each installed plugin's
-   *  installPath (which may hold skills at <root>/skills, <root>/.claude/skills,
-   *  or a nested plugin folder). */
-  function scanClaudePluginSkills(managedPaths, occurrences) {
-    const installedPaths = readInstalledClaudePlugins()
-    for (const installPath of installedPaths) {
-      scanPluginSkills('claude', installPath, managedPaths, occurrences)
-    }
-  }
-
-  function scanOpenCodePluginSkills(managedPaths, occurrences) {
-    const cacheHome = env.XDG_CACHE_HOME ? resolve(env.XDG_CACHE_HOME) : join(skillHome, '.cache')
-    scanPluginSkills('opencode', join(cacheHome, 'opencode', 'packages'), managedPaths, occurrences)
-  }
+  const skillDiscovery = createSkillDiscovery({
+    home: skillHome,
+    env,
+    inspectSkillDirectory,
+    buildSkillVisibility
+  })
 
   function discover(projectPath) {
     const installations = db.listSkillInstallations()
-    const managedPaths = new Map(installations.map((item) => [normalizedPath(item.targetPath), item]))
-    const occurrences = []
-    for (const adapterId of Object.keys(SKILL_ADAPTERS)) {
-      const userRoot = resolveSkillRoot({ adapterId, scopeType: 'user', home: skillHome, env })
-      scanRoot(adapterId, 'user', '*', userRoot, managedPaths, occurrences)
-      if (projectPath) {
-        const projectRoot = resolveSkillRoot({ adapterId, scopeType: 'project', projectPath })
-        scanRoot(adapterId, 'project', normalizedPath(projectPath), projectRoot, managedPaths, occurrences)
-      }
-    }
-    const codexLegacyRoot = join(skillHome, '.codex', 'skills')
-    scanRoot('codex', 'user', '*', codexLegacyRoot, managedPaths, occurrences)
-    scanRoot('codex', 'system', '*', join(codexLegacyRoot, '.system'), managedPaths, occurrences, 'bundled')
-    scanClaudePluginSkills(managedPaths, occurrences)
-    scanOpenCodePluginSkills(managedPaths, occurrences)
+    const sourceProjects = userSourceProjects()
+    const projectSourceProjects = projectPath ? readSkillSourceProjects(resolve(projectPath)) : new Map()
+    const occurrences = skillDiscovery.discover({
+      projectPath,
+      managedInstallations: installations,
+      sourceProjects,
+      projectSourceProjects
+    })
     const ucodeKey = projectPath ? normalizedPath(projectPath) : '*'
     if (ucodeDiscoveryCache.key !== ucodeKey || now() - ucodeDiscoveryCache.checkedAt > 30000) {
       ucodeDiscoveryCache = {
@@ -265,9 +298,14 @@ export function createSkillsService({
       occurrences.push({
         key: `ucode:${skill.origin}:${skill.name}:${skillPath || ''}`,
         adapterId: 'ucode',
+        sourceKind: ['bundled', 'system'].includes(skill.origin) ? 'ucode_builtin' : 'ucode_user',
         scopeType: 'system',
         scopeKey: '*',
         path: skillPath || '',
+        entryPath: skillPath || '',
+        resolvedPath: skillPath || '',
+        link: null,
+        health: 'ready',
         name: skill.name,
         description: skill.description,
         contentSha256: inspected?.contentSha256 || null,
@@ -286,13 +324,15 @@ export function createSkillsService({
     }
     return [...groups.entries()].map(([name, sources]) => {
       const hashes = new Set(sources.map((source) => source.contentSha256).filter(Boolean))
+      const allBroken = sources.every((source) => source.status === 'broken_link')
       const allInvalid = sources.every((source) => source.status === 'invalid')
       const allHashed = sources.every((source) => Boolean(source.contentSha256))
       return {
         name,
         description: sources[0].description,
-        status: allInvalid
-          ? 'invalid'
+        status: allBroken
+          ? 'broken_link'
+          : allInvalid ? 'invalid'
           : hashes.size > 1 ? 'conflict' : sources.length > 1 && allHashed ? 'mirror' : 'ready',
         sources
       }
@@ -313,6 +353,20 @@ export function createSkillsService({
       if (targetAdapterIds.includes('opencode') && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(inspected.name)) {
         throw serviceError('Skill name is incompatible with OpenCode', 'SKILL_INCOMPATIBLE')
       }
+      const packagesInScope = db.listSkillPackages().filter((pkg) => packageInScope(pkg, scopeType, scopeKey))
+      const reusable = packagesInScope
+        .filter((pkg) => pkg.contentSha256 === inspected.contentSha256)
+        .sort((left, right) => Number(samePreparedSource(right, prepared.source)) - Number(samePreparedSource(left, prepared.source)))[0]
+      if (reusable) {
+        return reuseManagedPackage(
+          reusable,
+          targetAdapterIds,
+          samePreparedSource(reusable, prepared.source) ? 'same_source_and_content' : 'same_content'
+        )
+      }
+      if (packagesInScope.some((pkg) => samePreparedSource(pkg, prepared.source))) {
+        throw serviceError('The installed source has changed; preview and update the existing Skill', 'SKILL_SOURCE_CHANGED')
+      }
       const projectionIds = planSkillProjections(targetAdapterIds)
       const targets = projectionIds.map((targetAdapterId) => ({
         targetAdapterId,
@@ -324,9 +378,23 @@ export function createSkillsService({
           env
         }), inspected.name)
       }))
-      if (targets.some((item) => existsSync(item.targetPath))) {
-        throw serviceError('A skill already exists at a target location', 'SKILL_TARGET_CONFLICT')
-      }
+      const managedPaths = new Set(db.listSkillInstallations().map((item) => normalizedPath(item.targetPath)))
+      const targetStates = targets.map((target) => {
+        if (!existsSync(target.targetPath)) return { ...target, existing: null }
+        if (managedPaths.has(normalizedPath(target.targetPath))) {
+          throw serviceError('A skill target is already managed', 'SKILL_TARGET_CONFLICT')
+        }
+        let existing
+        try { existing = inspectSkillDirectory(target.targetPath) } catch {
+          throw serviceError('An invalid skill already exists at the target', 'SKILL_TARGET_CONFLICT')
+        }
+        if (existing.contentSha256 !== inspected.contentSha256) {
+          throw serviceError('A different skill already exists at the target', 'SKILL_TARGET_CONFLICT')
+        }
+        return { ...target, existing }
+      })
+      const adoptedAdapterIds = targetStates.filter((item) => item.existing).map((item) => item.targetAdapterId)
+      const appliedAdapterIds = targetStates.filter((item) => !item.existing).map((item) => item.targetAdapterId)
 
       const packageId = uuid()
       const canonical = packageDirectory(packageId)
@@ -336,9 +404,9 @@ export function createSkillsService({
         const canonicalInspection = copySkillDirectoryAtomic(prepared.workingDirectory, canonical)
         created.push({ path: canonical, sha256: canonicalInspection.contentSha256 })
         const installations = []
-        for (const target of targets) {
-          const deployed = copySkillDirectoryAtomic(canonical, target.targetPath)
-          created.push({ path: target.targetPath, sha256: deployed.contentSha256 })
+        for (const target of targetStates) {
+          const deployed = target.existing || copySkillDirectoryAtomic(canonical, target.targetPath)
+          if (!target.existing) created.push({ path: target.targetPath, sha256: deployed.contentSha256 })
           installations.push({
             id: uuid(),
             packageId,
@@ -373,7 +441,18 @@ export function createSkillsService({
           for (const installation of installations) db.insertSkillInstallation(installation)
         })
         await persistOrThrow()
-        return packageView(db.getSkillPackage(packageId))
+        const view = packageView(db.getSkillPackage(packageId))
+        return adoptedAdapterIds.length
+          ? {
+              ...view,
+              installOutcome: {
+                kind: 'adopted_existing',
+                matchType: 'same_content',
+                appliedAdapterIds,
+                adoptedAdapterIds
+              }
+            }
+          : view
       } catch (error) {
         if (error?.code === 'SKILL_PERSISTENCE_PENDING') throw error
         for (const item of created.reverse()) {
@@ -382,6 +461,77 @@ export function createSkillsService({
         throw error
       }
     })
+  }
+
+  async function applyToAdapter(packageId, targetAdapterId) {
+    const pkg = db.getSkillPackage(packageId)
+    if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    if (!SKILL_ADAPTERS[targetAdapterId]) throw serviceError('Skill adapter is unavailable', 'SKILL_ADAPTER_UNAVAILABLE')
+    if (targetAdapterId === 'opencode' && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(pkg.name)) {
+      throw serviceError('Skill name is incompatible with OpenCode', 'SKILL_INCOMPATIBLE')
+    }
+
+    const installations = db.listSkillInstallations({ packageId })
+    if (!installations.length) throw serviceError('Skill package has no installation scope', 'SKILL_SCOPE_INVALID')
+    if (installations.some((item) => item.targetAdapterId === targetAdapterId)) {
+      throw serviceError('Skill is already applied to this CLI', 'SKILL_TARGET_EXISTS')
+    }
+    const scopes = new Set(installations.map((item) => `${item.scopeType}:${item.scopeKey}`))
+    if (scopes.size !== 1) throw serviceError('Skill package has multiple installation scopes', 'SKILL_SCOPE_AMBIGUOUS')
+    const scope = installations[0]
+    if (!['user', 'project'].includes(scope.scopeType)) throw serviceError('Skill scope is invalid', 'SKILL_SCOPE_INVALID')
+
+    const canonical = inspectSkillDirectory(packageDirectory(pkg.id))
+    if (canonical.contentSha256 !== pkg.contentSha256) {
+      throw serviceError('Managed package was modified outside UCLI', 'SKILL_DRIFTED')
+    }
+    const targetPath = join(resolveSkillRoot({
+      adapterId: targetAdapterId,
+      scopeType: scope.scopeType,
+      projectPath: scope.scopeType === 'project' ? scope.scopeKey : undefined,
+      home: skillHome,
+      env
+    }), pkg.name)
+    const managedTarget = db.listSkillInstallations()
+      .find((item) => normalizedPath(item.targetPath) === normalizedPath(targetPath))
+    if (managedTarget) throw serviceError('Skill target is already managed', 'SKILL_TARGET_EXISTS')
+
+    let deployed = canonical
+    let created = false
+    if (existsSync(targetPath)) {
+      const existing = inspectSkillDirectory(targetPath)
+      if (existing.contentSha256 !== canonical.contentSha256) {
+        throw serviceError('A different skill already exists at the target', 'SKILL_TARGET_CONFLICT')
+      }
+      deployed = existing
+    } else {
+      deployed = copySkillDirectoryAtomic(packageDirectory(pkg.id), targetPath)
+      created = true
+    }
+
+    const timestamp = now()
+    const installationId = uuid()
+    try {
+      await db.transaction(async () => {
+        db.insertSkillInstallation({
+          id: installationId, packageId, targetAdapterId,
+          scopeType: scope.scopeType, scopeKey: scope.scopeKey, targetPath,
+          enabled: true, deployedSha256: deployed.contentSha256, status: 'ready',
+          createdAt: timestamp, updatedAt: timestamp
+        })
+      })
+      await persistOrThrow()
+      return packageView(db.getSkillPackage(packageId))
+    } catch (error) {
+      try {
+        if (db.getSkillInstallation(installationId)) db.deleteSkillInstallation(installationId)
+        if (error?.code === 'SKILL_PERSISTENCE_PENDING') await flush()
+      } catch { /* keep the original operation error */ }
+      if (created) {
+        try { removeManagedSkillDirectory(targetPath, deployed.contentSha256) } catch { /* preserve changed data */ }
+      }
+      throw error
+    }
   }
 
   async function setEnabled(installationId, enabled) {
@@ -528,10 +678,42 @@ export function createSkillsService({
     const timestamp = now()
     const canonical = copySkillDirectoryAtomic(path, packageDirectory(packageId))
     const scopeKey = request.scopeType === 'project' ? normalizedPath(request.projectPath) : '*'
-    const installation = {
-      id: uuid(), packageId, targetAdapterId: request.targetAdapterId,
-      scopeType: request.scopeType, scopeKey, targetPath: path, enabled: true,
-      deployedSha256: inspected.contentSha256, status: 'ready', createdAt: timestamp, updatedAt: timestamp
+    const scopeFilter = request.scopeType === 'project'
+      ? { scopeType: 'project', scopeKey }
+      : { scopeType: 'user', scopeKey: '*' }
+
+    // Same-named external skill folders (mirror deployments, e.g. both
+    // ~/.agents/skills/x and ~/.codex/skills/x) are registered under the same
+    // package so adopting one adopts the whole skill instead of duplicating it.
+    const siblingPaths = discover(request.projectPath)
+      .flatMap((group) => group.sources)
+      .filter((source) =>
+        source.origin === 'external' &&
+        source.name === inspected.name &&
+        source.contentSha256 === inspected.contentSha256
+      )
+      .map((source) => ({ path: resolve(source.path), adapterId: source.adapterId, scopeType: source.scopeType }))
+      .filter((item) => item.scopeType === scopeFilter.scopeType)
+
+    const installations = []
+    const seen = new Set()
+    for (const sibling of [path, ...siblingPaths.map((item) => item.path)]) {
+      const target = resolve(sibling)
+      const key = normalizedPath(target)
+      if (seen.has(key)) continue
+      seen.add(key)
+      if (db.listSkillInstallations().some((item) => normalizedPath(item.targetPath) === key)) continue
+      let contentSha256 = inspected.contentSha256
+      try {
+        const siblingInspection = inspectSkillDirectory(target)
+        contentSha256 = siblingInspection.contentSha256
+      } catch { /* keep primary inspection */ }
+      const siblingEntry = siblingPaths.find((item) => normalizedPath(item.path) === key)
+      installations.push({
+        id: uuid(), packageId, targetAdapterId: siblingEntry?.adapterId || request.targetAdapterId,
+        scopeType: scopeFilter.scopeType, scopeKey: scopeFilter.scopeKey, targetPath: target, enabled: true,
+        deployedSha256: contentSha256, status: 'ready', createdAt: timestamp, updatedAt: timestamp
+      })
     }
     try {
       await db.transaction(async () => {
@@ -541,7 +723,7 @@ export function createSkillsService({
           resolvedRevision: null, manifest: inspected.manifest, contentSha256: canonical.contentSha256,
           lastCheckedAt: timestamp, createdAt: timestamp, updatedAt: timestamp
         })
-        db.insertSkillInstallation(installation)
+        for (const installation of installations) db.insertSkillInstallation(installation)
       })
       await persistOrThrow()
       return packageView(db.getSkillPackage(packageId))
@@ -673,8 +855,16 @@ export function createSkillsService({
   }
 
   return {
-    inspectSource: (source) => sourceLoader.inspect(source),
+    inspectSource: async (source, context = {}) => {
+      const preview = await sourceLoader.inspect(source)
+      return {
+        ...preview,
+        installedMatches: installedMatches(preview),
+        targetMatches: inspectTargetMatches(preview, context)
+      }
+    },
     install,
+    applyToAdapter,
     setEnabled,
     resolveDrift,
     removeInstallation,
@@ -693,7 +883,12 @@ export function createSkillsService({
       return results
     },
     async getState({ projectPath } = {}) {
-      const packages = db.listSkillPackages().map(packageView)
+      const sourceProjects = userSourceProjects()
+      const packages = db.listSkillPackages().map((pkg) => {
+        const view = packageView(pkg)
+        const sourceProject = sourceProjects.get(view.name)
+        return sourceProject ? { ...view, sourceProject } : view
+      })
       const discovered = discover(projectPath)
       const conflicts = discovered.filter((item) => item.status === 'conflict').length
       return {

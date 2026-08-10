@@ -34,8 +34,9 @@ export const ipc = {
   reconcileAiCliProfiles: () => u.reconcileAiCliProfiles(),
   // Skills
   getSkillsState: (options) => u.getSkillsState(options),
-  inspectSkillSource: (source) => u.inspectSkillSource(source),
+  inspectSkillSource: (source, context) => u.inspectSkillSource(source, context),
   installSkill: (request) => u.installSkill(request),
+  applySkillToAdapter: (packageId, targetAdapterId) => u.applySkillToAdapter(packageId, targetAdapterId),
   checkSkillUpdates: (packageIds) => u.checkSkillUpdates(packageIds),
   previewSkillUpdate: (packageId) => u.previewSkillUpdate(packageId),
   updateSkill: (packageId, expectedRevision) => u.updateSkill(packageId, expectedRevision),

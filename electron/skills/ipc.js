@@ -64,6 +64,24 @@ function installRequest(value) {
   return { source: source(input.source), targetAdapterIds, scopeType: input.scopeType, projectPath }
 }
 
+function inspectionContext(value) {
+  if (value == null) return {}
+  const input = object(value, 'context')
+  if (!Array.isArray(input.targetAdapterIds) || !input.targetAdapterIds.length || input.targetAdapterIds.length > 4) {
+    throw ipcError('targetAdapterIds is invalid')
+  }
+  const targetAdapterIds = [...new Set(input.targetAdapterIds.map((adapterId) => {
+    if (!ADAPTER_IDS.has(adapterId)) throw ipcError('targetAdapterIds is invalid')
+    return adapterId
+  }))]
+  if (!['user', 'project'].includes(input.scopeType)) throw ipcError('scopeType is invalid')
+  return {
+    targetAdapterIds,
+    scopeType: input.scopeType,
+    projectPath: input.scopeType === 'project' ? string(input.projectPath, 'projectPath') : ''
+  }
+}
+
 async function safeCall(work) {
   try { return await work() } catch (error) {
     if (error?.code === 'SKILL_IPC_INVALID') throw error
@@ -78,8 +96,15 @@ export function registerSkillsIpc({ ipcMain, service }) {
       projectPath: input.projectPath ? string(input.projectPath, 'projectPath') : undefined
     })
   }))
-  ipcMain.handle('skills:inspect-source', (_event, input) => safeCall(() => service.inspectSource(source(input))))
+  ipcMain.handle('skills:inspect-source', (_event, input, context) => safeCall(() =>
+    service.inspectSource(source(input), inspectionContext(context))
+  ))
   ipcMain.handle('skills:install', (_event, input) => safeCall(() => service.install(installRequest(input))))
+  ipcMain.handle('skills:apply-to-adapter', (_event, request) => safeCall(() => {
+    const input = object(request, 'request')
+    if (!ADAPTER_IDS.has(input.targetAdapterId)) throw ipcError('targetAdapterId is invalid')
+    return service.applyToAdapter(id(input.packageId, 'packageId'), input.targetAdapterId)
+  }))
   ipcMain.handle('skills:check-updates', (_event, packageIds) => safeCall(() =>
     service.checkUpdates(packageIds == null ? null : ids(packageIds, 'packageIds'))
   ))

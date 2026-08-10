@@ -17,6 +17,8 @@
     "dist:win": "electron-vite build && electron-builder --win --publish never",
     "dist:mac": "electron-vite build && electron-builder --mac --publish never",
     "schema:codex": "codex app-server generate-json-schema --out .codex-schema",
+    "audit:skills": "node scripts/audit-skill-discovery.mjs",
+    "test:skills-audit": "node --test test/skills-audit.test.mjs",
     "smoke:claude": "claude -p \"Reply with exactly: hello\" --output-format stream-json --verbose",
     "smoke:codex": "codex exec \"say hello\" --json --skip-git-repo-check",
     "smoke:opencode": "node test/headless-opencode.mjs"

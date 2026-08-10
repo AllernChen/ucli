@@ -47,10 +47,17 @@ export const useSkillsStore = defineStore('skills', {
         this.saving = false
       }
     },
-    inspectSource(source) { return ipc.inspectSkillSource(source) },
+    inspectSource(source, context) { return ipc.inspectSkillSource(source, context) },
     install(request) {
       return this.runSaving(async () => {
         const result = await ipc.installSkill(request)
+        await this.load()
+        return result
+      })
+    },
+    applyToAdapter(packageId, targetAdapterId) {
+      return this.runSaving(async () => {
+        const result = await ipc.applySkillToAdapter(packageId, targetAdapterId)
         await this.load()
         return result
       })
