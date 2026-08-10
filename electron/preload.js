@@ -41,8 +41,24 @@ const api = {
   repairAiCliProfile: (profileId) => ipcRenderer.invoke('ai-cli-profiles:repair', profileId),
   reconcileAiCliProfiles: () => ipcRenderer.invoke('ai-cli-profiles:reconcile'),
 
+  // ---- Skills ----
+  getSkillsState: (options) => ipcRenderer.invoke('skills:get-state', options || {}),
+  inspectSkillSource: (source, context) => ipcRenderer.invoke('skills:inspect-source', source, context),
+  installSkill: (request) => ipcRenderer.invoke('skills:install', request),
+  applySkillToAdapter: (packageId, targetAdapterId) => ipcRenderer.invoke('skills:apply-to-adapter', { packageId, targetAdapterId }),
+  checkSkillUpdates: (packageIds) => ipcRenderer.invoke('skills:check-updates', packageIds ?? null),
+  previewSkillUpdate: (packageId) => ipcRenderer.invoke('skills:preview-update', packageId),
+  updateSkill: (packageId, expectedRevision) => ipcRenderer.invoke('skills:update', packageId, expectedRevision ?? null),
+  setSkillEnabled: (installationId, enabled) => ipcRenderer.invoke('skills:set-enabled', installationId, enabled),
+  removeSkillInstallation: (installationId) => ipcRenderer.invoke('skills:remove-installation', installationId),
+  resolveSkillDrift: (installationId, resolution) => ipcRenderer.invoke('skills:resolve-drift', installationId, resolution),
+  adoptSkill: (request) => ipcRenderer.invoke('skills:adopt', request),
+  getSkillAffectedSessions: (installationIds) => ipcRenderer.invoke('skills:get-affected-sessions', installationIds),
+  restartSkillSessions: (sessionIds) => ipcRenderer.invoke('skills:restart-sessions', sessionIds),
+
   // ---- dialog ----
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
+  pickSkillArchive: () => ipcRenderer.invoke('dialog:pick-skill-archive'),
   scanClaudeSessions: (cwd) => ipcRenderer.invoke('session:scan-claude', cwd),
   discoverSessions: (cwd) => ipcRenderer.invoke('session:discover', cwd),
 

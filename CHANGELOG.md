@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-07
+
+### Skills 管理
+
+- Skills 页面升级为按名称聚合的统一目录，支持 GitHub 来源项目分组、四 CLI 可见性矩阵以及将现有受管 Skill 直接应用到其他 CLI。
+- 明确区分 Claude 用户/项目目录、Codex Agent Skills、Claude 插件和 CLI 内置来源；有效链接、物理位置和失效链接分别展示，插件命令或 MCP 配置不会误识别为 Skill。
+- 重复安装改为幂等操作：相同来源或相同内容复用现有受管包；目标目录已有相同内容时安全接管且不改写文件；同名异内容继续阻止覆盖。
+- 新增一级“Skills”页面，统一盘点 Claude Code、Codex、OpenCode 和 U-Code 的用户级、项目级、兼容继承及内置 Skills。
+- 支持从本地目录、ZIP 和 GitHub 仓库安装；私有仓库复用本机 Git 认证，UCLI 不保存 GitHub Token。
+- UCLI 保存受管原件并按实际可见性选择最少投放目录，支持启停、更新预览、卸载、接管、同名冲突诊断和会话重启提示。
+- 增加内容哈希与漂移保护；外部修改可选择恢复 UCLI 版本或接纳为新的受管版本，未接管的现有 Skills 不会被覆盖或删除。
+
+### 安全与兼容
+
+- Skill 安装不执行包内脚本，并限制路径穿越、符号链接、ZIP 解压范围、文件数量和总体积。
+- OpenCode 与 U-Code 的跨目录兼容发现会合并为镜像或标记冲突；U-Code 内置 Skills 通过 `ucode debug skill` 只读发现。
+- 新增 `skill_packages` 与 `skill_installations` 数据表，受管原件保存在 UCLI `userData/skills`，应用升级后继续保留。
+
 ## [0.8.3] - 2026-08-07
 
 ### Changed
