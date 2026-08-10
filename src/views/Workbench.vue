@@ -41,7 +41,13 @@
               <span class="group-count">{{ cli.count }} 个会话</span>
             </button>
             <div v-show="!collapsedClis.has(cli.key)" class="card-grid">
-              <SessionCard v-for="s in cli.sessions" :key="s.id" :session="s" @open="openSession" />
+              <SessionCard
+                v-for="s in cli.sessions"
+                :key="s.id"
+                :session="s"
+                @open="openSession"
+                @configure="openSessionConfig"
+              />
             </div>
           </section>
         </div>
@@ -155,6 +161,11 @@
         </a-button>
       </div>
     </a-modal>
+
+    <SessionConfigModal
+      v-model:open="sessionConfig.open"
+      :session-id="sessionConfig.sessionId"
+    />
   </div>
 </template>
 
@@ -174,6 +185,7 @@ import { useSettingsStore } from '../stores/settings.js'
 import { useGatewayStore } from '../stores/gateway.js'
 import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import SessionCard from '../components/SessionCard.vue'
+import SessionConfigModal from '../components/SessionConfigModal.vue'
 import { groupSessionsByProject } from '../sessionGrouping.js'
 import { ipc } from '../ipc.js'
 
@@ -188,6 +200,7 @@ const creating = ref(false)
 const discovering = ref(false)
 const discoverError = ref('')
 const filterTier = ref(undefined)
+const sessionConfig = ref({ open: false, sessionId: '' })
 
 const form = ref({
   adapterId: 'claude', cwd: '', model: undefined, tier: 'safety-rules',
@@ -314,6 +327,10 @@ async function discover(cwd) {
   } finally {
     discovering.value = false
   }
+}
+
+function openSessionConfig(sessionId) {
+  sessionConfig.value = { open: true, sessionId }
 }
 
 function profileConfigForSelection(imported, adapterId) {

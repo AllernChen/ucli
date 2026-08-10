@@ -34,15 +34,14 @@ test('GatewayRelayToggle exposes one accessible, store-backed session relay cont
   assert.doesNotMatch(source, /v-html/)
 })
 
-test('session cards and the shared configuration modal use the relay control', () => {
+test('the shared configuration modal owns the relay control', () => {
   const sessionCard = readFileSync(sessionCardUrl, 'utf8')
   const sessionDetail = readFileSync(sessionDetailUrl, 'utf8')
   const sessionConfig = readFileSync(sessionConfigUrl, 'utf8')
   const workbench = readFileSync(workbenchUrl, 'utf8')
 
-  assert.match(sessionCard, /<GatewayRelayToggle[^>]*:session-id="session\.id"/)
   assert.match(sessionConfig, /<GatewayRelayToggle[^>]*:session-id="session\.id"/)
-  assert.doesNotMatch(sessionCard, /relaySwitching|relay-icon|toggleRelay/)
+  assert.doesNotMatch(sessionCard, /GatewayRelayToggle|relaySwitching|relay-icon|toggleRelay/)
   assert.doesNotMatch(sessionDetail, /GatewayRelayToggle|paneRelayOn|togglePaneRelay/)
   assert.match(workbench, /gateway\.init\(\)/)
 })

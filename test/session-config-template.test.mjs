@@ -127,3 +127,22 @@ test('pane information bar is read-only', () => {
   assert.equal(findElements(paneInfo, (node) => node.tag === 'a-select').length, 0)
   assert.equal(findElements(paneInfo, (node) => node.tag === 'a-button').length, 0)
 })
+
+test('overview cards expose one configuration action without inline editors', () => {
+  const { source, ast } = loadComponent('../src/components/SessionCard.vue')
+
+  assert.equal(findElements(ast, (node) => node.tag === 'a-input').length, 0)
+  assert.equal(findElements(ast, (node) => node.tag === 'GatewayRelayToggle').length, 0)
+  assert.equal(findElements(ast, (node) => node.tag === 'SettingOutlined').length, 1)
+  assert.match(source, /view\.needsAttention/)
+  assert.match(source, /emit\('configure', props\.session\.id\)/)
+  assert.doesNotMatch(source, /EditOutlined|updateName|startEdit/)
+})
+
+test('overview reuses a single session configuration modal for all cards', () => {
+  const { source, ast } = loadComponent('../src/views/Workbench.vue')
+
+  assert.match(source, /@configure="openSessionConfig"/)
+  assert.match(source, /function openSessionConfig\(sessionId\)/)
+  assert.equal(findElements(ast, (node) => node.tag === 'SessionConfigModal').length, 1)
+})

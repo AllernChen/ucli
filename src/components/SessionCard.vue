@@ -3,26 +3,22 @@
     <template #title>
       <div class="card-title">
         <span class="icon">{{ session.icon }}</span>
-        <span v-if="editingId !== session.id" class="name-wrap">
-          <span class="name">{{ session.displayName }}</span>
-          <EditOutlined class="name-edit-icon" @click.stop="startEdit" title="重命名" />
-        </span>
-        <a-input
-          v-else
-          ref="nameInputRef"
-          v-model:value="editDraft"
-          size="small"
-          class="name-input"
-          @click.stop
-          @press-enter="saveEdit"
-          @blur="saveEdit"
-          @keydown.escape.prevent="cancelEdit"
-        />
+        <span class="name">{{ session.displayName }}</span>
         <span :class="['status-badge', statusCls]">{{ statusText }}</span>
       </div>
     </template>
     <template #extra>
-      <GatewayRelayToggle :session-id="session.id" compact />
+      <a-badge :dot="view.needsAttention" status="warning">
+        <a-button
+          type="text"
+          size="small"
+          aria-label="配置会话"
+          title="配置会话"
+          @click.stop="configure"
+        >
+          <SettingOutlined />
+        </a-button>
+      </a-badge>
       <a-tag :color="tierColor">{{ tierLabel }}</a-tag>
     </template>
 
@@ -48,36 +44,16 @@
 </template>
 
 <script setup>
-import { computed, ref, nextTick } from 'vue'
-import { FolderOpenOutlined, EditOutlined } from '@ant-design/icons-vue'
-import { useSessionsStore } from '../stores/sessions.js'
-import GatewayRelayToggle from './gateway/GatewayRelayToggle.vue'
+import { computed } from 'vue'
+import { FolderOpenOutlined, SettingOutlined } from '@ant-design/icons-vue'
+import { deriveSessionConfigState } from '../sessionConfigPresentation.js'
 
 const props = defineProps({ session: { type: Object, required: true } })
-const emit = defineEmits(['open'])
-const sessions = useSessionsStore()
+const emit = defineEmits(['open', 'configure'])
+const view = computed(() => deriveSessionConfigState(props.session))
 
-const editingId = ref(null)
-const editDraft = ref('')
-const nameInputRef = ref(null)
-
-function startEdit() {
-  editingId.value = props.session.id
-  editDraft.value = props.session.displayName || ''
-  nextTick(() => nameInputRef.value?.focus())
-}
-async function saveEdit() {
-  const id = editingId.value
-  if (!id) return
-  const name = editDraft.value.trim()
-  if (name && name !== props.session.displayName) {
-    await sessions.updateName(id, name)
-  }
-  editingId.value = null
-}
-function cancelEdit() {
-  editingId.value = null
-  editDraft.value = ''
+function configure() {
+  emit('configure', props.session.id)
 }
 
 const isWaiting = computed(() => props.session.status === 'waiting')
@@ -110,12 +86,7 @@ function fmtShort(ts) {
 .session-card.waiting { border-color: #faad14; box-shadow: 0 0 0 2px rgba(250,173,20,.25); }
 .card-title { display: flex; align-items: center; gap: 6px; }
 .card-title .icon { font-size: 16px; }
-.card-title .name-wrap { display: inline-flex; align-items: center; gap: 2px; }
-.card-title .name { font-weight: 600; }
-.card-title .name-edit-icon { font-size: 12px; color: #bfbfbf; cursor: pointer; opacity: 0; transition: opacity .15s; }
-.card-title .name-wrap:hover .name-edit-icon { opacity: 1; }
-.card-title .name-edit-icon:hover { color: #1677ff; }
-.card-title .name-input { width: auto; min-width: 120px; max-width: 240px; font-weight: 600; }
+.card-title .name { min-width: 0; overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .card-title .status-badge { margin-left: auto; }
 .cwd { font-size: 12px; color: #8c8c8c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 4px; }
 .sep { color: #d9d9d9; }
