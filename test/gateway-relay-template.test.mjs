@@ -10,6 +10,7 @@ const componentUrl = new URL(
 )
 const sessionCardUrl = new URL('../src/components/SessionCard.vue', import.meta.url)
 const sessionDetailUrl = new URL('../src/views/SessionDetail.vue', import.meta.url)
+const sessionConfigUrl = new URL('../src/components/SessionConfigModal.vue', import.meta.url)
 const workbenchUrl = new URL('../src/views/Workbench.vue', import.meta.url)
 
 test('GatewayRelayToggle exposes one accessible, store-backed session relay control', () => {
@@ -33,15 +34,16 @@ test('GatewayRelayToggle exposes one accessible, store-backed session relay cont
   assert.doesNotMatch(source, /v-html/)
 })
 
-test('session cards and workbench panes use the shared relay control', () => {
+test('session cards and the shared configuration modal use the relay control', () => {
   const sessionCard = readFileSync(sessionCardUrl, 'utf8')
   const sessionDetail = readFileSync(sessionDetailUrl, 'utf8')
+  const sessionConfig = readFileSync(sessionConfigUrl, 'utf8')
   const workbench = readFileSync(workbenchUrl, 'utf8')
 
   assert.match(sessionCard, /<GatewayRelayToggle[^>]*:session-id="session\.id"/)
-  assert.match(sessionDetail, /<GatewayRelayToggle[^>]*:session-id="pane\.sessionId"/)
+  assert.match(sessionConfig, /<GatewayRelayToggle[^>]*:session-id="session\.id"/)
   assert.doesNotMatch(sessionCard, /relaySwitching|relay-icon|toggleRelay/)
-  assert.doesNotMatch(sessionDetail, /paneRelayOn|togglePaneRelay/)
+  assert.doesNotMatch(sessionDetail, /GatewayRelayToggle|paneRelayOn|togglePaneRelay/)
   assert.match(workbench, /gateway\.init\(\)/)
 })
 

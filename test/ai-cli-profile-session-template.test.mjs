@@ -2,16 +2,17 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
-const source = readFileSync(new URL('../src/views/SessionDetail.vue', import.meta.url), 'utf8')
+const source = readFileSync(new URL('../src/components/SessionConfigModal.vue', import.meta.url), 'utf8')
 
-test('each Codex pane shows its profile and hides legacy provider controls for managed selection', () => {
-  assert.match(source, /profileNameForSession/)
-  assert.match(source, /由档案管理/)
-  assert.match(source, /!sessions\.byId\(pane\.sessionId\)\?\.profileId/)
+test('the session configuration modal owns Codex profile and Provider selection', () => {
+  assert.match(source, /view\.profileCapable/)
+  assert.match(source, /view\.providerEditable/)
+  assert.match(source, /view\.explicitProviderVisible/)
   assert.match(source, /setSessionProfile/)
-  assert.match(source, /isProfileSession/)
   assert.match(source, /profilesForSession/)
   assert.match(source, /profile\.canStart/)
+  assert.match(source, /setCodexProviderPolicy/)
+  assert.match(source, /setCodexExplicitProvider/)
 })
 
 test('running profile switches require an explicit restart decision and cancellation is inert', () => {

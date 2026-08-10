@@ -36,19 +36,18 @@ function attribute(node, name) {
   return node.props.find((prop) => prop.type === NodeTypes.ATTRIBUTE && prop.name === name)?.value?.content
 }
 
-test('each populated Codex pane exposes the session diagnostics entry', () => {
-  const { ast } = loadTemplate('../src/views/SessionDetail.vue')
+test('the shared session configuration modal exposes the diagnostics entry', () => {
+  const { ast } = loadTemplate('../src/components/SessionConfigModal.vue')
   const buttons = findElements(ast, (node) => node.tag === 'a-button')
-  const diagnosticButton = buttons.find((node) => staticText(node) === '诊断')
+  const diagnosticButton = buttons.find((node) => staticText(node) === '会话诊断')
 
   assert.ok(diagnosticButton)
-  assert.equal(directive(diagnosticButton, 'if')?.exp?.content, 'pane.sessionId && isProfileSession(pane.sessionId)')
-  assert.equal(directive(diagnosticButton, 'on')?.exp?.content, 'openSessionDiagnostics(i)')
+  assert.equal(directive(diagnosticButton, 'on')?.exp?.content, 'diagnosticsVisible = true')
 
   const modal = findElements(ast, (node) => node.tag === 'SessionDiagnosticsModal')[0]
   assert.ok(modal)
   assert.equal(directive(modal, 'model')?.arg?.content, 'open')
-  assert.equal(directive(modal, 'bind')?.arg?.content, 'session-id')
+  assert.equal(directive(modal, 'bind', 'session-id')?.exp?.content, 'sessionId')
 })
 
 test('session diagnostics modal renders the safe binding contract and gates repair', () => {

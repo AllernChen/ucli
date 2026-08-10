@@ -97,21 +97,18 @@
                     @dblclick="openInNewPane(s.id)"
                   >
                     <div class="item-head">
-                      <span v-if="nameEditId !== s.id" class="item-name-wrap">
-                        <span class="item-name">{{ s.displayName || s.adapterId }}</span>
-                        <EditOutlined class="item-name-edit-icon" @click.stop="startNameEdit(s)" title="重命名" />
-                      </span>
-                      <a-input
-                        v-else
-                        ref="nameEditRef"
-                        v-model:value="nameEditDraft"
-                        size="small"
-                        class="item-name-input"
-                        @click.stop
-                        @press-enter="saveNameEdit"
-                        @blur="saveNameEdit"
-                        @keydown.escape.prevent="cancelNameEdit"
-                      />
+                      <span class="item-name">{{ s.displayName || s.adapterId }}</span>
+                      <a-badge :dot="sessionConfigNeedsAttention(s.id)" status="warning">
+                        <a-button
+                          type="text"
+                          size="small"
+                          aria-label="配置会话"
+                          title="配置会话"
+                          @click.stop="openSessionConfig(s.id)"
+                        >
+                          <SettingOutlined />
+                        </a-button>
+                      </a-badge>
                       <span :class="['status-dot', s.status]"></span>
                     </div>
                     <span
@@ -163,44 +160,58 @@
             <span v-if="pane.sessionId" class="pane-session">
               {{ (sessions.byId(pane.sessionId)?.icon) || '•' }}
               {{ (sessions.byId(pane.sessionId)?.displayName || pane.sessionId.slice(0,8)) }}
-              <a-tag v-if="isProfileSession(pane.sessionId)" color="purple">档案：{{ profileNameForSession(pane.sessionId) }}</a-tag>
               <span :class="['status-dot', sessions.byId(pane.sessionId)?.status]"></span>
             </span>
             <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
             <a-space size="small">
-              <a-button
-                v-if="pane.sessionId && isProfileSession(pane.sessionId)"
-                size="small"
-                type="text"
-                @click.stop="openSessionDiagnostics(i)"
-              >诊断</a-button>
+              <a-badge v-if="pane.sessionId" :dot="sessionConfigNeedsAttention(pane.sessionId)" status="warning">
+                <a-button
+                  size="small"
+                  type="text"
+                  aria-label="配置会话"
+                  title="配置会话"
+                  @click.stop="openSessionConfig(pane.sessionId)"
+                >
+                  <SettingOutlined />
+                </a-button>
+              </a-badge>
               <a-button
                 v-if="pane.sessionId"
                 size="small"
                 type="text"
                 @click.stop="togglePaneHistory(i)"
                 :title="pane.viewMode === 'history' ? '返回实时终端' : '查看完整历史记录'"
+                :aria-label="pane.viewMode === 'history' ? '返回实时终端' : '查看完整历史记录'"
               >
                 {{ pane.viewMode === 'history' ? '终端' : '历史' }}
               </a-button>
-              <GatewayRelayToggle v-if="pane.sessionId" :session-id="pane.sessionId" compact />
               <a-button
                 v-if="pane.sessionId && !gridFullscreen"
                 size="small"
                 type="text"
                 @click.stop="togglePaneFullscreen(i)"
                 :title="fullscreenPane === i ? '退出全屏' : '全屏显示当前会话'"
+                aria-label="切换会话全屏"
               >
                 <FullscreenExitOutlined v-if="fullscreenPane === i" />
                 <FullscreenOutlined v-else />
               </a-button>
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="openNote(i)" title="备注">📝</a-button>
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="interruptPane(i)" title="中断">⏹</a-button>
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="stopPane(i)" title="停止 CLI 进程并保留会话">停止</a-button>
-              <a-button v-if="pane.sessionId" size="small" type="text" @click.stop="clearPane(i)" title="仅关闭窗格，会话继续运行">关闭</a-button>
-              <a-popconfirm v-if="pane.sessionId" title="从 UCLI 移除会话？源会话和用量统计会保留。" @confirm="deletePane(i)" @click.stop>
-                <a-button size="small" type="text" danger title="移除 UCLI 记录">移除</a-button>
-              </a-popconfirm>
+              <a-button
+                v-if="pane.sessionId && sessionConfigCanInterrupt(pane.sessionId)"
+                size="small"
+                type="text"
+                aria-label="中断当前任务"
+                title="中断当前任务"
+                @click.stop="interruptPane(i)"
+              >⏹</a-button>
+              <a-button
+                v-if="pane.sessionId"
+                size="small"
+                type="text"
+                aria-label="关闭窗格"
+                title="仅关闭窗格，会话继续运行"
+                @click.stop="clearPane(i)"
+              >关闭</a-button>
             </a-space>
           </div>
           <!-- Pane info bar -->
@@ -214,48 +225,6 @@
             <span class="pi-item">↓{{ fmtNum(sessions.byId(pane.sessionId)?.stats?.tokens?.output) }}</span>
             <span class="pi-item" v-if="sessions.byId(pane.sessionId)?.stats?.costUsd">${{ sessions.byId(pane.sessionId).stats.costUsd.toFixed(4) }}</span>
             <span class="pi-item">{{ sessions.byId(pane.sessionId)?.stats?.turns || 0 }} 轮</span>
-            <a-select
-              v-if="isProfileSession(pane.sessionId)"
-              :value="sessions.byId(pane.sessionId)?.profileId || 'system'"
-              size="small"
-              style="width: 150px"
-              @click.stop
-              @change="setSessionProfile(pane.sessionId, $event)"
-            >
-              <a-select-option value="system">系统 / 来源策略</a-select-option>
-              <a-select-option v-for="profile in profilesForSession(pane.sessionId)" :key="profile.id" :value="profile.id" :disabled="!profile.canStart">
-                {{ profile.name }}{{ profile.canStart ? '' : '（不可用）' }}
-              </a-select-option>
-            </a-select>
-            <span v-if="isProfileSession(pane.sessionId) && sessions.byId(pane.sessionId)?.profileId" class="pi-item">由档案管理</span>
-            <a-select
-              v-if="isCodexSession(pane.sessionId) && !sessions.byId(pane.sessionId)?.profileId"
-              :value="sessions.byId(pane.sessionId)?.providerPolicy || 'live'"
-              size="small"
-              style="width: 108px"
-              @click.stop
-              @change="setCodexProviderPolicy(pane.sessionId, $event)"
-            >
-              <a-select-option value="source">来源 Provider</a-select-option>
-              <a-select-option value="live">跟随当前</a-select-option>
-              <a-select-option value="explicit">显式指定</a-select-option>
-            </a-select>
-            <a-select
-              v-if="isCodexSession(pane.sessionId) && !sessions.byId(pane.sessionId)?.profileId && sessions.byId(pane.sessionId)?.providerPolicy === 'explicit'"
-              :value="sessions.byId(pane.sessionId)?.explicitProvider || codexRuntime?.currentProvider"
-              size="small"
-              style="width: 130px"
-              @click.stop
-              @change="setCodexExplicitProvider(pane.sessionId, $event)"
-            >
-              <a-select-option v-for="provider in codexRuntime?.availableProviders || []" :key="provider" :value="provider">{{ provider }}</a-select-option>
-            </a-select>
-            <span v-if="isCodexSession(pane.sessionId) && !sessions.byId(pane.sessionId)?.profileId && codexProviderStatus(pane.sessionId)" class="pi-item provider-warning">{{ codexProviderStatus(pane.sessionId) }}</span>
-            <span v-if="isProfileSession(pane.sessionId) && profileRuntimeNoticeForSession(pane.sessionId)" class="pi-item provider-warning">
-              {{ profileRuntimeNoticeForSession(pane.sessionId) }}
-              <a-button v-if="sessions.byId(pane.sessionId)?.restartRequired" type="link" size="small" @click.stop="restartWithPendingProfile(pane.sessionId)">立即重启</a-button>
-            </span>
-            <span class="pi-item sid">{{ sessions.byId(pane.sessionId)?.id?.slice(0,8) }}</span>
           </div>
           <!-- Terminal container -->
           <div
@@ -272,24 +241,11 @@
       </div>
     </div>
 
-    <!-- Task note modal -->
-    <a-modal v-model:open="noteVisible" title="会话备注" @ok="saveNote" okText="保存" cancelText="取消">
-      <a-textarea v-model:value="noteDraft" :rows="6" placeholder="标记进度、下一步计划…" />
-    </a-modal>
-
-    <SessionDiagnosticsModal
-      v-model:open="sessionDiagnosticsVisible"
-      :session-id="sessionDiagnosticsSessionId"
+    <SessionConfigModal
+      v-model:open="sessionConfig.open"
+      :session-id="sessionConfig.sessionId"
+      @removed="handleConfiguredSessionRemoved"
     />
-
-    <a-modal :open="profileSwitch.open" title="切换配置档案" :footer="null" :closable="false">
-      <p>该会话正在运行。可以保留当前进程并在下次重启时生效，也可以现在重启。</p>
-      <div class="modal-footer">
-        <a-button @click="cancelProfileSwitch">取消</a-button>
-        <a-button @click="applyProfileSwitch(false)">下次重启生效</a-button>
-        <a-button type="primary" @click="applyProfileSwitch(true)">立即重启</a-button>
-      </div>
-    </a-modal>
 
     <!-- Import historical sessions modal -->
     <a-modal v-model:open="showImport" title="导入历史会话" :footer="null" width="640px">
@@ -383,7 +339,7 @@ import {
   FullscreenExitOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
-  EditOutlined,
+  SettingOutlined,
   DownOutlined,
   RightOutlined,
   FolderOpenOutlined
@@ -392,7 +348,6 @@ import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { useGatewayStore } from '../stores/gateway.js'
 import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
-import { profileRuntimeNotice } from '../profilePresentation.js'
 import { matchesBinding } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { groupSessionsByProject } from '../sessionGrouping.js'
@@ -401,11 +356,11 @@ import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldBlockDuplicate
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { compactPaneSessionIds } from '../paneCompaction.js'
 import PaneHistory from '../components/PaneHistory.vue'
-import SessionDiagnosticsModal from '../components/SessionDiagnosticsModal.vue'
+import SessionConfigModal from '../components/SessionConfigModal.vue'
 import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
-import GatewayRelayToggle from '../components/gateway/GatewayRelayToggle.vue'
 import GatewayChannelIcon from '../components/gateway/GatewayChannelIcon.vue'
 import { deriveGatewayRelayControl } from '../gatewayRelayPresentation.js'
+import { deriveSessionConfigState } from '../sessionConfigPresentation.js'
 import { terminalSizeChanged } from '../terminalResize.js'
 import {
   reconcileSessionPanes,
@@ -460,126 +415,32 @@ const activePane = computed({
 // Each pane: { id, sessionId, viewMode, term, fitAddon, resizeObserver }
 const panes = ref([])
 const assignedPaneCount = computed(() => panes.value.filter((pane) => pane.sessionId).length)
-const codexRuntime = ref(null)
-let stopCodexRuntimeListener = null
-
-function isCodexSession(sessionId) {
-  return sessions.byId(sessionId)?.adapterId === 'codex'
-}
-
-function isProfileSession(sessionId) {
-  return ['codex', 'claude'].includes(sessions.byId(sessionId)?.adapterId)
-}
-
-function profilesForSession(sessionId) {
-  const adapterId = sessions.byId(sessionId)?.adapterId
-  return profilesForAdapter(adapterId)
-}
 
 const profileAdapterIds = ['codex', 'claude']
 const profilesForAdapter = (adapterId) => aiProfiles.profiles.filter((profile) => profile.adapterId === adapterId)
 const profileAdapterName = (adapterId) => sessions.adapters.find((adapter) => adapter.id === adapterId)?.displayName || adapterId
 
-function profileName(profileId) {
-  return aiProfiles.profileById(profileId)?.name || (profileId ? '不可用档案' : '系统当前')
+const sessionConfig = ref({ open: false, sessionId: '' })
+
+function sessionConfigView(sessionId) {
+  return deriveSessionConfigState(sessions.byId(sessionId) || {})
 }
 
-function profileNameForSession(sessionId) {
-  const session = sessions.byId(sessionId)
-  if (!session) return '系统当前'
-  if (session.activeProfileId && session.activeProfileId !== session.profileId) {
-    return `${profileName(session.activeProfileId)} → ${profileName(session.profileId)}`
-  }
-  if (session.profileId) return profileName(session.profileId)
-  return session.providerPolicy === 'source' ? '历史来源' : '系统当前'
+function sessionConfigNeedsAttention(sessionId) {
+  return sessionConfigView(sessionId).needsAttention
 }
 
-function profileRuntimeNoticeForSession(sessionId) {
-  return profileRuntimeNotice(sessions.byId(sessionId) || {})
+function sessionConfigCanInterrupt(sessionId) {
+  return sessionConfigView(sessionId).canInterrupt
 }
 
-const profileSwitch = ref({ open: false, sessionId: '', profileId: null })
-
-async function setSessionProfile(sessionId, value) {
-  const session = sessions.byId(sessionId)
-  const profileId = value === 'system' ? null : value
-  if (!session || session.profileId === profileId) return
-  const active = !['offline', 'exited', 'error'].includes(session.status)
-  if (active) {
-    profileSwitch.value = { open: true, sessionId, profileId }
-    return
-  }
-  try {
-    await sessions.setProfile(sessionId, profileId)
-  } catch (error) {
-    message.error('切换档案失败：' + (error?.message || error))
-  }
+function openSessionConfig(sessionId) {
+  sessionConfig.value = { open: true, sessionId }
 }
 
-function cancelProfileSwitch() {
-  profileSwitch.value = { open: false, sessionId: '', profileId: null }
-}
-
-async function applyProfileSwitch(restartNow) {
-  const { sessionId, profileId } = profileSwitch.value
-  cancelProfileSwitch()
-  if (!sessionId) return
-  try {
-    await sessions.setProfile(sessionId, profileId)
-    if (restartNow) {
-      await sessions.stop(sessionId)
-      await sessions.restart(sessionId)
-    } else {
-      message.info('档案已保存，将在下次重启生效')
-    }
-  } catch (error) {
-    message.error('切换档案失败：' + (error?.message || error))
-  }
-}
-
-async function restartWithPendingProfile(sessionId) {
-  try {
-    const session = sessions.byId(sessionId)
-    if (session?.status !== 'offline') await sessions.stop(sessionId)
-    await sessions.restart(sessionId)
-  } catch (error) {
-    message.error('重启失败：' + (error?.message || error))
-  }
-}
-
-function codexProviderStatus(sessionId) {
-  const session = sessions.byId(sessionId)
-  if (!session) return ''
-  if (session.restartRequired) {
-    return session.pendingProviderWarning === 'explicit_provider_unavailable'
-      ? '显式 Provider 已不可用；请重新选择后再重启。'
-      : `配置已变更；重启后将使用 ${session.pendingProvider || '当前配置'}。`
-  }
-  if (session.providerWarning === 'explicit_provider_unavailable') {
-    return '显式 Provider 已不可用；请重新选择后启动。'
-  }
-  return session.providerWarning ? '来源 Provider 已不可用，将使用当前配置。' : ''
-}
-
-async function setCodexProviderPolicy(sessionId, policy) {
-  const session = sessions.byId(sessionId)
-  const explicitProvider = policy === 'explicit'
-    ? (session?.explicitProvider || codexRuntime.value?.currentProvider || null)
-    : undefined
-  try {
-    await sessions.updateCodexProviderPolicy(sessionId, { policy, explicitProvider })
-    message.success('Codex Provider 策略已保存；正在运行的会话不会自动重启。')
-  } catch (error) {
-    message.error('保存 Provider 策略失败：' + (error?.message || error))
-  }
-}
-
-async function setCodexExplicitProvider(sessionId, explicitProvider) {
-  try {
-    await sessions.updateCodexProviderPolicy(sessionId, { policy: 'explicit', explicitProvider })
-  } catch (error) {
-    message.error('保存 Codex Provider 失败：' + (error?.message || error))
-  }
+function handleConfiguredSessionRemoved(sessionId) {
+  const paneIndex = panes.value.findIndex((pane) => pane.sessionId === sessionId)
+  if (paneIndex >= 0) compactPanes(paneIndex)
 }
 // Refs storage for pane terminal containers
 const paneRefs = {}
@@ -595,29 +456,6 @@ function setPaneRootRef(i, el) {
 
 // IPC unsubscribers per pane
 const unsubs = {}
-
-// Inline name editing
-const nameEditId = ref(null)
-const nameEditDraft = ref('')
-const nameEditRef = ref(null)
-function startNameEdit(s) {
-  nameEditId.value = s.id
-  nameEditDraft.value = s.displayName || ''
-  nextTick(() => nameEditRef.value?.focus())
-}
-async function saveNameEdit() {
-  const id = nameEditId.value
-  if (!id) return
-  const name = nameEditDraft.value.trim()
-  if (name && name !== sessions.byId(id)?.displayName) {
-    await sessions.updateName(id, name)
-  }
-  nameEditId.value = null
-}
-function cancelNameEdit() {
-  nameEditId.value = null
-  nameEditDraft.value = ''
-}
 
 // Filters
 const filter = ref({ search: '', status: [] })
@@ -1051,20 +889,6 @@ function clearPane(i) {
   if (!panes.value[i]?.sessionId) return
   compactPanes(i)
 }
-async function stopPane(i) {
-  const sid = panes.value[i]?.sessionId
-  if (!sid) return
-  await sessions.stop(sid)
-  message.success('会话已离线保存')
-}
-async function deletePane(i) {
-  const sid = panes.value[i]?.sessionId
-  if (!sid) return
-  await sessions.deleteSession(sid)
-  compactPanes(i)
-  message.success('会话已从 UCLI 移除，源会话和用量统计已保留')
-}
-
 function compactPanes(omitIndex) {
   const next = compactPaneSessionIds(panes.value.map((pane) => pane.sessionId), omitIndex)
   for (let i = 0; i < panes.value.length; i++) {
@@ -1086,31 +910,6 @@ function compactPanes(omitIndex) {
 function interruptPane(i) {
   const sid = panes.value[i]?.sessionId
   if (sid) sessions.interrupt(sid)
-}
-
-let noteVisible = ref(false)
-let noteSessionId = ref(null)
-let noteDraft = ref('')
-function openNote(i) {
-  const sid = panes.value[i]?.sessionId
-  if (!sid) return
-  noteSessionId.value = sid
-  noteDraft.value = sessions.byId(sid)?.taskNote || ''
-  noteVisible.value = true
-}
-async function saveNote() {
-  if (!noteSessionId.value) return
-  await sessions.updateNote(noteSessionId.value, noteDraft.value.trim())
-  noteVisible.value = false
-}
-
-const sessionDiagnosticsVisible = ref(false)
-const sessionDiagnosticsSessionId = ref('')
-function openSessionDiagnostics(i) {
-  const sessionId = panes.value[i]?.sessionId
-  if (!sessionId || !isProfileSession(sessionId)) return
-  sessionDiagnosticsSessionId.value = sessionId
-  sessionDiagnosticsVisible.value = true
 }
 
 // Import historical sessions
@@ -1253,8 +1052,6 @@ onDeactivated(deactivateWorkbench)
 
 onMounted(async () => {
   await Promise.all([sessions.init(), settings.load(), gateway.init(), aiProfiles.load()])
-  codexRuntime.value = await ipc.getCodexRuntime().catch(() => null)
-  stopCodexRuntimeListener = ipc.onCodexRuntime((snapshot) => { codexRuntime.value = snapshot })
   await sessions.loadWorkbench()
   sessionListHidden.value = sessions.workbench.sessionListHidden // sync after load
   const savedIds = sessions.workbench.paneSessionIds
@@ -1283,7 +1080,6 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  stopCodexRuntimeListener?.()
   deactivateWorkbench()
   for (let i = 0; i < panes.value.length; i++) {
     destroyPaneTerminal(i)
@@ -1337,12 +1133,7 @@ onBeforeUnmount(() => {
 .session-item:hover { background: #f5f5f5; }
 .session-item.assigned { background: #e6f4ff; border-color: #1677ff; }
 .item-head { display: flex; align-items: center; gap: 4px; }
-.item-name-wrap { display: inline-flex; align-items: center; gap: 2px; flex: 1; overflow: hidden; }
-.item-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.item-name-edit-icon { font-size: 11px; color: #bfbfbf; cursor: pointer; flex-shrink: 0; opacity: 0; transition: opacity .12s; }
-.item-name-wrap:hover .item-name-edit-icon { opacity: 1; }
-.item-name-edit-icon:hover { color: #1677ff; }
-.item-name-input { width: auto; min-width: 80px; max-width: 160px; font-size: 12px; font-weight: 600; }
+.item-name { flex: 1; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-relay-state { display: inline-flex; align-items: center; gap: 3px; margin-top: 2px; font-size: 10px; color: #8c8c8c; }
 .session-relay-state.tone-blue { color: #1677ff; }
 .session-relay-state.tone-green { color: #389e0d; }
