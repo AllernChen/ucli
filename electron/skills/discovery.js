@@ -16,7 +16,7 @@ function pathIsWithin(root, candidate) {
 function inspectEntry(entryPath) {
   const stat = lstatSync(entryPath)
   if (!stat.isDirectory() && !stat.isSymbolicLink()) return null
-  if (!stat.isSymbolicLink()) return { resolvedPath: entryPath, link: null }
+  if (!stat.isSymbolicLink()) return { resolvedPath: realpathSync(entryPath), link: null }
   if (!existsSync(entryPath)) {
     const rawTarget = readlinkSync(entryPath).replace(/^\\\\\?\\/, '')
     const targetPath = isAbsolute(rawTarget) ? rawTarget : resolve(dirname(entryPath), rawTarget)

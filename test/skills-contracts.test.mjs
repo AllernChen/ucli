@@ -52,7 +52,7 @@ test('GitHub source never retains embedded credentials', () => {
 })
 
 test('skill roots resolve user and project scopes for all adapters', () => {
-  const project = join('C:', 'work', 'demo')
+  const project = join(homedir(), 'work', 'demo')
   const home = homedir()
   assert.equal(resolveSkillRoot({ adapterId: 'claude', scopeType: 'project', projectPath: project }), join(project, '.claude', 'skills'))
   assert.equal(resolveSkillRoot({ adapterId: 'codex', scopeType: 'user', home }), join(home, '.agents', 'skills'))

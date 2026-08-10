@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import test from 'node:test'
@@ -672,7 +672,7 @@ test('Claude root remains Claude-owned when its entry links into agents storage'
     assert.deepEqual(sources.map((source) => source.adapterId).sort(), ['claude', 'codex'])
     assert.equal(claude.sourceKind, 'claude_user')
     assert.equal(claude.entryPath, entry)
-    assert.equal(claude.resolvedPath, target)
+    assert.equal(claude.resolvedPath, realpathSync(target))
     assert.equal(claude.link.status, 'valid')
   })
 })
@@ -768,6 +768,32 @@ test('Claude plugin Skills only load from installed_plugins.json, not stale cach
       locator: 'https://github.com/obra/superpowers'
     })
     assert.equal(source.installationId, null)
+  })
+})
+
+test('Claude plugin Skills remain discoverable through an aliased install root', async () => {
+  await withService(async ({ root, service }) => {
+    const pluginsRoot = join(root, 'home', '.claude', 'plugins')
+    const actualInstall = join(root, 'plugin-store', 'superpowers', '5.1.0')
+    const aliasedInstall = join(pluginsRoot, 'cache', 'superpowers', '5.1.0')
+    createSkill(join(actualInstall, 'skills', 'writing-plans'), 'Write implementation plans', 'writing-plans')
+    createDirectoryLink(actualInstall, aliasedInstall)
+    writeFileSync(join(pluginsRoot, 'installed_plugins.json'), JSON.stringify({
+      version: 2,
+      plugins: {
+        'superpowers@superpowers-marketplace': [{
+          scope: 'user',
+          installPath: aliasedInstall,
+          version: '5.1.0'
+        }]
+      }
+    }))
+
+    const source = findSource(await service.getState(), 'writing-plans', 'claude')
+
+    assert.ok(source)
+    assert.equal(source.entryPath, join(aliasedInstall, 'skills', 'writing-plans'))
+    assert.equal(source.resolvedPath, join(actualInstall, 'skills', 'writing-plans'))
   })
 })
 
