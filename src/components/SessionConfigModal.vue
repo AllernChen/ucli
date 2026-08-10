@@ -226,6 +226,7 @@ const diagnosticsVisible = ref(false)
 const codexRuntime = ref(null)
 const profileSwitch = ref({ open: false, profileId: null })
 let stopCodexRuntimeListener = null
+let runtimeSubscriptionVersion = 0
 
 const adapterLabel = computed(() => {
   if (!session.value) return '—'
@@ -269,16 +270,24 @@ function resetDrafts() {
 }
 
 function stopRuntimeSubscription() {
+  runtimeSubscriptionVersion += 1
   stopCodexRuntimeListener?.()
   stopCodexRuntimeListener = null
 }
 
 async function syncRuntimeSubscription() {
   stopRuntimeSubscription()
+  const subscriptionVersion = runtimeSubscriptionVersion
   codexRuntime.value = null
   if (!props.open || session.value?.adapterId !== 'codex') return
   try {
-    codexRuntime.value = await ipc.getCodexRuntime()
+    const snapshot = await ipc.getCodexRuntime()
+    if (
+      subscriptionVersion !== runtimeSubscriptionVersion ||
+      !props.open ||
+      session.value?.adapterId !== 'codex'
+    ) return
+    codexRuntime.value = snapshot
     stopCodexRuntimeListener = ipc.onCodexRuntime((snapshot) => {
       codexRuntime.value = snapshot
     })
@@ -291,7 +300,7 @@ watch(
   () => [props.open, props.sessionId, session.value?.adapterId],
   () => {
     resetDrafts()
-    if (props.open) aiProfiles.load()
+    if (props.open) aiProfiles.load(session.value?.cwd || '').catch(() => {})
     syncRuntimeSubscription()
   },
   { immediate: true }

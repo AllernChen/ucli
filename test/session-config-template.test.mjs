@@ -98,6 +98,15 @@ test('session configuration modal does not expose secrets or render provider con
   assert.equal(findElements(ast, (node) => hasDirective(node, 'html')).length, 0)
 })
 
+test('session configuration modal invalidates stale Codex runtime subscriptions', () => {
+  const { source } = loadComponent('../src/components/SessionConfigModal.vue')
+
+  assert.match(source, /runtimeSubscriptionVersion \+= 1/)
+  assert.match(source, /subscriptionVersion !== runtimeSubscriptionVersion/)
+  assert.match(source, /session\.value\?\.adapterId !== 'codex'/)
+  assert.match(source, /aiProfiles\.load\(session\.value\?\.cwd \|\| ''\)\.catch/)
+})
+
 test('populated pane headers retain only five basic operations and one shared configuration modal', () => {
   const { ast } = loadComponent('../src/views/SessionDetail.vue')
   const paneHeader = findElements(ast, (node) => node.tag === 'div' && hasClass(node, 'pane-header'))[0]
