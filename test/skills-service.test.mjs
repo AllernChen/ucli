@@ -652,7 +652,7 @@ test('agents root is Codex-owned and does not imply Claude visibility', async ()
 
     assert.equal(source.sourceKind, 'codex_user')
     assert.equal(source.entryPath, skillPath)
-    assert.equal(source.resolvedPath, skillPath)
+    assert.equal(source.resolvedPath, realpathSync(skillPath))
     assert.equal(source.health, 'ready')
     assert.equal(source.visibility.codex.direct, true)
     assert.equal(source.visibility.claude.visible, false)
@@ -793,7 +793,7 @@ test('Claude plugin Skills remain discoverable through an aliased install root',
 
     assert.ok(source)
     assert.equal(source.entryPath, join(aliasedInstall, 'skills', 'writing-plans'))
-    assert.equal(source.resolvedPath, join(actualInstall, 'skills', 'writing-plans'))
+    assert.equal(source.resolvedPath, realpathSync(join(actualInstall, 'skills', 'writing-plans')))
   })
 })
 
