@@ -1,5 +1,3 @@
-const ACTIVE_STATUSES = new Set(['running', 'idle', 'waiting', 'starting'])
-const INTERRUPTIBLE_STATUSES = new Set(['running', 'idle', 'waiting'])
 const PROFILE_ADAPTERS = new Set(['codex', 'claude'])
 
 export function deriveSessionConfigState(session = {}) {
@@ -23,9 +21,6 @@ export function deriveSessionConfigState(session = {}) {
     profileCapable,
     providerEditable,
     explicitProviderVisible: providerEditable && session.providerPolicy === 'explicit',
-    canInterrupt: INTERRUPTIBLE_STATUSES.has(session.status),
-    canStop: ACTIVE_STATUSES.has(session.status),
-    canRestart: session.canStart !== false,
     needsAttention: Boolean(attentionCode),
     attentionCode,
     attentionText

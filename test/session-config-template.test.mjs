@@ -43,17 +43,17 @@ function directiveExpression(node, name) {
   return node.props?.find((prop) => prop.type === NodeTypes.DIRECTIVE && prop.name === name)?.exp?.content
 }
 
-test('session configuration modal groups low-frequency controls into four sections', () => {
+test('session configuration modal contains configuration but no routine maintenance section', () => {
   const { ast } = loadComponent('../src/components/SessionConfigModal.vue')
   const headings = findElements(ast, (node) => node.tag === 'h3')
     .map((node) => textContent(node).trim())
 
-  assert.deepEqual(headings, ['会话信息', '运行配置', '协作与诊断', '会话维护'])
+  assert.deepEqual(headings, ['会话信息', '运行配置', '协作与诊断'])
   assert.equal(findElements(ast, (node) => node.tag === 'GatewayRelayToggle').length, 1)
   assert.equal(findElements(ast, (node) => node.tag === 'SessionDiagnosticsModal').length, 1)
 })
 
-test('session configuration modal exposes profile, Provider, and lifecycle controls', () => {
+test('session configuration modal exposes profile and Provider controls', () => {
   const { source, ast } = loadComponent('../src/components/SessionConfigModal.vue')
   const visibleText = textContent(ast)
 
@@ -63,32 +63,24 @@ test('session configuration modal exposes profile, Provider, and lifecycle contr
     '来源 Provider',
     '跟随当前',
     '显式指定',
-    '会话诊断',
-    '停止进程',
-    '重启会话',
-    '移除 UCLI 记录'
+    '会话诊断'
   ]) {
     assert.match(visibleText, new RegExp(label))
   }
   for (const handler of [
     'saveBasics',
     'setSessionProfile',
-    'setCodexProviderPolicy',
-    'stopSession',
-    'restartSession',
-    'removeSession'
+    'setCodexProviderPolicy'
   ]) {
     assert.match(source, new RegExp(handler))
   }
 })
 
-test('dangerous session removal never masquerades as closing a pane', () => {
-  const { source, ast } = loadComponent('../src/components/SessionConfigModal.vue')
-  const visibleText = textContent(ast)
+test('session settings never own layout or routine maintenance actions', () => {
+  const { source } = loadComponent('../src/components/SessionConfigModal.vue')
 
-  assert.match(visibleText, /停止 CLI 进程并保留会话/)
-  assert.match(visibleText, /源会话和用量统计会保留/)
-  assert.doesNotMatch(source, /clearPane|compactPanes|关闭窗格/)
+  assert.doesNotMatch(source, /clearPane|compactPanes|关闭窗格|停止进程|移除 UCLI 记录/)
+  assert.doesNotMatch(source, /function stopSession|function restartSession|function removeSession/)
 })
 
 test('session configuration modal does not expose secrets or render provider content as HTML', () => {
@@ -107,23 +99,23 @@ test('session configuration modal invalidates stale Codex runtime subscriptions'
   assert.match(source, /aiProfiles\.load\(session\.value\?\.cwd \|\| ''\)\.catch/)
 })
 
-test('populated pane headers retain only five basic operations and one shared configuration modal', () => {
-  const { ast } = loadComponent('../src/views/SessionDetail.vue')
+test('populated pane headers expose compact settings, viewing, maintenance, and close entry points', () => {
+  const { source, ast } = loadComponent('../src/views/SessionDetail.vue')
   const paneHeader = findElements(ast, (node) => node.tag === 'div' && hasClass(node, 'pane-header'))[0]
   assert.ok(paneHeader)
 
   const buttons = findElements(paneHeader, (node) => node.tag === 'a-button')
   const staticLabels = buttons.map((node) => textContent(node).trim()).filter(Boolean)
-  assert.equal(buttons.length, 5)
+  assert.equal(buttons.length, 4)
   assert.ok(buttons.some((node) => attribute(node, 'aria-label') === '配置会话'))
   assert.ok(buttons.some((node) => directiveExpression(node, 'on') === 'togglePaneHistory(i)'))
   assert.ok(buttons.some((node) => directiveExpression(node, 'on') === 'togglePaneFullscreen(i)'))
-  assert.ok(buttons.some((node) => directiveExpression(node, 'on') === 'interruptPane(i)'))
   assert.ok(buttons.some((node) => directiveExpression(node, 'on') === 'clearPane(i)'))
   assert.ok(staticLabels.includes('关闭'))
   assert.equal(staticLabels.includes('诊断'), false)
-  assert.equal(staticLabels.includes('停止'), false)
-  assert.equal(staticLabels.includes('移除'), false)
+  assert.equal(findElements(paneHeader, (node) => node.tag === 'SessionMaintenanceActions').length, 1)
+  assert.match(source, /@removed="handleConfiguredSessionRemoved"/)
+  assert.doesNotMatch(source, /interruptPane/)
   assert.equal(findElements(paneHeader, (node) => node.tag === 'GatewayRelayToggle').length, 0)
   assert.equal(findElements(ast, (node) => node.tag === 'SessionConfigModal').length, 1)
 })
@@ -154,4 +146,23 @@ test('overview reuses a single session configuration modal for all cards', () =>
   assert.match(source, /@configure="openSessionConfig"/)
   assert.match(source, /function openSessionConfig\(sessionId\)/)
   assert.equal(findElements(ast, (node) => node.tag === 'SessionConfigModal').length, 1)
+})
+
+test('pane maintenance menu distinguishes soft interrupt from process stop', () => {
+  const { source, ast } = loadComponent('../src/components/SessionMaintenanceActions.vue')
+  const visibleText = textContent(ast)
+
+  assert.equal(findElements(ast, (node) => node.tag === 'a-dropdown').length, 1)
+  for (const label of ['会话操作', '中断当前任务', '停止进程', '重启会话', '移除 UCLI 记录']) {
+    assert.match(visibleText, new RegExp(label))
+  }
+  assert.match(visibleText, /只中断当前任务，CLI 进程继续运行/)
+  assert.match(visibleText, /停止整个 CLI 进程，会话转为离线/)
+  assert.match(source, /pendingAction/)
+  assert.match(source, /sessions\.interrupt/)
+  assert.match(source, /sessions\.stop/)
+  assert.match(source, /sessions\.restart/)
+  assert.match(source, /sessions\.deleteSession/)
+  assert.match(source, /emit\('removed', sessionId\)/)
+  assert.doesNotMatch(source, /clearPane|关闭窗格|v-html/)
 })

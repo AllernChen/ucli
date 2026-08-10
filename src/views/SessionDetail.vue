@@ -196,14 +196,11 @@
                 <FullscreenExitOutlined v-if="fullscreenPane === i" />
                 <FullscreenOutlined v-else />
               </a-button>
-              <a-button
-                v-if="pane.sessionId && sessionConfigCanInterrupt(pane.sessionId)"
-                size="small"
-                type="text"
-                aria-label="中断当前任务"
-                title="中断当前任务"
-                @click.stop="interruptPane(i)"
-              >⏹</a-button>
+              <SessionMaintenanceActions
+                v-if="pane.sessionId"
+                :session-id="pane.sessionId"
+                @removed="handleConfiguredSessionRemoved"
+              />
               <a-button
                 v-if="pane.sessionId"
                 size="small"
@@ -244,7 +241,6 @@
     <SessionConfigModal
       v-model:open="sessionConfig.open"
       :session-id="sessionConfig.sessionId"
-      @removed="handleConfiguredSessionRemoved"
     />
 
     <!-- Import historical sessions modal -->
@@ -357,6 +353,7 @@ import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { compactPaneSessionIds } from '../paneCompaction.js'
 import PaneHistory from '../components/PaneHistory.vue'
 import SessionConfigModal from '../components/SessionConfigModal.vue'
+import SessionMaintenanceActions from '../components/SessionMaintenanceActions.vue'
 import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
 import GatewayChannelIcon from '../components/gateway/GatewayChannelIcon.vue'
 import { deriveGatewayRelayControl } from '../gatewayRelayPresentation.js'
@@ -428,10 +425,6 @@ function sessionConfigView(sessionId) {
 
 function sessionConfigNeedsAttention(sessionId) {
   return sessionConfigView(sessionId).needsAttention
-}
-
-function sessionConfigCanInterrupt(sessionId) {
-  return sessionConfigView(sessionId).canInterrupt
 }
 
 function openSessionConfig(sessionId) {
@@ -905,11 +898,6 @@ function compactPanes(omitIndex) {
     viewMode: 'terminal'
   }))
   nextTick(() => createPanes(next.splitCount))
-}
-
-function interruptPane(i) {
-  const sid = panes.value[i]?.sessionId
-  if (sid) sessions.interrupt(sid)
 }
 
 // Import historical sessions

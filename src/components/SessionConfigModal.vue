@@ -75,15 +75,7 @@
             show-icon
             :message="profileNotice"
             class="runtime-alert"
-          >
-            <template #action>
-              <a-button
-                v-if="session.restartRequired"
-                size="small"
-                @click="restartSession"
-              >立即重启</a-button>
-            </template>
-          </a-alert>
+          />
 
           <a-form-item v-if="view.providerEditable" label="Codex Provider 策略">
             <a-select
@@ -139,42 +131,6 @@
         </div>
       </section>
 
-      <section class="config-section maintenance" aria-labelledby="maintenance-heading">
-        <h3 id="maintenance-heading">会话维护</h3>
-        <p class="maintenance-help">停止 CLI 进程并保留会话，稍后仍可重启并恢复。</p>
-        <div class="maintenance-actions">
-          <a-button
-            :disabled="!view.canStop || pendingAction !== ''"
-            :loading="pendingAction === 'stop'"
-            @click="stopSession"
-          >停止进程</a-button>
-          <a-button
-            type="primary"
-            ghost
-            :disabled="!view.canRestart || pendingAction !== ''"
-            :loading="pendingAction === 'restart'"
-            @click="restartSession"
-          >重启会话</a-button>
-        </div>
-        <a-divider />
-        <div class="danger-row">
-          <div>
-            <div class="control-title danger-title">移除 UCLI 记录</div>
-            <div class="control-help">源会话和用量统计会保留，此操作不会删除 CLI 的历史记录。</div>
-          </div>
-          <a-popconfirm
-            title="从 UCLI 移除该会话？"
-            ok-text="移除"
-            ok-type="danger"
-            cancel-text="取消"
-            @confirm="removeSession"
-          >
-            <a-button danger :disabled="pendingAction !== ''" :loading="pendingAction === 'remove'">
-              移除 UCLI 记录
-            </a-button>
-          </a-popconfirm>
-        </div>
-      </section>
     </div>
 
     <SessionDiagnosticsModal
@@ -209,7 +165,7 @@ const props = defineProps({
   open: { type: Boolean, default: false },
   sessionId: { type: String, default: '' }
 })
-const emit = defineEmits(['update:open', 'removed'])
+const emit = defineEmits(['update:open'])
 
 const sessions = useSessionsStore()
 const aiProfiles = useAiCliProfilesStore()
@@ -400,49 +356,6 @@ async function setCodexExplicitProvider(explicitProvider) {
   }
 }
 
-async function stopSession() {
-  if (!session.value || !view.value.canStop) return
-  pendingAction.value = 'stop'
-  try {
-    await sessions.stop(session.value.id)
-    message.success('会话已离线保存')
-  } catch (error) {
-    message.error('停止会话失败：' + (error?.message || error))
-  } finally {
-    pendingAction.value = ''
-  }
-}
-
-async function restartSession() {
-  const current = session.value
-  if (!current || !view.value.canRestart) return
-  pendingAction.value = 'restart'
-  try {
-    if (sessionIsActive(current)) await sessions.stop(current.id)
-    await sessions.restart(current.id)
-    message.success('会话正在重启')
-  } catch (error) {
-    message.error('重启失败：' + (error?.message || error))
-  } finally {
-    pendingAction.value = ''
-  }
-}
-
-async function removeSession() {
-  if (!session.value) return
-  const sessionId = session.value.id
-  pendingAction.value = 'remove'
-  try {
-    await sessions.deleteSession(sessionId)
-    emit('removed', sessionId)
-    message.success('会话已从 UCLI 移除，源会话和用量统计已保留')
-    close()
-  } catch (error) {
-    message.error('移除会话失败：' + (error?.message || error))
-  } finally {
-    pendingAction.value = ''
-  }
-}
 </script>
 
 <style scoped>
@@ -458,19 +371,12 @@ async function removeSession() {
 .basic-form { margin-top: 14px; }
 .section-actions { display: flex; justify-content: flex-end; }
 .runtime-alert { margin-bottom: 14px; }
-.control-row,
-.danger-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 0; }
+.control-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 0; }
 .control-title { font-weight: 500; color: #262626; }
-.control-help,
-.maintenance-help { margin: 2px 0 0; color: #8c8c8c; font-size: 12px; }
-.maintenance { padding-bottom: 0; }
-.maintenance-actions { display: flex; gap: 8px; }
-.danger-title { color: #cf1322; }
+.control-help { margin: 2px 0 0; color: #8c8c8c; font-size: 12px; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 
 @media (max-width: 720px) {
-  .control-row,
-  .danger-row { align-items: flex-start; flex-direction: column; }
-  .maintenance-actions { width: 100%; }
+  .control-row { align-items: flex-start; flex-direction: column; }
 }
 </style>
