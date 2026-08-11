@@ -1,5 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+async function invokeSummary(channel, ...args) {
+  const response = await ipcRenderer.invoke(channel, ...args)
+  if (response?.ok) return response.value
+  const payload = response?.error || {
+    code: 'SUMMARY_SERVICE_UNAVAILABLE',
+    message: 'Summary service is unavailable'
+  }
+  throw Object.assign(new Error(payload.message), { code: payload.code })
+}
+
 /**
  * The single bridge between the renderer (Vue) and the main process.
  * Renderer code never touches Node directly — it calls `window.ucli.*`.
@@ -119,6 +129,25 @@ const api = {
   // ---- settings ----
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSettings: (s) => ipcRenderer.invoke('settings:update', s),
+
+  // ---- work summaries ----
+  getSummarySettings: () => invokeSummary('summary:get-settings'),
+  setSummarySettings: (value) => invokeSummary('summary:set-settings', value),
+  listSummaryReports: (filters) => invokeSummary('summary:list-reports', filters || {}),
+  getSummaryReport: (reportId) => invokeSummary('summary:get-report', reportId),
+  generateSummary: (value) => invokeSummary('summary:generate', value),
+  confirmSummary: (reportId, confirmationCallLimit) => invokeSummary('summary:generate', {
+    reportId, confirm: true, confirmationCallLimit
+  }),
+  cancelSummary: (reportId) => invokeSummary('summary:cancel', reportId),
+  setCurrentSummary: (reportId) => invokeSummary('summary:set-current', reportId),
+  exportSummaryMarkdown: (value) => invokeSummary('summary:export-markdown', value),
+  exportSummaryHtml: (value) => invokeSummary('summary:export-html', value),
+  onSummaryProgress: (handler) => {
+    const wrapped = (_event, payload) => handler(payload)
+    ipcRenderer.on('summary:progress', wrapped)
+    return () => ipcRenderer.removeListener('summary:progress', wrapped)
+  },
 
   // ---- communication Gateway ----
   getGatewayState: () => ipcRenderer.invoke('gateway:get-state'),

@@ -78,9 +78,7 @@
     </a-card>
       </a-tab-pane>
       <a-tab-pane key="summary" tab="工作总结">
-        <div v-if="activeTab === 'summary'" class="summary-placeholder">
-          <a-empty description="工作总结将在后续任务中启用" />
-        </div>
+        <WorkSummaryPanel v-if="activeTab === 'summary'" />
       </a-tab-pane>
     </a-tabs>
   </div>
@@ -93,6 +91,7 @@ import { ReloadOutlined } from '@ant-design/icons-vue'
 import { useStatsStore } from '../stores/stats.js'
 import { useSessionsStore } from '../stores/sessions.js'
 import UsageTrendsPanel from '../components/stats/UsageTrendsPanel.vue'
+import WorkSummaryPanel from '../components/summaries/WorkSummaryPanel.vue'
 
 const stats = useStatsStore()
 const sessions = useSessionsStore()
@@ -191,5 +190,4 @@ async function load() {
 .hint { color: #8c8c8c; font-size: 12px; }
 .cwd-cell { max-width: 200px; display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cost-hint { color: #8c8c8c; font-size: 12px; margin-top: 4px; }
-.summary-placeholder { padding: 64px 0; }
 </style>

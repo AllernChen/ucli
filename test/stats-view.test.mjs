@@ -94,7 +94,7 @@ test('usage trend chart is dependency-free, accessible, interactive, and has a t
   assert.doesNotMatch(source, /chart\.js|echarts|d3|highcharts/i)
 })
 
-test('statistics view keeps cumulative usage under a trend-first tab and defers summary work', () => {
+test('statistics view keeps cumulative usage under a trend-first tab and mounts summary work', () => {
   const { source, ast } = loadSfc('../src/views/Stats.vue')
   const tabs = findElements(ast, (node) => node.tag === 'a-tab-pane')
 
@@ -102,7 +102,8 @@ test('statistics view keeps cumulative usage under a trend-first tab and defers 
   assert.deepEqual(tabs.map((tab) => attribute(tab, 'tab')), ['使用统计', '工作总结'])
   assert.match(source, /UsageTrendsPanel/)
   assert.ok(source.indexOf('<UsageTrendsPanel') < source.indexOf('stats.total.input'))
-  assert.match(source, /工作总结将在后续任务中启用/)
+  assert.match(source, /WorkSummaryPanel/)
+  assert.doesNotMatch(source, /工作总结将在后续任务中启用/)
   assert.match(source, /v-if="activeTab === 'summary'"/)
   assert.match(source, /stats\.total\.input/)
   assert.match(source, /stats\.modelStats/)

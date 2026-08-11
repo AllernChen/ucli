@@ -29,6 +29,16 @@ function terminal(status) {
   return ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(status)
 }
 
+function safePipelineProgress(event) {
+  const phase = ['collecting', 'mapping', 'reducing', 'rendering'].includes(event?.phase)
+    ? event.phase
+    : null
+  if (!phase) return null
+  const total = Number.isInteger(event?.total) && event.total > 0 ? event.total : 1
+  const current = Number.isInteger(event?.current) && event.current >= 0 ? event.current : 0
+  return { phase, completed: Math.min(current, total), total }
+}
+
 export function createSummaryJobService({
   repository,
   evidenceCollector,
@@ -47,9 +57,9 @@ export function createSummaryJobService({
   const jobs = new Map()
   let queue = Promise.resolve()
 
-  const publish = report => {
+  const publish = (report, progress = null) => {
     for (const listener of listeners) {
-      try { listener(report) } catch { /* subscribers cannot break jobs */ }
+      try { listener(report, progress) } catch { /* subscribers cannot break jobs */ }
     }
     return report
   }
@@ -99,7 +109,11 @@ export function createSummaryJobService({
       mode: request.generatedBy,
       confirmed,
       confirmedCallLimit,
-      signal: job.controller.signal
+      signal: job.controller.signal,
+      onProgress(event) {
+        const progress = safePipelineProgress(event)
+        if (progress) publish(repository.get(job.reportId), progress)
+      }
     })
     if (job.cancelled) {
       throw Object.assign(new Error('cancelled'), { code: 'SUMMARY_CANCELLED' })
@@ -234,6 +248,15 @@ export function createSummaryJobService({
       publish(repository.update(reportId, { status: 'queued', errorText: null }))
       enqueue(() => runConfirmed(job, limit))
       return { reportId, completion: job.done.promise }
+    },
+
+    getConfirmationCallLimit(reportId) {
+      const job = jobs.get(reportId)
+      const limit = job?.confirmationCallLimit
+      return repository.get(reportId)?.status === 'awaiting_confirmation' &&
+        Number.isInteger(limit) && limit > 0
+        ? limit
+        : null
     },
 
     subscribe(listener) {

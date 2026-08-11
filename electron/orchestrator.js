@@ -42,6 +42,7 @@ import { createSessionHistoryService, registerSessionHistoryIpc } from './sessio
 import { createUsageRecorder, normalizeAdapterStatsEvent } from './usage/usageRecorder.js'
 import { assertUsageQuery } from './usage/contracts.js'
 import { createUsageQueryService } from './usage/usageQueryService.js'
+import { completedPeriod, manualPeriod } from './usage/periods.js'
 import { createEvidenceCollector } from './summaries/evidenceCollector.js'
 import { createSummaryPipeline } from './summaries/chunkPlanner.js'
 import { createReportRepository } from './summaries/reportRepository.js'
@@ -77,19 +78,261 @@ const DEFAULT_SETTINGS = {
   theme: 'light'
 }
 
-const SUMMARY_SETTING_FIELDS = new Set([
+const SUMMARY_SETTINGS_FIELDS = new Set([
   'autoEnabled', 'autoPeriods', 'defaultExecutorId', 'defaultProfileId',
   'defaultModel', 'firstEnableDisclosureAcceptedAt', 'automaticCallLimit'
 ])
+const SUMMARY_REPORT_FILTER_FIELDS = new Set([
+  'periodType', 'status', 'generatedBy', 'timezone', 'periodStart',
+  'periodEndExclusive', 'isCurrent'
+])
+const SUMMARY_GENERATE_FIELDS = new Set([
+  'periodType', 'start', 'endExclusive', 'timezone', 'partial',
+  'executorId', 'profileId', 'model'
+])
+const SUMMARY_CONFIRM_FIELDS = new Set(['reportId', 'confirm', 'confirmationCallLimit'])
+const SUMMARY_EXPORT_FIELDS = new Set(['reportId', 'style', 'executorId', 'profileId', 'model'])
+const SUMMARY_STYLE_FIELDS = new Set(['mode', 'requirement'])
+const SUMMARY_PERIODS = new Set(['day', 'week', 'month', 'quarter', 'year'])
+const SUMMARY_EXECUTORS = new Set(['claude', 'codex', 'opencode', 'ucode'])
+const SUMMARY_ERROR_MESSAGES = Object.freeze({
+  INVALID_SUMMARY_IPC: 'Invalid summary request',
+  SUMMARY_SERVICE_UNAVAILABLE: 'Summary service is unavailable',
+  SUMMARY_EXPORT_UNAVAILABLE: 'Summary export is unavailable',
+  SUMMARY_REPORT_NOT_FOUND: 'Summary report was not found',
+  SUMMARY_REPORT_NOT_COMPLETED: 'Only a completed report can be current',
+  SUMMARY_AUTOMATION_UNAVAILABLE: 'Automatic summaries require local persistence',
+  SUMMARY_EXECUTOR_UNAVAILABLE: 'Select an available default AI CLI',
+  SUMMARY_PROFILE_UNAVAILABLE: 'Select an available default AI CLI profile',
+  SUMMARY_DISCLOSURE_REQUIRED: 'Automatic summaries require disclosure acceptance'
+})
 
 function splitSettingsPatch(value = {}) {
   const appSettings = {}
   const summary = {}
   for (const [key, item] of Object.entries(value && typeof value === 'object' ? value : {})) {
-    if (SUMMARY_SETTING_FIELDS.has(key)) summary[key] = item
+    if (SUMMARY_SETTINGS_FIELDS.has(key)) summary[key] = item
     else appSettings[key] = item
   }
   return { appSettings, summary }
+}
+
+function invalidSummaryIpc() {
+  return Object.assign(new Error('Invalid summary request'), { code: 'INVALID_SUMMARY_IPC' })
+}
+
+function summaryObject(value, fields) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    Object.keys(value).some(key => !fields.has(key))) throw invalidSummaryIpc()
+  return value
+}
+
+function validateSummaryId(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) {
+    throw invalidSummaryIpc()
+  }
+  return value
+}
+
+function validateSummaryTimezone(value) {
+  if (typeof value !== 'string' || !value || value.length > 100) throw invalidSummaryIpc()
+  try { new Intl.DateTimeFormat('en-US', { timeZone: value }).format(0) } catch { throw invalidSummaryIpc() }
+  return value
+}
+
+function validateSummarySettings(value) {
+  const result = { ...summaryObject(value, SUMMARY_SETTINGS_FIELDS) }
+  if (result.autoEnabled !== undefined && typeof result.autoEnabled !== 'boolean') throw invalidSummaryIpc()
+  if (result.autoPeriods !== undefined) {
+    summaryObject(result.autoPeriods, SUMMARY_PERIODS)
+    if (Object.values(result.autoPeriods).some(item => typeof item !== 'boolean')) throw invalidSummaryIpc()
+    result.autoPeriods = { ...result.autoPeriods }
+  }
+  if (result.defaultExecutorId !== undefined && result.defaultExecutorId !== null &&
+    !SUMMARY_EXECUTORS.has(result.defaultExecutorId)) throw invalidSummaryIpc()
+  for (const field of ['defaultProfileId', 'defaultModel']) {
+    if (result[field] !== undefined && result[field] !== null &&
+      (typeof result[field] !== 'string' || !result[field] || result[field].length > 200 || result[field].includes('\0'))) {
+      throw invalidSummaryIpc()
+    }
+  }
+  if (result.firstEnableDisclosureAcceptedAt !== undefined &&
+    result.firstEnableDisclosureAcceptedAt !== null &&
+    (!Number.isInteger(result.firstEnableDisclosureAcceptedAt) || result.firstEnableDisclosureAcceptedAt <= 0)) {
+    throw invalidSummaryIpc()
+  }
+  if (result.automaticCallLimit !== undefined &&
+    (!Number.isInteger(result.automaticCallLimit) || result.automaticCallLimit < 1 || result.automaticCallLimit > 100)) {
+    throw invalidSummaryIpc()
+  }
+  return result
+}
+
+function validateSummaryFilters(value = {}) {
+  const result = { ...summaryObject(value, SUMMARY_REPORT_FILTER_FIELDS) }
+  if (result.periodType !== undefined && !SUMMARY_PERIODS.has(result.periodType)) throw invalidSummaryIpc()
+  if (result.status !== undefined && ![
+    'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted',
+    'awaiting_confirmation', 'skipped_empty'
+  ].includes(result.status)) throw invalidSummaryIpc()
+  if (result.generatedBy !== undefined && !['manual', 'automatic'].includes(result.generatedBy)) throw invalidSummaryIpc()
+  if (result.timezone !== undefined) result.timezone = validateSummaryTimezone(result.timezone)
+  for (const field of ['periodStart', 'periodEndExclusive']) {
+    if (result[field] !== undefined && !Number.isInteger(result[field])) throw invalidSummaryIpc()
+  }
+  if (result.isCurrent !== undefined && typeof result.isCurrent !== 'boolean') throw invalidSummaryIpc()
+  return result
+}
+
+function validateSummaryGenerate(value) {
+  if (value?.confirm === true || value?.reportId !== undefined) {
+    const confirmation = { ...summaryObject(value, SUMMARY_CONFIRM_FIELDS) }
+    if (confirmation.confirm !== true || !Number.isInteger(confirmation.confirmationCallLimit) ||
+      confirmation.confirmationCallLimit < 1 || confirmation.confirmationCallLimit > 1000) {
+      throw invalidSummaryIpc()
+    }
+    return {
+      action: 'confirm',
+      reportId: validateSummaryId(confirmation.reportId),
+      confirmationCallLimit: confirmation.confirmationCallLimit
+    }
+  }
+  const result = { ...summaryObject(value, SUMMARY_GENERATE_FIELDS) }
+  if (!SUMMARY_PERIODS.has(result.periodType) || !Number.isInteger(result.start) ||
+    !Number.isInteger(result.endExclusive) || result.start >= result.endExclusive ||
+    typeof result.partial !== 'boolean' || !SUMMARY_EXECUTORS.has(result.executorId)) {
+    throw invalidSummaryIpc()
+  }
+  result.timezone = validateSummaryTimezone(result.timezone)
+  for (const field of ['profileId', 'model']) {
+    if (result[field] !== null && result[field] !== undefined &&
+      (typeof result[field] !== 'string' || !result[field] || result[field].length > 200 || result[field].includes('\0'))) {
+      throw invalidSummaryIpc()
+    }
+    result[field] = result[field] || null
+  }
+  return { action: 'generate', ...result }
+}
+
+function validateSummaryExport(value, { html = false } = {}) {
+  const fields = html ? SUMMARY_EXPORT_FIELDS : new Set(['reportId'])
+  const result = { ...summaryObject(value, fields), reportId: validateSummaryId(value.reportId) }
+  if (html) {
+    const style = { ...summaryObject(result.style, SUMMARY_STYLE_FIELDS) }
+    if (!['light', 'dark', 'custom'].includes(style.mode)) throw invalidSummaryIpc()
+    if (style.mode === 'custom') {
+      if (typeof style.requirement !== 'string' || !style.requirement.trim() ||
+        style.requirement.length > 1000 || style.requirement.includes('\0')) throw invalidSummaryIpc()
+    } else if (style.requirement !== undefined) {
+      throw invalidSummaryIpc()
+    }
+    if (result.executorId !== undefined && result.executorId !== null && !SUMMARY_EXECUTORS.has(result.executorId)) {
+      throw invalidSummaryIpc()
+    }
+    for (const field of ['profileId', 'model']) {
+      if (result[field] !== undefined && result[field] !== null &&
+        (typeof result[field] !== 'string' || !result[field] || result[field].length > 200 || result[field].includes('\0'))) {
+        throw invalidSummaryIpc()
+      }
+    }
+    result.style = style
+  }
+  return result
+}
+
+function validateManualSummaryRequest(input, {
+  now = Date.now(),
+  availableExecutors = [],
+  availableProfiles = []
+} = {}) {
+  const expected = input.partial
+    ? manualPeriod(input.periodType, now, { now, timeZone: input.timezone })
+    : completedPeriod(input.periodType, now, { timeZone: input.timezone })
+  if (input.start !== expected.start ||
+    (!input.partial && input.endExclusive !== expected.endExclusive) ||
+    (input.partial && (input.endExclusive > now || input.endExclusive < now - 5 * 60 * 1000))) {
+    throw invalidSummaryIpc()
+  }
+
+  if (!availableExecutors.some(tool => tool?.id === input.executorId && tool?.installed === true)) {
+    throw Object.assign(new Error(), { code: 'SUMMARY_EXECUTOR_UNAVAILABLE' })
+  }
+  if (input.profileId) {
+    if (!availableProfiles.some(profile => profile?.id === input.profileId &&
+      profile?.adapterId === input.executorId && profile?.status === 'ready')) {
+      throw Object.assign(new Error(), { code: 'SUMMARY_PROFILE_UNAVAILABLE' })
+    }
+  }
+  return {
+    ...input,
+    start: expected.start,
+    endExclusive: input.partial ? now : expected.endExclusive
+  }
+}
+
+function safeSummaryError(error) {
+  const code = typeof error?.code === 'string' && SUMMARY_ERROR_MESSAGES[error.code]
+    ? error.code
+    : 'SUMMARY_SERVICE_UNAVAILABLE'
+  return { code, message: SUMMARY_ERROR_MESSAGES[code] }
+}
+
+function safeSummaryEnvelope(operation) {
+  return async (...args) => {
+    try { return { ok: true, value: await operation(...args) } }
+    catch (error) { return { ok: false, error: safeSummaryError(error) } }
+  }
+}
+
+function summaryProgressPayload(report, confirmationCallLimit = null, pipelineProgress = null) {
+  const phaseByStatus = {
+    queued: 'queued', running: 'collecting', awaiting_confirmation: 'awaiting_confirmation',
+    completed: 'completed', failed: 'failed', cancelled: 'cancelled',
+    interrupted: 'interrupted', skipped_empty: 'skipped_empty'
+  }
+  const textByStatus = {
+    queued: '等待生成', running: '正在生成总结',
+    awaiting_confirmation: Number.isInteger(confirmationCallLimit)
+      ? `预计调用 ${confirmationCallLimit} 次，等待确认`
+      : '等待确认',
+    completed: '总结已生成', failed: '生成失败', cancelled: '已取消',
+    interrupted: '生成已中断', skipped_empty: '周期内没有可总结内容'
+  }
+  const terminal = ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(report?.status)
+  if (pipelineProgress) {
+    const progressText = {
+      collecting: '正在收集材料', mapping: '正在分析材料',
+      reducing: '正在汇总项目', rendering: '正在生成报告'
+    }
+    return {
+      reportId: validateSummaryId(report?.id),
+      phase: pipelineProgress.phase,
+      completed: pipelineProgress.completed,
+      total: pipelineProgress.total,
+      text: progressText[pipelineProgress.phase]
+    }
+  }
+  return {
+    reportId: validateSummaryId(report?.id),
+    phase: phaseByStatus[report?.status] || 'running',
+    completed: terminal ? 1 : 0,
+    total: report?.status === 'awaiting_confirmation' && Number.isInteger(confirmationCallLimit)
+      ? confirmationCallLimit
+      : 1,
+    text: textByStatus[report?.status] || '正在处理'
+  }
+}
+
+export function registerSummaryIpc({ ipcMain, service }) {
+  ipcMain.handle('summary:get-settings', safeSummaryEnvelope(() => service.getSettings()))
+  ipcMain.handle('summary:set-settings', safeSummaryEnvelope((_event, value) => service.setSettings(validateSummarySettings(value))))
+  ipcMain.handle('summary:list-reports', safeSummaryEnvelope((_event, value = {}) => service.listReports(validateSummaryFilters(value))))
+  ipcMain.handle('summary:get-report', safeSummaryEnvelope((_event, value) => service.getReport(validateSummaryId(value))))
+  ipcMain.handle('summary:generate', safeSummaryEnvelope((_event, value) => service.generate(validateSummaryGenerate(value))))
+  ipcMain.handle('summary:cancel', safeSummaryEnvelope((_event, value) => service.cancel(validateSummaryId(value))))
+  ipcMain.handle('summary:set-current', safeSummaryEnvelope((_event, value) => service.setCurrent(validateSummaryId(value))))
+  ipcMain.handle('summary:export-markdown', safeSummaryEnvelope((_event, value) => service.exportMarkdown(validateSummaryExport(value))))
+  ipcMain.handle('summary:export-html', safeSummaryEnvelope((_event, value) => service.exportHtml(validateSummaryExport(value, { html: true }))))
 }
 
 function summaryUsageGranularity(periodType) {
@@ -192,8 +435,10 @@ export function createOrchestrator() {
   let usageRecorder = null
   let usageQueryService = null
   let summarySettings = normalizeSummarySettings(DEFAULT_SUMMARY_SETTINGS)
+  let summaryRepository = null
   let summaryJobService = null
   let summaryScheduler = null
+  let summaryExportService = null
   let persistenceRecovery = null
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
@@ -289,7 +534,7 @@ export function createOrchestrator() {
 
   async function initSummaryAutomation(db) {
     summarySettings = db.getSummarySettings()
-    const repository = createReportRepository({ db })
+    summaryRepository = createReportRepository({ db })
     const runner = createSummaryRunner({ profileService })
     const pipeline = createLiveSummaryPipeline({
       runner,
@@ -297,7 +542,7 @@ export function createOrchestrator() {
       createPipeline: createSummaryPipeline
     })
     summaryJobService = createSummaryJobService({
-      repository,
+      repository: summaryRepository,
       evidenceCollector: createEvidenceCollector({ historyService }),
       snapshotUsage: ({ periodType, start, endExclusive, timezone }) =>
         usageQueryService.queryUsage({
@@ -310,11 +555,23 @@ export function createOrchestrator() {
       listSessions,
       defaultTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
     })
-    summaryJobService.subscribe(() => scheduleFlush())
+    summaryJobService.subscribe((report, pipelineProgress) => {
+      if (!pipelineProgress) scheduleFlush()
+      if (mainWindow && !mainWindow.isDestroyed?.()) {
+        mainWindow.webContents.send(
+          'summary:progress',
+          summaryProgressPayload(
+            report,
+            summaryJobService.getConfirmationCallLimit(report.id),
+            pipelineProgress
+          )
+        )
+      }
+    })
     scheduleFlush()
     summaryScheduler = createSummaryScheduler({
       getSettings: () => summarySettings,
-      listReports: filters => repository.list(filters),
+      listReports: filters => summaryRepository.list(filters),
       generate: request => summaryJobService.generate(request),
       cancel: reportId => summaryJobService.cancel(reportId)
     })
@@ -1792,6 +2049,33 @@ export function createOrchestrator() {
     return publishProfileRuntime(sessionId, entry.session)
   }
 
+  async function saveSummarySettingsPatch(summary) {
+    const candidate = normalizeSummarySettings({
+      ...summarySettings,
+      ...summary,
+      autoPeriods: { ...summarySettings.autoPeriods, ...(summary.autoPeriods || {}) }
+    })
+    const db = getDb()
+    const automationAvailable = Boolean(db && summaryScheduler)
+    const availableExecutors = candidate.autoEnabled && automationAvailable
+      ? await inspectCliTools()
+      : []
+    const availableProfiles = candidate.autoEnabled && automationAvailable && candidate.defaultExecutorId
+      ? profileService?.listProfiles({ adapterId: candidate.defaultExecutorId }) || []
+      : []
+    summarySettings = updateSummarySettings(summarySettings, summary, {
+      availableExecutors,
+      availableProfiles,
+      automationAvailable
+    })
+    if (db) {
+      db.setSummarySettings(summarySettings)
+      scheduleFlush()
+    }
+    await summaryScheduler?.tick()
+    return summarySettings
+  }
+
   // ---- IPC registration ----
   function registerIpc() {
     registerGatewayIpc({ ipcMain, manager: gatewayManager })
@@ -1803,6 +2087,65 @@ export function createOrchestrator() {
       getClaudeRuntime: () => readClaudeRuntimeSnapshot({ env: process.env })
     })
     if (skillsService) registerSkillsIpc({ ipcMain, service: skillsService })
+    registerSummaryIpc({
+      ipcMain,
+      service: {
+        getSettings: () => summarySettings,
+        setSettings: patch => saveSummarySettingsPatch(patch),
+        listReports: filters => {
+          if (!summaryRepository) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          return summaryRepository.list(filters).map(({ markdown, ...report }) => report)
+        },
+        getReport: reportId => {
+          if (!summaryRepository) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          const report = summaryRepository.get(reportId)
+          if (!report) throw Object.assign(new Error(), { code: 'SUMMARY_REPORT_NOT_FOUND' })
+          return report
+        },
+        generate: async input => {
+          if (!summaryJobService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          if (input.action === 'confirm') {
+            const required = summaryJobService.getConfirmationCallLimit(input.reportId)
+            if (!Number.isInteger(required) || input.confirmationCallLimit < required) {
+              throw Object.assign(new Error(), { code: 'INVALID_SUMMARY_IPC' })
+            }
+            const { reportId } = summaryJobService.confirm(input.reportId, {
+              confirmationCallLimit: input.confirmationCallLimit
+            })
+            return { reportId }
+          }
+          const { action: _action, ...request } = input
+          const availableExecutors = await inspectCliTools()
+          const availableProfiles = request.profileId
+            ? profileService?.listProfiles({ adapterId: request.executorId }) || []
+            : []
+          const validated = validateManualSummaryRequest(request, {
+            availableExecutors,
+            availableProfiles
+          })
+          const { reportId } = summaryJobService.generate({ ...validated, generatedBy: 'manual' })
+          return { reportId }
+        },
+        cancel: reportId => {
+          if (!summaryJobService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          return summaryJobService.cancel(reportId)
+        },
+        async setCurrent(reportId) {
+          if (!summaryRepository) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          const report = await summaryRepository.setCurrent(reportId)
+          scheduleFlush()
+          return report
+        },
+        exportMarkdown: input => {
+          if (!summaryExportService?.exportMarkdown) throw Object.assign(new Error(), { code: 'SUMMARY_EXPORT_UNAVAILABLE' })
+          return summaryExportService.exportMarkdown(input)
+        },
+        exportHtml: input => {
+          if (!summaryExportService?.exportHtml) throw Object.assign(new Error(), { code: 'SUMMARY_EXPORT_UNAVAILABLE' })
+          return summaryExportService.exportHtml(input)
+        }
+      }
+    })
     ipcMain.handle('adapters:list', () =>
       Array.from(adapters.values()).map((d) => ({ id: d.id, displayName: d.displayName, icon: d.icon, models: d.models }))
     )
@@ -2128,36 +2471,17 @@ export function createOrchestrator() {
     ipcMain.handle('settings:get', () => ({ ...settings, ...summarySettings }))
     ipcMain.handle('settings:update', async (_e, s) => {
       const { appSettings, summary } = splitSettingsPatch(s)
-      const candidate = normalizeSummarySettings({
-        ...summarySettings,
-        ...summary,
-        autoPeriods: { ...summarySettings.autoPeriods, ...(summary.autoPeriods || {}) }
-      })
+      await saveSummarySettingsPatch(summary)
       const db = getDb()
-      const automationAvailable = Boolean(db && summaryScheduler)
-      const availableExecutors = candidate.autoEnabled && automationAvailable
-        ? await inspectCliTools()
-        : []
-      const availableProfiles = candidate.autoEnabled && automationAvailable && candidate.defaultExecutorId
-        ? profileService?.listProfiles({ adapterId: candidate.defaultExecutorId }) || []
-        : []
-      const nextSummary = updateSummarySettings(summarySettings, summary, {
-        availableExecutors,
-        availableProfiles,
-        automationAvailable
-      })
       settings = { ...settings, ...appSettings }
-      summarySettings = nextSummary
       if (db) {
         db.saveSettings(settings)
-        db.setSummarySettings(summarySettings)
         scheduleFlush()
       }
       if (Object.prototype.hasOwnProperty.call(appSettings, 'codexConfigDir')) {
         const snapshot = startCodexConfigWatcher()
         publishCodexRuntime(snapshot)
       }
-      await summaryScheduler?.tick()
       return true
     })
 

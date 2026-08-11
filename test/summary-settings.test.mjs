@@ -137,6 +137,6 @@ test('orchestrator merges summary settings compatibly and owns scheduler startup
   assert.match(source, /setSummarySettings\(/)
   assert.match(source, /summaryScheduler\.start\(\)/)
   assert.match(source, /summaryScheduler\?\.stop\(\)/)
-  assert.match(source, /summaryJobService\.subscribe\(\(\) => scheduleFlush\(\)\)/)
+  assert.match(source, /summaryJobService\.subscribe\(\(report, pipelineProgress\) => \{[\s\S]*?scheduleFlush\(\)[\s\S]*?summary:progress/)
   assert.match(source, /updateSummarySettings/)
 })

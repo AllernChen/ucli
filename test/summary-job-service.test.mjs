@@ -162,6 +162,30 @@ test('jobs persist queued and running transitions while executing only one pipel
   ])
 })
 
+test('pipeline progress is forwarded ephemerally without changing persisted report fields', async () => {
+  const events = []
+  const { service, repository } = createHarness({
+    pipeline: {
+      async run({ onProgress }) {
+        onProgress({ phase: 'mapping', current: 2, total: 4, evidence: 'must not escape' })
+        onProgress({ phase: 'reducing' })
+        return pipelineResult()
+      }
+    }
+  })
+  service.subscribe((report, progress) => {
+    if (progress) events.push({ reportId: report.id, ...progress })
+  })
+
+  const job = service.generate(request())
+  await job.completion
+  assert.deepEqual(events, [
+    { reportId: job.reportId, phase: 'mapping', completed: 2, total: 4 },
+    { reportId: job.reportId, phase: 'reducing', completed: 0, total: 1 }
+  ])
+  assert.equal('progress' in repository.get(job.reportId), false)
+})
+
 async function waitFor(predicate) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (predicate()) return
@@ -384,6 +408,7 @@ test('manual preflight persists awaiting_confirmation and resumes only through e
   await waitFor(() => repository.get(job.reportId).status === 'awaiting_confirmation')
   assert.equal(calls.length, 1)
   assert.equal(repository.get(job.reportId).errorText, 'SUMMARY_MANUAL_CONFIRMATION_REQUIRED')
+  assert.equal(service.getConfirmationCallLimit(job.reportId), 24)
 
   const resumed = service.confirm(job.reportId)
   assert.equal(resumed.completion, job.completion)
@@ -391,6 +416,7 @@ test('manual preflight persists awaiting_confirmation and resumes only through e
   assert.equal(calls.length, 2)
   assert.equal(completed.status, 'completed')
   assert.equal(completed.isCurrent, true)
+  assert.equal(service.getConfirmationCallLimit(job.reportId), null)
 })
 
 test('a dynamic confirmation error fails safely instead of pretending a costly restart is continuation', async () => {

@@ -84,6 +84,18 @@ export const ipc = {
   // settings
   getSettings: () => u.getSettings(),
   updateSettings: (s) => u.updateSettings(s),
+  // work summaries
+  getSummarySettings: () => u.getSummarySettings(),
+  setSummarySettings: (value) => u.setSummarySettings(value),
+  listSummaryReports: (filters) => u.listSummaryReports(filters),
+  getSummaryReport: (reportId) => u.getSummaryReport(reportId),
+  generateSummary: (value) => u.generateSummary(value),
+  confirmSummary: (reportId, confirmationCallLimit) => u.confirmSummary(reportId, confirmationCallLimit),
+  cancelSummary: (reportId) => u.cancelSummary(reportId),
+  setCurrentSummary: (reportId) => u.setCurrentSummary(reportId),
+  exportSummaryMarkdown: (value) => u.exportSummaryMarkdown(value),
+  exportSummaryHtml: (value) => u.exportSummaryHtml(value),
+  onSummaryProgress: (handler) => u.onSummaryProgress(handler),
   // communication Gateway
   getGatewayState: () => u.getGatewayState(),
   setGatewayDesiredEnabled: (enabled) => u.setGatewayDesiredEnabled(enabled),
