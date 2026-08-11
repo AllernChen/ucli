@@ -134,6 +134,7 @@ class Db {
     this.sql = sql
     this.path = path
     this.recoveryInfo = recoveryInfo
+    this._transactionTail = Promise.resolve()
   }
 
   // ---- schema ----
@@ -415,13 +416,16 @@ class Db {
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS summary_reports (
         id                    TEXT PRIMARY KEY,
-        period_type           TEXT NOT NULL,
+        period_type           TEXT NOT NULL CHECK (period_type IN ('day', 'week', 'month', 'quarter', 'year')),
         period_start          INTEGER NOT NULL,
         period_end_exclusive  INTEGER NOT NULL,
-        timezone              TEXT NOT NULL,
+        timezone              TEXT NOT NULL CHECK (length(trim(timezone)) > 0),
         partial               INTEGER NOT NULL DEFAULT 0,
-        version               INTEGER NOT NULL,
-        status                TEXT NOT NULL,
+        version               INTEGER NOT NULL CHECK (version >= 1),
+        status                TEXT NOT NULL CHECK (status IN (
+          'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted',
+          'awaiting_confirmation', 'skipped_empty'
+        )),
         markdown              TEXT,
         executor_id           TEXT,
         profile_id            TEXT,
@@ -433,11 +437,12 @@ class Db {
         prompt_version        TEXT,
         source_hash           TEXT,
         is_current            INTEGER NOT NULL DEFAULT 0,
-        generated_by          TEXT NOT NULL,
+        generated_by          TEXT NOT NULL CHECK (generated_by IN ('manual', 'automatic')),
         error_text            TEXT,
         created_at            INTEGER NOT NULL,
         updated_at            INTEGER NOT NULL,
-        UNIQUE (period_type, period_start, period_end_exclusive, timezone, version)
+        UNIQUE (period_type, period_start, period_end_exclusive, timezone, version),
+        CHECK (period_start < period_end_exclusive)
       )
     `)
     this.sql.run(`
@@ -452,6 +457,80 @@ class Db {
         updated_at    INTEGER NOT NULL
       )
     `)
+    this._initializeUsageLedger()
+  }
+
+  _initializeUsageLedger() {
+    const existing = rows(this.sql.exec(
+      "SELECT value FROM settings WHERE key = 'usage.ledger'"
+    ))[0]
+    if (existing) return
+
+    const ledgerStartedAt = Date.now()
+    this.sql.run('BEGIN IMMEDIATE')
+    try {
+      this.sql.run(
+        `INSERT OR IGNORE INTO usage_checkpoints (
+           session_id, model_key, project_path, adapter_id, observed_at,
+           input_tokens, output_tokens, cost_usd, cost_available, turns,
+           legacy_input_tokens, legacy_output_tokens, legacy_cost_usd,
+           legacy_cost_available, legacy_turns
+         )
+         SELECT
+           ms.session_id, ms.model, s.project_path, s.adapter_id, ?,
+           COALESCE(ms.input_tokens, 0), COALESCE(ms.output_tokens, 0),
+           CASE WHEN ms.cost_available = 1 THEN COALESCE(ms.cost_usd, 0) ELSE NULL END,
+           COALESCE(ms.cost_available, 0),
+           CASE WHEN (SELECT COUNT(*) FROM model_stats counted WHERE counted.session_id = ms.session_id) = 1
+             THEN COALESCE(st.turns_count, 0) ELSE 0 END,
+           COALESCE(ms.input_tokens, 0), COALESCE(ms.output_tokens, 0),
+           CASE WHEN ms.cost_available = 1 THEN COALESCE(ms.cost_usd, 0) ELSE NULL END,
+           COALESCE(ms.cost_available, 0),
+           CASE WHEN (SELECT COUNT(*) FROM model_stats counted WHERE counted.session_id = ms.session_id) = 1
+             THEN COALESCE(st.turns_count, 0) ELSE 0 END
+         FROM model_stats ms
+         JOIN sessions s ON s.id = ms.session_id
+         LEFT JOIN session_stats st ON st.session_id = ms.session_id`,
+        [ledgerStartedAt]
+      )
+      this.sql.run(
+        `INSERT OR IGNORE INTO usage_checkpoints (
+           session_id, model_key, project_path, adapter_id, observed_at,
+           input_tokens, output_tokens, cost_usd, cost_available, turns,
+           legacy_input_tokens, legacy_output_tokens, legacy_cost_usd,
+           legacy_cost_available, legacy_turns
+         )
+         SELECT
+           st.session_id,
+           CASE WHEN EXISTS (SELECT 1 FROM model_stats ms WHERE ms.session_id = st.session_id)
+             THEN '' ELSE COALESCE(NULLIF(s.model, ''), '') END,
+           s.project_path, s.adapter_id, ?,
+           COALESCE(st.input_tokens, 0), COALESCE(st.output_tokens, 0),
+           CASE WHEN st.cost_available = 1 THEN COALESCE(st.cost_usd, 0) ELSE NULL END,
+           COALESCE(st.cost_available, 0), COALESCE(st.turns_count, 0),
+           CASE WHEN EXISTS (SELECT 1 FROM model_stats ms WHERE ms.session_id = st.session_id)
+             THEN 0 ELSE COALESCE(st.input_tokens, 0) END,
+           CASE WHEN EXISTS (SELECT 1 FROM model_stats ms WHERE ms.session_id = st.session_id)
+             THEN 0 ELSE COALESCE(st.output_tokens, 0) END,
+           CASE WHEN EXISTS (SELECT 1 FROM model_stats ms WHERE ms.session_id = st.session_id)
+             THEN 0 WHEN st.cost_available = 1 THEN COALESCE(st.cost_usd, 0) ELSE NULL END,
+           CASE WHEN EXISTS (SELECT 1 FROM model_stats ms WHERE ms.session_id = st.session_id)
+             THEN 1 ELSE COALESCE(st.cost_available, 0) END,
+           COALESCE(st.turns_count, 0)
+         FROM session_stats st
+         JOIN sessions s ON s.id = st.session_id
+         WHERE (SELECT COUNT(*) FROM model_stats ms WHERE ms.session_id = st.session_id) <> 1`,
+        [ledgerStartedAt]
+      )
+      this.sql.run(
+        'INSERT INTO settings (key, value) VALUES (?, ?)',
+        ['usage.ledger', JSON.stringify({ ledgerStartedAt, exactSince: ledgerStartedAt })]
+      )
+      this.sql.run('COMMIT')
+    } catch (error) {
+      try { this.sql.run('ROLLBACK') } catch { /* preserve original error */ }
+      throw error
+    }
   }
 
   // ---- projects ----
@@ -615,11 +694,16 @@ class Db {
   async observeUsage(snapshot) {
     return this.transaction(async () => {
       const modelKey = snapshot.model || ''
-      const existing = rows(this.sql.exec(
+      let existing = rows(this.sql.exec(
         'SELECT * FROM usage_checkpoints WHERE session_id = ? AND model_key = ?',
         [snapshot.sessionId, modelKey]
       ))[0]
       if (!existing) {
+        const metadata = this.getUsageLedgerMetadata()
+        if (!Number.isFinite(snapshot.observedAt) || snapshot.observedAt < metadata.exactSince) {
+          return { baseline: false, ignored: true, event: null }
+        }
+        const startsWithKnownCost = isKnownUsageCost(snapshot)
         this.sql.run(
           `INSERT INTO usage_checkpoints (
              session_id, model_key, project_path, adapter_id, observed_at,
@@ -629,30 +713,39 @@ class Db {
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             snapshot.sessionId, modelKey, snapshot.projectPath || null, snapshot.adapterId,
-            snapshot.observedAt, usageCounter(snapshot.inputTokens), usageCounter(snapshot.outputTokens),
-            snapshot.costAvailable === false ? null : usageCost(snapshot.costUsd),
-            snapshot.costAvailable === false ? 0 : 1, usageCounter(snapshot.turns),
-            usageCounter(snapshot.inputTokens), usageCounter(snapshot.outputTokens),
-            snapshot.costAvailable === false ? null : usageCost(snapshot.costUsd),
-            snapshot.costAvailable === false ? 0 : 1, usageCounter(snapshot.turns)
+            metadata.exactSince, 0, 0, startsWithKnownCost ? 0 : null,
+            startsWithKnownCost ? 1 : 0, 0,
+            0, 0, startsWithKnownCost ? 0 : null, startsWithKnownCost ? 1 : 0, 0
           ]
         )
-        return { baseline: true, event: null }
+        existing = {
+          input_tokens: 0,
+          output_tokens: 0,
+          cost_usd: startsWithKnownCost ? 0 : null,
+          cost_available: startsWithKnownCost ? 1 : 0,
+          turns: 0,
+          observed_at: metadata.exactSince
+        }
       }
 
       const next = {
         inputTokens: usageCounter(snapshot.inputTokens),
         outputTokens: usageCounter(snapshot.outputTokens),
-        costUsd: snapshot.costAvailable === false ? null : usageCost(snapshot.costUsd),
-        costAvailable: snapshot.costAvailable !== false,
+        costUsd: isKnownUsageCost(snapshot) ? snapshot.costUsd : null,
+        costAvailable: isKnownUsageCost(snapshot),
         turns: usageCounter(snapshot.turns)
       }
-      const reset = next.inputTokens < existing.input_tokens ||
+      const countersRegressed = next.inputTokens < existing.input_tokens ||
         next.outputTokens < existing.output_tokens ||
         next.turns < existing.turns ||
         (next.costAvailable && existing.cost_available === 1 && next.costUsd < existing.cost_usd)
 
-      if (reset) {
+      if (snapshot.observedAt < existing.observed_at ||
+        (snapshot.observedAt === existing.observed_at && countersRegressed)) {
+        return { baseline: false, ignored: true, event: null }
+      }
+
+      if (countersRegressed) {
         this._updateUsageCheckpoint(snapshot, modelKey, next)
         return { baseline: false, reset: true, event: null }
       }
@@ -693,6 +786,17 @@ class Db {
     })
   }
 
+  getUsageLedgerMetadata() {
+    const raw = rows(this.sql.exec(
+      "SELECT value FROM settings WHERE key = 'usage.ledger'"
+    ))[0]?.value
+    const parsed = parseJsonObject(raw)
+    return {
+      ledgerStartedAt: parsed.ledgerStartedAt,
+      exactSince: parsed.exactSince
+    }
+  }
+
   _updateUsageCheckpoint(snapshot, modelKey, next) {
     this.sql.run(
       `UPDATE usage_checkpoints SET
@@ -708,9 +812,16 @@ class Db {
   }
 
   recordApproval(approval) {
+    const approvalId = typeof (approval?.approvalId || approval?.id) === 'string'
+      ? (approval.approvalId || approval.id).trim()
+      : ''
+    if (!approvalId) {
+      throw Object.assign(new TypeError('A stable approval ID is required'), {
+        code: 'INVALID_APPROVAL_ID'
+      })
+    }
     const id = createHash('sha256').update(JSON.stringify([
-      'approval', approval.sessionId, approval.approvalId || approval.id,
-      approval.adapterId, approval.observedAt
+      'approval', approval.sessionId, approvalId, approval.adapterId
     ])).digest('hex')
     this.sql.run(
       `INSERT OR IGNORE INTO usage_events (
@@ -774,6 +885,7 @@ class Db {
 
   // ---- summary reports ----
   createSummaryReport(report) {
+    assertSummaryReport(report)
     const createdAt = Number.isFinite(report.createdAt) ? report.createdAt : Date.now()
     const updatedAt = Number.isFinite(report.updatedAt) ? report.updatedAt : createdAt
     this.sql.run(
@@ -799,6 +911,7 @@ class Db {
   }
 
   updateSummaryReport(reportId, fields = {}) {
+    assertSummaryReportPatch(fields)
     const columns = {
       status: 'status', markdown: 'markdown', executorId: 'executor_id',
       profileId: 'profile_id', model: 'model', generationCostUsd: 'generation_cost_usd',
@@ -877,6 +990,11 @@ class Db {
       if (!target) {
         throw Object.assign(new Error(`Summary report not found: ${reportId}`), {
           code: 'SUMMARY_REPORT_NOT_FOUND'
+        })
+      }
+      if (target.status !== 'completed') {
+        throw Object.assign(new Error('Only completed summary reports can be current'), {
+          code: 'SUMMARY_REPORT_NOT_COMPLETED'
         })
       }
       const logicalKey = [
@@ -1518,15 +1636,20 @@ class Db {
   }
 
   async transaction(work) {
-    this.sql.run('BEGIN IMMEDIATE')
-    try {
-      const result = await work()
-      this.sql.run('COMMIT')
-      return result
-    } catch (error) {
-      try { this.sql.run('ROLLBACK') } catch { /* preserve original error */ }
-      throw error
+    const run = async () => {
+      this.sql.run('BEGIN IMMEDIATE')
+      try {
+        const result = await work()
+        this.sql.run('COMMIT')
+        return result
+      } catch (error) {
+        try { this.sql.run('ROLLBACK') } catch { /* preserve original error */ }
+        throw error
+      }
     }
+    const result = this._transactionTail.then(run, run)
+    this._transactionTail = result.catch(() => {})
+    return result
   }
 
   // ---- migration ----
@@ -1634,8 +1757,8 @@ function usageCounter(value) {
   return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0
 }
 
-function usageCost(value) {
-  return Number.isFinite(value) && value >= 0 ? value : 0
+function isKnownUsageCost(value) {
+  return value?.costAvailable === true && Number.isFinite(value.costUsd) && value.costUsd >= 0
 }
 
 function normalizeCost(value) {
@@ -1684,6 +1807,51 @@ function normalizeSummarySettings(value = {}) {
       ? value.automaticCallLimit
       : 20
   }
+}
+
+const SUMMARY_PERIOD_TYPES = new Set(['day', 'week', 'month', 'quarter', 'year'])
+const SUMMARY_STATUSES = new Set([
+  'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted',
+  'awaiting_confirmation', 'skipped_empty'
+])
+const SUMMARY_GENERATORS = new Set(['manual', 'automatic'])
+
+function assertSummaryReport(report) {
+  if (!SUMMARY_PERIOD_TYPES.has(report?.periodType)) {
+    throw summaryValidationError('INVALID_SUMMARY_PERIOD', 'Invalid summary period type')
+  }
+  if (!SUMMARY_STATUSES.has(report.status)) {
+    throw summaryValidationError('INVALID_SUMMARY_STATUS', 'Invalid summary report status')
+  }
+  if (!SUMMARY_GENERATORS.has(report.generatedBy)) {
+    throw summaryValidationError('INVALID_SUMMARY_GENERATED_BY', 'Invalid summary report origin')
+  }
+  if (!Number.isInteger(report.version) || report.version < 1) {
+    throw summaryValidationError('INVALID_SUMMARY_VERSION', 'Invalid summary report version')
+  }
+  if (!Number.isInteger(report.periodStart) || !Number.isInteger(report.periodEndExclusive) ||
+    report.periodStart >= report.periodEndExclusive) {
+    throw summaryValidationError('INVALID_SUMMARY_RANGE', 'Invalid summary report range')
+  }
+  if (typeof report.timezone !== 'string' || !report.timezone.trim()) {
+    throw summaryValidationError('INVALID_SUMMARY_TIMEZONE', 'Invalid summary report timezone')
+  }
+  if (report.isCurrent && report.status !== 'completed') {
+    throw summaryValidationError('SUMMARY_REPORT_NOT_COMPLETED', 'Only completed reports can be current')
+  }
+}
+
+function assertSummaryReportPatch(fields) {
+  if (fields.status !== undefined && !SUMMARY_STATUSES.has(fields.status)) {
+    throw summaryValidationError('INVALID_SUMMARY_STATUS', 'Invalid summary report status')
+  }
+  if (fields.generatedBy !== undefined && !SUMMARY_GENERATORS.has(fields.generatedBy)) {
+    throw summaryValidationError('INVALID_SUMMARY_GENERATED_BY', 'Invalid summary report origin')
+  }
+}
+
+function summaryValidationError(code, message) {
+  return Object.assign(new TypeError(message), { code })
 }
 
 function rowToUsageEvent(row) {

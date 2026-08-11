@@ -39,6 +39,13 @@ function usageSnapshot(overrides = {}) {
   }
 }
 
+function ledgerSnapshot(db, offset, overrides = {}) {
+  return usageSnapshot({
+    observedAt: db.getUsageLedgerMetadata().exactSince + offset,
+    ...overrides
+  })
+}
+
 function summaryReport(overrides = {}) {
   return {
     id: 'report-1',
@@ -83,6 +90,7 @@ test('migration preserves cumulative statistics and adds usage and summary table
   writeFileSync(path, Buffer.from(legacy.export()))
   legacy.close()
 
+  const openedAfter = Date.now()
   const db = await openDb(path)
   try {
     assert.deepEqual(
@@ -96,18 +104,9 @@ test('migration preserves cumulative statistics and adds usage and summary table
     assert.deepEqual(db.getModelStatsForSession('s1')[0], {
       model: 'sonnet', input_tokens: 100, output_tokens: 20, cost_usd: 0.5, cost_available: 1
     })
-  } finally {
-    db.close()
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('first usage observation creates only a checkpoint and legacy baseline', async () => {
-  await withDb('ucli-usage-ledger-baseline-', async (db) => {
-    const result = await db.observeUsage(usageSnapshot())
-
-    assert.deepEqual(result, { baseline: true, event: null })
-    assert.deepEqual(db.queryUsageEvents({}), [])
+    const metadata = db.getUsageLedgerMetadata()
+    assert.equal(metadata.ledgerStartedAt, metadata.exactSince)
+    assert.ok(metadata.exactSince >= openedAfter && metadata.exactSince <= Date.now())
     assert.deepEqual(db.getLegacyUsageBaseline(), {
       inputTokens: 100,
       outputTokens: 20,
@@ -115,14 +114,58 @@ test('first usage observation creates only a checkpoint and legacy baseline', as
       costAvailable: true,
       turns: 2
     })
+
+    const update = await db.observeUsage(usageSnapshot({
+      model: 'sonnet', observedAt: metadata.exactSince + 1000,
+      inputTokens: 130, outputTokens: 30, costUsd: 0.7, turns: 3
+    }))
+    assert.equal(update.event.inputTokens, 30)
+    assert.equal(update.event.outputTokens, 10)
+    assert.equal(update.event.turns, 1)
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a new post-migration session records its first non-zero observation from zero', async () => {
+  await withDb('ucli-usage-ledger-baseline-', async (db) => {
+    const observedAt = db.getUsageLedgerMetadata().exactSince + 1
+    const result = await db.observeUsage(usageSnapshot({ observedAt }))
+
+    assert.equal(result.baseline, false)
+    assert.equal(result.event.inputTokens, 100)
+    assert.equal(result.event.outputTokens, 20)
+    assert.equal(result.event.turns, 2)
+    assert.deepEqual(db.getLegacyUsageBaseline(), {
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      costAvailable: true,
+      turns: 0
+    })
+  })
+})
+
+test('a model first seen after migration records its first observation from zero', async () => {
+  await withDb('ucli-usage-ledger-new-model-', async (db) => {
+    await db.observeUsage(ledgerSnapshot(db, 1, { model: 'model-a' }))
+    const result = await db.observeUsage(ledgerSnapshot(db, 2, {
+      model: 'model-b', inputTokens: 40, outputTokens: 5, costUsd: 0.1, turns: 1
+    }))
+
+    assert.equal(result.baseline, false)
+    assert.equal(result.event.model, 'model-b')
+    assert.equal(result.event.inputTokens, 40)
+    assert.equal(result.event.outputTokens, 5)
+    assert.equal(result.event.turns, 1)
   })
 })
 
 test('later usage observations append a non-negative delta and advance the checkpoint', async () => {
   await withDb('ucli-usage-ledger-delta-', async (db) => {
-    await db.observeUsage(usageSnapshot())
-    const result = await db.observeUsage(usageSnapshot({
-      observedAt: 2000,
+    await db.observeUsage(ledgerSnapshot(db, 1000))
+    const result = await db.observeUsage(ledgerSnapshot(db, 2000, {
       inputTokens: 130,
       outputTokens: 30,
       costUsd: 0.7,
@@ -131,7 +174,7 @@ test('later usage observations append a non-negative delta and advance the check
 
     assert.equal(result.baseline, false)
     assert.match(result.event.id, /^[a-f0-9]{64}$/)
-    assert.deepEqual(db.queryUsageEvents({}), [result.event])
+    assert.deepEqual(db.queryUsageEvents({}).at(-1), result.event)
     assert.deepEqual(
       {
         sessionId: result.event.sessionId,
@@ -146,7 +189,7 @@ test('later usage observations append a non-negative delta and advance the check
         approvals: result.event.approvals
       },
       {
-        sessionId: 's1', adapterId: 'claude', model: 'claude-sonnet', observedAt: 2000,
+        sessionId: 's1', adapterId: 'claude', model: 'claude-sonnet', observedAt: result.event.observedAt,
         inputTokens: 30, outputTokens: 10, costUsd: 0.2, costAvailable: true,
         turns: 1, approvals: 0
       }
@@ -156,23 +199,24 @@ test('later usage observations append a non-negative delta and advance the check
 
 test('replaying the same cumulative observation is idempotent', async () => {
   await withDb('ucli-usage-ledger-idempotent-', async (db) => {
-    await db.observeUsage(usageSnapshot())
-    const update = usageSnapshot({ observedAt: 2000, inputTokens: 130, outputTokens: 30, costUsd: 0.7, turns: 3 })
+    await db.observeUsage(ledgerSnapshot(db, 1000))
+    const update = ledgerSnapshot(db, 2000, { inputTokens: 130, outputTokens: 30, costUsd: 0.7, turns: 3 })
     const first = await db.observeUsage(update)
     const replay = await db.observeUsage(update)
 
     assert.equal(replay.event, null)
-    assert.deepEqual(db.queryUsageEvents({}).map((event) => event.id), [first.event.id])
+    assert.equal(db.queryUsageEvents({}).filter((event) => event.id === first.event.id).length, 1)
   })
 })
 
 test('usage observation IDs are stable across databases', async () => {
   const ids = []
+  const observedAt = Date.now() + 10000
   for (const suffix of ['a', 'b']) {
     await withDb(`ucli-usage-ledger-stable-${suffix}-`, async (db) => {
-      await db.observeUsage(usageSnapshot())
-      const result = await db.observeUsage(usageSnapshot({
-        observedAt: 2000, inputTokens: 130, outputTokens: 30, costUsd: 0.7, turns: 3
+      await db.observeUsage(usageSnapshot({ observedAt: observedAt - 1000 }))
+      const result = await db.observeUsage(usageSnapshot({ observedAt,
+        inputTokens: 130, outputTokens: 30, costUsd: 0.7, turns: 3
       }))
       ids.push(result.event.id)
     })
@@ -182,18 +226,19 @@ test('usage observation IDs are stable across databases', async () => {
 
 test('any cumulative counter rollback resets the entire checkpoint without a mixed delta', async () => {
   await withDb('ucli-usage-ledger-reset-', async (db) => {
-    await db.observeUsage(usageSnapshot())
-    const reset = await db.observeUsage(usageSnapshot({
-      observedAt: 2000, inputTokens: 130, outputTokens: 10, costUsd: 0.6, turns: 3
+    await db.observeUsage(ledgerSnapshot(db, 1000))
+    const beforeReset = db.queryUsageEvents({}).length
+    const reset = await db.observeUsage(ledgerSnapshot(db, 2000, {
+      inputTokens: 130, outputTokens: 10, costUsd: 0.6, turns: 3
     }))
     assert.equal(reset.reset, true)
     assert.equal(reset.event, null)
-    assert.deepEqual(db.queryUsageEvents({}), [])
+    assert.equal(db.queryUsageEvents({}).length, beforeReset)
 
-    await db.observeUsage(usageSnapshot({
-      observedAt: 3000, inputTokens: 140, outputTokens: 15, costUsd: 0.7, turns: 4
+    await db.observeUsage(ledgerSnapshot(db, 3000, {
+      inputTokens: 140, outputTokens: 15, costUsd: 0.7, turns: 4
     }))
-    const [event] = db.queryUsageEvents({})
+    const event = db.queryUsageEvents({}).at(-1)
     assert.equal(event.inputTokens, 10)
     assert.equal(event.outputTokens, 5)
     assert.equal(event.turns, 1)
@@ -203,7 +248,8 @@ test('any cumulative counter rollback resets the entire checkpoint without a mix
 
 test('usage event insertion and checkpoint advance are atomic', async () => {
   await withDb('ucli-usage-ledger-atomic-', async (db) => {
-    await db.observeUsage(usageSnapshot())
+    await db.observeUsage(ledgerSnapshot(db, 1000))
+    const eventCount = db.queryUsageEvents({}).length
     db.sql.run(`
       CREATE TRIGGER reject_usage_checkpoint_update
       BEFORE UPDATE ON usage_checkpoints
@@ -213,10 +259,99 @@ test('usage event insertion and checkpoint advance are atomic', async () => {
     `)
 
     await assert.rejects(
-      db.observeUsage(usageSnapshot({ observedAt: 2000, inputTokens: 110 })),
+      db.observeUsage(ledgerSnapshot(db, 2000, { inputTokens: 110 })),
       /checkpoint update failed/
     )
-    assert.deepEqual(db.queryUsageEvents({}), [])
+    assert.equal(db.queryUsageEvents({}).length, eventCount)
+  })
+})
+
+test('concurrent usage observations share the database transaction queue', async () => {
+  await withDb('ucli-usage-ledger-concurrent-', async (db) => {
+    const results = await Promise.all([
+      db.observeUsage(ledgerSnapshot(db, 1, { inputTokens: 100, outputTokens: 20, turns: 2 })),
+      db.observeUsage(ledgerSnapshot(db, 2, { inputTokens: 150, outputTokens: 30, turns: 3 }))
+    ])
+
+    assert.equal(results.length, 2)
+    assert.equal(db.queryUsageEvents({}).reduce((sum, event) => sum + event.inputTokens, 0), 150)
+    assert.equal(db.queryUsageEvents({}).reduce((sum, event) => sum + event.outputTokens, 0), 30)
+  })
+})
+
+test('out-of-order observations cannot rewind a checkpoint or inflate later deltas', async () => {
+  await withDb('ucli-usage-ledger-out-of-order-', async (db) => {
+    const exactSince = db.getUsageLedgerMetadata().exactSince
+    const at = (offset, inputTokens) => usageSnapshot({
+      observedAt: exactSince + offset,
+      inputTokens,
+      outputTokens: 0,
+      costUsd: null,
+      costAvailable: false,
+      turns: 0
+    })
+    await db.observeUsage(at(1, 100))
+    await db.observeUsage(at(3, 150))
+    const stale = await db.observeUsage(at(2, 120))
+    await db.observeUsage(at(4, 160))
+
+    assert.equal(stale.ignored, true)
+    assert.equal(stale.event, null)
+    assert.equal(
+      db.queryUsageEvents({ start: exactSince + 2 }).reduce((sum, event) => sum + event.inputTokens, 0),
+      60
+    )
+  })
+})
+
+test('a same-timestamp counter rollback is ignored instead of treated as a reset', async () => {
+  await withDb('ucli-usage-ledger-same-time-', async (db) => {
+    const observedAt = db.getUsageLedgerMetadata().exactSince + 10
+    await db.observeUsage(usageSnapshot({ observedAt, inputTokens: 150 }))
+    const stale = await db.observeUsage(usageSnapshot({ observedAt, inputTokens: 120 }))
+    await db.observeUsage(usageSnapshot({ observedAt: observedAt + 1, inputTokens: 160 }))
+
+    assert.equal(stale.ignored, true)
+    assert.equal(db.queryUsageEvents({ start: observedAt + 1 }).at(-1).inputTokens, 10)
+  })
+})
+
+test('cost is known only when availability and a non-negative finite amount agree', async () => {
+  await withDb('ucli-usage-ledger-cost-contract-', async (db) => {
+    const missingFlag = await db.observeUsage(ledgerSnapshot(db, 1, {
+      inputTokens: 10, outputTokens: 0, turns: 0, costUsd: 0.5, costAvailable: undefined
+    }))
+    assert.equal(missingFlag.event.costAvailable, false)
+    assert.equal(missingFlag.event.costUsd, null)
+
+    const invalidAmount = await db.observeUsage(ledgerSnapshot(db, 2, {
+      inputTokens: 20, outputTokens: 0, turns: 0, costUsd: -1, costAvailable: true
+    }))
+    assert.equal(invalidAmount.reset, undefined)
+    assert.equal(invalidAmount.event.inputTokens, 10)
+    assert.equal(invalidAmount.event.costAvailable, false)
+    assert.equal(invalidAmount.event.costUsd, null)
+  })
+})
+
+test('an inconsistent cost update cannot reset otherwise increasing token counters', async () => {
+  await withDb('ucli-usage-ledger-cost-reset-', async (db) => {
+    await db.observeUsage(ledgerSnapshot(db, 1, {
+      inputTokens: 100, outputTokens: 0, turns: 0, costUsd: 0.5, costAvailable: true
+    }))
+    const invalid = await db.observeUsage(ledgerSnapshot(db, 2, {
+      inputTokens: 110, outputTokens: 0, turns: 0, costUsd: Number.NaN, costAvailable: true
+    }))
+    await db.observeUsage(ledgerSnapshot(db, 3, {
+      inputTokens: 120, outputTokens: 0, turns: 0, costUsd: 0.6, costAvailable: true
+    }))
+
+    assert.equal(invalid.reset, undefined)
+    assert.equal(invalid.event.inputTokens, 10)
+    assert.equal(
+      db.queryUsageEvents({}).reduce((sum, event) => sum + event.inputTokens, 0),
+      120
+    )
   })
 })
 
@@ -231,7 +366,7 @@ test('approval decisions are append-only usage events and replay safely', async 
       observedAt: 2500
     }
     const first = await db.recordApproval(approval)
-    const replay = await db.recordApproval(approval)
+    const replay = await db.recordApproval({ ...approval, observedAt: 3500 })
 
     assert.equal(first.id, replay.id)
     assert.deepEqual(db.queryUsageEvents({}), [{
@@ -248,6 +383,10 @@ test('approval decisions are append-only usage events and replay safely', async 
       turns: 0,
       approvals: 1
     }])
+    assert.throws(
+      () => db.recordApproval({ ...approval, approvalId: '' }),
+      (error) => error.code === 'INVALID_APPROVAL_ID'
+    )
   })
 })
 
@@ -304,12 +443,46 @@ test('summary report CRUD maps fields and validates JSON at the database boundar
   })
 })
 
+test('summary reports reject invalid periods, states, origins, versions, ranges, and timezones', async () => {
+  await withDb('ucli-summary-report-validation-', async (db) => {
+    for (const [overrides, code] of [
+      [{ periodType: 'hour' }, 'INVALID_SUMMARY_PERIOD'],
+      [{ status: 'done' }, 'INVALID_SUMMARY_STATUS'],
+      [{ generatedBy: 'scheduler' }, 'INVALID_SUMMARY_GENERATED_BY'],
+      [{ version: 0 }, 'INVALID_SUMMARY_VERSION'],
+      [{ periodStart: 200, periodEndExclusive: 200 }, 'INVALID_SUMMARY_RANGE'],
+      [{ timezone: '  ' }, 'INVALID_SUMMARY_TIMEZONE']
+    ]) {
+      assert.throws(
+        () => db.createSummaryReport(summaryReport(overrides)),
+        (error) => error.code === code
+      )
+    }
+
+    db.createSummaryReport(summaryReport())
+    assert.throws(
+      () => db.updateSummaryReport('report-1', { status: 'done' }),
+      (error) => error.code === 'INVALID_SUMMARY_STATUS'
+    )
+    assert.throws(
+      () => db.updateSummaryReport('report-1', { generatedBy: 'scheduler' }),
+      (error) => error.code === 'INVALID_SUMMARY_GENERATED_BY'
+    )
+
+    const schema = db.sql.exec("SELECT sql FROM sqlite_master WHERE name = 'summary_reports'")[0].values[0][0]
+    assert.match(schema, /CHECK\s*\(period_type IN/i)
+    assert.match(schema, /CHECK\s*\(status IN/i)
+    assert.match(schema, /CHECK\s*\(generated_by IN/i)
+  })
+})
+
 test('setting a current report atomically switches only its logical period', async () => {
   await withDb('ucli-summary-report-current-', async (db) => {
-    db.createSummaryReport(summaryReport({ id: 'week-v1', isCurrent: true }))
-    db.createSummaryReport(summaryReport({ id: 'week-v2', version: 2 }))
+    db.createSummaryReport(summaryReport({ id: 'week-v1', status: 'completed', isCurrent: true }))
+    db.createSummaryReport(summaryReport({ id: 'week-v2', status: 'completed', version: 2 }))
     db.createSummaryReport(summaryReport({
-      id: 'day-v1', periodType: 'day', periodStart: 300, periodEndExclusive: 400, isCurrent: true
+      id: 'day-v1', periodType: 'day', periodStart: 300, periodEndExclusive: 400,
+      status: 'completed', isCurrent: true
     }))
 
     const current = await db.setCurrentSummaryReport('week-v2')
@@ -326,8 +499,8 @@ test('setting a current report atomically switches only its logical period', asy
 
 test('a failed current switch rolls back the previous current marker', async () => {
   await withDb('ucli-summary-report-current-atomic-', async (db) => {
-    db.createSummaryReport(summaryReport({ id: 'week-v1', isCurrent: true }))
-    db.createSummaryReport(summaryReport({ id: 'week-v2', version: 2 }))
+    db.createSummaryReport(summaryReport({ id: 'week-v1', status: 'completed', isCurrent: true }))
+    db.createSummaryReport(summaryReport({ id: 'week-v2', status: 'completed', version: 2 }))
     db.sql.run(`
       CREATE TRIGGER reject_report_current
       BEFORE UPDATE OF is_current ON summary_reports
@@ -340,6 +513,17 @@ test('a failed current switch rolls back the previous current marker', async () 
     await assert.rejects(db.setCurrentSummaryReport('week-v2'), /current switch failed/)
     assert.equal(db.getSummaryReport('week-v1').isCurrent, true)
     assert.equal(db.getSummaryReport('week-v2').isCurrent, false)
+  })
+})
+
+test('only completed reports can become current', async () => {
+  await withDb('ucli-summary-report-current-status-', async (db) => {
+    db.createSummaryReport(summaryReport({ status: 'running' }))
+    await assert.rejects(
+      db.setCurrentSummaryReport('report-1'),
+      (error) => error.code === 'SUMMARY_REPORT_NOT_COMPLETED'
+    )
+    assert.equal(db.getSummaryReport('report-1').isCurrent, false)
   })
 })
 
