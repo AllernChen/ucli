@@ -9,6 +9,17 @@ function uniqueStrings(value, field) {
   return [...new Set(value)]
 }
 
+function optionalTimeZone(value) {
+  if (value == null) return undefined
+  if (typeof value !== 'string') throw new Error('Invalid time zone')
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format(0)
+  } catch {
+    throw new Error(`Invalid time zone: ${value}`)
+  }
+  return value
+}
+
 export function assertUsageQuery(query) {
   if (!query || typeof query !== 'object') throw new Error('Usage query is required')
   if (!USAGE_GRANULARITIES.includes(query.granularity)) {
@@ -22,7 +33,7 @@ export function assertUsageQuery(query) {
     throw new Error('Invalid time range')
   }
 
-  return {
+  const normalized = {
     granularity: query.granularity,
     start: query.start,
     endExclusive: query.endExclusive,
@@ -30,4 +41,7 @@ export function assertUsageQuery(query) {
     adapterIds: uniqueStrings(query.adapterIds, 'adapterIds'),
     models: uniqueStrings(query.models, 'models')
   }
+  const timeZone = optionalTimeZone(query.timeZone)
+  if (timeZone) normalized.timeZone = timeZone
+  return normalized
 }

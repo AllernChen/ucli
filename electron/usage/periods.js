@@ -11,8 +11,9 @@ import {
 dayjs.extend(utc)
 dayjs.extend(timezone)
 
-const HOUR_MS = 60 * 60 * 1000
+const MINUTE_MS = 60 * 1000
 const MAX_BUCKETS = 400
+const MAX_HOURLY_BOUNDARY_SCAN_MINUTES = 180
 const ALL_PERIOD_TYPES = new Set([...USAGE_GRANULARITIES, ...SUMMARY_PERIOD_TYPES])
 
 function resolveTimeZone(options = {}) {
@@ -71,7 +72,18 @@ function shiftCalendarDate(parts, { days = 0, months = 0, years = 0 } = {}) {
 }
 
 function shiftBucketStart(start, periodType, amount, timeZone) {
-  if (periodType === 'hour') return start + amount * HOUR_MS
+  if (periodType === 'hour') {
+    if (amount === 1) return nextHourlyBoundary(start, timeZone)
+    if (amount === -1) return hourlyBucketStart(start - 1, timeZone)
+    let shifted = start
+    const direction = Math.sign(amount)
+    for (let index = 0; index < Math.abs(amount); index += 1) {
+      shifted = direction > 0
+        ? nextHourlyBoundary(shifted, timeZone)
+        : hourlyBucketStart(shifted - 1, timeZone)
+    }
+    return shifted
+  }
 
   const parts = localParts(start, timeZone)
   let shifted
@@ -84,6 +96,46 @@ function shiftBucketStart(start, periodType, amount, timeZone) {
   return localMidnight(shifted.year, shifted.month, shifted.date, timeZone)
 }
 
+function isHourlyBoundary(value, timeZone) {
+  const parts = localParts(value, timeZone)
+  const startsWallClockHour =
+    parts.minute === 0 &&
+    parts.second === 0 &&
+    parts.millisecond === 0
+  const startsOffsetTransition =
+    dayjs(value).tz(timeZone).utcOffset() !== dayjs(value - 1).tz(timeZone).utcOffset()
+  return startsWallClockHour || startsOffsetTransition
+}
+
+function hourlyBucketStart(value, timeZone) {
+  const parts = localParts(value, timeZone)
+  let candidate = value -
+    parts.minute * MINUTE_MS -
+    parts.second * 1000 -
+    parts.millisecond
+  if (isHourlyBoundary(candidate, timeZone)) return candidate
+
+  candidate = Math.floor(value / MINUTE_MS) * MINUTE_MS
+  for (let index = 0; index <= MAX_HOURLY_BOUNDARY_SCAN_MINUTES; index += 1) {
+    if (isHourlyBoundary(candidate, timeZone)) return candidate
+    candidate -= MINUTE_MS
+  }
+  throw new Error('Unable to find hourly calendar boundary')
+}
+
+function nextHourlyBoundary(start, timeZone) {
+  const parts = localParts(start, timeZone)
+  let candidate = start + (60 - parts.minute) * MINUTE_MS
+  if (isHourlyBoundary(candidate, timeZone)) return candidate
+
+  candidate = Math.floor(start / MINUTE_MS) * MINUTE_MS + MINUTE_MS
+  for (let index = 0; index < MAX_HOURLY_BOUNDARY_SCAN_MINUTES; index += 1) {
+    if (isHourlyBoundary(candidate, timeZone)) return candidate
+    candidate += MINUTE_MS
+  }
+  throw new Error('Unable to find next hourly calendar boundary')
+}
+
 export function bucketStart(value, periodType, options = {}) {
   assertTimestamp(value, 'value')
   assertPeriodType(periodType)
@@ -91,10 +143,7 @@ export function bucketStart(value, periodType, options = {}) {
   const parts = localParts(value, timeZone)
 
   if (periodType === 'hour') {
-    return value -
-      parts.minute * 60 * 1000 -
-      parts.second * 1000 -
-      parts.millisecond
+    return hourlyBucketStart(value, timeZone)
   }
 
   if (periodType === 'day') {
@@ -126,7 +175,7 @@ export function nextBucketStart(value, periodType, options = {}) {
 
 export function enumerateBuckets(query) {
   const normalized = assertUsageQuery(query)
-  const timeZone = resolveTimeZone({ timeZone: query.timeZone })
+  const timeZone = resolveTimeZone({ timeZone: normalized.timeZone })
   const buckets = []
   let start = bucketStart(normalized.start, normalized.granularity, { timeZone })
 

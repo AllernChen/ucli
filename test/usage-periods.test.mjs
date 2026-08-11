@@ -46,6 +46,25 @@ test('usage queries validate ranges and de-duplicate filters', () => {
   )
 })
 
+test('usage queries preserve a valid optional IANA timezone and reject invalid zones', () => {
+  assert.equal(assertUsageQuery({
+    granularity: 'hour',
+    start: 1000,
+    endExclusive: 2000,
+    timeZone: 'Australia/Lord_Howe'
+  }).timeZone, 'Australia/Lord_Howe')
+
+  assert.throws(
+    () => assertUsageQuery({
+      granularity: 'hour',
+      start: 1000,
+      endExclusive: 2000,
+      timeZone: 'Mars/Olympus_Mons'
+    }),
+    /Invalid time zone/
+  )
+})
+
 test('weekly buckets start on local Monday', () => {
   const value = new Date('2026-08-12T12:00:00+08:00').getTime()
   assert.equal(
@@ -176,6 +195,64 @@ test('hour buckets distinguish both repeated hours during DST fallback', () => {
     buckets.map(item => (item.endExclusive - item.start) / 3600000),
     [24, 25, 24]
   )
+})
+
+test('hour buckets stay continuous across Lord Howe half-hour DST spring forward', () => {
+  const options = { timeZone: 'Australia/Lord_Howe' }
+  const beforeJump = new Date('2026-10-03T15:15:00Z').getTime()
+  const afterJump = new Date('2026-10-03T15:45:00Z').getTime()
+
+  assert.equal(iso(bucketStart(beforeJump, 'hour', options)), '2026-10-03T14:30:00.000Z')
+  assert.equal(iso(nextBucketStart(beforeJump, 'hour', options)), '2026-10-03T15:30:00.000Z')
+  assert.equal(iso(bucketStart(afterJump, 'hour', options)), '2026-10-03T15:30:00.000Z')
+  assert.equal(iso(nextBucketStart(afterJump, 'hour', options)), '2026-10-03T16:00:00.000Z')
+
+  const buckets = enumerateBuckets({
+    granularity: 'hour',
+    start: beforeJump,
+    endExclusive: new Date('2026-10-03T17:00:00Z').getTime(),
+    timeZone: 'Australia/Lord_Howe'
+  })
+  assert.deepEqual(buckets.map(item => [iso(item.start), iso(item.endExclusive)]), [
+    ['2026-10-03T14:30:00.000Z', '2026-10-03T15:30:00.000Z'],
+    ['2026-10-03T15:30:00.000Z', '2026-10-03T16:00:00.000Z'],
+    ['2026-10-03T16:00:00.000Z', '2026-10-03T17:00:00.000Z']
+  ])
+})
+
+test('hour buckets stay continuous across Lord Howe half-hour DST fallback', () => {
+  const options = { timeZone: 'Australia/Lord_Howe' }
+  const daylightOccurrence = new Date('2026-04-04T14:45:00Z').getTime()
+  const standardOccurrence = new Date('2026-04-04T15:15:00Z').getTime()
+
+  assert.equal(
+    iso(bucketStart(daylightOccurrence, 'hour', options)),
+    '2026-04-04T14:00:00.000Z'
+  )
+  assert.equal(
+    iso(nextBucketStart(daylightOccurrence, 'hour', options)),
+    '2026-04-04T15:00:00.000Z'
+  )
+  assert.equal(
+    iso(bucketStart(standardOccurrence, 'hour', options)),
+    '2026-04-04T15:00:00.000Z'
+  )
+  assert.equal(
+    iso(nextBucketStart(standardOccurrence, 'hour', options)),
+    '2026-04-04T15:30:00.000Z'
+  )
+
+  const buckets = enumerateBuckets({
+    granularity: 'hour',
+    start: daylightOccurrence,
+    endExclusive: new Date('2026-04-04T16:30:00Z').getTime(),
+    timeZone: 'Australia/Lord_Howe'
+  })
+  assert.deepEqual(buckets.map(item => [iso(item.start), iso(item.endExclusive)]), [
+    ['2026-04-04T14:00:00.000Z', '2026-04-04T15:00:00.000Z'],
+    ['2026-04-04T15:00:00.000Z', '2026-04-04T15:30:00.000Z'],
+    ['2026-04-04T15:30:00.000Z', '2026-04-04T16:30:00.000Z']
+  ])
 })
 
 test('manual periods mark only the current selected period as partial', () => {
