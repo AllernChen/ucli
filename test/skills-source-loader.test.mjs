@@ -85,6 +85,27 @@ test('GitLab preparation invokes git without placing credentials in metadata', a
   }
 })
 
+test('generic Git source resolves GitLab from the repository hostname', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-git-auto-'))
+  try {
+    const loader = createSkillSourceLoader({
+      stagingRoot: join(temp, 'staging'),
+      runGit(args) {
+        if (args[0] === 'clone') createSkill(args.at(-1))
+        if (args.includes('rev-parse')) return 'gitlab-auto123\n'
+        return ''
+      }
+    })
+    const preview = await loader.inspect({
+      type: 'git', url: 'https://gitlab.com/example/platform/skills.git', ref: 'main'
+    })
+    assert.equal(preview.source.type, 'gitlab')
+    assert.equal(preview.source.locator, 'https://gitlab.com/example/platform/skills.git')
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
 test('ZIP source is extracted into a bounded temporary directory', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-zip-'))
   try {

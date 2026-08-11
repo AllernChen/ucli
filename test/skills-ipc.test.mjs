@@ -112,7 +112,7 @@ test('Skills IPC validates and forwards install inspection context', async () =>
   )
 })
 
-test('Skills IPC forwards a GitLab source intact', async () => {
+test('Skills IPC forwards a generic Git source intact for hostname detection', async () => {
   const { handlers, ipcMain } = registry()
   const calls = []
   registerSkillsIpc({
@@ -126,7 +126,7 @@ test('Skills IPC forwards a GitLab source intact', async () => {
   })
 
   const source = {
-    type: 'gitlab',
+    type: 'git',
     url: 'https://gitlab.com/example/skills.git',
     refType: 'branch',
     ref: 'main',

@@ -909,13 +909,14 @@ test('Skills page renders source-project groups with safe external navigation', 
   assert.match(page, /groupSkillCatalogBySourceProject\(visibleCatalog\.value,\s*\{\s*status:\s*statusFilter\.value\s*\}\)/)
 })
 
-test('Skills install workflow offers separate GitHub and GitLab HTTPS sources', () => {
+test('Skills install workflow auto-detects GitHub or GitLab from the repository address', () => {
   const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
-  assert.match(page, /value="github">GitHub/)
-  assert.match(page, /value="gitlab">GitLab/)
-  assert.match(page, /GitLab 仓库地址/)
+  assert.match(page, /value="git">GitHub \/ GitLab/)
+  assert.match(page, /GitHub \/ GitLab 仓库地址/)
+  assert.match(page, /https:\/\/github\.com\/owner\/repository\.git/)
+  assert.match(page, /https:\/\/gitlab\.com\/group\/project\.git/)
   assert.match(page, /GitLab 源项目/)
-  assert.match(page, /type: installDraft\.sourceType/)
+  assert.match(page, /type: 'git'/)
 })
 
 test('Skills page renders an actionable Skill by AI CLI usage matrix', () => {

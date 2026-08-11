@@ -34,7 +34,7 @@ function source(value) {
   if (input.type === 'local') {
     return { type: 'local', path: string(input.path, 'source.path') }
   }
-  if (input.type === 'github' || input.type === 'gitlab') {
+  if (input.type === 'github' || input.type === 'gitlab' || input.type === 'git') {
     const refType = input.refType == null ? 'default' : String(input.refType)
     if (!REF_TYPES.has(refType)) throw ipcError('source.refType is invalid')
     return {

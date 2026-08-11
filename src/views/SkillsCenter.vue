@@ -336,8 +336,7 @@
         <a-form-item label="来源">
           <a-radio-group v-model:value="installDraft.sourceType" @change="clearPreview">
             <a-radio-button value="local">本地目录 / ZIP</a-radio-button>
-            <a-radio-button value="github">GitHub</a-radio-button>
-            <a-radio-button value="gitlab">GitLab</a-radio-button>
+            <a-radio-button value="git">GitHub / GitLab</a-radio-button>
           </a-radio-group>
         </a-form-item>
 
@@ -351,8 +350,8 @@
           </a-form-item>
         </template>
         <template v-else>
-          <a-form-item :label="installDraft.sourceType === 'gitlab' ? 'GitLab 仓库地址' : 'GitHub 仓库地址'">
-            <a-input v-model:value="installDraft.gitUrl" :placeholder="installDraft.sourceType === 'gitlab' ? 'https://gitlab.com/group/project.git' : 'https://github.com/owner/repository.git'" @input="clearPreview" />
+          <a-form-item label="GitHub / GitLab 仓库地址">
+            <a-input v-model:value="installDraft.gitUrl" placeholder="https://github.com/owner/repository.git 或 https://gitlab.com/group/project.git" @input="clearPreview" />
             <div class="skills-help">私有仓库使用本机 Git 登录状态，UCLI 不保存令牌。</div>
           </a-form-item>
           <a-row :gutter="12">
@@ -598,7 +597,7 @@ function sourceRequest() {
   return installDraft.sourceType === 'local'
     ? { type: 'local', path: installDraft.localPath }
     : {
-        type: installDraft.sourceType, url: installDraft.gitUrl, refType: installDraft.refType,
+        type: 'git', url: installDraft.gitUrl, refType: installDraft.refType,
         ref: installDraft.refType === 'default' ? '' : installDraft.ref, subdir: installDraft.subdir
       }
 }

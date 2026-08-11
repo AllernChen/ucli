@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, extname, relative, resolve } from 'node:path'
 import AdmZip from 'adm-zip'
 
-import { sanitiseGitHubSource, sanitiseGitLabSource, validateSkillCompatibility } from './contracts.js'
+import { sanitiseGitHubSource, sanitiseGitLabSource, sanitiseGitRemoteSource, validateSkillCompatibility } from './contracts.js'
 import { inspectSkillDirectory } from './fileOps.js'
 
 function sourceError(message, code = 'SKILL_SOURCE_INVALID') {
@@ -114,29 +114,31 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit } 
       }
     }
 
-    if (source.type === 'github' || source.type === 'gitlab') {
-      const clean = source.type === 'github' ? sanitiseGitHubSource(source) : sanitiseGitLabSource(source)
-      const checkout = resolve(root, `${source.type}-${randomUUID()}`)
+    if (source.type === 'github' || source.type === 'gitlab' || source.type === 'git') {
+      const resolved = source.type === 'git'
+        ? sanitiseGitRemoteSource(source)
+        : { type: source.type, ...(source.type === 'github' ? sanitiseGitHubSource(source) : sanitiseGitLabSource(source)) }
+      const checkout = resolve(root, `${resolved.type}-${randomUUID()}`)
       mkdirSync(dirname(checkout), { recursive: true })
       if (source.refType === 'commit') {
-        runGit(['clone', '--filter=blob:none', '--no-checkout', clean.url, checkout])
-        runGit(['-C', checkout, 'fetch', '--depth', '1', 'origin', clean.ref])
+        runGit(['clone', '--filter=blob:none', '--no-checkout', resolved.url, checkout])
+        runGit(['-C', checkout, 'fetch', '--depth', '1', 'origin', resolved.ref])
         runGit(['-C', checkout, 'checkout', '--detach', 'FETCH_HEAD'])
       } else {
         const args = ['clone', '--depth', '1']
-        if (clean.ref) args.push('--branch', clean.ref)
-        args.push(clean.url, checkout)
+        if (resolved.ref) args.push('--branch', resolved.ref)
+        args.push(resolved.url, checkout)
         runGit(args)
       }
-      const workingDirectory = safeChild(checkout, clean.subdir)
+      const workingDirectory = safeChild(checkout, resolved.subdir)
       const resolvedRevision = String(runGit(['-C', checkout, 'rev-parse', 'HEAD']) || '').trim()
       return {
         workingDirectory,
         source: {
-          type: source.type,
-          locator: clean.url,
-          ref: clean.ref,
-          subdir: clean.subdir
+          type: resolved.type,
+          locator: resolved.url,
+          ref: resolved.ref,
+          subdir: resolved.subdir
         },
         resolvedRevision,
         cleanup() { rmSync(checkout, { recursive: true, force: true }) }

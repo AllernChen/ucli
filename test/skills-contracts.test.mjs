@@ -5,6 +5,7 @@ import test from 'node:test'
 
 import {
   parseSkillManifest,
+  sanitiseGitRemoteSource,
   sanitiseGitLabSource,
   sanitiseGitHubSource,
   validateSkillCompatibility
@@ -65,6 +66,29 @@ test('GitLab HTTPS sources preserve nested groups and never retain embedded cred
   assert.throws(
     () => sanitiseGitLabSource({ url: 'https://github.com/owner/repo' }),
     (error) => error.code === 'SKILL_SOURCE_INVALID'
+  )
+})
+
+test('generic Git remote source detects the provider from the repository hostname', () => {
+  assert.deepEqual(sanitiseGitRemoteSource({
+    url: 'https://token@github.com/owner/skills.git', ref: 'main'
+  }), {
+    type: 'github',
+    url: 'https://github.com/owner/skills.git',
+    ref: 'main',
+    subdir: ''
+  })
+  assert.deepEqual(sanitiseGitRemoteSource({
+    url: 'https://token@gitlab.com/group/platform/skills.git'
+  }), {
+    type: 'gitlab',
+    url: 'https://gitlab.com/group/platform/skills.git',
+    ref: '',
+    subdir: ''
+  })
+  assert.throws(
+    () => sanitiseGitRemoteSource({ url: 'https://gitlab.example.com/group/skills.git' }),
+    (error) => error.code === 'SKILL_SOURCE_INVALID' && error.message === 'Only GitHub or GitLab HTTPS URLs are supported'
   )
 })
 

@@ -86,6 +86,16 @@ export function sanitiseGitLabSource(source = {}) {
   return sanitiseGitSource(source, { host: 'gitlab.com', label: 'GitLab', nestedGroups: true })
 }
 
+export function sanitiseGitRemoteSource(source = {}) {
+  let hostname
+  try { hostname = new URL(String(source.url || '')).hostname.toLowerCase() } catch {
+    throw skillError('Git repository URL is invalid', 'SKILL_SOURCE_INVALID')
+  }
+  if (hostname === 'github.com') return { type: 'github', ...sanitiseGitHubSource(source) }
+  if (hostname === 'gitlab.com') return { type: 'gitlab', ...sanitiseGitLabSource(source) }
+  throw skillError('Only GitHub or GitLab HTTPS URLs are supported', 'SKILL_SOURCE_INVALID')
+}
+
 export function sanitiseSkillError(error) {
   const code = typeof error?.code === 'string' && error.code.startsWith('SKILL_')
     ? error.code
