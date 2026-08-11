@@ -4,6 +4,10 @@ import { ipc } from '../ipc.js'
 let unsub = null
 let refreshTimer = null
 
+function sameArray(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
 export const useStatsStore = defineStore('stats', {
   state: () => ({
     total: { input: 0, output: 0, costUsd: 0, costUnavailableCount: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } },
@@ -19,17 +23,32 @@ export const useStatsStore = defineStore('stats', {
     _trendRequestSequence: 0
   }),
   actions: {
+    _invalidateTrendQuery() {
+      this._trendRequestSequence += 1
+      this.trendLoading = false
+      this.trendError = null
+      this.trend = null
+    },
+
     setGranularity(granularity) {
+      if (granularity === this.granularity) return
       this.granularity = granularity
       this.range = null
+      this._invalidateTrendQuery()
     },
 
     setFilters(filters = {}) {
-      this.filters = {
+      const next = {
         projectPaths: Array.isArray(filters.projectPaths) ? [...filters.projectPaths] : [],
         adapterIds: Array.isArray(filters.adapterIds) ? [...filters.adapterIds] : [],
         models: Array.isArray(filters.models) ? [...filters.models] : []
       }
+      const changed = !sameArray(next.projectPaths, this.filters.projectPaths) ||
+        !sameArray(next.adapterIds, this.filters.adapterIds) ||
+        !sameArray(next.models, this.filters.models)
+      if (!changed) return
+      this.filters = next
+      this._invalidateTrendQuery()
     },
 
     async loadTrend() {

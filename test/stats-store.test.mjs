@@ -112,3 +112,58 @@ test('stats store ignores stale success and failure responses', async () => {
   assert.equal(store.trendError, null)
   assert.equal(store.trendLoading, false)
 })
+
+test('changing granularity invalidates an in-flight success before another load starts', async () => {
+  const store = createStore()
+  store.trend = { granularity: 'day', buckets: [{ label: 'old' }] }
+  store.trendError = { code: 'OLD_ERROR', message: 'old' }
+  const stale = store.loadTrend()
+
+  store.setGranularity('week')
+  assert.equal(store.granularity, 'week')
+  assert.equal(store.trend, null)
+  assert.equal(store.trendError, null)
+  assert.equal(store.trendLoading, false)
+
+  trendRequests[0].resolve({ granularity: 'day', buckets: [{ label: 'stale' }] })
+  await stale
+  assert.equal(store.trend, null)
+  assert.equal(store.trendError, null)
+  assert.equal(store.trendLoading, false)
+
+  const current = store.loadTrend()
+  trendRequests[1].resolve({ granularity: 'week', buckets: [{ label: 'current' }] })
+  await current
+  assert.deepEqual(store.trend, {
+    granularity: 'week', buckets: [{ label: 'current' }]
+  })
+})
+
+test('changing filters invalidates an in-flight failure before another load starts', async () => {
+  const store = createStore()
+  const stale = store.loadTrend()
+
+  store.setFilters({ projectPaths: ['/work/new'], adapterIds: ['codex'], models: [] })
+  assert.deepEqual(store.filters, {
+    projectPaths: ['/work/new'], adapterIds: ['codex'], models: []
+  })
+  assert.equal(store.trend, null)
+  assert.equal(store.trendError, null)
+  assert.equal(store.trendLoading, false)
+
+  trendRequests[0].reject(Object.assign(new Error('stale failure'), {
+    code: 'TOO_MANY_BUCKETS', suggestedGranularity: 'week'
+  }))
+  await stale
+  assert.equal(store.trend, null)
+  assert.equal(store.trendError, null)
+  assert.equal(store.trendLoading, false)
+
+  const current = store.loadTrend()
+  assert.deepEqual(trendRequests[1].query.projectPaths, ['/work/new'])
+  trendRequests[1].resolve({ granularity: 'day', buckets: [{ label: 'current' }] })
+  await current
+  assert.deepEqual(store.trend, {
+    granularity: 'day', buckets: [{ label: 'current' }]
+  })
+})
