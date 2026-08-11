@@ -331,10 +331,18 @@
       </a-empty>
     </a-spin>
 
-    <a-drawer v-model:open="installOpen" title="安装 Skill" width="540" :destroy-on-close="true">
+    <a-drawer
+      v-model:open="installOpen"
+      title="安装 Skill"
+      width="540"
+      :destroy-on-close="true"
+      :closable="!skills.saving"
+      :mask-closable="!skills.saving"
+      :keyboard="!skills.saving"
+    >
       <a-form layout="vertical">
         <a-form-item label="来源">
-          <a-radio-group v-model:value="installDraft.sourceType" @change="clearPreview">
+          <a-radio-group v-model:value="installDraft.sourceType" :disabled="skills.saving" @change="clearPreview">
             <a-radio-button value="local">本地目录 / ZIP</a-radio-button>
             <a-radio-button value="git">GitHub / GitLab</a-radio-button>
           </a-radio-group>
@@ -344,46 +352,65 @@
           <a-form-item label="本地位置">
             <a-input v-model:value="installDraft.localPath" readonly placeholder="选择 Skill 目录或 ZIP 文件" />
             <a-space class="skills-picker-actions">
-              <a-button @click="chooseLocalDirectory">选择目录</a-button>
-              <a-button @click="chooseArchive">选择 ZIP</a-button>
+              <a-button :disabled="skills.saving" @click="chooseLocalDirectory">选择目录</a-button>
+              <a-button :disabled="skills.saving" @click="chooseArchive">选择 ZIP</a-button>
             </a-space>
           </a-form-item>
         </template>
         <template v-else>
           <a-form-item label="GitHub / GitLab 仓库地址">
-            <a-input v-model:value="installDraft.gitUrl" placeholder="https://github.com/owner/repository.git 或 https://gitlab.com/group/project.git" @input="clearPreview" />
+            <a-input v-model:value="installDraft.gitUrl" :disabled="skills.saving" placeholder="https://github.com/owner/repository.git 或 https://gitlab.com/group/project.git" @input="clearPreview" />
             <div class="skills-help">支持 GitHub、GitLab 与自建 GitLab；HTTP 仅支持私网或本机地址。私有仓库复用本机 Git 登录状态，UCLI 不保存令牌。</div>
           </a-form-item>
           <a-row :gutter="12">
             <a-col :span="8">
               <a-form-item label="引用类型">
-                <a-select v-model:value="installDraft.refType" :options="refTypeOptions" @change="clearPreview" />
+                <a-select v-model:value="installDraft.refType" :options="refTypeOptions" :disabled="skills.saving" @change="clearPreview" />
               </a-form-item>
             </a-col>
             <a-col :span="16">
               <a-form-item label="分支 / 标签 / 提交">
-                <a-input v-model:value="installDraft.ref" :disabled="installDraft.refType === 'default'" @input="clearPreview" />
+                <a-input v-model:value="installDraft.ref" :disabled="installDraft.refType === 'default' || skills.saving" @input="clearPreview" />
               </a-form-item>
             </a-col>
           </a-row>
           <a-form-item label="仓库内子目录（可选）">
-            <a-input v-model:value="installDraft.subdir" placeholder="skills/my-skill" @input="clearPreview" />
+            <a-input v-model:value="installDraft.subdir" :disabled="skills.saving" placeholder="skills/my-skill" @input="clearPreview" />
           </a-form-item>
         </template>
 
-        <a-button :loading="inspecting" :disabled="!sourceReady" @click="inspectSource">检查来源</a-button>
+        <a-button :loading="inspecting" :disabled="!sourceReady || skills.saving" @click="inspectSource">检查来源</a-button>
 
         <a-card v-if="sourcePreview && sourcePreview.kind === 'collection'" class="source-preview" size="small">
           <strong>发现 {{ sourcePreview.skills.length }} 个 Skills</strong>
-          <p>这个仓库是 Skill 集合，请先选择要安装的 Skill。</p>
+          <p>这个仓库是 Skill 集合，可以选择一个或多个 Skill，也可以全选。</p>
+          <div class="skills-collection-controls">
+            <a-checkbox
+              :checked="collectionSelectionState.allSelected"
+              :indeterminate="collectionSelectionState.partiallySelected"
+              :disabled="inspecting || skills.saving"
+              @change="toggleCollectionSelectAll"
+            >全选</a-checkbox>
+            <span class="skills-muted">
+              已选择 {{ collectionSelectionState.selectedSkills.length }}/{{ sourcePreview.skills.length }}
+            </span>
+          </div>
           <a-select
-            v-model:value="installDraft.subdir"
+            v-model:value="collectionSelectedSubdirs"
+            mode="multiple"
             :options="collectionSkillOptions"
-            placeholder="选择要安装的 Skill"
+            placeholder="选择要安装的 Skills"
             style="width: 100%"
             :loading="inspecting"
-            :disabled="inspecting"
-            @change="selectCollectionSkill"
+            :disabled="inspecting || skills.saving"
+          />
+          <a-alert
+            v-if="collectionSelectionState.blockedSkills.length"
+            class="skills-inline-alert"
+            type="error"
+            show-icon
+            :message="`${collectionSelectionState.blockedSkills.length} 个所选 Skill 暂不可安装`"
+            :description="collectionBlockedDescription"
           />
           <a-alert
             v-if="sourcePreview.invalidSkills?.length"
@@ -392,6 +419,39 @@
             show-icon
             :message="`${sourcePreview.invalidSkills.length} 个无效 Skill 已跳过`"
           />
+          <a-alert
+            v-if="batchInstallResult && (batchInstallResult.failed.length || batchInstallResult.aborted || batchInstallResult.refreshError)"
+            class="skills-inline-alert"
+            type="warning"
+            show-icon
+            message="批量安装结果"
+          >
+            <template #description>
+              <div
+                v-for="success in batchInstallResult.installed"
+                :key="`success:${success.request.source.subdir}`"
+                class="skills-batch-result skills-batch-result-success"
+              >
+                ✓ {{ collectionSkillName(success.request.source.subdir) }} · {{ success.request.source.subdir }}
+              </div>
+              <div
+                v-for="failure in batchInstallResult.failed"
+                :key="`failure:${failure.request.source.subdir}`"
+                class="skills-batch-result skills-batch-result-failure"
+              >
+                ✕ {{ collectionSkillName(failure.request.source.subdir) }} · {{ failure.request.source.subdir }} ·
+                {{ failure.error.code }} · {{ failure.error.message }}
+              </div>
+              <div v-if="batchInstallResult.refreshError" class="skills-batch-result skills-batch-result-failure">
+                状态刷新失败 · {{ batchInstallResult.refreshError.code }} · {{ batchInstallResult.refreshError.message }}
+              </div>
+              <div v-if="batchInstallResult.aborted" class="skills-batch-result skills-batch-result-failure">
+                批次已中止，{{ collectionSkillName(batchInstallResult.aborted.request.source.subdir) }} 的保存状态待确认 ·
+                {{ batchInstallResult.aborted.error.code }} · {{ batchInstallResult.aborted.error.message }}；
+                已跳过 {{ batchInstallResult.aborted.skippedRequests.length }} 个 Skill
+              </div>
+            </template>
+          </a-alert>
         </a-card>
 
         <a-card v-else-if="sourcePreview" class="source-preview" size="small">
@@ -432,24 +492,24 @@
         />
 
         <a-form-item label="确保可用于">
-          <a-checkbox-group v-model:value="installDraft.targets" :options="targetOptions" @change="clearPreview" />
+          <a-checkbox-group v-model:value="installDraft.targets" :options="targetOptions" :disabled="skills.saving" @change="clearPreview" />
           <div class="skills-help">OpenCode 和 U-Code 可能通过兼容目录继承，不会重复投放相同内容。</div>
         </a-form-item>
         <a-form-item label="安装范围">
-          <a-radio-group v-model:value="installDraft.scopeType" @change="clearPreview">
+          <a-radio-group v-model:value="installDraft.scopeType" :disabled="skills.saving" @change="clearPreview">
             <a-radio value="user">用户级（所有项目）</a-radio>
             <a-radio value="project">项目级</a-radio>
           </a-radio-group>
         </a-form-item>
         <a-form-item v-if="installDraft.scopeType === 'project'" label="项目">
           <a-input v-model:value="installDraft.projectPath" readonly placeholder="请选择项目目录" />
-          <a-button class="skills-picker-actions" @click="chooseInstallProject">选择项目</a-button>
+          <a-button class="skills-picker-actions" :disabled="skills.saving" @click="chooseInstallProject">选择项目</a-button>
         </a-form-item>
       </a-form>
       <template #footer>
         <div class="drawer-footer">
-          <a-button @click="installOpen = false">取消</a-button>
-          <a-button type="primary" :loading="skills.saving" :disabled="!canInstall" @click="install">{{ installActionLabel }}</a-button>
+          <a-button :disabled="skills.saving" @click="installOpen = false">取消</a-button>
+          <a-button type="primary" :loading="skills.saving" :disabled="!canInstall || skills.saving" @click="install">{{ installActionLabel }}</a-button>
         </div>
       </template>
     </a-drawer>
@@ -487,6 +547,7 @@ import { ipc } from '../ipc.js'
 import {
   aggregateSkillCatalog,
   buildPluginCopyInstallRequest,
+  buildSkillCollectionInstallRequests,
   buildSkillInstallRequest,
   buildSourceProjectCliSummary,
   buildSkillCliMatrix,
@@ -494,8 +555,10 @@ import {
   createLatestRequestGuard,
   filterSkillCatalog,
   groupSkillCatalogBySourceProject,
+  resolveSkillCollectionInstallSelection,
   resolveSkillInstallPreflight,
   skillCliName,
+  skillInstallAffectedInstallationIds,
   skillOriginLabel,
   skillPackageApplyTargets,
   skillSourceKindLabel,
@@ -518,6 +581,8 @@ const sourceProjectDetailKey = ref(null)
 const skillDetailSelection = ref(null)
 const sourcePreview = ref(null)
 const inspecting = ref(false)
+const collectionSelectedSubdirs = ref([])
+const batchInstallResult = ref(null)
 const inspectionGuard = createLatestRequestGuard()
 
 const installDraft = reactive({
@@ -604,6 +669,27 @@ const collectionSkillOptions = computed(() => sourcePreview.value?.kind === 'col
       label: `${item.name} · ${item.subdir}`
     }))
   : [])
+const collectionSelectionState = computed(() => resolveSkillCollectionInstallSelection({
+  preview: sourcePreview.value,
+  selectedSubdirs: collectionSelectedSubdirs.value,
+  inspecting: inspecting.value,
+  sourceType: installDraft.sourceType,
+  targetAdapterIds: installDraft.targets,
+  scopeType: installDraft.scopeType,
+  projectPath: installDraft.projectPath
+}))
+const collectionBlockedDescription = computed(() => collectionSelectionState.value.blockedSkills
+  .map(({ skill, reason }) => {
+    const label = {
+      duplicate_name: '集合中存在同名 Skill',
+      incompatible: '与所选 CLI 不兼容',
+      target_conflict: '目标位置存在冲突',
+      source_changed: '已安装来源内容发生变化',
+      inspecting: '正在检查'
+    }[reason] || '未通过安装预检'
+    return `${skill.name}：${label}`
+  })
+  .join('；'))
 
 const sourceReady = computed(() => installDraft.sourceType === 'local' ? Boolean(installDraft.localPath) : Boolean(installDraft.gitUrl))
 const installPreflight = computed(() => resolveSkillInstallPreflight(sourcePreview.value || {}, {
@@ -615,20 +701,28 @@ const installPreflightMissingNames = computed(() => installPreflight.value.missi
   .map((adapterId) => skills.adapters.find((item) => item.id === adapterId)?.displayName || adapterId)
   .join('、'))
 const installActionLabel = computed(() => {
+  if (sourcePreview.value?.kind === 'collection') {
+    if (skills.saving && skills.batchProgress) {
+      return `正在安装 ${skills.batchProgress.total} 个 Skills`
+    }
+    return `安装 ${collectionSelectionState.value.selectedSkills.length} 个 Skills`
+  }
   if (installPreflight.value.kind === 'existing_target') return '确认接管'
   if (installPreflight.value.kind !== 'already_installed') return '确认安装'
   return installPreflight.value.missingAdapterIds.length ? '应用到所选 CLI' : '完成'
 })
-const canInstall = computed(() => canConfirmSkillInstall({
-  preview: sourcePreview.value,
-  inspecting: inspecting.value,
-  sourceType: installDraft.sourceType,
-  subdir: installDraft.subdir,
-  targetAdapterIds: installDraft.targets,
-  scopeType: installDraft.scopeType,
-  projectPath: installDraft.projectPath,
-  preflightKind: installPreflight.value.kind
-}))
+const canInstall = computed(() => sourcePreview.value?.kind === 'collection'
+  ? collectionSelectionState.value.canInstall
+  : canConfirmSkillInstall({
+      preview: sourcePreview.value,
+      inspecting: inspecting.value,
+      sourceType: installDraft.sourceType,
+      subdir: installDraft.subdir,
+      targetAdapterIds: installDraft.targets,
+      scopeType: installDraft.scopeType,
+      projectPath: installDraft.projectPath,
+      preflightKind: installPreflight.value.kind
+    }))
 
 function sourceRequest() {
   return installDraft.sourceType === 'local'
@@ -641,6 +735,8 @@ function sourceRequest() {
 function clearPreview() {
   inspectionGuard.invalidate()
   sourcePreview.value = null
+  collectionSelectedSubdirs.value = []
+  batchInstallResult.value = null
   inspecting.value = false
 }
 function formatBytes(value) { return value < 1024 ? `${value} B` : `${(value / 1024).toFixed(1)} KB` }
@@ -677,6 +773,8 @@ function openInstall() {
   installDraft.scopeType = projectPath.value ? 'project' : 'user'
   installDraft.projectPath = projectPath.value
   sourcePreview.value = null
+  collectionSelectedSubdirs.value = []
+  batchInstallResult.value = null
   installOpen.value = true
 }
 async function chooseLocalDirectory() {
@@ -703,6 +801,12 @@ async function inspectSource() {
     })
     if (!inspectionGuard.isCurrent(requestId)) return
     sourcePreview.value = preview
+    if (preview.kind === 'collection') {
+      const available = new Set(preview.skills.map((item) => item.subdir))
+      collectionSelectedSubdirs.value = collectionSelectedSubdirs.value.filter((subdir) => available.has(subdir))
+    } else {
+      collectionSelectedSubdirs.value = []
+    }
   } catch (error) {
     if (!inspectionGuard.isCurrent(requestId)) return
     message.error(error?.message || '无法读取 Skill 来源')
@@ -710,11 +814,53 @@ async function inspectSource() {
     if (inspectionGuard.isCurrent(requestId)) inspecting.value = false
   }
 }
-async function selectCollectionSkill() {
-  await inspectSource()
+function toggleCollectionSelectAll(event) {
+  collectionSelectedSubdirs.value = event.target.checked
+    ? sourcePreview.value.skills.map((item) => item.subdir)
+    : []
+}
+function collectionSkillName(subdir) {
+  return sourcePreview.value?.skills?.find((item) => item.subdir === subdir)?.name || subdir.split('/').at(-1)
+}
+async function installCollection() {
+  batchInstallResult.value = null
+  const requests = buildSkillCollectionInstallRequests({
+    preview: sourcePreview.value,
+    selectedSubdirs: collectionSelectedSubdirs.value,
+    source: sourceRequest(),
+    targetAdapterIds: installDraft.targets,
+    scopeType: installDraft.scopeType,
+    projectPath: installDraft.projectPath
+  })
+  const result = await skills.installMany(requests)
+  batchInstallResult.value = result
+  const affectedIds = result.installed.flatMap((item) => skillInstallAffectedInstallationIds(item.result))
+  if (result.failed.length || result.aborted || result.refreshError) {
+    collectionSelectedSubdirs.value = [
+      ...result.failed.map((item) => item.request.source.subdir),
+      ...(result.aborted?.skippedRequests || []).map((item) => item.source.subdir)
+    ]
+    if (result.aborted) {
+      message.warning(`已完成 ${result.installed.length} 个 Skill；本地数据保存待确认，批次已中止。`)
+      await inspectSource()
+    } else if (result.failed.length) {
+      message.warning(`已完成 ${result.installed.length} 个 Skill，${result.failed.length} 个安装失败；失败项已保留选择。`)
+      await inspectSource()
+    } else {
+      message.warning(`已完成 ${result.installed.length} 个 Skill，但列表刷新失败；安装结果已保留。`)
+    }
+  } else {
+    installOpen.value = false
+    message.success(`已完成 ${result.installed.length} 个 Skills`)
+  }
+  await promptRestart(affectedIds)
 }
 async function install() {
   try {
+    if (sourcePreview.value?.kind === 'collection') {
+      await installCollection()
+      return
+    }
     const pkg = await skills.install(buildSkillInstallRequest({
       source: sourceRequest(), targetAdapterIds: installDraft.targets,
       scopeType: installDraft.scopeType, projectPath: installDraft.projectPath
@@ -989,6 +1135,11 @@ onMounted(async () => {
 .skills-picker-actions { margin-top: 8px; }
 .source-preview { margin: 14px 0; }
 .source-preview p { margin: 4px 0; color: #595959; }
+.skills-collection-controls { display: flex; justify-content: space-between; align-items: center; margin: 10px 0 8px; }
+.skills-inline-alert { margin-top: 10px; }
+.skills-batch-result { line-height: 1.6; word-break: break-word; }
+.skills-batch-result-success { color: #237804; }
+.skills-batch-result-failure { color: #a8071a; }
 .drawer-footer { display: flex; justify-content: flex-end; gap: 8px; }
 .detail-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
 h4 { margin: 20px 0 8px; }

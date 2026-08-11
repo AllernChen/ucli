@@ -55,11 +55,85 @@ export function canConfirmSkillInstall(options = {}) {
   const preview = options.preview
   if (!preview || preview.kind === 'collection' || options.inspecting) return false
   if (!(options.targetAdapterIds || []).length) return false
+  if ((options.targetAdapterIds || []).some((adapterId) =>
+    preview.compatibility?.[adapterId]?.compatible === false)) return false
   if (options.scopeType !== 'user' && !options.projectPath) return false
   if (['source_changed', 'target_conflict'].includes(options.preflightKind)) return false
   if (options.sourceType !== 'local' &&
       String(preview.source?.subdir || '') !== String(options.subdir || '')) return false
   return true
+}
+
+export function resolveSkillCollectionInstallSelection(options = {}) {
+  const preview = options.preview
+  const skills = preview?.kind === 'collection' && Array.isArray(preview.skills) ? preview.skills : []
+  const selected = new Set(options.selectedSubdirs || [])
+  const selectedSkills = skills.filter((skill) => selected.has(skill.subdir))
+  const nameCounts = new Map()
+  for (const skill of selectedSkills) {
+    const nameKey = String(skill.name || '').toLowerCase()
+    nameCounts.set(nameKey, (nameCounts.get(nameKey) || 0) + 1)
+  }
+
+  const blockedSkills = selectedSkills.flatMap((skill) => {
+    if (nameCounts.get(String(skill.name || '').toLowerCase()) > 1) return [{ skill, reason: 'duplicate_name' }]
+    if ((options.targetAdapterIds || []).some((adapterId) =>
+      skill.compatibility?.[adapterId]?.compatible === false)) {
+      return [{ skill, reason: 'incompatible' }]
+    }
+    const preflight = resolveSkillInstallPreflight(skill, {
+      scopeType: options.scopeType,
+      projectPath: options.projectPath,
+      targetAdapterIds: options.targetAdapterIds
+    })
+    if (canConfirmSkillInstall({
+      preview: skill,
+      inspecting: options.inspecting,
+      sourceType: options.sourceType,
+      subdir: skill.subdir,
+      targetAdapterIds: options.targetAdapterIds,
+      scopeType: options.scopeType,
+      projectPath: options.projectPath,
+      preflightKind: preflight.kind
+    })) return []
+    return [{ skill, reason: options.inspecting ? 'inspecting' : preflight.kind }]
+  })
+  const allSelected = skills.length > 0 && selectedSkills.length === skills.length
+  return {
+    selectedSkills,
+    blockedSkills,
+    allSelected,
+    partiallySelected: selectedSkills.length > 0 && !allSelected,
+    canInstall: selectedSkills.length > 0 && blockedSkills.length === 0
+  }
+}
+
+export function buildSkillCollectionInstallRequests(options = {}) {
+  if (options.preview?.kind !== 'collection' || !options.preview.resolvedRevision) return []
+  const selected = new Set(options.selectedSubdirs || [])
+  return options.preview.skills
+    .filter((skill) => selected.has(skill.subdir))
+    .map((skill) => ({
+      ...buildSkillInstallRequest({
+        source: { ...options.source, subdir: skill.subdir },
+        targetAdapterIds: options.targetAdapterIds || [],
+        scopeType: options.scopeType,
+        projectPath: options.projectPath || ''
+      }),
+      expectedRevision: options.preview.resolvedRevision
+    }))
+}
+
+export function skillInstallAffectedInstallationIds(pkg = {}) {
+  const installations = pkg.installations || []
+  if (pkg.installOutcome?.kind === 'already_installed') return []
+  if (['applied_existing', 'adopted_existing'].includes(pkg.installOutcome?.kind)) {
+    const applied = pkg.installOutcome.appliedAdapterIds || []
+    return installations
+      .filter((item) => applied.includes(item.targetAdapterId))
+      .map((item) => item.id)
+  }
+  return installations.map((item) => item.id)
 }
 
 function mergeVisibility(target, source = {}) {

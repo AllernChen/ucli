@@ -14,6 +14,7 @@ export const useSkillsStore = defineStore('skills', {
     loading: false,
     saving: false,
     checking: false,
+    batchProgress: null,
     error: null
   }),
   actions: {
@@ -53,6 +54,28 @@ export const useSkillsStore = defineStore('skills', {
         const result = await ipc.installSkill(request)
         await this.load()
         return result
+      })
+    },
+    installMany(requests = []) {
+      return this.runSaving(async () => {
+        this.batchProgress = { total: requests.length }
+        try {
+          const result = await ipc.installSkills(requests)
+          try {
+            await this.load()
+            return result
+          } catch (error) {
+            return {
+              ...result,
+              refreshError: {
+                code: error?.code || 'SKILL_REFRESH_FAILED',
+                message: error?.message || 'Skills 状态刷新失败'
+              }
+            }
+          }
+        } finally {
+          this.batchProgress = null
+        }
       })
     },
     applyToAdapter(packageId, targetAdapterId) {

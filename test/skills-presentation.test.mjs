@@ -5,6 +5,7 @@ import test from 'node:test'
 import {
   aggregateSkillCatalog,
   buildPluginCopyInstallRequest,
+  buildSkillCollectionInstallRequests,
   buildSourceProjectCliSummary,
   buildSkillCliMatrix,
   canConfirmSkillInstall,
@@ -14,7 +15,9 @@ import {
   normaliseGitLabRepository,
   normaliseGitHubRepository,
   resolveSkillInstallPreflight,
+  resolveSkillCollectionInstallSelection,
   skillOriginLabel,
+  skillInstallAffectedInstallationIds,
   skillPackageApplyTargets,
   skillSourceKindLabel,
   skillStatusPresentation,
@@ -931,15 +934,26 @@ test('Skills install workflow auto-detects GitHub or GitLab from the repository 
   assert.match(page, /type: 'git'/)
 })
 
-test('Skills install workflow lets users select one Skill from a collection repository', () => {
+test('Skills install workflow supports multi-select and select-all for a collection repository', () => {
   const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
   assert.match(page, /sourcePreview\.kind === 'collection'/)
-  assert.match(page, /选择要安装的 Skill/)
+  assert.match(page, /选择要安装的 Skills/)
+  assert.match(page, /mode="multiple"/)
+  assert.match(page, /collectionSelectedSubdirs/)
   assert.match(page, /collectionSkillOptions/)
-  assert.match(page, /selectCollectionSkill/)
+  assert.match(page, /toggleCollectionSelectAll/)
+  assert.match(page, />全选</)
+  assert.match(page, /collectionSelectionState/)
+  assert.match(page, /buildSkillCollectionInstallRequests/)
+  assert.match(page, /skills\.installMany/)
+  assert.match(page, /batchInstallResult/)
+  assert.match(page, /failure\.error\.message/)
+  assert.match(page, /batchInstallResult\.aborted/)
+  assert.match(page, /:disabled="skills\.saving"/)
+  assert.match(page, /:keyboard="!skills\.saving"/)
   assert.match(page, /canConfirmSkillInstall/)
   assert.match(page, /inspectionGuard\.isCurrent/)
-  assert.match(page, /:disabled="inspecting"/)
+  assert.match(page, /:disabled="inspecting \|\| skills\.saving"/)
   assert.match(page, /subdir: installDraft\.subdir/)
 })
 
@@ -983,6 +997,134 @@ test('Skill collection selection enables install only after matching preflight c
   assert.equal(canConfirmSkillInstall({ ...base, preview: staleSkill, inspecting: false }), false)
   assert.equal(canConfirmSkillInstall({ ...base, preview: selectedSkill, inspecting: true }), false)
   assert.equal(canConfirmSkillInstall({ ...base, preview: selectedSkill, inspecting: false }), true)
+})
+
+test('Skill collection selection supports partial selection and select all in repository order', () => {
+  const collection = {
+    kind: 'collection',
+    skills: [
+      {
+        kind: 'skill', name: 'tdd', subdir: 'skills/tdd',
+        source: { subdir: 'skills/tdd' }, compatibility: { codex: { compatible: true } },
+        installedMatches: [], targetMatches: []
+      },
+      {
+        kind: 'skill', name: 'grill-me', subdir: 'skills/grill-me',
+        source: { subdir: 'skills/grill-me' }, compatibility: { codex: { compatible: true } },
+        installedMatches: [], targetMatches: []
+      }
+    ]
+  }
+  const context = {
+    preview: collection, inspecting: false, sourceType: 'git', targetAdapterIds: ['codex'],
+    scopeType: 'user', projectPath: ''
+  }
+
+  const partial = resolveSkillCollectionInstallSelection({
+    ...context, selectedSubdirs: ['skills/grill-me']
+  })
+  assert.deepEqual(partial.selectedSkills.map((item) => item.name), ['grill-me'])
+  assert.equal(partial.allSelected, false)
+  assert.equal(partial.partiallySelected, true)
+  assert.equal(partial.canInstall, true)
+
+  const all = resolveSkillCollectionInstallSelection({
+    ...context, selectedSubdirs: ['skills/grill-me', 'skills/tdd']
+  })
+  assert.deepEqual(all.selectedSkills.map((item) => item.name), ['tdd', 'grill-me'])
+  assert.equal(all.allSelected, true)
+  assert.equal(all.partiallySelected, false)
+  assert.equal(all.canInstall, true)
+})
+
+test('Skill collection selection blocks conflicts, incompatible CLIs and duplicate names', () => {
+  const skills = [
+    {
+      kind: 'skill', name: 'Duplicate', subdir: 'skills/one', source: { subdir: 'skills/one' },
+      compatibility: { opencode: { compatible: true } }, installedMatches: [], targetMatches: []
+    },
+    {
+      kind: 'skill', name: 'duplicate', subdir: 'skills/two', source: { subdir: 'skills/two' },
+      compatibility: { opencode: { compatible: true } }, installedMatches: [], targetMatches: []
+    },
+    {
+      kind: 'skill', name: 'conflict', subdir: 'skills/conflict', source: { subdir: 'skills/conflict' },
+      compatibility: { opencode: { compatible: true } }, installedMatches: [],
+      targetMatches: [{ adapterId: 'opencode', matchType: 'conflict' }]
+    },
+    {
+      kind: 'skill', name: 'Bad_Name', subdir: 'skills/incompatible', source: { subdir: 'skills/incompatible' },
+      compatibility: { opencode: { compatible: false } }, installedMatches: [], targetMatches: []
+    }
+  ]
+  const state = resolveSkillCollectionInstallSelection({
+    preview: { kind: 'collection', skills },
+    selectedSubdirs: skills.map((item) => item.subdir),
+    inspecting: false,
+    sourceType: 'git', targetAdapterIds: ['opencode'], scopeType: 'user', projectPath: ''
+  })
+
+  assert.equal(state.canInstall, false)
+  assert.deepEqual(state.blockedSkills.map(({ skill, reason }) => ({ name: skill.name, reason })), [
+    { name: 'Duplicate', reason: 'duplicate_name' },
+    { name: 'duplicate', reason: 'duplicate_name' },
+    { name: 'conflict', reason: 'target_conflict' },
+    { name: 'Bad_Name', reason: 'incompatible' }
+  ])
+})
+
+test('Skill collection install requests use selected subdirectories in repository order', () => {
+  const requests = buildSkillCollectionInstallRequests({
+    preview: {
+      kind: 'collection',
+      resolvedRevision: 'collection123',
+      skills: [
+        { name: 'tdd', subdir: 'skills/tdd' },
+        { name: 'grill-me', subdir: 'skills/grill-me' },
+        { name: 'diagnose', subdir: 'skills/diagnose' }
+      ]
+    },
+    selectedSubdirs: ['skills/diagnose', 'skills/tdd'],
+    source: { type: 'git', url: 'https://github.com/example/skills', refType: 'default', ref: '', subdir: '' },
+    targetAdapterIds: ['codex', 'claude'],
+    scopeType: 'project',
+    projectPath: 'C:/project'
+  })
+
+  assert.deepEqual(requests, [
+    {
+      source: { type: 'git', url: 'https://github.com/example/skills', refType: 'default', ref: '', subdir: 'skills/tdd' },
+      expectedRevision: 'collection123',
+      targetAdapterIds: ['codex', 'claude'], scopeType: 'project', projectPath: 'C:/project'
+    },
+    {
+      source: { type: 'git', url: 'https://github.com/example/skills', refType: 'default', ref: '', subdir: 'skills/diagnose' },
+      expectedRevision: 'collection123',
+      targetAdapterIds: ['codex', 'claude'], scopeType: 'project', projectPath: 'C:/project'
+    }
+  ])
+})
+
+test('batch install restarts sessions only for newly applied projections', () => {
+  const installations = [
+    { id: 'claude-installation', targetAdapterId: 'claude' },
+    { id: 'codex-installation', targetAdapterId: 'codex' }
+  ]
+  assert.deepEqual(skillInstallAffectedInstallationIds({ installations }), [
+    'claude-installation', 'codex-installation'
+  ])
+  assert.deepEqual(skillInstallAffectedInstallationIds({
+    installations,
+    installOutcome: { kind: 'already_installed', appliedAdapterIds: [] }
+  }), [])
+  assert.deepEqual(skillInstallAffectedInstallationIds({
+    installations,
+    installOutcome: { kind: 'applied_existing', appliedAdapterIds: ['codex'] }
+  }), ['codex-installation'])
+  assert.deepEqual(skillInstallAffectedInstallationIds({
+    installations,
+    installOutcome: { kind: 'adopted_existing', appliedAdapterIds: ['claude'] }
+  }), ['claude-installation'])
 })
 
 test('Skills page renders an actionable Skill by AI CLI usage matrix', () => {

@@ -36,6 +36,7 @@ export const ipc = {
   getSkillsState: (options) => u.getSkillsState(options),
   inspectSkillSource: (source, context) => u.inspectSkillSource(source, context),
   installSkill: (request) => u.installSkill(request),
+  installSkills: (requests) => u.installSkills(requests),
   applySkillToAdapter: (packageId, targetAdapterId) => u.applySkillToAdapter(packageId, targetAdapterId),
   checkSkillUpdates: (packageIds) => u.checkSkillUpdates(packageIds),
   previewSkillUpdate: (packageId) => u.previewSkillUpdate(packageId),

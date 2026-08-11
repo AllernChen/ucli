@@ -12,13 +12,13 @@ function verifyReleaseArtifacts({ rootDir }) {
   return verifyReleaseArtifactsForPlatform({ rootDir, platform: 'win32', arch: 'x64' })
 }
 
-test('0.9.5 release package and user documentation agree', async () => {
+test('0.9.6 release package and user documentation agree', async () => {
   const [packageSource, readme, changelog] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../README.md', import.meta.url), 'utf8'),
     readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
   ])
-  assert.equal(JSON.parse(packageSource).version, '0.9.5')
+  assert.equal(JSON.parse(packageSource).version, '0.9.6')
   assert.match(readme, /配置档案/)
   assert.match(readme, /CC Switch/)
   assert.match(readme, /Claude 登录态/)
@@ -29,8 +29,9 @@ test('0.9.5 release package and user documentation agree', async () => {
   assert.doesNotMatch(changelog, /\uFFFD/)
   assert.match(readme, /Skills 管理/)
   assert.match(readme, /GitLab/)
-  assert.match(changelog, /## \[0\.9\.5\]/)
-  assert.match(changelog, /多个 Skill/)
+  assert.match(changelog, /## \[0\.9\.6\]/)
+  assert.match(changelog, /多选/)
+  assert.match(changelog, /全选/)
 })
 
 test('Gateway release acceptance documents every required Feishu prerequisite', async () => {

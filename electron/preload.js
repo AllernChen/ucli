@@ -45,6 +45,7 @@ const api = {
   getSkillsState: (options) => ipcRenderer.invoke('skills:get-state', options || {}),
   inspectSkillSource: (source, context) => ipcRenderer.invoke('skills:inspect-source', source, context),
   installSkill: (request) => ipcRenderer.invoke('skills:install', request),
+  installSkills: (requests) => ipcRenderer.invoke('skills:install-many', requests),
   applySkillToAdapter: (packageId, targetAdapterId) => ipcRenderer.invoke('skills:apply-to-adapter', { packageId, targetAdapterId }),
   checkSkillUpdates: (packageIds) => ipcRenderer.invoke('skills:check-updates', packageIds ?? null),
   previewSkillUpdate: (packageId) => ipcRenderer.invoke('skills:preview-update', packageId),

@@ -64,6 +64,16 @@ function installRequest(value) {
   return { source: source(input.source), targetAdapterIds, scopeType: input.scopeType, projectPath }
 }
 
+function installRequests(value) {
+  if (!Array.isArray(value) || !value.length || value.length > 200) {
+    throw ipcError('requests is invalid')
+  }
+  return value.map((request) => ({
+    ...installRequest(request),
+    expectedRevision: string(request?.expectedRevision, 'expectedRevision', { max: 256 })
+  }))
+}
+
 function inspectionContext(value) {
   if (value == null) return {}
   const input = object(value, 'context')
@@ -100,6 +110,7 @@ export function registerSkillsIpc({ ipcMain, service }) {
     service.inspectSource(source(input), inspectionContext(context))
   ))
   ipcMain.handle('skills:install', (_event, input) => safeCall(() => service.install(installRequest(input))))
+  ipcMain.handle('skills:install-many', (_event, input) => safeCall(() => service.installMany(installRequests(input))))
   ipcMain.handle('skills:apply-to-adapter', (_event, request) => safeCall(() => {
     const input = object(request, 'request')
     if (!ADAPTER_IDS.has(input.targetAdapterId)) throw ipcError('targetAdapterId is invalid')

@@ -7,6 +7,7 @@ import test from 'node:test'
 import { openDb } from '../electron/persistence/db.js'
 import { createSkillsService } from '../electron/skills/service.js'
 import { createSkillSourceLoader } from '../electron/skills/sourceLoader.js'
+import { inspectSkillDirectory } from '../electron/skills/fileOps.js'
 
 function createSkill(root, description = 'Prepare release notes', name = 'release-notes') {
   mkdirSync(root, { recursive: true })
@@ -771,20 +772,191 @@ test('Claude plugin Skills only load from installed_plugins.json, not stale cach
   })
 })
 
-test('collection inspection returns selectable Skills without single-package matching', async () => {
-  const collection = {
-    kind: 'collection',
-    skills: [
-      { name: 'tdd', description: 'Develop test-first', subdir: 'skills/engineering/tdd' },
-      { name: 'grill-me', description: 'Clarify a plan', subdir: 'skills/productivity/grill-me' }
-    ],
-    source: { type: 'github', locator: 'https://github.com/example/skills.git', ref: '', subdir: '' },
-    resolvedRevision: 'collection123'
+test('batch install reuses one pinned checkout for multiple Skill packages', async () => {
+  const sourceRoot = mkdtempSync(join(tmpdir(), 'ucli-skills-batch-loader-'))
+  const gitCalls = []
+  try {
+    const sourceLoader = createSkillSourceLoader({
+      stagingRoot: join(sourceRoot, 'staging'),
+      runGit(args) {
+        gitCalls.push(args)
+        if (args[0] === 'clone') {
+          const destination = args.at(-1)
+          createSkill(join(destination, 'skills', 'first'), 'First Skill', 'first')
+          createSkill(join(destination, 'skills', 'second'), 'Second Skill', 'second')
+        }
+        if (args.includes('rev-parse')) return 'collection123\n'
+        return ''
+      }
+    })
+    await withService(async ({ root, db, service }) => {
+      const common = {
+        type: 'git', url: 'https://github.com/example/skills.git',
+        refType: 'branch', ref: 'main'
+      }
+      const request = (subdir) => ({
+        source: { ...common, subdir },
+        expectedRevision: 'collection123',
+        targetAdapterIds: ['codex'], scopeType: 'project', projectPath: join(root, 'project')
+      })
+
+      const result = await service.installMany([
+        request('skills/first'),
+        request('skills/second')
+      ])
+
+      assert.deepEqual(result.installed.map((item) => item.result.name), ['first', 'second'])
+      assert.deepEqual(result.failed, [])
+      assert.deepEqual(db.listSkillPackages().map((pkg) => ({
+        sourceRefType: pkg.sourceRefType,
+        sourceRef: pkg.sourceRef,
+        resolvedRevision: pkg.resolvedRevision
+      })), [
+        { sourceRefType: 'branch', sourceRef: 'main', resolvedRevision: 'collection123' },
+        { sourceRefType: 'branch', sourceRef: 'main', resolvedRevision: 'collection123' }
+      ])
+      assert.equal(gitCalls.filter((args) => args.includes('clone')).length, 1)
+      assert.equal(gitCalls.filter((args) => args.includes('fetch')).length, 1)
+      assert.deepEqual((await service.checkUpdates()).map(({ checked, updateAvailable }) => ({ checked, updateAvailable })), [
+        { checked: true, updateAvailable: false },
+        { checked: true, updateAvailable: false }
+      ])
+    }, { sourceLoader })
+  } finally {
+    rmSync(sourceRoot, { recursive: true, force: true })
   }
-  await withService(async ({ service }) => {
-    assert.deepEqual(await service.inspectSource({
+})
+
+test('batch install preserves confirmed results and stops when later persistence becomes pending', async () => {
+  const preparedRoot = mkdtempSync(join(tmpdir(), 'ucli-skills-pending-batch-'))
+  createSkill(join(preparedRoot, 'first'), 'First Skill', 'first')
+  createSkill(join(preparedRoot, 'second'), 'Second Skill', 'second')
+  createSkill(join(preparedRoot, 'third'), 'Third Skill', 'third')
+  try {
+    await withService(async ({ root, db, service }) => {
+      const request = (subdir) => ({
+        source: {
+          type: 'git', url: 'https://github.com/example/skills.git',
+          refType: 'default', ref: '', subdir
+        },
+        expectedRevision: 'collection123',
+        targetAdapterIds: ['codex'], scopeType: 'project', projectPath: join(root, 'project')
+      })
+
+      const result = await service.installMany([
+        request('skills/first'), request('skills/second'), request('skills/third')
+      ])
+
+      assert.deepEqual(result.installed.map((item) => item.result.name), ['first'])
+      assert.deepEqual(result.failed, [])
+      assert.equal(result.aborted.request.source.subdir, 'skills/second')
+      assert.deepEqual(result.aborted.error, {
+        code: 'SKILL_PERSISTENCE_PENDING', message: 'Skill changes are pending persistence'
+      })
+      assert.deepEqual(result.aborted.skippedRequests.map((item) => item.source.subdir), ['skills/third'])
+      assert.deepEqual(db.listSkillPackages().map((pkg) => pkg.name).sort(), ['first', 'second'])
+      assert.equal(existsSync(join(root, 'project', '.agents', 'skills', 'first')), true)
+      assert.equal(existsSync(join(root, 'project', '.agents', 'skills', 'second')), true)
+      assert.equal(existsSync(join(root, 'project', '.agents', 'skills', 'third')), false)
+    }, {
+      sourceLoader: {
+        async withPreparedMany(_sources, work) {
+          return work([
+            {
+              workingDirectory: join(preparedRoot, 'first'),
+              source: { type: 'github', locator: 'https://github.com/example/skills.git', ref: '', subdir: 'skills/first' },
+              resolvedRevision: 'collection123'
+            },
+            {
+              workingDirectory: join(preparedRoot, 'second'),
+              source: { type: 'github', locator: 'https://github.com/example/skills.git', ref: '', subdir: 'skills/second' },
+              resolvedRevision: 'collection123'
+            },
+            {
+              workingDirectory: join(preparedRoot, 'third'),
+              source: { type: 'github', locator: 'https://github.com/example/skills.git', ref: '', subdir: 'skills/third' },
+              resolvedRevision: 'collection123'
+            }
+          ])
+        }
+      },
+      flushFactory: (db) => {
+        let calls = 0
+        return () => {
+          calls += 1
+          return calls === 2 ? false : db.flush()
+        }
+      }
+    })
+  } finally {
+    rmSync(preparedRoot, { recursive: true, force: true })
+  }
+})
+
+test('batch install rejects mixed target and scope contexts before source preparation', async () => {
+  let prepared = false
+  await withService(async ({ root, service }) => {
+    const base = (subdir) => ({
+      source: {
+        type: 'git', url: 'https://github.com/example/skills.git',
+        refType: 'default', ref: '', subdir
+      },
+      expectedRevision: 'collection123', scopeType: 'project', projectPath: join(root, 'project')
+    })
+    await assert.rejects(
+      service.installMany([
+        { ...base('skills/first'), targetAdapterIds: ['codex'] },
+        { ...base('skills/second'), targetAdapterIds: ['claude'] }
+      ]),
+      (error) => error.code === 'SKILL_BATCH_CONTEXT_INVALID'
+    )
+    assert.equal(prepared, false)
+  }, {
+    sourceLoader: {
+      async withPreparedMany() { prepared = true }
+    }
+  })
+})
+
+test('collection inspection adds independent install preflight to every selectable Skill', async () => {
+  let collection
+  await withService(async ({ root, service }) => {
+    const project = join(root, 'project')
+    const existingTdd = join(project, '.agents', 'skills', 'tdd')
+    createSkill(existingTdd, 'Develop test-first', 'tdd')
+    const tddHash = inspectSkillDirectory(existingTdd).contentSha256
+    collection = {
+      kind: 'collection',
+      skills: [
+        {
+          kind: 'skill', name: 'tdd', description: 'Develop test-first',
+          subdir: 'skills/engineering/tdd', contentSha256: tddHash,
+          source: { type: 'github', locator: 'https://github.com/example/skills.git', ref: '', subdir: 'skills/engineering/tdd' }
+        },
+        {
+          kind: 'skill', name: 'grill-me', description: 'Clarify a plan',
+          subdir: 'skills/productivity/grill-me', contentSha256: 'different-content',
+          source: { type: 'github', locator: 'https://github.com/example/skills.git', ref: '', subdir: 'skills/productivity/grill-me' }
+        }
+      ],
+      source: { type: 'github', locator: 'https://github.com/example/skills.git', ref: '', subdir: '' },
+      resolvedRevision: 'collection123'
+    }
+
+    const inspected = await service.inspectSource({
       type: 'git', url: 'https://github.com/example/skills.git'
-    }), collection)
+    }, {
+      targetAdapterIds: ['codex'], scopeType: 'project', projectPath: project
+    })
+
+    assert.deepEqual(inspected.skills.map((skill) => ({
+      name: skill.name,
+      installedMatches: skill.installedMatches,
+      targetMatches: skill.targetMatches.map(({ adapterId, matchType }) => ({ adapterId, matchType }))
+    })), [
+      { name: 'tdd', installedMatches: [], targetMatches: [{ adapterId: 'codex', matchType: 'same_content' }] },
+      { name: 'grill-me', installedMatches: [], targetMatches: [] }
+    ])
   }, {
     sourceLoader: { async inspect() { return collection } }
   })

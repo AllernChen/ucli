@@ -6,6 +6,7 @@ import test from 'node:test'
 import AdmZip from 'adm-zip'
 
 import { createSkillSourceLoader } from '../electron/skills/sourceLoader.js'
+import { inspectSkillDirectory } from '../electron/skills/fileOps.js'
 
 function createSkill(root, name = 'local-skill', description = 'Local test skill') {
   mkdirSync(root, { recursive: true })
@@ -155,6 +156,24 @@ test('Git repository inspection returns selectable Skills when the repository ro
       { name: 'tdd', description: 'Develop test-first', subdir: 'skills/engineering/tdd' },
       { name: 'grill-me', description: 'Clarify a plan', subdir: 'skills/productivity/grill-me' }
     ])
+    assert.deepEqual({
+      kind: collection.skills[0].kind,
+      manifest: collection.skills[0].manifest,
+      source: collection.skills[0].source,
+      resolvedRevision: collection.skills[0].resolvedRevision,
+      hashLength: collection.skills[0].contentSha256?.length
+    }, {
+      kind: 'skill',
+      manifest: { name: 'tdd', description: 'Develop test-first' },
+      source: {
+        type: 'github',
+        locator: 'https://github.com/example/skills.git',
+        ref: '',
+        subdir: 'skills/engineering/tdd'
+      },
+      resolvedRevision: 'collection123',
+      hashLength: 64
+    })
 
     const nestedCollection = await loader.inspect({ ...source, subdir: 'skills' })
     assert.deepEqual(nestedCollection.skills.map(({ subdir }) => subdir), [
@@ -289,6 +308,48 @@ test('GitHub commit sources fetch and detach the requested commit', async () => 
     })
     assert.equal(calls.some((args) => args.includes('fetch') && args.includes('0123456789012345678901234567890123456789')), true)
     assert.equal(calls.some((args) => args.includes('checkout') && args.includes('FETCH_HEAD')), true)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('batch preparation checks out one pinned repository for multiple Skill subdirectories', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-batch-source-'))
+  const calls = []
+  try {
+    const loader = createSkillSourceLoader({
+      stagingRoot: join(temp, 'staging'),
+      runGit(args) {
+        calls.push(args)
+        if (args[0] === 'clone') {
+          const destination = args.at(-1)
+          createSkill(join(destination, 'skills', 'tdd'), 'tdd', 'Develop test-first')
+          createSkill(join(destination, 'skills', 'grill-me'), 'grill-me', 'Clarify a plan')
+        }
+        if (args.includes('rev-parse')) return 'collection123\n'
+        return ''
+      }
+    })
+    const common = {
+      type: 'git', url: 'https://github.com/example/skills.git',
+      refType: 'default', ref: '', expectedRevision: 'collection123'
+    }
+
+    const names = await loader.withPreparedMany([
+      { ...common, subdir: 'skills/tdd' },
+      { ...common, subdir: 'skills/grill-me' }
+    ], async (prepared) => prepared.map((item) => ({
+      name: inspectSkillDirectory(item.workingDirectory).name,
+      subdir: item.source.subdir,
+      revision: item.resolvedRevision
+    })))
+
+    assert.deepEqual(names, [
+      { name: 'tdd', subdir: 'skills/tdd', revision: 'collection123' },
+      { name: 'grill-me', subdir: 'skills/grill-me', revision: 'collection123' }
+    ])
+    assert.equal(calls.filter((args) => args.includes('clone')).length, 1)
+    assert.equal(calls.filter((args) => args.includes('fetch')).length, 1)
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }

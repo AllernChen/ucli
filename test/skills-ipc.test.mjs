@@ -22,6 +22,7 @@ test('Skills IPC registers the complete management surface', () => {
     'skills:get-state',
     'skills:inspect-source',
     'skills:install',
+    'skills:install-many',
     'skills:preview-update',
     'skills:remove-installation',
     'skills:resolve-drift',
@@ -108,6 +109,35 @@ test('Skills IPC validates and forwards install inspection context', async () =>
       targetAdapterIds: ['unknown'],
       scopeType: 'user'
     }),
+    (error) => error.code === 'SKILL_IPC_INVALID'
+  )
+})
+
+test('Skills IPC validates and forwards a bounded batch install request', async () => {
+  const { handlers, ipcMain } = registry()
+  const calls = []
+  registerSkillsIpc({
+    ipcMain,
+    service: { installMany(requests) { calls.push(requests); return 'installed-many' } }
+  })
+  const request = (subdir) => ({
+    source: {
+      type: 'git', url: 'https://github.com/example/skills.git',
+      refType: 'default', ref: '', subdir
+    },
+    expectedRevision: 'collection123',
+    targetAdapterIds: ['codex'], scopeType: 'user'
+  })
+
+  const result = await handlers.get('skills:install-many')({}, [
+    request('skills/first'), request('skills/second')
+  ])
+
+  assert.equal(result, 'installed-many')
+  assert.deepEqual(calls[0].map((item) => item.source.subdir), ['skills/first', 'skills/second'])
+  assert.deepEqual(calls[0].map((item) => item.expectedRevision), ['collection123', 'collection123'])
+  await assert.rejects(
+    handlers.get('skills:install-many')({}, []),
     (error) => error.code === 'SKILL_IPC_INVALID'
   )
 })

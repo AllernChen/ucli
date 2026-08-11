@@ -101,12 +101,17 @@ function collectionPreview(prepared, rootManifestError, scanLimits = {}) {
     try {
       const inspected = inspectSkillDirectory(skillRoot)
       skills.push({
+        kind: 'skill',
         name: inspected.name,
         description: inspected.description,
+        manifest: inspected.manifest,
+        contentSha256: inspected.contentSha256,
         subdir,
         fileList: inspected.fileList,
         totalBytes: inspected.totalBytes,
-        compatibility: validateSkillCompatibility(inspected.name)
+        compatibility: validateSkillCompatibility(inspected.name),
+        source: { ...prepared.source, subdir },
+        resolvedRevision: prepared.resolvedRevision || null
       })
     } catch (error) {
       if (!String(error?.code || '').startsWith('SKILL_')) throw error
@@ -162,6 +167,18 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit, c
   const root = resolve(stagingRoot || '.ucli-skill-staging')
   mkdirSync(root, { recursive: true })
 
+  function resolveRemoteSource(source = {}) {
+    if (!['github', 'gitlab', 'git'].includes(source.type)) {
+      throw sourceError('Skill source type is invalid')
+    }
+    return source.type === 'git'
+      ? sanitiseGitRemoteSource(source)
+      : {
+          type: source.type,
+          ...(source.type === 'github' ? sanitiseGitHubSource(source) : sanitiseGitLabSource(source))
+        }
+  }
+
   async function prepare(source = {}) {
     if (source.type === 'local') {
       const path = resolve(String(source.path || ''))
@@ -187,9 +204,7 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit, c
     }
 
     if (source.type === 'github' || source.type === 'gitlab' || source.type === 'git') {
-      const resolved = source.type === 'git'
-        ? sanitiseGitRemoteSource(source)
-        : { type: source.type, ...(source.type === 'github' ? sanitiseGitHubSource(source) : sanitiseGitLabSource(source)) }
+      const resolved = resolveRemoteSource(source)
       const checkout = resolve(root, `${resolved.type}-${randomUUID()}`)
       const repositoryUrl = new URL(resolved.url)
       const gitPrefix = repositoryUrl.protocol === 'http:' && isPrivateNetworkHostname(repositoryUrl.hostname)
@@ -228,6 +243,53 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit, c
     async withPrepared(source, work) {
       const prepared = await prepare(source)
       try { return await work(prepared) } finally { prepared.cleanup() }
+    },
+    async withPreparedMany(sources, work) {
+      if (!Array.isArray(sources) || !sources.length || sources.length > 200) {
+        throw sourceError('Skill batch source list is invalid')
+      }
+      const resolvedSources = sources.map((source) => {
+        const expectedRevision = String(source?.expectedRevision || '').trim()
+        if (!expectedRevision || expectedRevision.length > 256 || expectedRevision.includes('\0')) {
+          throw sourceError('Batch Skill source revision is invalid')
+        }
+        return { source, resolved: resolveRemoteSource(source), expectedRevision }
+      })
+      const first = resolvedSources[0]
+      if (resolvedSources.some((item) =>
+        item.resolved.type !== first.resolved.type ||
+        item.resolved.url !== first.resolved.url ||
+        item.resolved.ref !== first.resolved.ref ||
+        (item.source.refType || 'default') !== (first.source.refType || 'default') ||
+        item.expectedRevision !== first.expectedRevision)) {
+        throw sourceError('Batch Skill sources must use the same repository, ref, and revision')
+      }
+
+      const preparedRoot = await prepare({
+        ...sources[0],
+        refType: 'commit',
+        ref: first.expectedRevision,
+        subdir: ''
+      })
+      try {
+        if (preparedRoot.resolvedRevision !== first.expectedRevision) {
+          throw sourceError('Skill source revision changed', 'SKILL_SOURCE_CHANGED')
+        }
+        const prepared = resolvedSources.map(({ resolved }) => ({
+          workingDirectory: safeChild(preparedRoot.workingDirectory, resolved.subdir),
+          source: {
+            type: resolved.type,
+            locator: resolved.url,
+            ref: resolved.ref,
+            subdir: resolved.subdir
+          },
+          resolvedRevision: preparedRoot.resolvedRevision,
+          cleanup() {}
+        }))
+        return await work(prepared)
+      } finally {
+        preparedRoot.cleanup()
+      }
     },
     inspect(source) {
       return this.withPrepared(source, async (prepared) => {

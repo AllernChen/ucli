@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 import { buildSkillVisibility, planSkillProjections, resolveSkillRoot, SKILL_ADAPTERS } from './adapters.js'
-import { sanitiseGitHubSource } from './contracts.js'
+import { sanitiseGitHubSource, sanitiseSkillError } from './contracts.js'
 import { createSkillDiscovery } from './discovery.js'
 import { copySkillDirectoryAtomic, diffSkillDirectories, inspectSkillDirectory, removeManagedSkillDirectory } from './fileOps.js'
 
@@ -339,7 +339,7 @@ export function createSkillsService({
     }).sort((left, right) => left.name.localeCompare(right.name))
   }
 
-  async function install(request = {}) {
+  function validateInstallRequest(request = {}) {
     const targetAdapterIds = [...new Set(request.targetAdapterIds || [])]
     if (!targetAdapterIds.length || targetAdapterIds.some((id) => !SKILL_ADAPTERS[id])) {
       throw serviceError('At least one valid CLI target is required', 'SKILL_TARGET_INVALID')
@@ -347,8 +347,11 @@ export function createSkillsService({
     const scopeType = request.scopeType
     const scopeKey = scopeType === 'project' ? normalizedPath(request.projectPath) : '*'
     if (!['user', 'project'].includes(scopeType)) throw serviceError('Skill scope is invalid', 'SKILL_SCOPE_INVALID')
+    return { targetAdapterIds, scopeType, scopeKey }
+  }
 
-    return sourceLoader.withPrepared(request.source, async (prepared) => {
+  async function installPrepared(request, prepared, validated) {
+      const { targetAdapterIds, scopeType, scopeKey } = validated
       const inspected = inspectSkillDirectory(prepared.workingDirectory)
       if (targetAdapterIds.includes('opencode') && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(inspected.name)) {
         throw serviceError('Skill name is incompatible with OpenCode', 'SKILL_INCOMPATIBLE')
@@ -460,6 +463,63 @@ export function createSkillsService({
         }
         throw error
       }
+  }
+
+  async function install(request = {}) {
+    const validated = validateInstallRequest(request)
+    return sourceLoader.withPrepared(request.source, (prepared) => installPrepared(request, prepared, validated))
+  }
+
+  async function installMany(requests = []) {
+    if (!Array.isArray(requests) || !requests.length || requests.length > 200) {
+      throw serviceError('Skill batch install request is invalid', 'SKILL_SOURCE_INVALID')
+    }
+    const validated = requests.map((request) => validateInstallRequest(request))
+    if (requests.some((request) =>
+      typeof request.expectedRevision !== 'string' || !request.expectedRevision.trim() ||
+      request.expectedRevision.length > 256 || request.expectedRevision.includes('\0'))) {
+      throw serviceError('Skill batch source revision is invalid', 'SKILL_SOURCE_INVALID')
+    }
+    const batchContexts = new Set(validated.map(({ targetAdapterIds, scopeType, scopeKey }) => JSON.stringify({
+      targetAdapterIds: [...targetAdapterIds].sort(),
+      scopeType,
+      scopeKey: normalizedPath(scopeKey)
+    })))
+    if (batchContexts.size !== 1) {
+      throw serviceError('Skill batch targets and scope must match', 'SKILL_BATCH_CONTEXT_INVALID')
+    }
+    return sourceLoader.withPreparedMany(requests.map((request) => ({
+      ...request.source,
+      expectedRevision: request.expectedRevision
+    })), async (preparedItems) => {
+      const installed = []
+      const failed = []
+      for (let index = 0; index < requests.length; index += 1) {
+        try {
+          installed.push({
+            request: requests[index],
+            result: await installPrepared(requests[index], preparedItems[index], validated[index])
+          })
+        } catch (error) {
+          const safeError = sanitiseSkillError(error)
+          if (error?.code === 'SKILL_PERSISTENCE_PENDING') {
+            return {
+              installed,
+              failed,
+              aborted: {
+                request: requests[index],
+                error: { code: safeError.code, message: safeError.message },
+                skippedRequests: requests.slice(index + 1)
+              }
+            }
+          }
+          failed.push({
+            request: requests[index],
+            error: { code: safeError.code, message: safeError.message }
+          })
+        }
+      }
+      return { installed, failed }
     })
   }
 
@@ -857,7 +917,16 @@ export function createSkillsService({
   return {
     inspectSource: async (source, context = {}) => {
       const preview = await sourceLoader.inspect(source)
-      if (preview.kind === 'collection') return preview
+      if (preview.kind === 'collection') {
+        return {
+          ...preview,
+          skills: preview.skills.map((skill) => ({
+            ...skill,
+            installedMatches: installedMatches(skill),
+            targetMatches: inspectTargetMatches(skill, context)
+          }))
+        }
+      }
       return {
         ...preview,
         installedMatches: installedMatches(preview),
@@ -865,6 +934,7 @@ export function createSkillsService({
       }
     },
     install,
+    installMany,
     applyToAdapter,
     setEnabled,
     resolveDrift,
