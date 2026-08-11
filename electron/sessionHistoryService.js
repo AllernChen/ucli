@@ -19,6 +19,10 @@ import { exportOpenCodeSession } from './openCodeStats.js'
 const CACHE_TTL_MS = 5000
 const DEFAULT_PARSE_CHUNK_SIZE = 500
 const DEFAULT_WORKER_THRESHOLD_BYTES = 256 * 1024
+const DEFAULT_RANGE_MAX_ITEMS = 5000
+const DEFAULT_RANGE_MAX_BYTES = 4 * 1024 * 1024
+const MAX_RANGE_ITEMS = 20_000
+const MAX_RANGE_BYTES = 16 * 1024 * 1024
 const JSON_LINES_WORKER = String.raw`
 const { parentPort, workerData } = require('worker_threads')
 const records = String(workerData)
@@ -43,8 +47,71 @@ function sourceSignature(session) {
   return [
     session.adapterId,
     session.cliSessionId,
-    session.historyRevision ?? ''
+    session.historyRevision ?? '',
+    session.historyTruncated === true ? 'truncated' : ''
   ].join(':')
+}
+
+function historySourceKind(adapterId) {
+  return adapterId === 'opencode' || adapterId === 'ucode' ? 'export' : 'transcript'
+}
+
+function digestText(value) {
+  if (typeof value === 'string' && value.trim()) return value.trim()
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  for (const key of ['summary', 'text', 'content', 'checkpoint', 'digest']) {
+    const result = digestText(value[key])
+    if (result) return result
+  }
+  return null
+}
+
+function openCodeNativeDigest(source) {
+  const direct = [
+    source?.nativeDigest,
+    source?.compactSummary,
+    source?.digest,
+    source?.info?.nativeDigest,
+    source?.info?.compactSummary,
+    source?.info?.digest,
+    source?.info?.compact,
+    source?.info?.compaction,
+    source?.info?.summary
+  ]
+  for (const candidate of direct) {
+    const result = digestText(candidate)
+    if (result) return result
+  }
+  const messages = Array.isArray(source?.messages) ? source.messages : []
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const parts = Array.isArray(messages[messageIndex]?.parts) ? messages[messageIndex].parts : []
+    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = parts[partIndex]
+      if (!['compact', 'compaction', 'summary', 'digest'].includes(part?.type)) continue
+      const result = digestText(part)
+      if (result) return result
+    }
+  }
+  return null
+}
+
+function boundedInteger(value, fallback, maximum) {
+  const numeric = Number(value)
+  return Number.isInteger(numeric) && numeric > 0
+    ? Math.min(numeric, maximum)
+    : fallback
+}
+
+function clipUtf8(text, maxBytes) {
+  let result = ''
+  let bytes = 0
+  for (const character of String(text)) {
+    const size = Buffer.byteLength(character, 'utf8')
+    if (bytes + size > maxBytes) break
+    result += character
+    bytes += size
+  }
+  return { text: result, bytes, clipped: result !== String(text) }
 }
 
 function safePageOptions(options) {
@@ -195,13 +262,23 @@ export function createSessionHistoryService({
     }
   }
 
-  async function loadProviderItems(session) {
+  async function loadProviderHistory(session) {
     if (!session.cliSessionId) throw new Error('history source unavailable')
     if (session.adapterId === 'claude') {
-      return readTranscript(resolveClaudeTranscript(session), parseClaudeHistory)
+      return {
+        items: await readTranscript(resolveClaudeTranscript(session), parseClaudeHistory),
+        nativeDigest: null,
+        sourceKind: 'transcript',
+        sourceTruncated: session.historyTruncated === true
+      }
     }
     if (session.adapterId === 'codex') {
-      return readTranscript(resolveCodexTranscript(session), parseCodexHistory)
+      return {
+        items: await readTranscript(resolveCodexTranscript(session), parseCodexHistory),
+        nativeDigest: null,
+        sourceKind: 'transcript',
+        sourceTruncated: session.historyTruncated === true
+      }
     }
     if (session.adapterId === 'opencode' || session.adapterId === 'ucode') {
       let source
@@ -211,9 +288,42 @@ export function createSessionHistoryService({
         source = null
       }
       if (!source) throw new Error('history source unavailable')
-      return parseOpenCodeHistory(source)
+      return {
+        items: parseOpenCodeHistory(source),
+        nativeDigest: openCodeNativeDigest(source),
+        sourceKind: 'export',
+        sourceTruncated: session.historyTruncated === true ||
+          source.truncated === true || source.info?.truncated === true
+      }
     }
     throw new Error('history provider unsupported')
+  }
+
+  async function providerHistory(sessionId, session) {
+    const signature = sourceSignature(session)
+    const currentTime = now()
+    for (const [cachedSessionId, entry] of cache) {
+      if (currentTime - entry.loadedAt > CACHE_TTL_MS) cache.delete(cachedSessionId)
+    }
+    const cached = cache.get(sessionId)
+    if (
+      cached &&
+      cached.signature === signature &&
+      currentTime - cached.loadedAt <= CACHE_TTL_MS
+    ) {
+      cache.delete(sessionId)
+      cache.set(sessionId, cached)
+      return cached.history
+    }
+
+    const history = await loadProviderHistory(session)
+    cache.set(sessionId, {
+      signature,
+      loadedAt: now(),
+      history
+    })
+    while (cache.size > safeCacheLimit) cache.delete(cache.keys().next().value)
+    return history
   }
 
   async function getPage(sessionId, options = {}) {
@@ -223,32 +333,7 @@ export function createSessionHistoryService({
       throw new Error('invalid native session id')
     }
 
-    const signature = sourceSignature(session)
-    const currentTime = now()
-    for (const [cachedSessionId, entry] of cache) {
-      if (currentTime - entry.loadedAt > CACHE_TTL_MS) cache.delete(cachedSessionId)
-    }
-    const cached = cache.get(sessionId)
-    let items
-    if (
-      cached &&
-      cached.signature === signature &&
-      currentTime - cached.loadedAt <= CACHE_TTL_MS
-    ) {
-      items = cached.items
-      cache.delete(sessionId)
-      cache.set(sessionId, cached)
-    } else {
-      items = await loadProviderItems(session)
-      cache.set(sessionId, {
-        signature,
-        loadedAt: now(),
-        items
-      })
-      while (cache.size > safeCacheLimit) {
-        cache.delete(cache.keys().next().value)
-      }
-    }
+    const { items } = await providerHistory(sessionId, session)
 
     return {
       source: session.adapterId,
@@ -256,11 +341,93 @@ export function createSessionHistoryService({
     }
   }
 
+  async function loadRange({
+    sessionId,
+    start,
+    endExclusive,
+    maxItems = DEFAULT_RANGE_MAX_ITEMS,
+    maxBytes = DEFAULT_RANGE_MAX_BYTES
+  } = {}) {
+    if (!Number.isFinite(start) || !Number.isFinite(endExclusive) || start >= endExclusive) {
+      throw new Error('invalid history range')
+    }
+    const session = resolveSession(sessionId)
+    const provider = session?.adapterId || null
+    const source = {
+      provider,
+      kind: provider ? historySourceKind(provider) : 'unavailable'
+    }
+    const missing = () => ({
+      sessionId,
+      source,
+      items: [],
+      missing: true,
+      truncated: false,
+      nativeDigest: null,
+      metadata: { itemsAvailable: 0, itemsReturned: 0, bytesReturned: 0 }
+    })
+    if (!session || !isSafeNativeSessionId(session.cliSessionId)) return missing()
+
+    let history
+    try {
+      history = await providerHistory(sessionId, session)
+    } catch {
+      return missing()
+    }
+
+    const available = history.items
+      .filter(item => Number.isFinite(item?.timestamp) &&
+        item.timestamp >= start && item.timestamp < endExclusive)
+      .map(item => ({
+        id: String(item.id),
+        role: item.role,
+        text: String(item.text),
+        timestamp: item.timestamp
+      }))
+    const itemLimit = boundedInteger(maxItems, DEFAULT_RANGE_MAX_ITEMS, MAX_RANGE_ITEMS)
+    const byteLimit = boundedInteger(maxBytes, DEFAULT_RANGE_MAX_BYTES, MAX_RANGE_BYTES)
+    const candidates = available.slice(-itemLimit)
+    const selected = []
+    let bytesReturned = 0
+    let clipped = false
+    for (let index = candidates.length - 1; index >= 0; index -= 1) {
+      const item = candidates[index]
+      const remaining = byteLimit - bytesReturned
+      const itemBytes = Buffer.byteLength(item.text, 'utf8')
+      if (itemBytes <= remaining) {
+        selected.unshift(item)
+        bytesReturned += itemBytes
+        continue
+      }
+      if (!selected.length && remaining > 0) {
+        const bounded = clipUtf8(item.text, remaining)
+        if (bounded.text) selected.unshift({ ...item, text: bounded.text })
+        bytesReturned += bounded.bytes
+        clipped = bounded.clipped
+      }
+      break
+    }
+
+    return {
+      sessionId,
+      source: { provider, kind: history.sourceKind },
+      items: selected,
+      missing: false,
+      truncated: history.sourceTruncated || clipped || selected.length < available.length,
+      nativeDigest: history.nativeDigest,
+      metadata: {
+        itemsAvailable: available.length,
+        itemsReturned: selected.length,
+        bytesReturned
+      }
+    }
+  }
+
   function invalidate(sessionId) {
     cache.delete(sessionId)
   }
 
-  return { getPage, invalidate }
+  return { getPage, loadRange, invalidate }
 }
 
 export function registerSessionHistoryIpc(ipcMain, historyService) {

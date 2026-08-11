@@ -326,3 +326,80 @@ test('Codex dual records stay paired across ignored records and batch boundaries
   assert.equal(items.length, 1)
   assert.equal(items[0].text, 'one copy')
 })
+
+test('main-process range loading filters timestamps and keeps the newest bounded items', async () => {
+  const start = Date.parse('2026-07-29T02:00:00.000Z')
+  const endExclusive = Date.parse('2026-07-29T02:00:04.000Z')
+  const service = createSessionHistoryService({
+    resolveSession: () => ({
+      id: 'ucli-session', adapterId: 'claude', cwd: 'F:\\private\\project',
+      cliSessionId: 'native-1', historyTruncated: false
+    }),
+    resolveClaudeTranscript: () => 'C:\\private\\project\\native-1.jsonl',
+    readFile: async () => [
+      { id: 'outside', timestamp: '2026-07-29T01:59:59.000Z', text: 'outside' },
+      { id: 'one', timestamp: '2026-07-29T02:00:01.000Z', text: 'one' },
+      { id: 'two', timestamp: '2026-07-29T02:00:02.000Z', text: 'two' },
+      { id: 'three', timestamp: '2026-07-29T02:00:03.000Z', text: 'three' }
+    ].map(({ id, timestamp, text }) => JSON.stringify({
+      type: 'user', uuid: id, timestamp,
+      message: { content: [{ type: 'text', text }] }
+    })).join('\n')
+  })
+
+  const result = await service.loadRange({
+    sessionId: 'ucli-session', start, endExclusive, maxItems: 2, maxBytes: 100
+  })
+
+  assert.deepEqual(result.items.map(item => item.text), ['two', 'three'])
+  assert.equal(result.missing, false)
+  assert.equal(result.truncated, true)
+  assert.deepEqual(result.source, { provider: 'claude', kind: 'transcript' })
+  assert.deepEqual(result.metadata, {
+    itemsAvailable: 3,
+    itemsReturned: 2,
+    bytesReturned: 8
+  })
+  assert.doesNotMatch(JSON.stringify(result), /private|native-1\.jsonl/)
+})
+
+test('range loading returns safe missing metadata and bounded normalized text', async () => {
+  const sessions = new Map([
+    ['missing', {
+      id: 'missing', adapterId: 'codex', cwd: 'C:\\private', cliSessionId: 'native-missing'
+    }],
+    ['large', {
+      id: 'large', adapterId: 'claude', cwd: 'C:\\private', cliSessionId: 'native-large'
+    }]
+  ])
+  const service = createSessionHistoryService({
+    resolveSession: id => sessions.get(id) || null,
+    resolveClaudeTranscript: () => 'large.jsonl',
+    resolveCodexTranscript: () => 'C:\\private\\missing.jsonl',
+    readFile: async (path) => {
+      if (path !== 'large.jsonl') throw new Error('SQL and raw path details')
+      return JSON.stringify({
+        type: 'assistant', uuid: 'large-message', timestamp: '2026-07-29T02:00:01.000Z',
+        message: { content: [{ type: 'text', text: 'abcdef😀ghijkl' }] }
+      })
+    }
+  })
+  const range = {
+    start: Date.parse('2026-07-29T02:00:00.000Z'),
+    endExclusive: Date.parse('2026-07-29T02:00:02.000Z'),
+    maxItems: 10,
+    maxBytes: 8
+  }
+
+  const missing = await service.loadRange({ ...range, sessionId: 'missing' })
+  assert.equal(missing.missing, true)
+  assert.deepEqual(missing.items, [])
+  assert.deepEqual(missing.source, { provider: 'codex', kind: 'transcript' })
+  assert.doesNotMatch(JSON.stringify(missing), /private|SQL|missing\.jsonl/)
+
+  const large = await service.loadRange({ ...range, sessionId: 'large' })
+  assert.equal(large.truncated, true)
+  assert.ok(Buffer.byteLength(large.items[0].text, 'utf8') <= 8)
+  assert.equal(large.items[0].role, 'assistant')
+  assert.equal(Object.hasOwn(large.items[0], 'path'), false)
+})
