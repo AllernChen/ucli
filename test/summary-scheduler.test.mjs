@@ -165,7 +165,7 @@ test('several missed periods enqueue only the latest completed day', async () =>
   assert.equal(enqueued[0].start, Date.parse('2026-08-11T00:00:00.000Z'))
 })
 
-test('a failed automatic job can be retried on a later tick', async () => {
+test('a failed automatic job is not retried every tick but can retry after restart', async () => {
   const enqueued = []
   let resolveFirst
   const firstCompletion = new Promise(resolve => { resolveFirst = resolve })
@@ -188,6 +188,21 @@ test('a failed automatic job can be retried on a later tick', async () => {
   resolveFirst({ status: 'failed' })
   await firstCompletion
   await scheduler.tick()
+
+  assert.equal(enqueued.length, 1)
+
+  const restarted = createSummaryScheduler({
+    getSettings: () => enabledSettings({
+      autoPeriods: { day: true, week: false, month: false, quarter: false, year: false }
+    }),
+    listReports: () => [{ status: 'failed', isCurrent: false }],
+    generate: request => { enqueued.push(request); return {} },
+    now: () => NOW,
+    timeZone: 'UTC',
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {}
+  })
+  await restarted.start()
 
   assert.equal(enqueued.length, 2)
 })

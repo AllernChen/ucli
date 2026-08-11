@@ -174,18 +174,13 @@ export function createSummaryScheduler({
         if (job?.completion && typeof job.completion.then === 'function') {
           const completion = Promise.resolve(job.completion)
           if (job.reportId) activeJobs.set(job.reportId, completion)
-          void completion.then(report => {
-            if (['failed', 'cancelled', 'interrupted'].includes(report?.status)) {
-              scheduled.delete(periodKey)
-            }
+          void completion.then(() => {
             if (job.reportId) activeJobs.delete(job.reportId)
           }, () => {
-            scheduled.delete(periodKey)
             if (job.reportId) activeJobs.delete(job.reportId)
           })
         }
       } catch (error) {
-        scheduled.delete(periodKey)
         throw error
       }
     }
