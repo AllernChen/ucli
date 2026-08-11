@@ -80,6 +80,7 @@ export const ipc = {
   testPattern: (payload) => u.testPattern(payload),
   // stats
   getStats: () => u.getStats(),
+  queryStats: (query) => u.queryStats(query),
   // settings
   getSettings: () => u.getSettings(),
   updateSettings: (s) => u.updateSettings(s),

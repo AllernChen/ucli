@@ -9,9 +9,69 @@ export const useStatsStore = defineStore('stats', {
     total: { input: 0, output: 0, costUsd: 0, costUnavailableCount: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } },
     perSession: {},
     modelStats: [],
-    loaded: false
+    loaded: false,
+    granularity: 'day',
+    range: null,
+    filters: { projectPaths: [], adapterIds: [], models: [] },
+    trend: null,
+    trendLoading: false,
+    trendError: null,
+    _trendRequestSequence: 0
   }),
   actions: {
+    setGranularity(granularity) {
+      this.granularity = granularity
+      this.range = null
+    },
+
+    setFilters(filters = {}) {
+      this.filters = {
+        projectPaths: Array.isArray(filters.projectPaths) ? [...filters.projectPaths] : [],
+        adapterIds: Array.isArray(filters.adapterIds) ? [...filters.adapterIds] : [],
+        models: Array.isArray(filters.models) ? [...filters.models] : []
+      }
+    },
+
+    async loadTrend() {
+      const sequence = ++this._trendRequestSequence
+      this.trendLoading = true
+      this.trendError = null
+      const range = this.range && typeof this.range === 'object'
+        ? {
+            start: this.range.start,
+            endExclusive: this.range.endExclusive,
+            ...(this.range.timeZone ? { timeZone: this.range.timeZone } : {})
+          }
+        : {}
+      const query = {
+        granularity: this.granularity,
+        ...range,
+        projectPaths: [...this.filters.projectPaths],
+        adapterIds: [...this.filters.adapterIds],
+        models: [...this.filters.models]
+      }
+      try {
+        const trend = await ipc.queryStats(query)
+        if (sequence !== this._trendRequestSequence) return null
+        this.trend = trend
+        return trend
+      } catch (error) {
+        if (sequence !== this._trendRequestSequence) return null
+        this.trendError = {
+          code: typeof error?.code === 'string' ? error.code : 'USAGE_QUERY_FAILED',
+          message: typeof error?.message === 'string' && error.message
+            ? error.message
+            : 'Unable to query usage',
+          ...(typeof error?.suggestedGranularity === 'string'
+            ? { suggestedGranularity: error.suggestedGranularity }
+            : {})
+        }
+        return null
+      } finally {
+        if (sequence === this._trendRequestSequence) this.trendLoading = false
+      }
+    },
+
     initLiveUpdates() {
       if (unsub) return
       unsub = ipc.on('session:event', (evt) => {

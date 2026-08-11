@@ -101,6 +101,20 @@ const api = {
 
   // ---- stats ----
   getStats: () => ipcRenderer.invoke('stats:get'),
+  queryStats: async (query) => {
+    const response = await ipcRenderer.invoke('stats:query', query)
+    if (response?.ok) return response.value
+    const payload = response?.error || {
+      code: 'USAGE_QUERY_FAILED',
+      message: 'Unable to query usage'
+    }
+    const error = new Error(payload.message)
+    error.code = payload.code
+    if (typeof payload.suggestedGranularity === 'string') {
+      error.suggestedGranularity = payload.suggestedGranularity
+    }
+    throw error
+  },
 
   // ---- settings ----
   getSettings: () => ipcRenderer.invoke('settings:get'),

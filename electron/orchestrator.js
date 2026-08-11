@@ -40,6 +40,8 @@ import { listUCodeSkills } from './skills/ucodeDiscovery.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
 import { createUsageRecorder, normalizeAdapterStatsEvent } from './usage/usageRecorder.js'
+import { assertUsageQuery } from './usage/contracts.js'
+import { createUsageQueryService } from './usage/usageQueryService.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
 import { GatewayManager } from './gateway/manager.js'
 import { createGatewayPort } from './gateway/orchestratorPort.js'
@@ -63,6 +65,86 @@ const DEFAULT_SETTINGS = {
   theme: 'light'
 }
 
+const USAGE_QUERY_FIELDS = new Set([
+  'granularity',
+  'start',
+  'endExclusive',
+  'timeZone',
+  'projectPaths',
+  'adapterIds',
+  'models'
+])
+
+function invalidUsageQuery() {
+  return Object.assign(new Error('Invalid usage query'), { code: 'INVALID_USAGE_QUERY' })
+}
+
+export function validateUsageQueryInput(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalidUsageQuery()
+    if (Object.keys(value).some(field => !USAGE_QUERY_FIELDS.has(field))) throw invalidUsageQuery()
+
+    const hasStart = Object.prototype.hasOwnProperty.call(value, 'start')
+    const hasEnd = Object.prototype.hasOwnProperty.call(value, 'endExclusive')
+    if (hasStart !== hasEnd) throw invalidUsageQuery()
+
+    const normalized = assertUsageQuery({
+      ...value,
+      start: hasStart ? value.start : 0,
+      endExclusive: hasEnd ? value.endExclusive : 1
+    })
+    if (!hasStart) {
+      delete normalized.start
+      delete normalized.endExclusive
+    }
+    return normalized
+  } catch {
+    throw invalidUsageQuery()
+  }
+}
+
+function serializeUsageQueryError(error) {
+  if (error?.code === 'INVALID_USAGE_QUERY') {
+    return { code: 'INVALID_USAGE_QUERY', message: 'Invalid usage query' }
+  }
+  if (error?.code === 'USAGE_QUERY_UNAVAILABLE') {
+    return { code: 'USAGE_QUERY_UNAVAILABLE', message: 'Usage statistics are unavailable' }
+  }
+  if (error?.code !== 'TOO_MANY_BUCKETS') {
+    return { code: 'USAGE_QUERY_FAILED', message: 'Unable to query usage' }
+  }
+  const result = {
+    code: 'TOO_MANY_BUCKETS',
+    message: typeof error.message === 'string' && error.message
+      ? error.message
+      : 'Unable to query usage'
+  }
+  if (['day', 'week', 'month'].includes(error.suggestedGranularity)) {
+    result.suggestedGranularity = error.suggestedGranularity
+  }
+  return result
+}
+
+export function createStatsQueryHandler(getUsageQueryService) {
+  if (typeof getUsageQueryService !== 'function') {
+    throw new TypeError('getUsageQueryService is required')
+  }
+  return async (_event, input) => {
+    try {
+      const service = getUsageQueryService()
+      if (!service) {
+        throw Object.assign(new Error('Usage statistics are unavailable'), {
+          code: 'USAGE_QUERY_UNAVAILABLE'
+        })
+      }
+      const query = validateUsageQueryInput(input)
+      return { ok: true, value: await service.queryUsage(query) }
+    } catch (error) {
+      return { ok: false, error: serializeUsageQueryError(error) }
+    }
+  }
+}
+
 export function createOrchestrator() {
   initLogger()
   log('createOrchestrator() — starting')
@@ -75,6 +157,7 @@ export function createOrchestrator() {
   let profileService = null
   let skillsService = null
   let usageRecorder = null
+  let usageQueryService = null
   let persistenceRecovery = null
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
@@ -378,6 +461,7 @@ export function createOrchestrator() {
     }
     persistenceRecovery = db.recoveryInfo || null
     usageRecorder = createUsageRecorder({ db })
+    usageQueryService = createUsageQueryService({ db })
 
     // Migrate old JSON files if they exist
     const configPath = join(app.getPath('userData'), 'ucli-config.json')
@@ -1962,6 +2046,7 @@ export function createOrchestrator() {
       const result = { total, perSession, modelStats: db?.getModelStats() || [] }
       return result
     })
+    ipcMain.handle('stats:query', createStatsQueryHandler(() => usageQueryService))
 
     ipcMain.handle('settings:get', () => settings)
     ipcMain.handle('settings:update', (_e, s) => {
