@@ -208,7 +208,7 @@ export async function collectSummaryEvidence({
     const byteLimit = Number.isInteger(maxBytesPerSession) && maxBytesPerSession > 0
       ? maxBytesPerSession
       : 4 * 1024 * 1024
-    const sourceByteLimit = Math.min(byteLimit, MAX_SOURCE_BYTES)
+    const sourceByteLimit = MAX_SOURCE_BYTES
     let bytesUsed = Buffer.byteLength(`${lines.join('\n')}\n${closing}`, 'utf8')
     let blockTruncated = range.truncated === true
     const truncatedSources = new Set(range.truncated ? ['transcript'] : [])
@@ -222,7 +222,7 @@ export async function collectSummaryEvidence({
         prefix,
         value,
         available,
-        Math.min(remainingSourceBytes, Math.max(available, 0))
+        remainingSourceBytes
       )
       if (!candidate) {
         blockTruncated = true

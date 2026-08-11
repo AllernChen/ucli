@@ -469,3 +469,98 @@ test('huge notes and native digests are source-bounded before redaction', async 
   assert.equal(result.coverage.truncatedSessions, 1)
   assert.doesNotMatch(result.text, /note-secret|digest-secret/)
 })
+
+test('complete PEM is redacted before the final escaped byte limit', async () => {
+  const note = [
+    '-----BEGIN PRIVATE KEY-----',
+    'super-secret-private-material'.repeat(100),
+    '-----END PRIVATE KEY-----',
+    '& trailing context'.repeat(100)
+  ].join('\n')
+  const result = await collectSummaryEvidence({
+    sessions: [{
+      id: 'complete-pem', adapterId: 'claude', cwd: '/work/pem',
+      taskNote: note, createdAt: start, updatedAt: endExclusive
+    }],
+    historyService: {
+      async loadRange() {
+        return { items: [], missing: false, truncated: false, nativeDigest: null }
+      }
+    },
+    start,
+    endExclusive,
+    maxBytesPerSession: 512
+  })
+
+  assert.equal(result.coverage.redactions.privateKey, 1)
+  assert.doesNotMatch(result.text, /super-secret-private-material|BEGIN PRIVATE KEY/)
+  assert.ok(Buffer.byteLength(result.blocks[0].text, 'utf8') <= 512)
+  assert.deepEqual(result.blocks[0].truncatedSources, ['note'])
+})
+
+test('source-capped PEM without its closing marker is redacted through EOF', async () => {
+  const note = [
+    '-----BEGIN PRIVATE KEY-----',
+    `source-cap-secret-${'x'.repeat(4 * 1024 * 1024)}`,
+    '-----END PRIVATE KEY-----'
+  ].join('\n')
+  const result = await collectSummaryEvidence({
+    sessions: [{
+      id: 'capped-pem', adapterId: 'claude', cwd: '/work/pem',
+      taskNote: note, createdAt: start, updatedAt: endExclusive
+    }],
+    historyService: {
+      async loadRange() {
+        return { items: [], missing: false, truncated: false, nativeDigest: null }
+      }
+    },
+    start,
+    endExclusive,
+    maxBytesPerSession: 512
+  })
+
+  assert.equal(result.coverage.redactions.privateKey, 1)
+  assert.match(result.text, /\[REDACTED:private-key\]/)
+  assert.doesNotMatch(result.text, /source-cap-secret|BEGIN PRIVATE KEY/)
+  assert.deepEqual(result.blocks[0].truncatedSources, ['note'])
+  assert.equal(result.coverage.truncatedSessions, 1)
+})
+
+test('source-capped quoted secrets are redacted when the closing quote is beyond the cap', async () => {
+  const beyondCap = 'x'.repeat(4 * 1024 * 1024)
+  const result = await collectSummaryEvidence({
+    sessions: [
+      {
+        id: 'capped-token', adapterId: 'claude', cwd: '/work/quoted',
+        taskNote: `token="quoted-token-secret-${beyondCap}"`,
+        createdAt: start, updatedAt: endExclusive
+      },
+      {
+        id: 'capped-auth', adapterId: 'opencode', cwd: '/work/quoted',
+        createdAt: start, updatedAt: endExclusive
+      }
+    ],
+    historyService: {
+      async loadRange({ sessionId }) {
+        return {
+          items: [], missing: false, truncated: false,
+          nativeDigest: sessionId === 'capped-auth'
+            ? `{"Authorization":"Bearer quoted-auth-secret-${beyondCap}"}`
+            : null
+        }
+      }
+    },
+    start,
+    endExclusive,
+    maxBytesPerSession: 512
+  })
+
+  assert.equal(result.coverage.redactions.namedValue, 1)
+  assert.equal(result.coverage.redactions.authorization, 1)
+  assert.doesNotMatch(result.text, /quoted-token-secret|quoted-auth-secret/)
+  assert.deepEqual(
+    result.blocks.map(block => block.truncatedSources),
+    [['note'], ['nativeDigest']]
+  )
+  assert.equal(result.coverage.truncatedSessions, 2)
+})

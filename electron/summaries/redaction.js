@@ -1,4 +1,4 @@
-const PRIVATE_KEY_PATTERN = /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?-----END \1-----/g
+const PRIVATE_KEY_BEGIN_PATTERN = /-----BEGIN ([A-Z0-9 ]{0,64}PRIVATE KEY)-----/g
 const CREDENTIAL_URL_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^@\s/]+)@/gi
 // Each key candidate is capped so a long non-matching line cannot trigger
 // unbounded regex backtracking. Values are consumed once by the scanner below.
@@ -24,6 +24,26 @@ function replaceAndCount(text, pattern, rule, counts, replacement) {
   })
 }
 
+function redactPrivateKeys(text, counts) {
+  PRIVATE_KEY_BEGIN_PATTERN.lastIndex = 0
+  const chunks = []
+  let cursor = 0
+  let match
+  while ((match = PRIVATE_KEY_BEGIN_PATTERN.exec(text)) !== null) {
+    const closing = `-----END ${match[1]}-----`
+    const closingIndex = text.indexOf(closing, PRIVATE_KEY_BEGIN_PATTERN.lastIndex)
+    const end = closingIndex === -1 ? text.length : closingIndex + closing.length
+    chunks.push(text.slice(cursor, match.index), '[REDACTED:private-key]')
+    counts.privateKey += 1
+    cursor = end
+    PRIVATE_KEY_BEGIN_PATTERN.lastIndex = end
+    if (end === text.length) break
+  }
+  if (!chunks.length) return text
+  chunks.push(text.slice(cursor))
+  return chunks.join('')
+}
+
 function sensitiveNamedKey(key) {
   const normalized = String(key).toLowerCase()
   return normalized.includes('token') ||
@@ -38,14 +58,16 @@ function assignedValue(text, start, authorization) {
     let escaped = false
     for (let index = start + 1; index < text.length; index += 1) {
       const character = text[index]
-      if (character === '\r' || character === '\n') return null
+      if (character === '\r' || character === '\n') {
+        return { end: index, quote, closed: false }
+      }
       if (!escaped && character === quote) {
-        return { end: index + 1, quote }
+        return { end: index + 1, quote, closed: true }
       }
       escaped = !escaped && character === '\\'
       if (character !== '\\') escaped = false
     }
-    return null
+    return { end: text.length, quote, closed: false }
   }
 
   let end = start
@@ -54,7 +76,7 @@ function assignedValue(text, start, authorization) {
     : /[\s,;&?#}\]"']/
   while (end < text.length && !delimiter.test(text[end])) end += 1
   while (end > start && /[ \t]/.test(text[end - 1])) end -= 1
-  return end > start ? { end, quote: '' } : null
+  return end > start ? { end, quote: '', closed: true } : null
 }
 
 function redactAssignments(text, counts) {
@@ -74,7 +96,9 @@ function redactAssignments(text, counts) {
       ? '[REDACTED:authorization]'
       : '[REDACTED:named-value]'
     chunks.push(text.slice(cursor, match.index), match[0])
-    chunks.push(value.quote ? `${value.quote}${marker}${value.quote}` : marker)
+    chunks.push(value.quote
+      ? `${value.quote}${marker}${value.closed ? value.quote : ''}`
+      : marker)
     counts[rule] += 1
     cursor = value.end
     ASSIGNMENT_PATTERN.lastIndex = value.end
@@ -87,13 +111,7 @@ function redactAssignments(text, counts) {
 export function redactEvidenceText(value) {
   const counts = emptyRedactionCounts()
   let text = String(value ?? '')
-  text = replaceAndCount(
-    text,
-    PRIVATE_KEY_PATTERN,
-    'privateKey',
-    counts,
-    '[REDACTED:private-key]'
-  )
+  text = redactPrivateKeys(text, counts)
   text = replaceAndCount(
     text,
     CREDENTIAL_URL_PATTERN,
