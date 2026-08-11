@@ -117,11 +117,49 @@ test('migration preserves cumulative statistics and adds usage and summary table
 
     const update = await db.observeUsage(usageSnapshot({
       model: 'sonnet', observedAt: metadata.exactSince + 1000,
-      inputTokens: 130, outputTokens: 30, costUsd: 0.7, turns: 3
+      inputTokens: 130, outputTokens: 30, costUsd: 0.7, turns: 0
     }))
     assert.equal(update.event.inputTokens, 30)
     assert.equal(update.event.outputTokens, 10)
-    assert.equal(update.event.turns, 1)
+    assert.equal(update.event.turns, 0)
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('legacy baseline uses canonical session totals with zero, one, or many model rows', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ucli-usage-ledger-canonical-baseline-'))
+  const path = join(dir, 'ucli.db')
+  const initSqlJs = (await import('sql.js')).default
+  const SQL = await initSqlJs()
+  const legacy = new SQL.Database()
+  legacy.run("CREATE TABLE sessions (id TEXT PRIMARY KEY, project_path TEXT NOT NULL, adapter_id TEXT NOT NULL, native_session_id TEXT, name TEXT, task_note TEXT DEFAULT '', tier TEXT NOT NULL DEFAULT 'safety-rules', model TEXT, status TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)")
+  legacy.run('CREATE TABLE session_stats (session_id TEXT PRIMARY KEY, input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, turns_count INTEGER, auto_allowed INTEGER, confirmed INTEGER, denied INTEGER)')
+  legacy.run('CREATE TABLE model_stats (session_id TEXT, model TEXT, input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, PRIMARY KEY(session_id, model))')
+  for (const [id, inputTokens, outputTokens, costUsd, turns] of [
+    ['zero-models', 100, 10, 1, 1],
+    ['one-model', 200, 20, 2, 2],
+    ['two-models', 300, 30, 3, 3]
+  ]) {
+    legacy.run('INSERT INTO sessions VALUES (?, ?, ?, NULL, NULL, \'\', \'safety-rules\', NULL, \'offline\', 1, 2)', [id, `/projects/${id}`, 'claude'])
+    legacy.run('INSERT INTO session_stats VALUES (?, ?, ?, ?, ?, 0, 0, 0)', [id, inputTokens, outputTokens, costUsd, turns])
+  }
+  legacy.run("INSERT INTO model_stats VALUES ('one-model', 'sonnet', 150, 15, 1.5)")
+  legacy.run("INSERT INTO model_stats VALUES ('two-models', 'sonnet', 90, 9, 0.9)")
+  legacy.run("INSERT INTO model_stats VALUES ('two-models', 'haiku', 110, 11, 1.1)")
+  writeFileSync(path, Buffer.from(legacy.export()))
+  legacy.close()
+
+  const db = await openDb(path)
+  try {
+    assert.deepEqual(db.getLegacyUsageBaseline(), {
+      inputTokens: 600,
+      outputTokens: 60,
+      costUsd: 6,
+      costAvailable: true,
+      turns: 6
+    })
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })
@@ -473,6 +511,7 @@ test('summary reports reject invalid periods, states, origins, versions, ranges,
     assert.match(schema, /CHECK\s*\(period_type IN/i)
     assert.match(schema, /CHECK\s*\(status IN/i)
     assert.match(schema, /CHECK\s*\(generated_by IN/i)
+    assert.match(schema, /CHECK\s*\(is_current = 0 OR status = 'completed'\)/i)
   })
 })
 
@@ -524,6 +563,18 @@ test('only completed reports can become current', async () => {
       (error) => error.code === 'SUMMARY_REPORT_NOT_COMPLETED'
     )
     assert.equal(db.getSummaryReport('report-1').isCurrent, false)
+  })
+})
+
+test('a current completed report cannot transition to a non-completed status', async () => {
+  await withDb('ucli-summary-report-current-update-', async (db) => {
+    db.createSummaryReport(summaryReport({ status: 'completed', isCurrent: true }))
+    assert.throws(
+      () => db.updateSummaryReport('report-1', { status: 'failed' }),
+      (error) => error.code === 'SUMMARY_REPORT_NOT_COMPLETED'
+    )
+    assert.equal(db.getSummaryReport('report-1').status, 'completed')
+    assert.equal(db.getSummaryReport('report-1').isCurrent, true)
   })
 })
 

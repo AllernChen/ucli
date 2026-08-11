@@ -5,6 +5,9 @@ import {
 import { createHash } from 'node:crypto'
 import { join } from 'path'
 
+const USAGE_MODEL_KEY_PREFIX = 'model:'
+const USAGE_SESSION_TOTAL_KEY = '__ucli_internal__:session-total'
+
 /**
  * SQLite-backed persistence via sql.js (pure WASM, zero native compilation).
  *
@@ -442,7 +445,8 @@ class Db {
         created_at            INTEGER NOT NULL,
         updated_at            INTEGER NOT NULL,
         UNIQUE (period_type, period_start, period_end_exclusive, timezone, version),
-        CHECK (period_start < period_end_exclusive)
+        CHECK (period_start < period_end_exclusive),
+        CHECK (is_current = 0 OR status = 'completed')
       )
     `)
     this.sql.run(`
@@ -477,21 +481,14 @@ class Db {
            legacy_cost_available, legacy_turns
          )
          SELECT
-           ms.session_id, ms.model, s.project_path, s.adapter_id, ?,
+           ms.session_id, ? || ms.model, s.project_path, s.adapter_id, ?,
            COALESCE(ms.input_tokens, 0), COALESCE(ms.output_tokens, 0),
            CASE WHEN ms.cost_available = 1 THEN COALESCE(ms.cost_usd, 0) ELSE NULL END,
-           COALESCE(ms.cost_available, 0),
-           CASE WHEN (SELECT COUNT(*) FROM model_stats counted WHERE counted.session_id = ms.session_id) = 1
-             THEN COALESCE(st.turns_count, 0) ELSE 0 END,
-           COALESCE(ms.input_tokens, 0), COALESCE(ms.output_tokens, 0),
-           CASE WHEN ms.cost_available = 1 THEN COALESCE(ms.cost_usd, 0) ELSE NULL END,
-           COALESCE(ms.cost_available, 0),
-           CASE WHEN (SELECT COUNT(*) FROM model_stats counted WHERE counted.session_id = ms.session_id) = 1
-             THEN COALESCE(st.turns_count, 0) ELSE 0 END
+           COALESCE(ms.cost_available, 0), 0,
+           0, 0, 0, 1, 0
          FROM model_stats ms
-         JOIN sessions s ON s.id = ms.session_id
-         LEFT JOIN session_stats st ON st.session_id = ms.session_id`,
-        [ledgerStartedAt]
+         JOIN sessions s ON s.id = ms.session_id`,
+        [USAGE_MODEL_KEY_PREFIX, ledgerStartedAt]
       )
       this.sql.run(
         `INSERT OR IGNORE INTO usage_checkpoints (
@@ -501,26 +498,17 @@ class Db {
            legacy_cost_available, legacy_turns
          )
          SELECT
-           st.session_id,
-           CASE WHEN EXISTS (SELECT 1 FROM model_stats ms WHERE ms.session_id = st.session_id)
-             THEN '' ELSE COALESCE(NULLIF(s.model, ''), '') END,
-           s.project_path, s.adapter_id, ?,
+           st.session_id, ?, s.project_path, s.adapter_id, ?,
            COALESCE(st.input_tokens, 0), COALESCE(st.output_tokens, 0),
            CASE WHEN st.cost_available = 1 THEN COALESCE(st.cost_usd, 0) ELSE NULL END,
            COALESCE(st.cost_available, 0), COALESCE(st.turns_count, 0),
-           CASE WHEN EXISTS (SELECT 1 FROM model_stats ms WHERE ms.session_id = st.session_id)
-             THEN 0 ELSE COALESCE(st.input_tokens, 0) END,
-           CASE WHEN EXISTS (SELECT 1 FROM model_stats ms WHERE ms.session_id = st.session_id)
-             THEN 0 ELSE COALESCE(st.output_tokens, 0) END,
-           CASE WHEN EXISTS (SELECT 1 FROM model_stats ms WHERE ms.session_id = st.session_id)
-             THEN 0 WHEN st.cost_available = 1 THEN COALESCE(st.cost_usd, 0) ELSE NULL END,
-           CASE WHEN EXISTS (SELECT 1 FROM model_stats ms WHERE ms.session_id = st.session_id)
-             THEN 1 ELSE COALESCE(st.cost_available, 0) END,
+           COALESCE(st.input_tokens, 0), COALESCE(st.output_tokens, 0),
+           CASE WHEN st.cost_available = 1 THEN COALESCE(st.cost_usd, 0) ELSE NULL END,
+           COALESCE(st.cost_available, 0),
            COALESCE(st.turns_count, 0)
          FROM session_stats st
-         JOIN sessions s ON s.id = st.session_id
-         WHERE (SELECT COUNT(*) FROM model_stats ms WHERE ms.session_id = st.session_id) <> 1`,
-        [ledgerStartedAt]
+         JOIN sessions s ON s.id = st.session_id`,
+        [USAGE_SESSION_TOTAL_KEY, ledgerStartedAt]
       )
       this.sql.run(
         'INSERT INTO settings (key, value) VALUES (?, ?)',
@@ -693,7 +681,7 @@ class Db {
   // ---- exact post-upgrade usage ledger ----
   async observeUsage(snapshot) {
     return this.transaction(async () => {
-      const modelKey = snapshot.model || ''
+      const modelKey = `${USAGE_MODEL_KEY_PREFIX}${snapshot.model || ''}`
       let existing = rows(this.sql.exec(
         'SELECT * FROM usage_checkpoints WHERE session_id = ? AND model_key = ?',
         [snapshot.sessionId, modelKey]
@@ -912,6 +900,13 @@ class Db {
 
   updateSummaryReport(reportId, fields = {}) {
     assertSummaryReportPatch(fields)
+    if (fields.status !== undefined && fields.status !== 'completed' &&
+      this.getSummaryReport(reportId)?.isCurrent) {
+      throw summaryValidationError(
+        'SUMMARY_REPORT_NOT_COMPLETED',
+        'A current summary report must remain completed'
+      )
+    }
     const columns = {
       status: 'status', markdown: 'markdown', executorId: 'executor_id',
       profileId: 'profile_id', model: 'model', generationCostUsd: 'generation_cost_usd',
