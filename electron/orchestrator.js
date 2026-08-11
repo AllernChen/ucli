@@ -39,6 +39,7 @@ import { registerSkillsIpc } from './skills/ipc.js'
 import { listUCodeSkills } from './skills/ucodeDiscovery.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
+import { createUsageRecorder, normalizeAdapterStatsEvent } from './usage/usageRecorder.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
 import { GatewayManager } from './gateway/manager.js'
 import { createGatewayPort } from './gateway/orchestratorPort.js'
@@ -73,6 +74,7 @@ export function createOrchestrator() {
   let codexConfigWatcher = null
   let profileService = null
   let skillsService = null
+  let usageRecorder = null
   let persistenceRecovery = null
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
@@ -375,6 +377,7 @@ export function createOrchestrator() {
       return // app continues without DB (stats work from in-memory sessions)
     }
     persistenceRecovery = db.recoveryInfo || null
+    usageRecorder = createUsageRecorder({ db })
 
     // Migrate old JSON files if they exist
     const configPath = join(app.getPath('userData'), 'ucli-config.json')
@@ -615,6 +618,17 @@ export function createOrchestrator() {
     onApprovalResolved(req) {
       dismissApprovalNotification(req.requestId)
       send('session:approval-resolved', req)
+      const entry = sessions.get(req.sessionId)
+      if (entry && usageRecorder) {
+        void usageRecorder.recordApproval({
+          approvalId: req.requestId,
+          sessionId: req.sessionId,
+          projectPath: entry.session.cwd,
+          adapterId: entry.session.adapterId,
+          model: entry.session.actualModel || entry.session.model,
+          observedAt: Date.now()
+        }).catch((error) => log('Failed to record approval usage:', error))
+      }
     },
     onDecision(d) {
       const s = sessions.get(d.sessionId)
@@ -888,6 +902,7 @@ export function createOrchestrator() {
         }
         break
       case 'stats_update':
+        evt = normalizeAdapterStatsEvent(evt, entry.stats)
         entry.stats.tokens = { input: evt.usage.inputTokens, output: evt.usage.outputTokens }
         if (evt.costAvailable === false) {
           entry.stats.costAvailable = false
@@ -917,19 +932,34 @@ export function createOrchestrator() {
           const db = getDb()
           if (db) db.updateSession(sessionId, { model: evt.model })
         }
+        const cumulativeStats = {
+          inputTokens: entry.stats.tokens.input,
+          outputTokens: entry.stats.tokens.output,
+          costUsd: entry.stats.costUsd,
+          costAvailable: entry.stats.costAvailable,
+          turnsDelta: entry.stats.turns,
+          autoAllowed: entry.stats.approvals.autoAllowed,
+          confirmed: entry.stats.approvals.confirmed,
+          denied: entry.stats.approvals.denied
+        }
+        if (usageRecorder) {
+          try {
+            await usageRecorder.observe({
+              sessionId,
+              projectPath: entry.session.cwd,
+              adapterId: entry.session.adapterId,
+              totals: cumulativeStats,
+              models: evt.models,
+              modelBreakdown: evt.modelBreakdown
+            })
+          } catch (error) {
+            log('Failed to record usage observation:', error)
+          }
+        }
         {
           const db = getDb()
           if (db) {
-            db.upsertStats(sessionId, {
-              inputTokens: entry.stats.tokens.input,
-              outputTokens: entry.stats.tokens.output,
-              costUsd: entry.stats.costUsd,
-              costAvailable: entry.stats.costAvailable,
-              turnsDelta: entry.stats.turns,
-              autoAllowed: entry.stats.approvals.autoAllowed,
-              confirmed: entry.stats.approvals.confirmed,
-              denied: entry.stats.approvals.denied
-            })
+            db.upsertStats(sessionId, cumulativeStats)
           }
         }
         // Persist per-model breakdown to model_stats table

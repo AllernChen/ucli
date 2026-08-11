@@ -10,7 +10,8 @@ import {
   parseCodexTranscriptStats
 } from '../electron/adapters/codexAdapter.js'
 import { OpenCodeAdapter } from '../electron/adapters/openCodeAdapter.js'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { normalizeAdapterStatsEvent } from '../electron/usage/usageRecorder.js'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -530,5 +531,44 @@ test('Codex terminal notification distinguishes approvals from completion', () =
   assert.deepEqual(classifyCodexTerminalNotification('Finished implementing the feature'), {
     kind: 'complete',
     operation: '任务完成'
+  })
+})
+
+test('orchestrator records ledger observations beside legacy cumulative stats', () => {
+  const source = readFileSync(
+    new URL('../electron/orchestrator.js', import.meta.url),
+    'utf8'
+  )
+  const statsCase = source.match(/case 'stats_update':[\s\S]*?case 'profile-model'/)?.[0] || ''
+
+  assert.match(statsCase, /await usageRecorder\.observe\(/)
+  assert.match(statsCase, /models:\s*evt\.models/)
+  assert.match(statsCase, /modelBreakdown:\s*evt\.modelBreakdown/)
+  assert.match(statsCase, /db\.upsertStats\(sessionId,/)
+  assert.match(statsCase, /db\.upsertModelStats\(sessionId,/)
+  assert.match(source, /onApprovalResolved\(req\)[\s\S]*usageRecorder\.recordApproval\([\s\S]*approvalId:\s*req\.requestId/)
+})
+
+test('orchestrator stats normalization accepts nested and parser-style adapter fields', () => {
+  assert.deepEqual(normalizeAdapterStatsEvent({
+    type: 'stats_update', inputTokens: 40, outputTokens: 8,
+    turnsCount: 3, completedTurnsCount: 2, lastModel: 'gpt-5.5',
+    models: [{ model: 'gpt-5.5', inputTokens: 40, outputTokens: 8 }]
+  }, { tokens: { input: 10, output: 2 }, turns: 1 }), {
+    type: 'stats_update', inputTokens: 40, outputTokens: 8,
+    turnsCount: 3, completedTurnsCount: 2, lastModel: 'gpt-5.5',
+    models: [{ model: 'gpt-5.5', inputTokens: 40, outputTokens: 8 }],
+    usage: { inputTokens: 40, outputTokens: 8 },
+    turns: 3,
+    completedTurns: 2,
+    model: 'gpt-5.5'
+  })
+
+  const nested = normalizeAdapterStatsEvent({
+    usage: { inputTokens: 50, outputTokens: 9, cachedInputTokens: 20 },
+    turns: 4, model: 'claude-sonnet'
+  })
+  assert.deepEqual(nested.usage, {
+    inputTokens: 50, outputTokens: 9, cachedInputTokens: 20
   })
 })
