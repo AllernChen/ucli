@@ -26,6 +26,7 @@ function tableNames(db) {
 function usageSnapshot(overrides = {}) {
   return {
     sessionId: 's1',
+    scope: 'model',
     model: 'claude-sonnet',
     projectPath: 'F:/projects/demo',
     adapterId: 'claude',
@@ -39,11 +40,34 @@ function usageSnapshot(overrides = {}) {
   }
 }
 
+async function openMigratedUsageDb(prefix, { models = [['claude-sonnet', 100, 20, 0.5]] } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  const path = join(dir, 'ucli.db')
+  const initSqlJs = (await import('sql.js')).default
+  const SQL = await initSqlJs()
+  const legacy = new SQL.Database()
+  legacy.run("CREATE TABLE sessions (id TEXT PRIMARY KEY, project_path TEXT NOT NULL, adapter_id TEXT NOT NULL, native_session_id TEXT, name TEXT, task_note TEXT DEFAULT '', tier TEXT NOT NULL DEFAULT 'safety-rules', model TEXT, status TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)")
+  legacy.run('CREATE TABLE session_stats (session_id TEXT PRIMARY KEY, input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, turns_count INTEGER, auto_allowed INTEGER, confirmed INTEGER, denied INTEGER)')
+  legacy.run('CREATE TABLE model_stats (session_id TEXT, model TEXT, input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, PRIMARY KEY(session_id, model))')
+  legacy.run("INSERT INTO sessions VALUES ('s1', '/projects/demo', 'claude', NULL, NULL, '', 'safety-rules', 'claude-sonnet', 'offline', 1, 2)")
+  legacy.run("INSERT INTO session_stats VALUES ('s1', 100, 20, 0.5, 2, 0, 0, 0)")
+  for (const [model, inputTokens, outputTokens, costUsd] of models) {
+    legacy.run('INSERT INTO model_stats VALUES (?, ?, ?, ?, ?)', ['s1', model, inputTokens, outputTokens, costUsd])
+  }
+  writeFileSync(path, Buffer.from(legacy.export()))
+  legacy.close()
+  return { db: await openDb(path), dir }
+}
+
 function ledgerSnapshot(db, offset, overrides = {}) {
   return usageSnapshot({
     observedAt: db.getUsageLedgerMetadata().exactSince + offset,
     ...overrides
   })
+}
+
+function modelEvents(db, filters = {}) {
+  return db.queryUsageEvents({ ...filters, scopes: ['model'] })
 }
 
 function summaryReport(overrides = {}) {
@@ -97,6 +121,10 @@ test('migration preserves cumulative statistics and adds usage and summary table
       tableNames(db).filter((name) => ['usage_checkpoints', 'usage_events', 'summary_reports', 'summary_settings'].includes(name)),
       ['summary_reports', 'summary_settings', 'usage_checkpoints', 'usage_events']
     )
+    const checkpointSql = db.sql.exec("SELECT sql FROM sqlite_master WHERE name = 'usage_checkpoints'")[0].values[0][0]
+    const eventSql = db.sql.exec("SELECT sql FROM sqlite_master WHERE name = 'usage_events'")[0].values[0][0]
+    assert.match(checkpointSql, /scope/i)
+    assert.match(eventSql, /scope\s+TEXT\s+NOT NULL\s+CHECK\s*\(scope IN \('session', 'model', 'approval'\)\)/i)
     const session = db.getSession('s1')
     assert.equal(session.stats.tokens.input, 100)
     assert.equal(session.stats.tokens.output, 20)
@@ -126,6 +154,83 @@ test('migration preserves cumulative statistics and adds usage and summary table
     db.close()
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('migrated session totals produce only their post-upgrade delta', async () => {
+  const { db, dir } = await openMigratedUsageDb('ucli-usage-scope-session-')
+  try {
+    const result = await db.observeUsage(ledgerSnapshot(db, 1, {
+      scope: 'session', model: null, inputTokens: 130, outputTokens: 30, costUsd: 0.7, turns: 3
+    }))
+    assert.equal(result.event.scope, 'session')
+    assert.equal(result.event.inputTokens, 30)
+    assert.equal(result.event.outputTokens, 10)
+    assert.equal(result.event.turns, 1)
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('migrated model counters produce independent per-model deltas', async () => {
+  const { db, dir } = await openMigratedUsageDb('ucli-usage-scope-model-', {
+    models: [['sonnet', 60, 12, 0.3], ['haiku', 40, 8, 0.2]]
+  })
+  try {
+    await db.observeUsage(ledgerSnapshot(db, 1, {
+      scope: 'model', model: 'sonnet', inputTokens: 70, outputTokens: 14, costUsd: 0.35, turns: 0
+    }))
+    await db.observeUsage(ledgerSnapshot(db, 2, {
+      scope: 'model', model: 'haiku', inputTokens: 50, outputTokens: 10, costUsd: 0.25, turns: 0
+    }))
+    assert.deepEqual(
+      db.queryUsageEvents({ scopes: ['model'] }).map((event) => [event.model, event.inputTokens, event.outputTokens]),
+      [['sonnet', 10, 2], ['haiku', 10, 2]]
+    )
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('session totals and model breakdown remain separate when both are observed', async () => {
+  const { db, dir } = await openMigratedUsageDb('ucli-usage-scope-both-')
+  try {
+    await db.observeUsage(ledgerSnapshot(db, 1, {
+      scope: 'session', model: null, inputTokens: 130, outputTokens: 30, costUsd: 0.7, turns: 3
+    }))
+    await db.observeUsage(ledgerSnapshot(db, 2, {
+      scope: 'model', model: 'claude-sonnet', inputTokens: 130, outputTokens: 30, costUsd: 0.7, turns: 0
+    }))
+    const [sessionEvent] = db.queryUsageEvents({ scopes: ['session'] })
+    const [modelEvent] = db.queryUsageEvents({ scopes: ['model'] })
+    assert.equal(sessionEvent.inputTokens, 30)
+    assert.equal(sessionEvent.turns, 1)
+    assert.equal(modelEvent.inputTokens, 30)
+    assert.equal(modelEvent.turns, 0)
+    assert.deepEqual(db.queryUsageEvents({}).map((event) => event.scope), ['session'])
+    assert.deepEqual(db.queryUsageEvents({ models: ['claude-sonnet'] }).map((event) => event.scope), ['model'])
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('usage observations require an explicit valid scope and model identity', async () => {
+  await withDb('ucli-usage-scope-validation-', async (db) => {
+    await assert.rejects(
+      db.observeUsage(ledgerSnapshot(db, 1, { scope: undefined })),
+      (error) => error.code === 'INVALID_USAGE_SCOPE'
+    )
+    await assert.rejects(
+      db.observeUsage(ledgerSnapshot(db, 1, { scope: 'approval' })),
+      (error) => error.code === 'INVALID_USAGE_SCOPE'
+    )
+    await assert.rejects(
+      db.observeUsage(ledgerSnapshot(db, 1, { scope: 'model', model: '' })),
+      (error) => error.code === 'INVALID_USAGE_MODEL'
+    )
+  })
 })
 
 test('legacy baseline uses canonical session totals with zero, one, or many model rows', async () => {
@@ -212,7 +317,7 @@ test('later usage observations append a non-negative delta and advance the check
 
     assert.equal(result.baseline, false)
     assert.match(result.event.id, /^[a-f0-9]{64}$/)
-    assert.deepEqual(db.queryUsageEvents({}).at(-1), result.event)
+    assert.deepEqual(modelEvents(db).at(-1), result.event)
     assert.deepEqual(
       {
         sessionId: result.event.sessionId,
@@ -243,7 +348,7 @@ test('replaying the same cumulative observation is idempotent', async () => {
     const replay = await db.observeUsage(update)
 
     assert.equal(replay.event, null)
-    assert.equal(db.queryUsageEvents({}).filter((event) => event.id === first.event.id).length, 1)
+    assert.equal(modelEvents(db).filter((event) => event.id === first.event.id).length, 1)
   })
 })
 
@@ -265,18 +370,18 @@ test('usage observation IDs are stable across databases', async () => {
 test('any cumulative counter rollback resets the entire checkpoint without a mixed delta', async () => {
   await withDb('ucli-usage-ledger-reset-', async (db) => {
     await db.observeUsage(ledgerSnapshot(db, 1000))
-    const beforeReset = db.queryUsageEvents({}).length
+    const beforeReset = modelEvents(db).length
     const reset = await db.observeUsage(ledgerSnapshot(db, 2000, {
       inputTokens: 130, outputTokens: 10, costUsd: 0.6, turns: 3
     }))
     assert.equal(reset.reset, true)
     assert.equal(reset.event, null)
-    assert.equal(db.queryUsageEvents({}).length, beforeReset)
+    assert.equal(modelEvents(db).length, beforeReset)
 
     await db.observeUsage(ledgerSnapshot(db, 3000, {
       inputTokens: 140, outputTokens: 15, costUsd: 0.7, turns: 4
     }))
-    const event = db.queryUsageEvents({}).at(-1)
+    const event = modelEvents(db).at(-1)
     assert.equal(event.inputTokens, 10)
     assert.equal(event.outputTokens, 5)
     assert.equal(event.turns, 1)
@@ -287,7 +392,7 @@ test('any cumulative counter rollback resets the entire checkpoint without a mix
 test('usage event insertion and checkpoint advance are atomic', async () => {
   await withDb('ucli-usage-ledger-atomic-', async (db) => {
     await db.observeUsage(ledgerSnapshot(db, 1000))
-    const eventCount = db.queryUsageEvents({}).length
+    const eventCount = modelEvents(db).length
     db.sql.run(`
       CREATE TRIGGER reject_usage_checkpoint_update
       BEFORE UPDATE ON usage_checkpoints
@@ -300,7 +405,7 @@ test('usage event insertion and checkpoint advance are atomic', async () => {
       db.observeUsage(ledgerSnapshot(db, 2000, { inputTokens: 110 })),
       /checkpoint update failed/
     )
-    assert.equal(db.queryUsageEvents({}).length, eventCount)
+    assert.equal(modelEvents(db).length, eventCount)
   })
 })
 
@@ -312,8 +417,8 @@ test('concurrent usage observations share the database transaction queue', async
     ])
 
     assert.equal(results.length, 2)
-    assert.equal(db.queryUsageEvents({}).reduce((sum, event) => sum + event.inputTokens, 0), 150)
-    assert.equal(db.queryUsageEvents({}).reduce((sum, event) => sum + event.outputTokens, 0), 30)
+    assert.equal(modelEvents(db).reduce((sum, event) => sum + event.inputTokens, 0), 150)
+    assert.equal(modelEvents(db).reduce((sum, event) => sum + event.outputTokens, 0), 30)
   })
 })
 
@@ -336,7 +441,7 @@ test('out-of-order observations cannot rewind a checkpoint or inflate later delt
     assert.equal(stale.ignored, true)
     assert.equal(stale.event, null)
     assert.equal(
-      db.queryUsageEvents({ start: exactSince + 2 }).reduce((sum, event) => sum + event.inputTokens, 0),
+      modelEvents(db, { start: exactSince + 2 }).reduce((sum, event) => sum + event.inputTokens, 0),
       60
     )
   })
@@ -350,7 +455,7 @@ test('a same-timestamp counter rollback is ignored instead of treated as a reset
     await db.observeUsage(usageSnapshot({ observedAt: observedAt + 1, inputTokens: 160 }))
 
     assert.equal(stale.ignored, true)
-    assert.equal(db.queryUsageEvents({ start: observedAt + 1 }).at(-1).inputTokens, 10)
+    assert.equal(modelEvents(db, { start: observedAt + 1 }).at(-1).inputTokens, 10)
   })
 })
 
@@ -387,7 +492,7 @@ test('an inconsistent cost update cannot reset otherwise increasing token counte
     assert.equal(invalid.reset, undefined)
     assert.equal(invalid.event.inputTokens, 10)
     assert.equal(
-      db.queryUsageEvents({}).reduce((sum, event) => sum + event.inputTokens, 0),
+      modelEvents(db).reduce((sum, event) => sum + event.inputTokens, 0),
       120
     )
   })
@@ -410,6 +515,7 @@ test('approval decisions are append-only usage events and replay safely', async 
     assert.deepEqual(db.queryUsageEvents({}), [{
       id: first.id,
       sessionId: 's1',
+      scope: 'approval',
       projectPath: 'F:/projects/demo',
       adapterId: 'codex',
       model: 'gpt-5',
@@ -443,7 +549,8 @@ test('usage event queries filter by time, project, adapter, model, and session',
       projectPaths: ['/b'],
       adapterIds: ['claude'],
       models: ['sonnet'],
-      sessionIds: ['s2']
+      sessionIds: ['s2'],
+      scopes: ['approval']
     })
     assert.deepEqual(result.map((event) => event.sessionId), ['s2'])
   })

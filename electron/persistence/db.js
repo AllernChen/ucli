@@ -381,6 +381,7 @@ class Db {
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS usage_checkpoints (
         session_id          TEXT NOT NULL,
+        scope               TEXT NOT NULL CHECK (scope IN ('session', 'model')),
         model_key           TEXT NOT NULL,
         project_path        TEXT,
         adapter_id          TEXT NOT NULL,
@@ -395,13 +396,14 @@ class Db {
         legacy_cost_usd     REAL,
         legacy_cost_available INTEGER NOT NULL DEFAULT 0,
         legacy_turns        INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (session_id, model_key)
+        PRIMARY KEY (session_id, scope, model_key)
       )
     `)
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS usage_events (
         id             TEXT PRIMARY KEY,
         session_id     TEXT NOT NULL,
+        scope          TEXT NOT NULL CHECK (scope IN ('session', 'model', 'approval')),
         project_path   TEXT,
         adapter_id     TEXT NOT NULL,
         model          TEXT,
@@ -475,13 +477,13 @@ class Db {
     try {
       this.sql.run(
         `INSERT OR IGNORE INTO usage_checkpoints (
-           session_id, model_key, project_path, adapter_id, observed_at,
+           session_id, scope, model_key, project_path, adapter_id, observed_at,
            input_tokens, output_tokens, cost_usd, cost_available, turns,
            legacy_input_tokens, legacy_output_tokens, legacy_cost_usd,
            legacy_cost_available, legacy_turns
          )
          SELECT
-           ms.session_id, ? || ms.model, s.project_path, s.adapter_id, ?,
+           ms.session_id, 'model', ? || ms.model, s.project_path, s.adapter_id, ?,
            COALESCE(ms.input_tokens, 0), COALESCE(ms.output_tokens, 0),
            CASE WHEN ms.cost_available = 1 THEN COALESCE(ms.cost_usd, 0) ELSE NULL END,
            COALESCE(ms.cost_available, 0), 0,
@@ -492,13 +494,13 @@ class Db {
       )
       this.sql.run(
         `INSERT OR IGNORE INTO usage_checkpoints (
-           session_id, model_key, project_path, adapter_id, observed_at,
+           session_id, scope, model_key, project_path, adapter_id, observed_at,
            input_tokens, output_tokens, cost_usd, cost_available, turns,
            legacy_input_tokens, legacy_output_tokens, legacy_cost_usd,
            legacy_cost_available, legacy_turns
          )
          SELECT
-           st.session_id, ?, s.project_path, s.adapter_id, ?,
+           st.session_id, 'session', ?, s.project_path, s.adapter_id, ?,
            COALESCE(st.input_tokens, 0), COALESCE(st.output_tokens, 0),
            CASE WHEN st.cost_available = 1 THEN COALESCE(st.cost_usd, 0) ELSE NULL END,
            COALESCE(st.cost_available, 0), COALESCE(st.turns_count, 0),
@@ -680,11 +682,14 @@ class Db {
 
   // ---- exact post-upgrade usage ledger ----
   async observeUsage(snapshot) {
+    assertUsageObservationScope(snapshot)
     return this.transaction(async () => {
-      const modelKey = `${USAGE_MODEL_KEY_PREFIX}${snapshot.model || ''}`
+      const modelKey = snapshot.scope === 'session'
+        ? USAGE_SESSION_TOTAL_KEY
+        : `${USAGE_MODEL_KEY_PREFIX}${snapshot.model}`
       let existing = rows(this.sql.exec(
-        'SELECT * FROM usage_checkpoints WHERE session_id = ? AND model_key = ?',
-        [snapshot.sessionId, modelKey]
+        'SELECT * FROM usage_checkpoints WHERE session_id = ? AND scope = ? AND model_key = ?',
+        [snapshot.sessionId, snapshot.scope, modelKey]
       ))[0]
       if (!existing) {
         const metadata = this.getUsageLedgerMetadata()
@@ -694,13 +699,13 @@ class Db {
         const startsWithKnownCost = isKnownUsageCost(snapshot)
         this.sql.run(
           `INSERT INTO usage_checkpoints (
-             session_id, model_key, project_path, adapter_id, observed_at,
+             session_id, scope, model_key, project_path, adapter_id, observed_at,
              input_tokens, output_tokens, cost_usd, cost_available, turns,
              legacy_input_tokens, legacy_output_tokens, legacy_cost_usd,
              legacy_cost_available, legacy_turns
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
-            snapshot.sessionId, modelKey, snapshot.projectPath || null, snapshot.adapterId,
+            snapshot.sessionId, snapshot.scope, modelKey, snapshot.projectPath || null, snapshot.adapterId,
             metadata.exactSince, 0, 0, startsWithKnownCost ? 0 : null,
             startsWithKnownCost ? 1 : 0, 0,
             0, 0, startsWithKnownCost ? 0 : null, startsWithKnownCost ? 1 : 0, 0
@@ -741,9 +746,10 @@ class Db {
       const event = {
         id: usageObservationId(snapshot, modelKey, next),
         sessionId: snapshot.sessionId,
+        scope: snapshot.scope,
         projectPath: snapshot.projectPath || null,
         adapterId: snapshot.adapterId,
-        model: snapshot.model || null,
+        model: snapshot.scope === 'model' ? snapshot.model : null,
         observedAt: snapshot.observedAt,
         inputTokens: next.inputTokens - existing.input_tokens,
         outputTokens: next.outputTokens - existing.output_tokens,
@@ -759,11 +765,11 @@ class Db {
       if (hasDelta) {
         this.sql.run(
           `INSERT OR IGNORE INTO usage_events (
-             id, session_id, project_path, adapter_id, model, observed_at,
+             id, session_id, scope, project_path, adapter_id, model, observed_at,
              input_tokens, output_tokens, cost_usd, cost_available, turns, approvals
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
-            event.id, event.sessionId, event.projectPath, event.adapterId, event.model,
+            event.id, event.sessionId, event.scope, event.projectPath, event.adapterId, event.model,
             event.observedAt, event.inputTokens, event.outputTokens, event.costUsd,
             event.costAvailable ? 1 : 0, event.turns, 0
           ]
@@ -790,11 +796,11 @@ class Db {
       `UPDATE usage_checkpoints SET
          project_path = ?, adapter_id = ?, observed_at = ?, input_tokens = ?,
          output_tokens = ?, cost_usd = ?, cost_available = ?, turns = ?
-       WHERE session_id = ? AND model_key = ?`,
+       WHERE session_id = ? AND scope = ? AND model_key = ?`,
       [
         snapshot.projectPath || null, snapshot.adapterId, snapshot.observedAt,
         next.inputTokens, next.outputTokens, next.costUsd, next.costAvailable ? 1 : 0,
-        next.turns, snapshot.sessionId, modelKey
+        next.turns, snapshot.sessionId, snapshot.scope, modelKey
       ]
     )
   }
@@ -813,9 +819,9 @@ class Db {
     ])).digest('hex')
     this.sql.run(
       `INSERT OR IGNORE INTO usage_events (
-         id, session_id, project_path, adapter_id, model, observed_at,
+         id, session_id, scope, project_path, adapter_id, model, observed_at,
          input_tokens, output_tokens, cost_usd, cost_available, turns, approvals
-       ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, NULL, 0, 0, 1)`,
+       ) VALUES (?, ?, 'approval', ?, ?, ?, ?, 0, 0, NULL, 0, 0, 1)`,
       [
         id, approval.sessionId, approval.projectPath || null, approval.adapterId,
         approval.model || null, approval.observedAt
@@ -840,6 +846,10 @@ class Db {
     appendSqlListFilter(conditions, values, 'adapter_id', filters.adapterIds)
     appendSqlListFilter(conditions, values, 'model', filters.models)
     appendSqlListFilter(conditions, values, 'session_id', filters.sessionIds)
+    const scopes = Array.isArray(filters.scopes) && filters.scopes.length
+      ? filters.scopes
+      : (Array.isArray(filters.models) && filters.models.length ? ['model'] : ['session', 'approval'])
+    appendSqlListFilter(conditions, values, 'scope', scopes)
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
     return rows(this.sql.exec(
       `SELECT * FROM usage_events ${where} ORDER BY observed_at, id`,
@@ -1756,13 +1766,27 @@ function isKnownUsageCost(value) {
   return value?.costAvailable === true && Number.isFinite(value.costUsd) && value.costUsd >= 0
 }
 
+function assertUsageObservationScope(snapshot) {
+  if (snapshot?.scope !== 'session' && snapshot?.scope !== 'model') {
+    throw Object.assign(new TypeError('Usage observations require session or model scope'), {
+      code: 'INVALID_USAGE_SCOPE'
+    })
+  }
+  if (snapshot.scope === 'model' &&
+    (typeof snapshot.model !== 'string' || !snapshot.model.trim())) {
+    throw Object.assign(new TypeError('Model-scoped usage requires a model'), {
+      code: 'INVALID_USAGE_MODEL'
+    })
+  }
+}
+
 function normalizeCost(value) {
   return Number(value.toFixed(12))
 }
 
 function usageObservationId(snapshot, modelKey, counters) {
   const identity = JSON.stringify([
-    'usage', snapshot.sessionId, modelKey, snapshot.adapterId, snapshot.observedAt,
+    'usage', snapshot.sessionId, snapshot.scope, modelKey, snapshot.adapterId, snapshot.observedAt,
     counters.inputTokens, counters.outputTokens, counters.costAvailable ? counters.costUsd : null,
     counters.costAvailable, counters.turns
   ])
@@ -1853,6 +1877,7 @@ function rowToUsageEvent(row) {
   return {
     id: row.id,
     sessionId: row.session_id,
+    scope: row.scope,
     projectPath: row.project_path || null,
     adapterId: row.adapter_id,
     model: row.model || null,
