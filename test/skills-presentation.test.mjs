@@ -716,6 +716,14 @@ test('GitLab repository URL variants preserve nested groups in one source-projec
   assert.equal(groups[0].repositoryUrl, 'https://gitlab.com/Platform/Agent/skills')
 })
 
+test('self-hosted GitLab repository identity retains its private HTTP origin', () => {
+  assert.deepEqual(normaliseGitLabRepository('http://10.44.51.32:8080/AI/pr-skills'), {
+    key: 'gitlab:10.44.51.32:8080/ai/pr-skills',
+    label: '10.44.51.32:8080/AI/pr-skills',
+    repositoryUrl: 'http://10.44.51.32:8080/AI/pr-skills'
+  })
+})
+
 test('catalog groups different Skills from the same GitHub repository once', () => {
   const entries = aggregateSkillCatalog({
     packages: [
@@ -916,6 +924,8 @@ test('Skills install workflow auto-detects GitHub or GitLab from the repository 
   assert.match(page, /https:\/\/github\.com\/owner\/repository\.git/)
   assert.match(page, /https:\/\/gitlab\.com\/group\/project\.git/)
   assert.match(page, /GitLab 源项目/)
+  assert.match(page, /自建 GitLab/)
+  assert.match(page, /HTTP 仅支持私网/)
   assert.match(page, /type: 'git'/)
 })
 

@@ -106,6 +106,33 @@ test('generic Git source resolves GitLab from the repository hostname', async ()
   }
 })
 
+test('generic Git source accepts a private HTTP self-hosted GitLab repository', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-gitlab-private-'))
+  const calls = []
+  try {
+    const loader = createSkillSourceLoader({
+      stagingRoot: join(temp, 'staging'),
+      runGit(args) {
+        calls.push(args)
+        if (args.includes('clone')) createSkill(args.at(-1))
+        if (args.includes('rev-parse')) return 'private-gitlab123\n'
+        return ''
+      }
+    })
+    const preview = await loader.inspect({
+      type: 'git', url: 'http://10.44.51.32:8080/AI/pr-skills'
+    })
+    assert.equal(preview.source.type, 'gitlab')
+    assert.equal(preview.source.locator, 'http://10.44.51.32:8080/AI/pr-skills')
+    assert.equal(calls.some((args) =>
+      args[0] === '-c' && args[1] === 'http.proxy=' && args.includes('clone') &&
+      args.includes('http://10.44.51.32:8080/AI/pr-skills')
+    ), true)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
 test('ZIP source is extracted into a bounded temporary directory', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-zip-'))
   try {

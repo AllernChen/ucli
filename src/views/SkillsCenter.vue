@@ -352,7 +352,7 @@
         <template v-else>
           <a-form-item label="GitHub / GitLab 仓库地址">
             <a-input v-model:value="installDraft.gitUrl" placeholder="https://github.com/owner/repository.git 或 https://gitlab.com/group/project.git" @input="clearPreview" />
-            <div class="skills-help">私有仓库使用本机 Git 登录状态，UCLI 不保存令牌。</div>
+            <div class="skills-help">支持 GitHub、GitLab 与自建 GitLab；HTTP 仅支持私网或本机地址。私有仓库复用本机 Git 登录状态，UCLI 不保存令牌。</div>
           </a-form-item>
           <a-row :gutter="12">
             <a-col :span="8">

@@ -1,4 +1,5 @@
 import { load as parseYaml } from 'js-yaml'
+import { isAllowedGitLabUrl } from '../../src/gitRemotePolicy.js'
 
 const PORTABLE_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
@@ -50,13 +51,17 @@ function cleanRelativePath(value, field) {
   return input
 }
 
-function sanitiseGitSource(source = {}, { host, label, nestedGroups = false }) {
+function sanitiseGitSource(source = {}, { host, label, nestedGroups = false, allowSelfHosted = false }) {
   let url
   try { url = new URL(String(source.url || '')) } catch {
     throw skillError(`${label} URL is invalid`, 'SKILL_SOURCE_INVALID')
   }
-  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== host) {
-    throw skillError(`Only ${label} HTTPS URLs are supported`, 'SKILL_SOURCE_INVALID')
+  const officialHttps = url.protocol === 'https:' && url.hostname.toLowerCase() === host
+  if (!officialHttps && (!allowSelfHosted || !isAllowedGitLabUrl(url))) {
+    const requirement = allowSelfHosted
+      ? `${label} sources require HTTPS, except for private or local HTTP hosts`
+      : `Only ${label} HTTPS URLs are supported`
+    throw skillError(requirement, 'SKILL_SOURCE_INVALID')
   }
   const parts = url.pathname.split('/').filter(Boolean)
   const namespaces = parts.slice(0, -1)
@@ -83,7 +88,9 @@ export function sanitiseGitHubSource(source = {}) {
 }
 
 export function sanitiseGitLabSource(source = {}) {
-  return sanitiseGitSource(source, { host: 'gitlab.com', label: 'GitLab', nestedGroups: true })
+  return sanitiseGitSource(source, {
+    host: 'gitlab.com', label: 'GitLab', nestedGroups: true, allowSelfHosted: true
+  })
 }
 
 export function sanitiseGitRemoteSource(source = {}) {
@@ -92,8 +99,7 @@ export function sanitiseGitRemoteSource(source = {}) {
     throw skillError('Git repository URL is invalid', 'SKILL_SOURCE_INVALID')
   }
   if (hostname === 'github.com') return { type: 'github', ...sanitiseGitHubSource(source) }
-  if (hostname === 'gitlab.com') return { type: 'gitlab', ...sanitiseGitLabSource(source) }
-  throw skillError('Only GitHub or GitLab HTTPS URLs are supported', 'SKILL_SOURCE_INVALID')
+  return { type: 'gitlab', ...sanitiseGitLabSource(source) }
 }
 
 export function sanitiseSkillError(error) {

@@ -1,3 +1,5 @@
+import { isAllowedGitLabUrl } from './gitRemotePolicy.js'
+
 const STATUSES = {
   ready: { label: '可用', color: 'green' },
   disabled: { label: '已停用', color: 'default' },
@@ -356,22 +358,28 @@ export function normaliseGitHubRepository(sourceLocator) {
 }
 
 export function normaliseGitLabRepository(sourceLocator) {
-  return normaliseGitRepository(sourceLocator, { host: 'gitlab.com', kind: 'gitlab', nestedGroups: true })
+  return normaliseGitRepository(sourceLocator, {
+    host: 'gitlab.com', kind: 'gitlab', nestedGroups: true, allowSelfHosted: true
+  })
 }
 
-function normaliseGitRepository(sourceLocator, { host, kind, nestedGroups = false }) {
+function normaliseGitRepository(sourceLocator, { host, kind, nestedGroups = false, allowSelfHosted = false }) {
   let url
   try { url = new URL(String(sourceLocator || '')) } catch { return null }
-  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== host || url.username || url.password) return null
+  const officialHttps = url.protocol === 'https:' && url.hostname.toLowerCase() === host
+  if ((!officialHttps && (!allowSelfHosted || !isAllowedGitLabUrl(url))) || url.username || url.password) return null
   const parts = url.pathname.split('/').filter(Boolean)
   if ((!nestedGroups && parts.length !== 2) || (nestedGroups && parts.length < 2)) return null
   const path = [...parts]
   path[path.length - 1] = path.at(-1).replace(/\.git$/i, '')
   if (path.some((part) => !part || !/^[\w.-]+$/.test(part))) return null
+  const origin = officialHttps ? `https://${host}` : `${url.protocol}//${url.host}`
+  const identityPrefix = officialHttps ? '' : `${url.host.toLowerCase()}/`
+  const labelPrefix = officialHttps ? '' : `${url.host}/`
   return {
-    key: `${kind}:${path.map((part) => part.toLowerCase()).join('/')}`,
-    label: path.join('/'),
-    repositoryUrl: `https://${host}/${path.join('/')}`
+    key: `${kind}:${identityPrefix}${path.map((part) => part.toLowerCase()).join('/')}`,
+    label: `${labelPrefix}${path.join('/')}`,
+    repositoryUrl: `${origin}/${path.join('/')}`
   }
 }
 

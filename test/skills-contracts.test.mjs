@@ -86,9 +86,27 @@ test('generic Git remote source detects the provider from the repository hostnam
     ref: '',
     subdir: ''
   })
+})
+
+test('self-hosted GitLab permits HTTPS and private HTTP without retaining credentials', () => {
+  assert.deepEqual(sanitiseGitRemoteSource({
+    url: 'http://token@10.44.51.32:8080/AI/pr-skills?private_token=secret#readme'
+  }), {
+    type: 'gitlab',
+    url: 'http://10.44.51.32:8080/AI/pr-skills',
+    ref: '',
+    subdir: ''
+  })
+  assert.deepEqual(sanitiseGitLabSource({
+    url: 'https://gitlab.example.com/platform/skills.git'
+  }), {
+    url: 'https://gitlab.example.com/platform/skills.git',
+    ref: '',
+    subdir: ''
+  })
   assert.throws(
-    () => sanitiseGitRemoteSource({ url: 'https://gitlab.example.com/group/skills.git' }),
-    (error) => error.code === 'SKILL_SOURCE_INVALID' && error.message === 'Only GitHub or GitLab HTTPS URLs are supported'
+    () => sanitiseGitRemoteSource({ url: 'http://gitlab.example.com/group/skills.git' }),
+    (error) => error.code === 'SKILL_SOURCE_INVALID'
   )
 })
 

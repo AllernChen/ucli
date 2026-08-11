@@ -6,6 +6,7 @@ import AdmZip from 'adm-zip'
 
 import { sanitiseGitHubSource, sanitiseGitLabSource, sanitiseGitRemoteSource, validateSkillCompatibility } from './contracts.js'
 import { inspectSkillDirectory } from './fileOps.js'
+import { isPrivateNetworkHostname } from '../../src/gitRemotePolicy.js'
 
 function sourceError(message, code = 'SKILL_SOURCE_INVALID') {
   return Object.assign(new Error(message), { code })
@@ -119,19 +120,24 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit } 
         ? sanitiseGitRemoteSource(source)
         : { type: source.type, ...(source.type === 'github' ? sanitiseGitHubSource(source) : sanitiseGitLabSource(source)) }
       const checkout = resolve(root, `${resolved.type}-${randomUUID()}`)
+      const repositoryUrl = new URL(resolved.url)
+      const gitPrefix = repositoryUrl.protocol === 'http:' && isPrivateNetworkHostname(repositoryUrl.hostname)
+        ? ['-c', 'http.proxy=']
+        : []
+      const runSourceGit = (args) => runGit([...gitPrefix, ...args])
       mkdirSync(dirname(checkout), { recursive: true })
       if (source.refType === 'commit') {
-        runGit(['clone', '--filter=blob:none', '--no-checkout', resolved.url, checkout])
-        runGit(['-C', checkout, 'fetch', '--depth', '1', 'origin', resolved.ref])
-        runGit(['-C', checkout, 'checkout', '--detach', 'FETCH_HEAD'])
+        runSourceGit(['clone', '--filter=blob:none', '--no-checkout', resolved.url, checkout])
+        runSourceGit(['-C', checkout, 'fetch', '--depth', '1', 'origin', resolved.ref])
+        runSourceGit(['-C', checkout, 'checkout', '--detach', 'FETCH_HEAD'])
       } else {
         const args = ['clone', '--depth', '1']
         if (resolved.ref) args.push('--branch', resolved.ref)
         args.push(resolved.url, checkout)
-        runGit(args)
+        runSourceGit(args)
       }
       const workingDirectory = safeChild(checkout, resolved.subdir)
-      const resolvedRevision = String(runGit(['-C', checkout, 'rev-parse', 'HEAD']) || '').trim()
+      const resolvedRevision = String(runSourceGit(['-C', checkout, 'rev-parse', 'HEAD']) || '').trim()
       return {
         workingDirectory,
         source: {
