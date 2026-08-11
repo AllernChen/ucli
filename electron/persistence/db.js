@@ -2,6 +2,7 @@ import {
   closeSync, existsSync, fsyncSync, openSync, readFileSync,
   renameSync, unlinkSync, writeSync
 } from 'fs'
+import { createHash } from 'node:crypto'
 import { join } from 'path'
 
 /**
@@ -373,6 +374,84 @@ class Db {
         updated_at        INTEGER NOT NULL
       )
     `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS usage_checkpoints (
+        session_id          TEXT NOT NULL,
+        model_key           TEXT NOT NULL,
+        project_path        TEXT,
+        adapter_id          TEXT NOT NULL,
+        observed_at         INTEGER NOT NULL,
+        input_tokens        INTEGER NOT NULL DEFAULT 0,
+        output_tokens       INTEGER NOT NULL DEFAULT 0,
+        cost_usd            REAL,
+        cost_available      INTEGER NOT NULL DEFAULT 0,
+        turns               INTEGER NOT NULL DEFAULT 0,
+        legacy_input_tokens INTEGER NOT NULL DEFAULT 0,
+        legacy_output_tokens INTEGER NOT NULL DEFAULT 0,
+        legacy_cost_usd     REAL,
+        legacy_cost_available INTEGER NOT NULL DEFAULT 0,
+        legacy_turns        INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (session_id, model_key)
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS usage_events (
+        id             TEXT PRIMARY KEY,
+        session_id     TEXT NOT NULL,
+        project_path   TEXT,
+        adapter_id     TEXT NOT NULL,
+        model          TEXT,
+        observed_at    INTEGER NOT NULL,
+        input_tokens   INTEGER NOT NULL DEFAULT 0,
+        output_tokens  INTEGER NOT NULL DEFAULT 0,
+        cost_usd       REAL,
+        cost_available INTEGER NOT NULL DEFAULT 0,
+        turns          INTEGER NOT NULL DEFAULT 0,
+        approvals      INTEGER NOT NULL DEFAULT 0
+      )
+    `)
+    this.sql.run('CREATE INDEX IF NOT EXISTS idx_usage_events_time ON usage_events(observed_at)')
+    this.sql.run('CREATE INDEX IF NOT EXISTS idx_usage_events_project_time ON usage_events(project_path, observed_at)')
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS summary_reports (
+        id                    TEXT PRIMARY KEY,
+        period_type           TEXT NOT NULL,
+        period_start          INTEGER NOT NULL,
+        period_end_exclusive  INTEGER NOT NULL,
+        timezone              TEXT NOT NULL,
+        partial               INTEGER NOT NULL DEFAULT 0,
+        version               INTEGER NOT NULL,
+        status                TEXT NOT NULL,
+        markdown              TEXT,
+        executor_id           TEXT,
+        profile_id            TEXT,
+        model                 TEXT,
+        usage_snapshot_json   TEXT NOT NULL DEFAULT '{}',
+        coverage_json         TEXT NOT NULL DEFAULT '{}',
+        generation_usage_json TEXT NOT NULL DEFAULT '{}',
+        generation_cost_usd   REAL,
+        prompt_version        TEXT,
+        source_hash           TEXT,
+        is_current            INTEGER NOT NULL DEFAULT 0,
+        generated_by          TEXT NOT NULL,
+        error_text            TEXT,
+        created_at            INTEGER NOT NULL,
+        updated_at            INTEGER NOT NULL,
+        UNIQUE (period_type, period_start, period_end_exclusive, timezone, version)
+      )
+    `)
+    this.sql.run(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_summary_reports_current
+      ON summary_reports(period_type, period_start, period_end_exclusive, timezone)
+      WHERE is_current = 1
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS summary_settings (
+        id            INTEGER PRIMARY KEY CHECK (id = 1),
+        settings_json TEXT NOT NULL DEFAULT '{}',
+        updated_at    INTEGER NOT NULL
+      )
+    `)
   }
 
   // ---- projects ----
@@ -530,6 +609,318 @@ class Db {
        GROUP BY s.project_path, s.adapter_id`,
     )
     return rows(r)
+  }
+
+  // ---- exact post-upgrade usage ledger ----
+  async observeUsage(snapshot) {
+    return this.transaction(async () => {
+      const modelKey = snapshot.model || ''
+      const existing = rows(this.sql.exec(
+        'SELECT * FROM usage_checkpoints WHERE session_id = ? AND model_key = ?',
+        [snapshot.sessionId, modelKey]
+      ))[0]
+      if (!existing) {
+        this.sql.run(
+          `INSERT INTO usage_checkpoints (
+             session_id, model_key, project_path, adapter_id, observed_at,
+             input_tokens, output_tokens, cost_usd, cost_available, turns,
+             legacy_input_tokens, legacy_output_tokens, legacy_cost_usd,
+             legacy_cost_available, legacy_turns
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            snapshot.sessionId, modelKey, snapshot.projectPath || null, snapshot.adapterId,
+            snapshot.observedAt, usageCounter(snapshot.inputTokens), usageCounter(snapshot.outputTokens),
+            snapshot.costAvailable === false ? null : usageCost(snapshot.costUsd),
+            snapshot.costAvailable === false ? 0 : 1, usageCounter(snapshot.turns),
+            usageCounter(snapshot.inputTokens), usageCounter(snapshot.outputTokens),
+            snapshot.costAvailable === false ? null : usageCost(snapshot.costUsd),
+            snapshot.costAvailable === false ? 0 : 1, usageCounter(snapshot.turns)
+          ]
+        )
+        return { baseline: true, event: null }
+      }
+
+      const next = {
+        inputTokens: usageCounter(snapshot.inputTokens),
+        outputTokens: usageCounter(snapshot.outputTokens),
+        costUsd: snapshot.costAvailable === false ? null : usageCost(snapshot.costUsd),
+        costAvailable: snapshot.costAvailable !== false,
+        turns: usageCounter(snapshot.turns)
+      }
+      const reset = next.inputTokens < existing.input_tokens ||
+        next.outputTokens < existing.output_tokens ||
+        next.turns < existing.turns ||
+        (next.costAvailable && existing.cost_available === 1 && next.costUsd < existing.cost_usd)
+
+      if (reset) {
+        this._updateUsageCheckpoint(snapshot, modelKey, next)
+        return { baseline: false, reset: true, event: null }
+      }
+
+      const event = {
+        id: usageObservationId(snapshot, modelKey, next),
+        sessionId: snapshot.sessionId,
+        projectPath: snapshot.projectPath || null,
+        adapterId: snapshot.adapterId,
+        model: snapshot.model || null,
+        observedAt: snapshot.observedAt,
+        inputTokens: next.inputTokens - existing.input_tokens,
+        outputTokens: next.outputTokens - existing.output_tokens,
+        costUsd: next.costAvailable && existing.cost_available === 1
+          ? normalizeCost(next.costUsd - existing.cost_usd)
+          : null,
+        costAvailable: next.costAvailable && existing.cost_available === 1,
+        turns: next.turns - existing.turns,
+        approvals: 0
+      }
+      const hasDelta = event.inputTokens > 0 || event.outputTokens > 0 ||
+        event.turns > 0 || (event.costAvailable && event.costUsd > 0)
+      if (hasDelta) {
+        this.sql.run(
+          `INSERT OR IGNORE INTO usage_events (
+             id, session_id, project_path, adapter_id, model, observed_at,
+             input_tokens, output_tokens, cost_usd, cost_available, turns, approvals
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            event.id, event.sessionId, event.projectPath, event.adapterId, event.model,
+            event.observedAt, event.inputTokens, event.outputTokens, event.costUsd,
+            event.costAvailable ? 1 : 0, event.turns, 0
+          ]
+        )
+      }
+      this._updateUsageCheckpoint(snapshot, modelKey, next)
+      return { baseline: false, event: hasDelta ? event : null }
+    })
+  }
+
+  _updateUsageCheckpoint(snapshot, modelKey, next) {
+    this.sql.run(
+      `UPDATE usage_checkpoints SET
+         project_path = ?, adapter_id = ?, observed_at = ?, input_tokens = ?,
+         output_tokens = ?, cost_usd = ?, cost_available = ?, turns = ?
+       WHERE session_id = ? AND model_key = ?`,
+      [
+        snapshot.projectPath || null, snapshot.adapterId, snapshot.observedAt,
+        next.inputTokens, next.outputTokens, next.costUsd, next.costAvailable ? 1 : 0,
+        next.turns, snapshot.sessionId, modelKey
+      ]
+    )
+  }
+
+  recordApproval(approval) {
+    const id = createHash('sha256').update(JSON.stringify([
+      'approval', approval.sessionId, approval.approvalId || approval.id,
+      approval.adapterId, approval.observedAt
+    ])).digest('hex')
+    this.sql.run(
+      `INSERT OR IGNORE INTO usage_events (
+         id, session_id, project_path, adapter_id, model, observed_at,
+         input_tokens, output_tokens, cost_usd, cost_available, turns, approvals
+       ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, NULL, 0, 0, 1)`,
+      [
+        id, approval.sessionId, approval.projectPath || null, approval.adapterId,
+        approval.model || null, approval.observedAt
+      ]
+    )
+    return rows(this.sql.exec('SELECT * FROM usage_events WHERE id = ?', [id]))
+      .map(rowToUsageEvent)[0]
+  }
+
+  queryUsageEvents(filters = {}) {
+    const conditions = []
+    const values = []
+    if (Number.isFinite(filters.start)) {
+      conditions.push('observed_at >= ?')
+      values.push(filters.start)
+    }
+    if (Number.isFinite(filters.endExclusive)) {
+      conditions.push('observed_at < ?')
+      values.push(filters.endExclusive)
+    }
+    appendSqlListFilter(conditions, values, 'project_path', filters.projectPaths)
+    appendSqlListFilter(conditions, values, 'adapter_id', filters.adapterIds)
+    appendSqlListFilter(conditions, values, 'model', filters.models)
+    appendSqlListFilter(conditions, values, 'session_id', filters.sessionIds)
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+    return rows(this.sql.exec(
+      `SELECT * FROM usage_events ${where} ORDER BY observed_at, id`,
+      values
+    ))
+      .map(rowToUsageEvent)
+  }
+
+  listUsageEvents(filters = {}) {
+    return this.queryUsageEvents(filters)
+  }
+
+  getLegacyUsageBaseline() {
+    const result = rows(this.sql.exec(
+      `SELECT
+         COALESCE(SUM(legacy_input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(legacy_output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(CASE WHEN legacy_cost_available = 1 THEN legacy_cost_usd ELSE 0 END), 0) AS cost_usd,
+         COALESCE(SUM(CASE WHEN legacy_cost_available = 0 THEN 1 ELSE 0 END), 0) AS unavailable_costs,
+         COALESCE(SUM(legacy_turns), 0) AS turns
+       FROM usage_checkpoints`
+    ))[0] || {}
+    return {
+      inputTokens: Number(result.input_tokens) || 0,
+      outputTokens: Number(result.output_tokens) || 0,
+      costUsd: Number(result.cost_usd) || 0,
+      costAvailable: Number(result.unavailable_costs) === 0,
+      turns: Number(result.turns) || 0
+    }
+  }
+
+  // ---- summary reports ----
+  createSummaryReport(report) {
+    const createdAt = Number.isFinite(report.createdAt) ? report.createdAt : Date.now()
+    const updatedAt = Number.isFinite(report.updatedAt) ? report.updatedAt : createdAt
+    this.sql.run(
+      `INSERT INTO summary_reports (
+         id, period_type, period_start, period_end_exclusive, timezone, partial,
+         version, status, markdown, executor_id, profile_id, model,
+         usage_snapshot_json, coverage_json, generation_usage_json,
+         generation_cost_usd, prompt_version, source_hash, is_current,
+         generated_by, error_text, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        report.id, report.periodType, report.periodStart, report.periodEndExclusive,
+        report.timezone, report.partial ? 1 : 0, report.version, report.status,
+        report.markdown ?? null, report.executorId || null, report.profileId || null,
+        report.model || null, stringifyJsonObject(report.usageSnapshot),
+        stringifyJsonObject(report.coverage), stringifyJsonObject(report.generationUsage),
+        report.generationCostUsd ?? null, report.promptVersion || null,
+        report.sourceHash || null, report.isCurrent ? 1 : 0, report.generatedBy,
+        report.errorText ?? null, createdAt, updatedAt
+      ]
+    )
+    return this.getSummaryReport(report.id)
+  }
+
+  updateSummaryReport(reportId, fields = {}) {
+    const columns = {
+      status: 'status', markdown: 'markdown', executorId: 'executor_id',
+      profileId: 'profile_id', model: 'model', generationCostUsd: 'generation_cost_usd',
+      promptVersion: 'prompt_version', sourceHash: 'source_hash', generatedBy: 'generated_by',
+      errorText: 'error_text', updatedAt: 'updated_at'
+    }
+    const sets = []
+    const values = []
+    for (const [field, column] of Object.entries(columns)) {
+      if (fields[field] === undefined) continue
+      sets.push(`${column} = ?`)
+      values.push(fields[field])
+    }
+    for (const [field, column] of [
+      ['usageSnapshot', 'usage_snapshot_json'],
+      ['coverage', 'coverage_json'],
+      ['generationUsage', 'generation_usage_json']
+    ]) {
+      if (fields[field] === undefined) continue
+      sets.push(`${column} = ?`)
+      values.push(stringifyJsonObject(fields[field]))
+    }
+    if (fields.partial !== undefined) {
+      sets.push('partial = ?')
+      values.push(fields.partial ? 1 : 0)
+    }
+    if (!sets.length) return this.getSummaryReport(reportId)
+    if (fields.updatedAt === undefined) {
+      sets.push('updated_at = ?')
+      values.push(Date.now())
+    }
+    values.push(reportId)
+    this.sql.run(`UPDATE summary_reports SET ${sets.join(', ')} WHERE id = ?`, values)
+    return this.getSummaryReport(reportId)
+  }
+
+  getSummaryReport(reportId) {
+    return rows(this.sql.exec('SELECT * FROM summary_reports WHERE id = ?', [reportId]))
+      .map(rowToSummaryReport)[0] || null
+  }
+
+  listSummaryReports(filters = {}) {
+    const conditions = []
+    const values = []
+    for (const [field, column] of [
+      ['periodType', 'period_type'], ['status', 'status'], ['generatedBy', 'generated_by'],
+      ['timezone', 'timezone']
+    ]) {
+      if (filters[field] === undefined) continue
+      conditions.push(`${column} = ?`)
+      values.push(filters[field])
+    }
+    if (Number.isFinite(filters.periodStart)) {
+      conditions.push('period_start = ?')
+      values.push(filters.periodStart)
+    }
+    if (Number.isFinite(filters.periodEndExclusive)) {
+      conditions.push('period_end_exclusive = ?')
+      values.push(filters.periodEndExclusive)
+    }
+    if (filters.isCurrent !== undefined) {
+      conditions.push('is_current = ?')
+      values.push(filters.isCurrent ? 1 : 0)
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+    return rows(this.sql.exec(
+      `SELECT * FROM summary_reports ${where}
+       ORDER BY period_start DESC, version DESC, created_at DESC, id`,
+      values
+    )).map(rowToSummaryReport)
+  }
+
+  async setCurrentSummaryReport(reportId) {
+    return this.transaction(async () => {
+      const target = this.getSummaryReport(reportId)
+      if (!target) {
+        throw Object.assign(new Error(`Summary report not found: ${reportId}`), {
+          code: 'SUMMARY_REPORT_NOT_FOUND'
+        })
+      }
+      const logicalKey = [
+        target.periodType, target.periodStart, target.periodEndExclusive, target.timezone
+      ]
+      this.sql.run(
+        `UPDATE summary_reports SET is_current = 0
+         WHERE period_type = ? AND period_start = ?
+           AND period_end_exclusive = ? AND timezone = ? AND id <> ?`,
+        [...logicalKey, reportId]
+      )
+      this.sql.run('UPDATE summary_reports SET is_current = 1 WHERE id = ?', [reportId])
+      return this.getSummaryReport(reportId)
+    })
+  }
+
+  getSummarySettings() {
+    const value = rows(this.sql.exec(
+      'SELECT settings_json FROM summary_settings WHERE id = 1'
+    ))[0]?.settings_json
+    return normalizeSummarySettings(parseJsonObject(value))
+  }
+
+  setSummarySettings(settings = {}) {
+    const current = this.getSummarySettings()
+    const merged = normalizeSummarySettings({
+      ...current,
+      ...settings,
+      autoPeriods: {
+        ...current.autoPeriods,
+        ...(settings.autoPeriods && typeof settings.autoPeriods === 'object'
+          ? settings.autoPeriods
+          : {})
+      }
+    })
+    this.sql.run(
+      `INSERT INTO summary_settings (id, settings_json, updated_at)
+       VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         settings_json = excluded.settings_json,
+         updated_at = excluded.updated_at`,
+      [JSON.stringify(merged), Date.now()]
+    )
+    return merged
   }
 
   // ---- rules ----
@@ -1237,6 +1628,107 @@ function parseJsonObject(value) {
 
 function stringifyJsonObject(value) {
   return JSON.stringify(value && typeof value === 'object' && !Array.isArray(value) ? value : {})
+}
+
+function usageCounter(value) {
+  return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0
+}
+
+function usageCost(value) {
+  return Number.isFinite(value) && value >= 0 ? value : 0
+}
+
+function normalizeCost(value) {
+  return Number(value.toFixed(12))
+}
+
+function usageObservationId(snapshot, modelKey, counters) {
+  const identity = JSON.stringify([
+    'usage', snapshot.sessionId, modelKey, snapshot.adapterId, snapshot.observedAt,
+    counters.inputTokens, counters.outputTokens, counters.costAvailable ? counters.costUsd : null,
+    counters.costAvailable, counters.turns
+  ])
+  return createHash('sha256').update(identity).digest('hex')
+}
+
+function appendSqlListFilter(conditions, values, column, candidates) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return
+  conditions.push(`${column} IN (${candidates.map(() => '?').join(', ')})`)
+  values.push(...candidates)
+}
+
+function normalizeSummarySettings(value = {}) {
+  const periods = value.autoPeriods && typeof value.autoPeriods === 'object'
+    ? value.autoPeriods
+    : {}
+  const nullableString = (candidate) => typeof candidate === 'string' && candidate
+    ? candidate
+    : null
+  return {
+    autoEnabled: typeof value.autoEnabled === 'boolean' ? value.autoEnabled : false,
+    autoPeriods: {
+      day: typeof periods.day === 'boolean' ? periods.day : true,
+      week: typeof periods.week === 'boolean' ? periods.week : true,
+      month: typeof periods.month === 'boolean' ? periods.month : false,
+      quarter: typeof periods.quarter === 'boolean' ? periods.quarter : false,
+      year: typeof periods.year === 'boolean' ? periods.year : false
+    },
+    defaultExecutorId: nullableString(value.defaultExecutorId),
+    defaultProfileId: nullableString(value.defaultProfileId),
+    defaultModel: nullableString(value.defaultModel),
+    firstEnableDisclosureAcceptedAt: Number.isFinite(value.firstEnableDisclosureAcceptedAt)
+      ? value.firstEnableDisclosureAcceptedAt
+      : null,
+    automaticCallLimit: Number.isInteger(value.automaticCallLimit) &&
+      value.automaticCallLimit >= 1 && value.automaticCallLimit <= 100
+      ? value.automaticCallLimit
+      : 20
+  }
+}
+
+function rowToUsageEvent(row) {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    projectPath: row.project_path || null,
+    adapterId: row.adapter_id,
+    model: row.model || null,
+    observedAt: row.observed_at,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    costUsd: row.cost_available === 1 ? row.cost_usd : null,
+    costAvailable: row.cost_available === 1,
+    turns: row.turns,
+    approvals: row.approvals
+  }
+}
+
+function rowToSummaryReport(row) {
+  return {
+    id: row.id,
+    periodType: row.period_type,
+    periodStart: row.period_start,
+    periodEndExclusive: row.period_end_exclusive,
+    timezone: row.timezone,
+    partial: row.partial === 1,
+    version: row.version,
+    status: row.status,
+    markdown: row.markdown ?? null,
+    executorId: row.executor_id || null,
+    profileId: row.profile_id || null,
+    model: row.model || null,
+    usageSnapshot: parseJsonObject(row.usage_snapshot_json),
+    coverage: parseJsonObject(row.coverage_json),
+    generationUsage: parseJsonObject(row.generation_usage_json),
+    generationCostUsd: row.generation_cost_usd ?? null,
+    promptVersion: row.prompt_version || null,
+    sourceHash: row.source_hash || null,
+    isCurrent: row.is_current === 1,
+    generatedBy: row.generated_by,
+    errorText: row.error_text ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }
 }
 
 function rowToAiCliProfile(row) {
