@@ -102,6 +102,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useStatsStore } from '../../stores/stats.js'
 import UsageTrendChart from './UsageTrendChart.vue'
+import { hasUsageMetricData } from './usageTrendGeometry.js'
 
 const stats = useStatsStore()
 const metric = ref('totalTokens')
@@ -117,6 +118,7 @@ const metricOptions = Object.freeze([
   { label: '输入 Tokens', value: 'inputTokens' },
   { label: '输出 Tokens', value: 'outputTokens' },
   { label: '已知费用', value: 'knownCostUsd' },
+  { label: '费用覆盖率', value: 'costCoverage' },
   { label: '轮次', value: 'turns' },
   { label: '活跃会话', value: 'activeSessions' },
   { label: '审批次数', value: 'approvals' }
@@ -146,8 +148,9 @@ const modelOptions = computed(() => uniqueOptions([
   ...(stats.modelStats || []).map(row => row.model)
 ]))
 
-const hasMetricData = computed(() => (stats.trend?.buckets || []).some(bucket =>
-  Number(bucket[metric.value] || 0) > 0
+const hasMetricData = computed(() => hasUsageMetricData(
+  stats.trend?.buckets || [],
+  metric.value
 ))
 const legacyMetrics = computed(() => stats.trend?.legacyBaseline?.metrics || null)
 const legacyTokens = computed(() =>

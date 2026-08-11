@@ -79,10 +79,16 @@ test('usage trend chart is dependency-free, accessible, interactive, and has a t
   assert.ok(directive(svg, 'bind', 'aria-labelledby'))
   assert.ok(title)
   assert.ok(bars.some((bar) => attribute(bar, 'tabindex') === '0'))
+  assert.ok(bars.every((bar) => attribute(bar, 'role') === 'img'))
+  assert.ok(bars.every((bar) => directive(bar, 'bind', 'aria-label')))
   assert.ok(bars.some((bar) => directive(bar, 'on', 'focus')))
   assert.ok(bars.some((bar) => directive(bar, 'on', 'mouseenter')))
+  const liveRegion = findElements(ast, (node) => attribute(node, 'aria-live') === 'polite')[0]
+  assert.ok(liveRegion)
+  assert.equal(directive(liveRegion, 'if'), undefined)
   assert.ok(tables.length)
   assert.match(source, /逐桶数据/)
+  assert.match(source, /bucketAriaLabel/)
   assert.match(source, /chartBars/)
   assert.match(source, /maxValue/)
   assert.doesNotMatch(source, /chart\.js|echarts|d3|highcharts/i)
@@ -121,4 +127,21 @@ test('usage trend geometry uses a zero-based proportional scale', async () => {
   assert.equal(geometry.baseline, 110)
   assert.deepEqual(geometry.bars.map(bar => bar.height), [0, 50, 100])
   assert.deepEqual(geometry.bars.map(bar => bar.y), [110, 60, 10])
+})
+
+test('cost coverage keeps zero percent as data and formats it as a percentage', async () => {
+  const {
+    formatUsageMetricValue,
+    hasUsageMetricData
+  } = await import('../src/components/stats/usageTrendGeometry.js')
+
+  assert.equal(hasUsageMetricData([{ costCoverage: 0 }], 'costCoverage'), true)
+  assert.equal(hasUsageMetricData([{ costCoverage: null }], 'costCoverage'), false)
+  assert.equal(formatUsageMetricValue(0, 'costCoverage'), '0%')
+  assert.equal(formatUsageMetricValue(0.875, 'costCoverage'), '87.5%')
+  assert.equal(formatUsageMetricValue(1, 'costCoverage'), '100%')
+
+  const { source } = loadSfc('../src/components/stats/UsageTrendsPanel.vue')
+  assert.match(source, /label: '费用覆盖率', value: 'costCoverage'/)
+  assert.match(source, /hasUsageMetricData/)
 })

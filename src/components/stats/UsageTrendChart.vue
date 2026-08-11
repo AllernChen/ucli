@@ -27,6 +27,8 @@
           :height="bar.height"
           rx="2"
           tabindex="0"
+          role="img"
+          :aria-label="bucketAriaLabel(bar)"
           @mouseenter="activate(bar.index)"
           @mouseleave="deactivate(bar.index)"
           @focus="activate(bar.index)"
@@ -44,9 +46,12 @@
       </g>
     </svg>
 
-    <div v-if="activeBucket" class="tooltip" role="status" aria-live="polite">
-      <strong>{{ activeBucket.label }}</strong>
-      <span>{{ metricLabel }}：{{ formatValue(metricValue(activeBucket)) }}</span>
+    <div class="tooltip" role="status" aria-live="polite" aria-atomic="true">
+      <template v-if="activeBucket">
+        <strong>{{ activeBucket.label }}</strong>
+        <span>{{ metricLabel }}：{{ formatValue(metricValue(activeBucket)) }}</span>
+      </template>
+      <span v-else class="tooltip-placeholder">聚焦或悬停时间桶查看数值</span>
     </div>
 
     <details class="bucket-details">
@@ -69,7 +74,11 @@
 
 <script setup>
 import { computed, ref, useId } from 'vue'
-import { buildUsageTrendGeometry, usageMetricValue } from './usageTrendGeometry.js'
+import {
+  buildUsageTrendGeometry,
+  formatUsageMetricValue,
+  usageMetricValue
+} from './usageTrendGeometry.js'
 
 const props = defineProps({
   buckets: { type: Array, default: () => [] },
@@ -82,6 +91,7 @@ const metricLabels = Object.freeze({
   inputTokens: '输入 Tokens',
   outputTokens: '输出 Tokens',
   knownCostUsd: '已知费用',
+  costCoverage: '费用覆盖率',
   turns: '轮次',
   activeSessions: '活跃会话',
   approvals: '审批次数'
@@ -127,6 +137,10 @@ function deactivate(index) {
   if (activeIndex.value === index) activeIndex.value = null
 }
 
+function bucketAriaLabel(bar) {
+  return `${bar.label}，${metricLabel.value}：${formatValue(bar.value)}`
+}
+
 function shortLabel(label) {
   const value = String(label || '')
   if (value.includes(' ')) {
@@ -137,8 +151,7 @@ function shortLabel(label) {
 }
 
 function formatValue(value) {
-  if (props.metric === 'knownCostUsd') return `$${Number(value || 0).toFixed(4)}`
-  return Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+  return formatUsageMetricValue(value, props.metric)
 }
 </script>
 
@@ -152,6 +165,7 @@ function formatValue(value) {
 .axis-label { fill: #8c8c8c; font-size: 11px; }
 .tooltip { display: flex; gap: 10px; align-items: center; min-height: 28px; color: #262626; }
 .tooltip span { color: #595959; }
+.tooltip-placeholder { color: #8c8c8c; }
 .bucket-details { margin-top: 8px; color: #595959; }
 .bucket-details summary { cursor: pointer; width: fit-content; }
 .table-scroll { margin-top: 8px; max-height: 240px; overflow: auto; }

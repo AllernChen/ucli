@@ -3,6 +3,29 @@ export function usageMetricValue(bucket, metric) {
   return Number.isFinite(value) && value > 0 ? value : 0
 }
 
+export function hasUsageMetricData(buckets, metric) {
+  if (metric === 'costCoverage') {
+    return buckets.some((bucket) => {
+      if (bucket?.costCoverage == null) return false
+      const value = Number(bucket.costCoverage)
+      return Number.isFinite(value) && value >= 0
+    })
+  }
+  return buckets.some(bucket => usageMetricValue(bucket, metric) > 0)
+}
+
+export function formatUsageMetricValue(value, metric) {
+  const number = Number(value || 0)
+  if (metric === 'knownCostUsd') return `$${number.toFixed(4)}`
+  if (metric === 'costCoverage') {
+    return number.toLocaleString('zh-CN', {
+      style: 'percent',
+      maximumFractionDigits: 1
+    })
+  }
+  return number.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+}
+
 export function buildUsageTrendGeometry({ buckets, metric, width, height, padding }) {
   const values = buckets.map(bucket => usageMetricValue(bucket, metric))
   const maxValue = Math.max(0, ...values)
