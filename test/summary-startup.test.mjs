@@ -43,7 +43,7 @@ test('summary recovery happens after persistence and before scheduler catch-up',
     new URL('../electron/summaries/summaryJobService.js', import.meta.url),
     'utf8'
   )
-  const persistence = orchestrator.indexOf('const db = await openDb(dbPath)')
+  const persistence = orchestrator.indexOf('const db = await openDb(dbPath')
   const initializeAutomation = orchestrator.indexOf('await initSummaryAutomation(db)', persistence)
   const automationFactory = orchestrator.indexOf('async function initSummaryAutomation(db)')
   const jobService = orchestrator.indexOf('summaryJobService = createSummaryJobService')

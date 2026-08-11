@@ -156,6 +156,84 @@ test('migration preserves cumulative statistics and adds usage and summary table
   }
 })
 
+test('legacy JSON totals seed the ledger before exact observations begin', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ucli-usage-ledger-json-migration-'))
+  const path = join(dir, 'ucli.db')
+  let db = await openDb(path, { deferUsageLedgerInitialization: true })
+
+  try {
+    assert.deepEqual(db.getUsageLedgerMetadata(), {
+      ledgerStartedAt: undefined,
+      exactSince: undefined
+    })
+
+    db.migrateFromJson(null, null, {
+      s1: {
+        cwd: 'F:/projects/demo',
+        adapterId: 'claude',
+        model: 'claude-sonnet',
+        createdAt: 1,
+        stats: {
+          tokens: { input: 100, output: 25 },
+          costUsd: 0.75,
+          turns: 4
+        }
+      }
+    })
+
+    const metadata = db.initializeUsageLedgerAfterLegacyImport()
+    assert.equal(metadata.ledgerStartedAt, metadata.exactSince)
+    assert.deepEqual(db.getLegacyUsageBaseline(), {
+      inputTokens: 100,
+      outputTokens: 25,
+      costUsd: 0.75,
+      costAvailable: true,
+      turns: 4
+    })
+
+    const unchanged = await db.observeUsage(usageSnapshot({
+      scope: 'session',
+      model: null,
+      observedAt: metadata.exactSince + 1,
+      inputTokens: 100,
+      outputTokens: 25,
+      costUsd: 0.75,
+      turns: 4
+    }))
+    assert.equal(unchanged.event, null)
+
+    const increment = await db.observeUsage(usageSnapshot({
+      scope: 'session',
+      model: null,
+      observedAt: metadata.exactSince + 2,
+      inputTokens: 110,
+      outputTokens: 30,
+      costUsd: 0.9,
+      turns: 5
+    }))
+    assert.deepEqual({
+      inputTokens: increment.event.inputTokens,
+      outputTokens: increment.event.outputTokens,
+      costUsd: increment.event.costUsd,
+      turns: increment.event.turns
+    }, {
+      inputTokens: 10,
+      outputTokens: 5,
+      costUsd: 0.15,
+      turns: 1
+    })
+
+    assert.deepEqual(db.initializeUsageLedgerAfterLegacyImport(), metadata)
+    db.flush()
+    db.close()
+    db = await openDb(path)
+    assert.deepEqual(db.getUsageLedgerMetadata(), metadata)
+  } finally {
+    db?.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('migrated session totals produce only their post-upgrade delta', async () => {
   const { db, dir } = await openMigratedUsageDb('ucli-usage-scope-session-')
   try {

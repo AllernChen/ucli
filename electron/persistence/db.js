@@ -29,7 +29,7 @@ let SQL = null
  * Open (or create) the database at `dbPath`. Must be awaited once before any
  * other `getDb()` call.
  */
-export async function openDb(dbPath) {
+export async function openDb(dbPath, { deferUsageLedgerInitialization = false } = {}) {
   if (!SQL) {
     try {
       const init = await import('sql.js')
@@ -49,7 +49,7 @@ export async function openDb(dbPath) {
   try {
     instance = new SQL.Database(buffer)
     const db = new Db(instance, dbPath)
-    db._ensureSchema()
+    db._ensureSchema({ initializeUsageLedger: !deferUsageLedgerInitialization })
     _db = db
     return db
   } catch (error) {
@@ -65,7 +65,7 @@ export async function openDb(dbPath) {
       try {
         instance = new SQL.Database(readFileSync(lastValidBackupPath))
         db = new Db(instance, dbPath)
-        db._ensureSchema()
+        db._ensureSchema({ initializeUsageLedger: !deferUsageLedgerInitialization })
         restoredFromBackup = true
       } catch {
         try { instance?.close() } catch { /* unusable backup, best effort */ }
@@ -77,7 +77,7 @@ export async function openDb(dbPath) {
     if (!db) {
       instance = new SQL.Database()
       db = new Db(instance, dbPath)
-      db._ensureSchema()
+      db._ensureSchema({ initializeUsageLedger: !deferUsageLedgerInitialization })
     }
     db.recoveryInfo = { reason: 'invalid-database', backupPath, restoredFromBackup }
     _db = db
@@ -141,7 +141,7 @@ class Db {
   }
 
   // ---- schema ----
-  _ensureSchema() {
+  _ensureSchema({ initializeUsageLedger = true } = {}) {
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS projects (
         path        TEXT PRIMARY KEY,
@@ -463,14 +463,14 @@ class Db {
         updated_at    INTEGER NOT NULL
       )
     `)
-    this._initializeUsageLedger()
+    if (initializeUsageLedger) this.initializeUsageLedgerAfterLegacyImport()
   }
 
-  _initializeUsageLedger() {
+  initializeUsageLedgerAfterLegacyImport() {
     const existing = rows(this.sql.exec(
       "SELECT value FROM settings WHERE key = 'usage.ledger'"
     ))[0]
-    if (existing) return
+    if (existing) return this.getUsageLedgerMetadata()
 
     const ledgerStartedAt = Date.now()
     this.sql.run('BEGIN IMMEDIATE')
@@ -517,6 +517,7 @@ class Db {
         ['usage.ledger', JSON.stringify({ ledgerStartedAt, exactSince: ledgerStartedAt })]
       )
       this.sql.run('COMMIT')
+      return this.getUsageLedgerMetadata()
     } catch (error) {
       try { this.sql.run('ROLLBACK') } catch { /* preserve original error */ }
       throw error

@@ -801,7 +801,7 @@ export function createOrchestrator() {
   }
 
   async function initPersistence() {
-    const db = await openDb(dbPath)
+    const db = await openDb(dbPath, { deferUsageLedgerInitialization: true })
     log('initPersistence — openDb returned:', !!db, 'path:', dbPath)
     if (!db) {
       console.error('Persistence not available — running without saving data')
@@ -828,12 +828,16 @@ export function createOrchestrator() {
     } catch { /* ignore */ }
 
     const existingSessions = db.listSessions()
-    if (!existingSessions.length && oldCfg) {
+    const shouldMigrateLegacyJson = !existingSessions.length && oldCfg
+    if (shouldMigrateLegacyJson) {
       db.migrateFromJson(
         oldCfg.rulesets || null,
         oldCfg.settings || null,
         oldSessions || null
       )
+    }
+    db.initializeUsageLedgerAfterLegacyImport()
+    if (shouldMigrateLegacyJson) {
       db.flush()
       // Remove old files after successful migration
       try { if (existsSync(configPath)) unlinkSync(configPath) } catch { /* ok */ }
@@ -1391,6 +1395,7 @@ export function createOrchestrator() {
               sessionId,
               projectPath: entry.session.cwd,
               adapterId: entry.session.adapterId,
+              synthetic: evt.synthetic,
               totals: cumulativeStats,
               models: evt.models,
               modelBreakdown: evt.modelBreakdown,
