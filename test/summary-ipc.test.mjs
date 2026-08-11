@@ -29,6 +29,37 @@ test('main summary IPC registers the exact surface and validates every payload',
   assert.match(source, /SUMMARY_EXPORT_FIELDS/)
   assert.match(source, /custom.*requirement/s)
   assert.match(source, /safeSummaryEnvelope/)
+  assert.match(source, /createReportExportService/)
+  assert.match(source, /summaryExportService\s*=\s*createReportExportService/)
+  assert.match(source, /SUMMARY_HTML_INVALID/)
+  assert.match(source, /validationErrors/)
+})
+
+test('preload preserves safe HTML validation codes without exposing raw output', async () => {
+  const source = readFileSync(new URL('../electron/preload.js', import.meta.url), 'utf8')
+    .replace("import { contextBridge, ipcRenderer } from 'electron'", '')
+  let api
+  new Function('contextBridge', 'ipcRenderer', source)(
+    { exposeInMainWorld: (_name, value) => { api = value } },
+    {
+      invoke: async () => ({
+        ok: false,
+        error: {
+          code: 'SUMMARY_HTML_INVALID',
+          message: 'Generated HTML failed safety validation',
+          validationErrors: [{ code: 'FORBIDDEN_ELEMENT' }]
+        }
+      }),
+      on() {},
+      removeListener() {}
+    }
+  )
+  await assert.rejects(
+    api.exportSummaryHtml({ reportId: 'r1', style: { mode: 'light' } }),
+    error => error.code === 'SUMMARY_HTML_INVALID' &&
+      error.validationErrors?.[0]?.code === 'FORBIDDEN_ELEMENT' &&
+      !JSON.stringify(error).includes('raw')
+  )
 })
 
 test('summary IPC returns typed safe errors without provider output', async () => {

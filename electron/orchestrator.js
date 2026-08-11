@@ -46,6 +46,7 @@ import { completedPeriod, manualPeriod } from './usage/periods.js'
 import { createEvidenceCollector } from './summaries/evidenceCollector.js'
 import { createSummaryPipeline } from './summaries/chunkPlanner.js'
 import { createReportRepository } from './summaries/reportRepository.js'
+import { createReportExportService } from './summaries/reportExportService.js'
 import { createSummaryJobService } from './summaries/summaryJobService.js'
 import { createSummaryRunner } from './summaries/summaryRunner.js'
 import {
@@ -99,6 +100,8 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   INVALID_SUMMARY_IPC: 'Invalid summary request',
   SUMMARY_SERVICE_UNAVAILABLE: 'Summary service is unavailable',
   SUMMARY_EXPORT_UNAVAILABLE: 'Summary export is unavailable',
+  SUMMARY_HTML_INVALID: 'Generated HTML failed safety validation',
+  INVALID_SUMMARY_EXPORT_STYLE: 'Invalid HTML export style',
   SUMMARY_REPORT_NOT_FOUND: 'Summary report was not found',
   SUMMARY_REPORT_NOT_COMPLETED: 'Only a completed report can be current',
   SUMMARY_AUTOMATION_UNAVAILABLE: 'Automatic summaries require local persistence',
@@ -274,7 +277,14 @@ function safeSummaryError(error) {
   const code = typeof error?.code === 'string' && SUMMARY_ERROR_MESSAGES[error.code]
     ? error.code
     : 'SUMMARY_SERVICE_UNAVAILABLE'
-  return { code, message: SUMMARY_ERROR_MESSAGES[code] }
+  const safe = { code, message: SUMMARY_ERROR_MESSAGES[code] }
+  if (code === 'SUMMARY_HTML_INVALID' && Array.isArray(error?.validationErrors)) {
+    safe.validationErrors = error.validationErrors
+      .filter(item => item && typeof item.code === 'string' && /^[A-Z][A-Z0-9_]{2,80}$/.test(item.code))
+      .slice(0, 50)
+      .map(item => ({ code: item.code }))
+  }
+  return safe
 }
 
 function safeSummaryEnvelope(operation) {
@@ -536,6 +546,13 @@ export function createOrchestrator() {
     summarySettings = db.getSummarySettings()
     summaryRepository = createReportRepository({ db })
     const runner = createSummaryRunner({ profileService })
+    summaryExportService = createReportExportService({
+      repository: summaryRepository,
+      runner,
+      showSaveDialog: options => mainWindow && !mainWindow.isDestroyed?.()
+        ? dialog.showSaveDialog(mainWindow, options)
+        : dialog.showSaveDialog(options)
+    })
     const pipeline = createLiveSummaryPipeline({
       runner,
       getSettings: () => summarySettings,

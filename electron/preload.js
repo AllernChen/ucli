@@ -7,7 +7,10 @@ async function invokeSummary(channel, ...args) {
     code: 'SUMMARY_SERVICE_UNAVAILABLE',
     message: 'Summary service is unavailable'
   }
-  throw Object.assign(new Error(payload.message), { code: payload.code })
+  throw Object.assign(new Error(payload.message), {
+    code: payload.code,
+    validationErrors: Array.isArray(payload.validationErrors) ? payload.validationErrors : undefined
+  })
 }
 
 /**
