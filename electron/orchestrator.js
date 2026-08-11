@@ -50,6 +50,10 @@ import { createReportExportService } from './summaries/reportExportService.js'
 import { createSummaryJobService } from './summaries/summaryJobService.js'
 import { createSummaryRunner } from './summaries/summaryRunner.js'
 import {
+  createSummaryOperationalLogEntry,
+  safeSummaryErrorCode
+} from './summaries/operationalLog.js'
+import {
   DEFAULT_SUMMARY_SETTINGS,
   createLiveSummaryPipeline,
   createSummaryScheduler,
@@ -573,6 +577,7 @@ export function createOrchestrator() {
       defaultTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
     })
     summaryJobService.subscribe((report, pipelineProgress) => {
+      log('summary-operation', createSummaryOperationalLogEntry(report, pipelineProgress))
       if (!pipelineProgress) scheduleFlush()
       if (mainWindow && !mainWindow.isDestroyed?.()) {
         mainWindow.webContents.send(
@@ -1018,7 +1023,10 @@ export function createOrchestrator() {
     } catch (error) {
       await summaryScheduler?.stop()
       summaryScheduler = null
-      log('Summary scheduler startup deferred:', error?.code || 'SUMMARY_SCHEDULER_START_FAILED')
+      log(
+        'Summary scheduler startup deferred:',
+        safeSummaryErrorCode(error?.code, 'SUMMARY_SCHEDULER_START_FAILED')
+      )
     }
   }
 

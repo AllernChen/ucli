@@ -12,6 +12,7 @@ import { installOutputErrorGuards } from './brokenPipeGuard.js'
 import { resolveWindowBounds } from './windowState.js'
 import { openAllowedExternalUrl } from './externalLinks.js'
 import { createUpdateService } from './updateService.js'
+import { safeStartupFailure, startMainWindowLifecycle } from './startupLifecycle.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -181,17 +182,15 @@ app.whenReady().then(async () => {
   // server (that the bundled Claude PreToolUse runner calls back into), the
   // adapter registry, sessions, stats, and all IPC handlers.
   orchestrator = createOrchestrator()
-  try { await orchestrator.initPersistence() } catch (e) { console.error('initPersistence failed:', e) }
-  try { await orchestrator.startGateway() } catch (e) { console.error('startGateway failed:', e) }
-  orchestrator.registerIpc()
-
-  try {
-    createTray()
-  } catch (error) {
-    tray = null
-    console.error('Failed to create tray:', error)
-  }
-  createWindow()
+  await startMainWindowLifecycle({
+    orchestrator,
+    beforeWindow: createTray,
+    openWindow: createWindow,
+    onError: ({ phase, code }) => {
+      if (phase === 'before-window') tray = null
+      console.error(`UCLI ${phase} startup failed:`, code)
+    }
+  })
   updateService = createUpdateService({
     updater: autoUpdater,
     appVersion: app.getVersion(),
@@ -216,7 +215,10 @@ app.whenReady().then(async () => {
       orchestrator.setMainWindow(mainWindow)
     } else showMainWindow()
   })
-}).catch((error) => console.error('UCLI startup failed:', error))
+}).catch((error) => {
+  const failure = safeStartupFailure('application', error)
+  console.error('UCLI startup failed:', failure.code)
+})
 
 // Single-instance lock — second launches focus the existing window.
 const gotLock = app.requestSingleInstanceLock()

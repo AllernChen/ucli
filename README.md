@@ -24,6 +24,14 @@ UCLI 是一个支持 macOS 与 Windows 的本地 AI CLI 工作台。它在用户
 
 当前适配 Claude Code、Codex、OpenCode 和 [U-Code](https://github.com/AllernChen/U-Code)。OpenCode 与 U-Code 均支持原生 TUI、新建/恢复会话、按目录发现历史、完整历史视图、三档权限映射，以及逐会话模型、Token、轮次统计；CLI 导出未提供费用时会显示“不可用”，不会误报为 `$0`。两者的可执行文件、配置环境和原生会话数据彼此隔离。
 
+## 使用趋势与工作总结
+
+0.10.0 在原有累计统计之上增加按小时、天、周、月查看的使用趋势，并支持按项目、AI CLI、模型和指标筛选。精确趋势从升级到 0.10.0 后开始采集；升级前累计总量继续单独展示，不会被伪造成精确的历史时间桶。
+
+工作总结支持每日、每周、每月、每季度和每年周期，分析用量、项目进展、风险与下一步建议。自动总结默认关闭，只有用户明确启用、选择 AI CLI 并确认执行后才运行；启动后的 catch-up 仅补齐每种周期最新一个缺口，不追溯生成全部历史报告。执行总结会调用所选 AI CLI，可能产生 Provider 费用。
+
+Claude Code 的 `/insights` 是交互式原生报告，适合用户在 Claude Code 内主动查看，但它不作为 0.10.0 跨 CLI 总结引擎。OpenCode 已有的 compact/native digest 可在证据收集时复用；UCLI 不会修改原生会话来生成 compact。U-Code 的 dream/distill 同样只复用已经存在的结果，不由 UCLI 自动触发。
+
 ## 配置档案
 
 0.8.3 的一级页面“配置档案”支持 Codex 与 Claude Code。Codex 支持两种可保存档案：

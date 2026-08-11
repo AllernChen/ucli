@@ -12,13 +12,14 @@ function verifyReleaseArtifacts({ rootDir }) {
   return verifyReleaseArtifactsForPlatform({ rootDir, platform: 'win32', arch: 'x64' })
 }
 
-test('0.9.6 release package and user documentation agree', async () => {
-  const [packageSource, readme, changelog] = await Promise.all([
+test('0.10.0 release package and user documentation agree', async () => {
+  const [packageSource, readme, changelog, acceptance] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../README.md', import.meta.url), 'utf8'),
-    readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
+    readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8'),
+    readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8')
   ])
-  assert.equal(JSON.parse(packageSource).version, '0.9.6')
+  assert.equal(JSON.parse(packageSource).version, '0.10.0')
   assert.match(readme, /配置档案/)
   assert.match(readme, /CC Switch/)
   assert.match(readme, /Claude 登录态/)
@@ -29,9 +30,28 @@ test('0.9.6 release package and user documentation agree', async () => {
   assert.doesNotMatch(changelog, /\uFFFD/)
   assert.match(readme, /Skills 管理/)
   assert.match(readme, /GitLab/)
-  assert.match(changelog, /## \[0\.9\.6\]/)
-  assert.match(changelog, /多选/)
-  assert.match(changelog, /全选/)
+  assert.match(changelog, /## \[0\.10\.0\] - 2026-08-12/)
+  assert.match(readme, /精确趋势从升级到 0\.10\.0 后开始/)
+  assert.match(readme, /升级前累计总量.*单独/)
+  assert.match(readme, /自动总结.*默认关闭.*AI CLI/s)
+  assert.match(readme, /仅补齐每种周期最新一个/)
+  assert.match(readme, /可能产生 Provider 费用/)
+  assert.match(readme, /Claude Code.*`\/insights`.*交互式原生报告/s)
+  assert.match(readme, /不作为 0\.10\.0 跨 CLI 总结引擎/)
+  assert.match(readme, /OpenCode.*compact.*复用/s)
+  assert.match(readme, /不会修改原生会话来生成 compact/)
+  assert.match(acceptance, /0\.10\.0 统计与工作总结/)
+  assert.match(acceptance, /fake.*不调用真实 AI CLI/s)
+  assert.match(acceptance, /需要用户本地验收/)
+  assert.match(acceptance, /pre-0\.10 数据库.*legacy totals/s)
+  assert.match(acceptance, /小时、天、周、月四种趋势/)
+  assert.match(acceptance, /每日、每周、每月、每季度和每年报告/)
+  assert.match(acceptance, /单次手动报告覆盖 executor、profile 或 model/)
+  assert.match(acceptance, /取消一个多分块报告并重试/)
+  assert.match(acceptance, /切换“当前版本”后重启应用/)
+  assert.match(acceptance, /复制报告 Markdown.*导出 Markdown/s)
+  assert.match(acceptance, /light、dark 和 custom 三种 AI HTML/)
+  assert.match(acceptance, /prompt-injection 文本与假密钥/)
 })
 
 test('Gateway release acceptance documents every required Feishu prerequisite', async () => {

@@ -140,14 +140,19 @@ test('manual enable keeps configuration errors explicit and connection errors re
 
 test('main process starts Gateway after persistence and shuts it down before adapters', () => {
   const main = readFileSync(new URL('../electron/main.js', import.meta.url), 'utf8')
+  const startup = readFileSync(
+    new URL('../electron/startupLifecycle.js', import.meta.url),
+    'utf8'
+  )
   const orchestrator = readFileSync(
     new URL('../electron/orchestrator.js', import.meta.url),
     'utf8'
   )
 
-  const persistence = main.indexOf('await orchestrator.initPersistence()')
-  const gateway = main.indexOf('await orchestrator.startGateway()')
-  const ipc = main.indexOf('orchestrator.registerIpc()')
+  assert.match(main, /await startMainWindowLifecycle\(/)
+  const persistence = startup.indexOf('() => orchestrator.initPersistence()')
+  const gateway = startup.indexOf('() => orchestrator.startGateway()')
+  const ipc = startup.indexOf('orchestrator.registerIpc()')
   assert.ok(persistence >= 0 && gateway > persistence && ipc > gateway)
 
   const gatewayShutdown = orchestrator.indexOf('await gatewayManager?.shutdown()')
