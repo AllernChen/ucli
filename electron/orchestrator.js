@@ -950,7 +950,8 @@ export function createOrchestrator() {
               adapterId: entry.session.adapterId,
               totals: cumulativeStats,
               models: evt.models,
-              modelBreakdown: evt.modelBreakdown
+              modelBreakdown: evt.modelBreakdown,
+              model: evt.model
             })
           } catch (error) {
             log('Failed to record usage observation:', error)

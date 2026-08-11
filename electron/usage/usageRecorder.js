@@ -102,7 +102,7 @@ export function normalizeUsageUpdate(update, fallbackObservedAt) {
     turns: counter(turns)
   }
 
-  const breakdown = Array.isArray(update?.models)
+  const breakdown = Array.isArray(update?.models) && update.models.length
     ? update.models
     : (Array.isArray(update?.modelBreakdown) ? update.modelBreakdown : [])
   const models = breakdown.map((modelUsage) => {
@@ -119,6 +119,20 @@ export function normalizeUsageUpdate(update, fallbackObservedAt) {
       turns: 0
     }
   })
+  if (!models.length) {
+    const explicitModel = optionalString(update?.model) ||
+      optionalString(update?.lastModel) ||
+      optionalString(totals?.model) ||
+      optionalString(totals?.lastModel)
+    if (explicitModel) {
+      models.push({
+        ...session,
+        scope: 'model',
+        model: explicitModel,
+        turns: 0
+      })
+    }
+  }
 
   return { observedAt, session, models }
 }

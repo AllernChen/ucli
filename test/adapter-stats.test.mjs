@@ -544,6 +544,7 @@ test('orchestrator records ledger observations beside legacy cumulative stats', 
   assert.match(statsCase, /await usageRecorder\.observe\(/)
   assert.match(statsCase, /models:\s*evt\.models/)
   assert.match(statsCase, /modelBreakdown:\s*evt\.modelBreakdown/)
+  assert.match(statsCase, /model:\s*evt\.model/)
   assert.match(statsCase, /db\.upsertStats\(sessionId,/)
   assert.match(statsCase, /db\.upsertModelStats\(sessionId,/)
   assert.match(source, /onApprovalResolved\(req\)[\s\S]*usageRecorder\.recordApproval\([\s\S]*approvalId:\s*req\.requestId/)

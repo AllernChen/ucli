@@ -83,9 +83,19 @@ test('supports parser-style totals and uses unknown only for an unnamed breakdow
 
   const withoutBreakdown = normalizeUsageUpdate({
     sessionId: 's3', adapterId: 'codex', inputTokens: 10, outputTokens: 2,
-    lastModel: 'gpt-5.5'
+    costUsd: 0, costAvailable: true, turnsCount: 1, lastModel: 'gpt-5.5'
   }, 7000)
-  assert.deepEqual(withoutBreakdown.models, [])
+  assert.deepEqual(withoutBreakdown.models, [{
+    sessionId: 's3', scope: 'model', projectPath: null,
+    adapterId: 'codex', model: 'gpt-5.5', observedAt: 7000,
+    inputTokens: 10, outputTokens: 2, costUsd: 0,
+    costAvailable: true, turns: 0
+  }])
+
+  const withoutModelIdentity = normalizeUsageUpdate({
+    sessionId: 's4', adapterId: 'codex', inputTokens: 10, outputTokens: 2
+  }, 7100)
+  assert.deepEqual(withoutModelIdentity.models, [])
 })
 
 test('explicit unavailable cost wins over a numeric provider placeholder', () => {
@@ -160,10 +170,10 @@ test('serializes concurrent observations in invocation order', async () => {
   })
 
   const first = recorder.observe(realAdapterUpdate({
-    usage: { inputTokens: 1, outputTokens: 0 }, modelBreakdown: []
+    usage: { inputTokens: 1, outputTokens: 0 }, model: null, modelBreakdown: []
   }))
   const second = recorder.observe(realAdapterUpdate({
-    usage: { inputTokens: 2, outputTokens: 0 }, modelBreakdown: []
+    usage: { inputTokens: 2, outputTokens: 0 }, model: null, modelBreakdown: []
   }))
   await new Promise((resolve) => setImmediate(resolve))
   assert.deepEqual(started, [1])
