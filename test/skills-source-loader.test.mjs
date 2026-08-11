@@ -7,9 +7,9 @@ import AdmZip from 'adm-zip'
 
 import { createSkillSourceLoader } from '../electron/skills/sourceLoader.js'
 
-function createSkill(root) {
+function createSkill(root, name = 'local-skill', description = 'Local test skill') {
   mkdirSync(root, { recursive: true })
-  writeFileSync(join(root, 'SKILL.md'), '---\nname: local-skill\ndescription: Local test skill\n---\n\n# Test\n')
+  writeFileSync(join(root, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n\n# Test\n`)
 }
 
 test('local source inspection returns a safe normalized preview', async () => {
@@ -128,6 +128,124 @@ test('generic Git source accepts a private HTTP self-hosted GitLab repository', 
       args[0] === '-c' && args[1] === 'http.proxy=' && args.includes('clone') &&
       args.includes('http://10.44.51.32:8080/AI/pr-skills')
     ), true)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('Git repository inspection returns selectable Skills when the repository root is a collection', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-collection-'))
+  try {
+    const loader = createSkillSourceLoader({
+      stagingRoot: join(temp, 'staging'),
+      runGit(args) {
+        if (args[0] === 'clone') {
+          const destination = args.at(-1)
+          createSkill(join(destination, 'skills', 'engineering', 'tdd'), 'tdd', 'Develop test-first')
+          createSkill(join(destination, 'skills', 'productivity', 'grill-me'), 'grill-me', 'Clarify a plan')
+        }
+        if (args.includes('rev-parse')) return 'collection123\n'
+        return ''
+      }
+    })
+    const source = { type: 'git', url: 'https://github.com/example/skills.git' }
+    const collection = await loader.inspect(source)
+    assert.equal(collection.kind, 'collection')
+    assert.deepEqual(collection.skills.map(({ name, description, subdir }) => ({ name, description, subdir })), [
+      { name: 'tdd', description: 'Develop test-first', subdir: 'skills/engineering/tdd' },
+      { name: 'grill-me', description: 'Clarify a plan', subdir: 'skills/productivity/grill-me' }
+    ])
+
+    const nestedCollection = await loader.inspect({ ...source, subdir: 'skills' })
+    assert.deepEqual(nestedCollection.skills.map(({ subdir }) => subdir), [
+      'skills/engineering/tdd',
+      'skills/productivity/grill-me'
+    ])
+
+    const selected = await loader.inspect({ ...source, subdir: 'skills/engineering/tdd' })
+    assert.equal(selected.kind, 'skill')
+    assert.equal(selected.name, 'tdd')
+    assert.equal(selected.source.subdir, 'skills/engineering/tdd')
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('collection classification does not inspect an entire large repository as one Skill', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-large-collection-'))
+  try {
+    const loader = createSkillSourceLoader({
+      stagingRoot: join(temp, 'staging'),
+      runGit(args) {
+        if (args[0] === 'clone') {
+          const destination = args.at(-1)
+          mkdirSync(destination, { recursive: true })
+          for (let index = 0; index < 2001; index += 1) {
+            writeFileSync(join(destination, `repository-file-${index}.txt`), '')
+          }
+          createSkill(join(destination, 'skills', 'safe-skill'), 'safe-skill', 'A small valid Skill')
+        }
+        if (args.includes('rev-parse')) return 'largecollection\n'
+        return ''
+      }
+    })
+
+    const preview = await loader.inspect({ type: 'git', url: 'https://github.com/example/large-skills.git' })
+    assert.equal(preview.kind, 'collection')
+    assert.deepEqual(preview.skills.map(({ name }) => name), ['safe-skill'])
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('collection inspection keeps valid Skills when another candidate is invalid', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-partial-collection-'))
+  try {
+    const loader = createSkillSourceLoader({
+      stagingRoot: join(temp, 'staging'),
+      runGit(args) {
+        if (args[0] === 'clone') {
+          const destination = args.at(-1)
+          createSkill(join(destination, 'skills', 'valid'), 'valid', 'A valid Skill')
+          const invalid = join(destination, 'skills', 'invalid')
+          mkdirSync(invalid, { recursive: true })
+          writeFileSync(join(invalid, 'SKILL.md'), 'not valid frontmatter')
+        }
+        if (args.includes('rev-parse')) return 'partialcollection\n'
+        return ''
+      }
+    })
+
+    const preview = await loader.inspect({ type: 'git', url: 'https://github.com/example/partial-skills.git' })
+    assert.deepEqual(preview.skills.map(({ name }) => name), ['valid'])
+    assert.deepEqual(preview.invalidSkills, [{ subdir: 'skills/invalid', code: 'SKILL_MANIFEST_INVALID' }])
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('collection traversal stops when its repository scan budget is exceeded', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-budget-collection-'))
+  try {
+    const loader = createSkillSourceLoader({
+      stagingRoot: join(temp, 'staging'),
+      collectionScanLimits: { maxEntries: 2 },
+      runGit(args) {
+        if (args[0] === 'clone') {
+          const destination = args.at(-1)
+          mkdirSync(join(destination, 'one'), { recursive: true })
+          mkdirSync(join(destination, 'two'), { recursive: true })
+          mkdirSync(join(destination, 'three'), { recursive: true })
+        }
+        if (args.includes('rev-parse')) return 'budgetcollection\n'
+        return ''
+      }
+    })
+
+    await assert.rejects(
+      () => loader.inspect({ type: 'git', url: 'https://github.com/example/budget-skills.git' }),
+      (error) => error?.code === 'SKILL_PACKAGE_TOO_LARGE' && /scan limit/.test(error.message)
+    )
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }

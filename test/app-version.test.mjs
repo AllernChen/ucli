@@ -8,8 +8,8 @@ const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8
 const profileCenterSource = readFileSync(new URL('../src/views/ProfileCenter.vue', import.meta.url), 'utf8')
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 
-test('release package version is 0.9.4', () => {
-  assert.equal(packageJson.version, '0.9.4')
+test('release package version is 0.9.5', () => {
+  assert.equal(packageJson.version, '0.9.5')
 })
 
 test('sidebar version is injected from the package version during renderer build', () => {

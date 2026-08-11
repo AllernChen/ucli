@@ -35,6 +35,33 @@ const SOURCE_KINDS = {
 const BUILT_IN_ORIGINS = new Set(['bundled', 'system'])
 const INSTALLATION_STATUS_ORDER = ['drifted', 'broken_link', 'invalid', 'missing', 'update_available', 'ready', 'disabled']
 
+export function createLatestRequestGuard() {
+  let current = 0
+  return {
+    begin() {
+      current += 1
+      return current
+    },
+    invalidate() {
+      current += 1
+    },
+    isCurrent(requestId) {
+      return requestId === current
+    }
+  }
+}
+
+export function canConfirmSkillInstall(options = {}) {
+  const preview = options.preview
+  if (!preview || preview.kind === 'collection' || options.inspecting) return false
+  if (!(options.targetAdapterIds || []).length) return false
+  if (options.scopeType !== 'user' && !options.projectPath) return false
+  if (['source_changed', 'target_conflict'].includes(options.preflightKind)) return false
+  if (options.sourceType !== 'local' &&
+      String(preview.source?.subdir || '') !== String(options.subdir || '')) return false
+  return true
+}
+
 function mergeVisibility(target, source = {}) {
   for (const [adapterId, visibility] of Object.entries(source || {})) {
     const current = target[adapterId] || { visible: false, direct: false, inheritedFrom: [] }

@@ -771,6 +771,25 @@ test('Claude plugin Skills only load from installed_plugins.json, not stale cach
   })
 })
 
+test('collection inspection returns selectable Skills without single-package matching', async () => {
+  const collection = {
+    kind: 'collection',
+    skills: [
+      { name: 'tdd', description: 'Develop test-first', subdir: 'skills/engineering/tdd' },
+      { name: 'grill-me', description: 'Clarify a plan', subdir: 'skills/productivity/grill-me' }
+    ],
+    source: { type: 'github', locator: 'https://github.com/example/skills.git', ref: '', subdir: '' },
+    resolvedRevision: 'collection123'
+  }
+  await withService(async ({ service }) => {
+    assert.deepEqual(await service.inspectSource({
+      type: 'git', url: 'https://github.com/example/skills.git'
+    }), collection)
+  }, {
+    sourceLoader: { async inspect() { return collection } }
+  })
+})
+
 test('GitLab-installed Skills retain their GitLab source when checking for updates', async () => {
   let sourceRoot = ''
   const loaderCalls = []

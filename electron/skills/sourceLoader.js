@@ -36,6 +36,7 @@ function safeChild(root, subdir) {
 function preview(prepared) {
   const inspected = inspectSkillDirectory(prepared.workingDirectory)
   return {
+    kind: 'skill',
     name: inspected.name,
     description: inspected.description,
     manifest: inspected.manifest,
@@ -48,13 +49,83 @@ function preview(prepared) {
   }
 }
 
-function findSkillRoots(directory, results = []) {
-  const entries = readdirSync(directory, { withFileTypes: true })
-  if (entries.some((entry) => entry.isFile() && entry.name === 'SKILL.md')) results.push(directory)
+function findSkillRoots(directory, results = [], options = {}, state = { directories: 0, entries: 0 }, depth = 0) {
+  const ignoredDirectories = options.ignoredDirectories || new Set()
+  const maxRoots = options.maxRoots ?? Number.POSITIVE_INFINITY
+  const maxDepth = options.maxDepth ?? Number.POSITIVE_INFINITY
+  const maxDirectories = options.maxDirectories ?? Number.POSITIVE_INFINITY
+  const maxEntries = options.maxEntries ?? Number.POSITIVE_INFINITY
+  if (depth > maxDepth) throw sourceError('Skill repository exceeds the collection scan limit', 'SKILL_PACKAGE_TOO_LARGE')
+
+  state.directories += 1
+  if (state.directories > maxDirectories) {
+    throw sourceError('Skill repository exceeds the collection scan limit', 'SKILL_PACKAGE_TOO_LARGE')
+  }
+  const entries = readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))
+  state.entries += entries.length
+  if (state.entries > maxEntries) {
+    throw sourceError('Skill repository exceeds the collection scan limit', 'SKILL_PACKAGE_TOO_LARGE')
+  }
+
+  const hasManifest = entries.some((entry) => entry.isFile() && entry.name === 'SKILL.md')
+  if (hasManifest) results.push(directory)
+  if (results.length > maxRoots) {
+    throw sourceError('Skill repository contains too many packages', 'SKILL_PACKAGE_TOO_LARGE')
+  }
+  if (hasManifest && options.stopAtSkillRoot) return results
   for (const entry of entries) {
-    if (entry.isDirectory()) findSkillRoots(resolve(directory, entry.name), results)
+    if (entry.isDirectory() && !ignoredDirectories.has(entry.name)) {
+      findSkillRoots(resolve(directory, entry.name), results, options, state, depth + 1)
+    }
   }
   return results
+}
+
+function collectionPreview(prepared, rootManifestError, scanLimits = {}) {
+  const roots = findSkillRoots(prepared.workingDirectory, [], {
+    ignoredDirectories: new Set(['.git', 'node_modules']),
+    maxRoots: scanLimits.maxRoots ?? 200,
+    maxDepth: scanLimits.maxDepth ?? 16,
+    maxDirectories: scanLimits.maxDirectories ?? 5000,
+    maxEntries: scanLimits.maxEntries ?? 20000,
+    stopAtSkillRoot: true
+  })
+  if (!roots.length) throw rootManifestError
+
+  const baseSubdir = String(prepared.source.subdir || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+  const skills = []
+  const invalidSkills = []
+  for (const skillRoot of roots) {
+    const nestedSubdir = relative(prepared.workingDirectory, skillRoot).replace(/\\/g, '/')
+    const subdir = [baseSubdir, nestedSubdir].filter(Boolean).join('/')
+    try {
+      const inspected = inspectSkillDirectory(skillRoot)
+      skills.push({
+        name: inspected.name,
+        description: inspected.description,
+        subdir,
+        fileList: inspected.fileList,
+        totalBytes: inspected.totalBytes,
+        compatibility: validateSkillCompatibility(inspected.name)
+      })
+    } catch (error) {
+      if (!String(error?.code || '').startsWith('SKILL_')) throw error
+      invalidSkills.push({ subdir, code: error.code })
+    }
+  }
+  skills.sort((left, right) => left.subdir.localeCompare(right.subdir))
+  invalidSkills.sort((left, right) => left.subdir.localeCompare(right.subdir))
+  if (!skills.length) {
+    throw sourceError('Skill repository does not contain a valid Skill package', 'SKILL_MANIFEST_INVALID')
+  }
+
+  return {
+    kind: 'collection',
+    skills,
+    invalidSkills,
+    source: prepared.source,
+    resolvedRevision: prepared.resolvedRevision || null
+  }
 }
 
 function extractZipSource(archive, stagingRoot) {
@@ -87,7 +158,7 @@ function extractZipSource(archive, stagingRoot) {
   }
 }
 
-export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit } = {}) {
+export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit, collectionScanLimits = {} } = {}) {
   const root = resolve(stagingRoot || '.ucli-skill-staging')
   mkdirSync(root, { recursive: true })
 
@@ -159,7 +230,15 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit } 
       try { return await work(prepared) } finally { prepared.cleanup() }
     },
     inspect(source) {
-      return this.withPrepared(source, async (prepared) => preview(prepared))
+      return this.withPrepared(source, async (prepared) => {
+        const isGitSource = ['github', 'gitlab'].includes(prepared.source.type)
+        const rootManifest = resolve(prepared.workingDirectory, 'SKILL.md')
+        if (isGitSource && !existsSync(rootManifest)) {
+          const missingManifest = sourceError('Skill package requires a root SKILL.md', 'SKILL_MANIFEST_INVALID')
+          return collectionPreview(prepared, missingManifest, collectionScanLimits)
+        }
+        return preview(prepared)
+      })
     }
   }
 }

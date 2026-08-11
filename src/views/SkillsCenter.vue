@@ -373,7 +373,28 @@
 
         <a-button :loading="inspecting" :disabled="!sourceReady" @click="inspectSource">检查来源</a-button>
 
-        <a-card v-if="sourcePreview" class="source-preview" size="small">
+        <a-card v-if="sourcePreview && sourcePreview.kind === 'collection'" class="source-preview" size="small">
+          <strong>发现 {{ sourcePreview.skills.length }} 个 Skills</strong>
+          <p>这个仓库是 Skill 集合，请先选择要安装的 Skill。</p>
+          <a-select
+            v-model:value="installDraft.subdir"
+            :options="collectionSkillOptions"
+            placeholder="选择要安装的 Skill"
+            style="width: 100%"
+            :loading="inspecting"
+            :disabled="inspecting"
+            @change="selectCollectionSkill"
+          />
+          <a-alert
+            v-if="sourcePreview.invalidSkills?.length"
+            class="skills-inline-alert"
+            type="warning"
+            show-icon
+            :message="`${sourcePreview.invalidSkills.length} 个无效 Skill 已跳过`"
+          />
+        </a-card>
+
+        <a-card v-else-if="sourcePreview" class="source-preview" size="small">
           <strong>{{ sourcePreview.name }}</strong>
           <p>{{ sourcePreview.description }}</p>
           <div>{{ sourcePreview.fileList.length }} 个文件 · {{ formatBytes(sourcePreview.totalBytes) }}</div>
@@ -469,6 +490,8 @@ import {
   buildSkillInstallRequest,
   buildSourceProjectCliSummary,
   buildSkillCliMatrix,
+  canConfirmSkillInstall,
+  createLatestRequestGuard,
   filterSkillCatalog,
   groupSkillCatalogBySourceProject,
   resolveSkillInstallPreflight,
@@ -495,6 +518,7 @@ const sourceProjectDetailKey = ref(null)
 const skillDetailSelection = ref(null)
 const sourcePreview = ref(null)
 const inspecting = ref(false)
+const inspectionGuard = createLatestRequestGuard()
 
 const installDraft = reactive({
   sourceType: 'local', localPath: '', gitUrl: '', refType: 'default', ref: '', subdir: '',
@@ -574,6 +598,12 @@ const refTypeOptions = [
   { value: 'commit', label: '提交（固定）' }
 ]
 const targetOptions = computed(() => skills.adapters.map(item => ({ value: item.id, label: item.displayName })))
+const collectionSkillOptions = computed(() => sourcePreview.value?.kind === 'collection'
+  ? sourcePreview.value.skills.map((item) => ({
+      value: item.subdir,
+      label: `${item.name} · ${item.subdir}`
+    }))
+  : [])
 
 const sourceReady = computed(() => installDraft.sourceType === 'local' ? Boolean(installDraft.localPath) : Boolean(installDraft.gitUrl))
 const installPreflight = computed(() => resolveSkillInstallPreflight(sourcePreview.value || {}, {
@@ -589,9 +619,16 @@ const installActionLabel = computed(() => {
   if (installPreflight.value.kind !== 'already_installed') return '确认安装'
   return installPreflight.value.missingAdapterIds.length ? '应用到所选 CLI' : '完成'
 })
-const canInstall = computed(() => sourcePreview.value && installDraft.targets.length &&
-  (installDraft.scopeType === 'user' || installDraft.projectPath) &&
-  !['source_changed', 'target_conflict'].includes(installPreflight.value.kind))
+const canInstall = computed(() => canConfirmSkillInstall({
+  preview: sourcePreview.value,
+  inspecting: inspecting.value,
+  sourceType: installDraft.sourceType,
+  subdir: installDraft.subdir,
+  targetAdapterIds: installDraft.targets,
+  scopeType: installDraft.scopeType,
+  projectPath: installDraft.projectPath,
+  preflightKind: installPreflight.value.kind
+}))
 
 function sourceRequest() {
   return installDraft.sourceType === 'local'
@@ -601,7 +638,11 @@ function sourceRequest() {
         ref: installDraft.refType === 'default' ? '' : installDraft.ref, subdir: installDraft.subdir
       }
 }
-function clearPreview() { sourcePreview.value = null }
+function clearPreview() {
+  inspectionGuard.invalidate()
+  sourcePreview.value = null
+  inspecting.value = false
+}
 function formatBytes(value) { return value < 1024 ? `${value} B` : `${(value / 1024).toFixed(1)} KB` }
 function scopeLabel(scopeType) { return scopeType === 'project' ? '项目级' : scopeType === 'user' ? '用户级' : '系统' }
 function sourceHealthColor(health) { return ['broken_link', 'invalid'].includes(health) ? 'red' : 'green' }
@@ -651,16 +692,26 @@ async function chooseInstallProject() {
   if (selected) { installDraft.projectPath = selected; clearPreview() }
 }
 async function inspectSource() {
+  const requestId = inspectionGuard.begin()
+  const source = sourceRequest()
   inspecting.value = true
   try {
-    sourcePreview.value = await skills.inspectSource(sourceRequest(), {
+    const preview = await skills.inspectSource(source, {
       targetAdapterIds: [...installDraft.targets],
       scopeType: installDraft.scopeType,
       projectPath: installDraft.scopeType === 'project' ? installDraft.projectPath : ''
     })
+    if (!inspectionGuard.isCurrent(requestId)) return
+    sourcePreview.value = preview
   } catch (error) {
+    if (!inspectionGuard.isCurrent(requestId)) return
     message.error(error?.message || '无法读取 Skill 来源')
-  } finally { inspecting.value = false }
+  } finally {
+    if (inspectionGuard.isCurrent(requestId)) inspecting.value = false
+  }
+}
+async function selectCollectionSkill() {
+  await inspectSource()
 }
 async function install() {
   try {

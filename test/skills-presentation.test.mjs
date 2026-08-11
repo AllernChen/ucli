@@ -7,6 +7,8 @@ import {
   buildPluginCopyInstallRequest,
   buildSourceProjectCliSummary,
   buildSkillCliMatrix,
+  canConfirmSkillInstall,
+  createLatestRequestGuard,
   filterSkillCatalog,
   groupSkillCatalogBySourceProject,
   normaliseGitLabRepository,
@@ -927,6 +929,60 @@ test('Skills install workflow auto-detects GitHub or GitLab from the repository 
   assert.match(page, /自建 GitLab/)
   assert.match(page, /HTTP 仅支持私网/)
   assert.match(page, /type: 'git'/)
+})
+
+test('Skills install workflow lets users select one Skill from a collection repository', () => {
+  const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
+  assert.match(page, /sourcePreview\.kind === 'collection'/)
+  assert.match(page, /选择要安装的 Skill/)
+  assert.match(page, /collectionSkillOptions/)
+  assert.match(page, /selectCollectionSkill/)
+  assert.match(page, /canConfirmSkillInstall/)
+  assert.match(page, /inspectionGuard\.isCurrent/)
+  assert.match(page, /:disabled="inspecting"/)
+  assert.match(page, /subdir: installDraft\.subdir/)
+})
+
+test('Skill source inspection accepts only the latest asynchronous response', () => {
+  const guard = createLatestRequestGuard()
+  const first = guard.begin()
+  const second = guard.begin()
+
+  assert.equal(guard.isCurrent(first), false)
+  assert.equal(guard.isCurrent(second), true)
+  guard.invalidate()
+  assert.equal(guard.isCurrent(second), false)
+})
+
+test('Skill collection selection enables install only after matching preflight completes', () => {
+  const base = {
+    sourceType: 'git',
+    subdir: 'skills/productivity/grill-me',
+    targetAdapterIds: ['codex'],
+    scopeType: 'user',
+    projectPath: '',
+    preflightKind: 'new_install'
+  }
+  const collection = {
+    kind: 'collection',
+    skills: [{ name: 'grill-me', subdir: base.subdir }]
+  }
+  const staleSkill = {
+    kind: 'skill',
+    name: 'tdd',
+    source: { subdir: 'skills/engineering/tdd' }
+  }
+  const selectedSkill = {
+    kind: 'skill',
+    name: 'grill-me',
+    source: { subdir: base.subdir }
+  }
+
+  assert.equal(canConfirmSkillInstall({ ...base, preview: collection, inspecting: false }), false)
+  assert.equal(canConfirmSkillInstall({ ...base, preview: staleSkill, inspecting: true }), false)
+  assert.equal(canConfirmSkillInstall({ ...base, preview: staleSkill, inspecting: false }), false)
+  assert.equal(canConfirmSkillInstall({ ...base, preview: selectedSkill, inspecting: true }), false)
+  assert.equal(canConfirmSkillInstall({ ...base, preview: selectedSkill, inspecting: false }), true)
 })
 
 test('Skills page renders an actionable Skill by AI CLI usage matrix', () => {

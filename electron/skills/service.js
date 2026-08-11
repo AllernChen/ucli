@@ -857,6 +857,7 @@ export function createSkillsService({
   return {
     inspectSource: async (source, context = {}) => {
       const preview = await sourceLoader.inspect(source)
+      if (preview.kind === 'collection') return preview
       return {
         ...preview,
         installedMatches: installedMatches(preview),
