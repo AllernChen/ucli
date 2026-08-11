@@ -848,7 +848,7 @@ class Db {
     appendSqlListFilter(conditions, values, 'session_id', filters.sessionIds)
     const scopes = Array.isArray(filters.scopes) && filters.scopes.length
       ? filters.scopes
-      : (Array.isArray(filters.models) && filters.models.length ? ['model'] : ['session', 'approval'])
+      : (Array.isArray(filters.models) && filters.models.length ? ['model', 'approval'] : ['session', 'approval'])
     appendSqlListFilter(conditions, values, 'scope', scopes)
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
     return rows(this.sql.exec(

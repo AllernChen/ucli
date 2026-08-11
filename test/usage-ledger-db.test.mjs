@@ -556,6 +556,23 @@ test('usage event queries filter by time, project, adapter, model, and session',
   })
 })
 
+test('model-filtered queries include matching approvals without double-counting tokens', async () => {
+  await withDb('ucli-usage-ledger-model-approval-query-', async (db) => {
+    await db.observeUsage(ledgerSnapshot(db, 1, {
+      model: 'gpt-5', inputTokens: 10, outputTokens: 2, turns: 1
+    }))
+    db.recordApproval({
+      approvalId: 'approval-1', sessionId: 's1', projectPath: 'F:/projects/demo',
+      adapterId: 'codex', model: 'gpt-5', observedAt: db.getUsageLedgerMetadata().exactSince + 2
+    })
+
+    const events = db.queryUsageEvents({ models: ['gpt-5'] })
+    assert.deepEqual(events.map((event) => event.scope), ['model', 'approval'])
+    assert.equal(events.reduce((sum, event) => sum + event.inputTokens, 0), 10)
+    assert.equal(events.reduce((sum, event) => sum + event.approvals, 0), 1)
+  })
+})
+
 test('summary report CRUD maps fields and validates JSON at the database boundary', async () => {
   await withDb('ucli-summary-report-crud-', async (db) => {
     assert.deepEqual(db.createSummaryReport(summaryReport()), summaryReport())
