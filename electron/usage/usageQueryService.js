@@ -34,10 +34,15 @@ function labelFor(value, granularity, timeZone) {
   return `${year}-${month}-${day}`
 }
 
-function emptyBucket(interval, granularity, timeZone) {
+function emptyBucket(interval, granularity, timeZone, range) {
+  const coveredStart = Math.max(interval.start, range.start)
+  const coveredEndExclusive = Math.min(interval.endExclusive, range.endExclusive)
   return {
     ...interval,
     label: labelFor(interval.start, granularity, timeZone),
+    coveredStart,
+    coveredEndExclusive,
+    partial: coveredStart !== interval.start || coveredEndExclusive !== interval.endExclusive,
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
@@ -123,6 +128,23 @@ function enumerateUsageBuckets(query) {
   }
 }
 
+function legacyBaseline(db, query) {
+  if (query.models.length) {
+    return {
+      available: false,
+      reason: 'MODEL_BREAKDOWN_UNAVAILABLE_BEFORE_EXACT_SINCE',
+      metrics: null
+    }
+  }
+  return {
+    available: true,
+    metrics: db.getLegacyUsageBaseline({
+      projectPaths: query.projectPaths,
+      adapterIds: query.adapterIds
+    })
+  }
+}
+
 export function createUsageQueryService({
   db,
   now = Date.now,
@@ -142,7 +164,7 @@ export function createUsageQueryService({
         ...normalized,
         endExclusive: range.bucketEndExclusive
       })
-        .map(interval => emptyBucket(interval, normalized.granularity, timeZone))
+        .map(interval => emptyBucket(interval, normalized.granularity, timeZone, normalized))
       const bucketByStart = new Map(buckets.map(bucket => [bucket.start, bucket]))
       const totals = emptyTotals()
       const events = db.queryUsageEvents(normalized)
@@ -158,9 +180,10 @@ export function createUsageQueryService({
       return {
         granularity: normalized.granularity,
         timezone: timeZone,
+        range: { start: normalized.start, endExclusive: normalized.endExclusive },
         buckets: buckets.map(finalizeMetric),
         totals: finalizeMetric(totals),
-        legacyBaseline: db.getLegacyUsageBaseline(),
+        legacyBaseline: legacyBaseline(db, normalized),
         exactSince: db.getUsageLedgerMetadata().exactSince
       }
     }

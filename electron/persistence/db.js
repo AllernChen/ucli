@@ -862,7 +862,11 @@ class Db {
     return this.queryUsageEvents(filters)
   }
 
-  getLegacyUsageBaseline() {
+  getLegacyUsageBaseline(filters = {}) {
+    const conditions = ["scope = 'session'"]
+    const values = []
+    appendSqlListFilter(conditions, values, 'project_path', filters.projectPaths)
+    appendSqlListFilter(conditions, values, 'adapter_id', filters.adapterIds)
     const result = rows(this.sql.exec(
       `SELECT
          COALESCE(SUM(legacy_input_tokens), 0) AS input_tokens,
@@ -870,7 +874,9 @@ class Db {
          COALESCE(SUM(CASE WHEN legacy_cost_available = 1 THEN legacy_cost_usd ELSE 0 END), 0) AS cost_usd,
          COALESCE(SUM(CASE WHEN legacy_cost_available = 0 THEN 1 ELSE 0 END), 0) AS unavailable_costs,
          COALESCE(SUM(legacy_turns), 0) AS turns
-       FROM usage_checkpoints`
+       FROM usage_checkpoints
+       WHERE ${conditions.join(' AND ')}`,
+      values
     ))[0] || {}
     return {
       inputTokens: Number(result.input_tokens) || 0,

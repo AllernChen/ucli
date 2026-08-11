@@ -27,7 +27,7 @@ function event(overrides = {}) {
 function fakeDb(events, overrides = {}) {
   return {
     queryUsageEvents() { return events },
-    getLegacyUsageBaseline() {
+    getLegacyUsageBaseline(_filters) {
       return { inputTokens: 900, outputTokens: 100, costUsd: 2, costAvailable: false, turns: 9 }
     },
     getUsageLedgerMetadata() {
@@ -73,22 +73,30 @@ test('pre-creates daily calendar buckets and aggregates usage without counting a
   assert.equal(result.granularity, 'day')
   assert.equal(result.timezone, 'Asia/Shanghai')
   assert.equal(result.exactSince, 20)
+  assert.deepEqual(result.range, {
+    start: ts('2026-08-11T00:00:00+08:00'),
+    endExclusive: ts('2026-08-14T00:00:00+08:00')
+  })
   assert.deepEqual(result.legacyBaseline, {
-    inputTokens: 900, outputTokens: 100, costUsd: 2, costAvailable: false, turns: 9
+    available: true,
+    metrics: { inputTokens: 900, outputTokens: 100, costUsd: 2, costAvailable: false, turns: 9 }
   })
   assert.deepEqual(result.buckets, [
     {
       start: ts('2026-08-11T00:00:00+08:00'), endExclusive: ts('2026-08-12T00:00:00+08:00'), label: '2026-08-11',
+      coveredStart: ts('2026-08-11T00:00:00+08:00'), coveredEndExclusive: ts('2026-08-12T00:00:00+08:00'), partial: false,
       inputTokens: 100, outputTokens: 20, totalTokens: 120, knownCostUsd: 0.5,
       costCoverage: 1, turns: 2, activeSessions: 1, approvals: 0
     },
     {
       start: ts('2026-08-12T00:00:00+08:00'), endExclusive: ts('2026-08-13T00:00:00+08:00'), label: '2026-08-12',
+      coveredStart: ts('2026-08-12T00:00:00+08:00'), coveredEndExclusive: ts('2026-08-13T00:00:00+08:00'), partial: false,
       inputTokens: 30, outputTokens: 5, totalTokens: 35, knownCostUsd: 0.2,
       costCoverage: 0.5, turns: 2, activeSessions: 3, approvals: 1
     },
     {
       start: ts('2026-08-13T00:00:00+08:00'), endExclusive: ts('2026-08-14T00:00:00+08:00'), label: '2026-08-13',
+      coveredStart: ts('2026-08-13T00:00:00+08:00'), coveredEndExclusive: ts('2026-08-14T00:00:00+08:00'), partial: false,
       inputTokens: 0, outputTokens: 0, totalTokens: 0, knownCostUsd: 0,
       costCoverage: null, turns: 0, activeSessions: 0, approvals: 0
     }
@@ -126,8 +134,75 @@ test('defaults to the current partial bucket plus the preceding calendar buckets
     assert.equal(result.buckets.length, count)
     assert.equal(result.buckets[0].start, ts(firstStart))
     assert.equal(result.buckets.at(-1).endExclusive, ts(lastNaturalEnd))
+    assert.deepEqual(result.range, { start: ts(firstStart), endExclusive: now })
+    assert.equal(result.buckets[0].partial, false)
+    assert.equal(result.buckets.at(-1).coveredEndExclusive, now)
+    assert.equal(result.buckets.at(-1).partial, true)
   }
   assert.deepEqual(seenQueries.map(query => query.endExclusive), [now, now, now, now])
+})
+
+test('preserves natural bucket boundaries while marking non-aligned query coverage as partial', () => {
+  const service = createUsageQueryService({ db: fakeDb([]) })
+  const start = ts('2026-08-11T10:15:00+08:00')
+  const endExclusive = ts('2026-08-12T12:30:00+08:00')
+  const result = service.queryUsage({
+    granularity: 'day', start, endExclusive, timeZone: 'Asia/Shanghai'
+  })
+
+  assert.deepEqual(result.range, { start, endExclusive })
+  assert.deepEqual(result.buckets.map(bucket => ({
+    start: bucket.start,
+    endExclusive: bucket.endExclusive,
+    coveredStart: bucket.coveredStart,
+    coveredEndExclusive: bucket.coveredEndExclusive,
+    partial: bucket.partial
+  })), [
+    {
+      start: ts('2026-08-11T00:00:00+08:00'),
+      endExclusive: ts('2026-08-12T00:00:00+08:00'),
+      coveredStart: start,
+      coveredEndExclusive: ts('2026-08-12T00:00:00+08:00'),
+      partial: true
+    },
+    {
+      start: ts('2026-08-12T00:00:00+08:00'),
+      endExclusive: ts('2026-08-13T00:00:00+08:00'),
+      coveredStart: ts('2026-08-12T00:00:00+08:00'),
+      coveredEndExclusive: endExclusive,
+      partial: true
+    }
+  ])
+})
+
+test('filters the legacy baseline by project and CLI but declares model history unavailable', () => {
+  const seenFilters = []
+  const db = fakeDb([], {
+    getLegacyUsageBaseline(filters) {
+      seenFilters.push(filters)
+      return { inputTokens: 12, outputTokens: 3, costUsd: 0.4, costAvailable: true, turns: 2 }
+    }
+  })
+  const service = createUsageQueryService({ db })
+  const base = {
+    granularity: 'day', start: 1, endExclusive: 2, timeZone: 'UTC',
+    projectPaths: ['/work/a'], adapterIds: ['claude']
+  }
+
+  const available = service.queryUsage(base).legacyBaseline
+  assert.deepEqual(available, {
+    available: true,
+    metrics: { inputTokens: 12, outputTokens: 3, costUsd: 0.4, costAvailable: true, turns: 2 }
+  })
+  assert.deepEqual(seenFilters, [{ projectPaths: ['/work/a'], adapterIds: ['claude'] }])
+
+  const unavailable = service.queryUsage({ ...base, models: ['sonnet'] }).legacyBaseline
+  assert.deepEqual(unavailable, {
+    available: false,
+    reason: 'MODEL_BREAKDOWN_UNAVAILABLE_BEFORE_EXACT_SINCE',
+    metrics: null
+  })
+  assert.equal(seenFilters.length, 1)
 })
 
 test('allows exactly 400 buckets and returns a typed coarser-granularity suggestion above the limit', () => {

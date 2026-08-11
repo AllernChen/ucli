@@ -242,12 +242,12 @@ test('legacy baseline uses canonical session totals with zero, one, or many mode
   legacy.run("CREATE TABLE sessions (id TEXT PRIMARY KEY, project_path TEXT NOT NULL, adapter_id TEXT NOT NULL, native_session_id TEXT, name TEXT, task_note TEXT DEFAULT '', tier TEXT NOT NULL DEFAULT 'safety-rules', model TEXT, status TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)")
   legacy.run('CREATE TABLE session_stats (session_id TEXT PRIMARY KEY, input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, turns_count INTEGER, auto_allowed INTEGER, confirmed INTEGER, denied INTEGER)')
   legacy.run('CREATE TABLE model_stats (session_id TEXT, model TEXT, input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, PRIMARY KEY(session_id, model))')
-  for (const [id, inputTokens, outputTokens, costUsd, turns] of [
-    ['zero-models', 100, 10, 1, 1],
-    ['one-model', 200, 20, 2, 2],
-    ['two-models', 300, 30, 3, 3]
+  for (const [id, adapterId, inputTokens, outputTokens, costUsd, turns] of [
+    ['zero-models', 'claude', 100, 10, 1, 1],
+    ['one-model', 'codex', 200, 20, 2, 2],
+    ['two-models', 'claude', 300, 30, 3, 3]
   ]) {
-    legacy.run('INSERT INTO sessions VALUES (?, ?, ?, NULL, NULL, \'\', \'safety-rules\', NULL, \'offline\', 1, 2)', [id, `/projects/${id}`, 'claude'])
+    legacy.run('INSERT INTO sessions VALUES (?, ?, ?, NULL, NULL, \'\', \'safety-rules\', NULL, \'offline\', 1, 2)', [id, `/projects/${id}`, adapterId])
     legacy.run('INSERT INTO session_stats VALUES (?, ?, ?, ?, ?, 0, 0, 0)', [id, inputTokens, outputTokens, costUsd, turns])
   }
   legacy.run("INSERT INTO model_stats VALUES ('one-model', 'sonnet', 150, 15, 1.5)")
@@ -264,6 +264,20 @@ test('legacy baseline uses canonical session totals with zero, one, or many mode
       costUsd: 6,
       costAvailable: true,
       turns: 6
+    })
+    assert.deepEqual(db.getLegacyUsageBaseline({ projectPaths: ['/projects/one-model'] }), {
+      inputTokens: 200,
+      outputTokens: 20,
+      costUsd: 2,
+      costAvailable: true,
+      turns: 2
+    })
+    assert.deepEqual(db.getLegacyUsageBaseline({ adapterIds: ['claude'] }), {
+      inputTokens: 400,
+      outputTokens: 40,
+      costUsd: 4,
+      costAvailable: true,
+      turns: 4
     })
   } finally {
     db.close()
