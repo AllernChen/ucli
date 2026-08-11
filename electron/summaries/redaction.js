@@ -2,7 +2,7 @@ const PRIVATE_KEY_PATTERN = /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?----
 const CREDENTIAL_URL_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^@\s/]+)@/gi
 // Each key candidate is capped so a long non-matching line cannot trigger
 // unbounded regex backtracking. Values are consumed once by the scanner below.
-const ASSIGNMENT_PATTERN = /(^|[\s{,;])(?:"([^"\r\n]{1,128})"|'([^'\r\n]{1,128})'|([A-Za-z0-9_.-]{1,128}))(\s*[:=]\s*)/g
+const ASSIGNMENT_PATTERN = /(^|[\s{,;&?'"])(?:"([^"\r\n]{1,128})"|'([^'\r\n]{1,128})'|([A-Za-z0-9_.-]{1,128}))(\s*[:=]\s*)/g
 const COMMON_KEY_PATTERN = /\b(?:sk-(?:(?:ant|live|proj)-)?[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{12,}|AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{12,}|npm_[A-Za-z0-9]{12,})\b/g
 
 const RULE_NAMES = Object.freeze([
@@ -49,7 +49,9 @@ function assignedValue(text, start, authorization) {
   }
 
   let end = start
-  const delimiter = authorization ? /[\r\n,;}\]]/ : /[\s,;}\]]/
+  const delimiter = authorization
+    ? /[\r\n,;}\]"']/
+    : /[\s,;&?#}\]"']/
   while (end < text.length && !delimiter.test(text[end])) end += 1
   while (end > start && /[ \t]/.test(text[end - 1])) end -= 1
   return end > start ? { end, quote: '' } : null

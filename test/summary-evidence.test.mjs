@@ -311,6 +311,22 @@ test('redaction handles quoted JSON and common Authorization formats', () => {
   )
 })
 
+test('redaction handles embedded curl headers and URL query secrets', () => {
+  const result = redactEvidenceText([
+    'curl -H "Authorization: Bearer opaque-header" https://example.test',
+    "curl -H 'Authorization: Basic opaque-basic' https://example.test",
+    'https://example.test/path?api_key=opaque-query&token=opaque-token&safe=yes'
+  ].join('\n'))
+
+  assert.equal(result.counts.authorization, 2)
+  assert.equal(result.counts.namedValue, 2)
+  assert.doesNotMatch(
+    result.text,
+    /opaque-header|opaque-basic|opaque-query|opaque-token/
+  )
+  assert.match(result.text, /&safe=yes/)
+})
+
 test('redaction scans long non-sensitive input within a bounded time', () => {
   const raw = `${'ordinary_key=ordinary-value '.repeat(2_000)}${'x'.repeat(50_000)}`
   const startedAt = performance.now()
@@ -389,4 +405,67 @@ test('final escaped evidence block obeys one byte budget across every source', a
   assert.equal((result.blocks[0].text.match(/<evidence /g) || []).length, 1)
   assert.equal((result.blocks[0].text.match(/<\/evidence>/g) || []).length, 1)
   assert.doesNotMatch(result.blocks[0].text, /<system>|<\/evidence>.*<\/evidence>/)
+})
+
+test('escaped byte budgeting keeps newest messages and restores chronological order', async () => {
+  const historyService = {
+    async loadRange() {
+      return {
+        items: [
+          { id: 'old', role: 'user', timestamp: start + 1, text: '&'.repeat(2_000) },
+          { id: 'middle', role: 'assistant', timestamp: start + 2, text: 'MIDDLE' },
+          { id: 'new', role: 'assistant', timestamp: start + 3, text: 'NEWEST' }
+        ],
+        missing: false,
+        truncated: false,
+        nativeDigest: null
+      }
+    }
+  }
+  const result = await collectSummaryEvidence({
+    sessions: [{
+      id: 'newest-first', adapterId: 'claude', cwd: '/work/latest',
+      createdAt: start, updatedAt: endExclusive
+    }],
+    historyService,
+    start,
+    endExclusive,
+    maxBytesPerSession: 512
+  })
+
+  assert.match(result.text, /NEWEST/)
+  assert.match(result.text, /MIDDLE/)
+  assert.ok(result.text.indexOf('MIDDLE') < result.text.indexOf('NEWEST'))
+  assert.ok(Buffer.byteLength(result.blocks[0].text, 'utf8') <= 512)
+  assert.equal(result.blocks[0].truncated, true)
+})
+
+test('huge notes and native digests are source-bounded before redaction', async () => {
+  const hugeNote = `note token=note-secret ${'n'.repeat(2_000_000)}`
+  const hugeDigest = `digest api_key=digest-secret ${'d'.repeat(2_000_000)}`
+  const historyService = {
+    async loadRange() {
+      return {
+        items: [], missing: false, truncated: false, nativeDigest: hugeDigest
+      }
+    }
+  }
+  const startedAt = performance.now()
+  const result = await collectSummaryEvidence({
+    sessions: [{
+      id: 'huge-supplements', adapterId: 'opencode', cwd: '/work/huge',
+      taskNote: hugeNote, createdAt: start, updatedAt: endExclusive
+    }],
+    historyService,
+    start,
+    endExclusive,
+    maxBytesPerSession: 1_024
+  })
+  const elapsedMs = performance.now() - startedAt
+
+  assert.ok(elapsedMs < 5_000, `evidence collection took ${elapsedMs.toFixed(0)}ms`)
+  assert.ok(Buffer.byteLength(result.blocks[0].text, 'utf8') <= 1_024)
+  assert.deepEqual(result.blocks[0].truncatedSources, ['note', 'nativeDigest'])
+  assert.equal(result.coverage.truncatedSessions, 1)
+  assert.doesNotMatch(result.text, /note-secret|digest-secret/)
 })
