@@ -5,6 +5,7 @@ import test from 'node:test'
 
 import {
   parseSkillManifest,
+  sanitiseGitLabSource,
   sanitiseGitHubSource,
   validateSkillCompatibility
 } from '../electron/skills/contracts.js'
@@ -47,6 +48,22 @@ test('GitHub source never retains embedded credentials', () => {
   })
   assert.throws(
     () => sanitiseGitHubSource({ url: 'https://example.com/owner/repo' }),
+    (error) => error.code === 'SKILL_SOURCE_INVALID'
+  )
+})
+
+test('GitLab HTTPS sources preserve nested groups and never retain embedded credentials', () => {
+  assert.deepEqual(sanitiseGitLabSource({
+    url: 'https://token@gitlab.com/platform/agent/skills.git',
+    ref: 'main',
+    subdir: 'skills/release'
+  }), {
+    url: 'https://gitlab.com/platform/agent/skills.git',
+    ref: 'main',
+    subdir: 'skills/release'
+  })
+  assert.throws(
+    () => sanitiseGitLabSource({ url: 'https://github.com/owner/repo' }),
     (error) => error.code === 'SKILL_SOURCE_INVALID'
   )
 })

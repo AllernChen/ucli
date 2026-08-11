@@ -77,7 +77,7 @@
             <div>
               <strong>{{ sourceProject.label }}</strong>
               <div class="skills-muted">
-                {{ sourceProject.kind === 'github' ? 'GitHub 源项目' : '本地、接管与已发现的 Skills' }}
+                {{ sourceProject.kind === 'github' ? 'GitHub 源项目' : sourceProject.kind === 'gitlab' ? 'GitLab 源项目' : '本地、接管与已发现的 Skills' }}
                 · {{ sourceProject.entries.length }} 个 Skill
               </div>
             </div>
@@ -337,6 +337,7 @@
           <a-radio-group v-model:value="installDraft.sourceType" @change="clearPreview">
             <a-radio-button value="local">本地目录 / ZIP</a-radio-button>
             <a-radio-button value="github">GitHub</a-radio-button>
+            <a-radio-button value="gitlab">GitLab</a-radio-button>
           </a-radio-group>
         </a-form-item>
 
@@ -350,8 +351,8 @@
           </a-form-item>
         </template>
         <template v-else>
-          <a-form-item label="GitHub 仓库地址">
-            <a-input v-model:value="installDraft.githubUrl" placeholder="https://github.com/owner/repository.git" @input="clearPreview" />
+          <a-form-item :label="installDraft.sourceType === 'gitlab' ? 'GitLab 仓库地址' : 'GitHub 仓库地址'">
+            <a-input v-model:value="installDraft.gitUrl" :placeholder="installDraft.sourceType === 'gitlab' ? 'https://gitlab.com/group/project.git' : 'https://github.com/owner/repository.git'" @input="clearPreview" />
             <div class="skills-help">私有仓库使用本机 Git 登录状态，UCLI 不保存令牌。</div>
           </a-form-item>
           <a-row :gutter="12">
@@ -497,7 +498,7 @@ const sourcePreview = ref(null)
 const inspecting = ref(false)
 
 const installDraft = reactive({
-  sourceType: 'local', localPath: '', githubUrl: '', refType: 'default', ref: '', subdir: '',
+  sourceType: 'local', localPath: '', gitUrl: '', refType: 'default', ref: '', subdir: '',
   targets: ['claude', 'codex', 'opencode', 'ucode'], scopeType: 'user', projectPath: ''
 })
 
@@ -575,7 +576,7 @@ const refTypeOptions = [
 ]
 const targetOptions = computed(() => skills.adapters.map(item => ({ value: item.id, label: item.displayName })))
 
-const sourceReady = computed(() => installDraft.sourceType === 'local' ? Boolean(installDraft.localPath) : Boolean(installDraft.githubUrl))
+const sourceReady = computed(() => installDraft.sourceType === 'local' ? Boolean(installDraft.localPath) : Boolean(installDraft.gitUrl))
 const installPreflight = computed(() => resolveSkillInstallPreflight(sourcePreview.value || {}, {
   scopeType: installDraft.scopeType,
   projectPath: installDraft.projectPath,
@@ -597,7 +598,7 @@ function sourceRequest() {
   return installDraft.sourceType === 'local'
     ? { type: 'local', path: installDraft.localPath }
     : {
-        type: 'github', url: installDraft.githubUrl, refType: installDraft.refType,
+        type: installDraft.sourceType, url: installDraft.gitUrl, refType: installDraft.refType,
         ref: installDraft.refType === 'default' ? '' : installDraft.ref, subdir: installDraft.subdir
       }
 }

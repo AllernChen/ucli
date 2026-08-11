@@ -18,9 +18,9 @@ function normalizedPath(path) {
 }
 
 function sourceForPackage(pkg) {
-  if (pkg.sourceType === 'github') {
+  if (pkg.sourceType === 'github' || pkg.sourceType === 'gitlab') {
     return {
-      type: 'github',
+      type: pkg.sourceType,
       url: pkg.sourceLocator,
       ref: pkg.sourceRef,
       refType: pkg.sourceRefType,
@@ -34,7 +34,7 @@ function sourceForPackage(pkg) {
 }
 
 function sourceRefType(source, prepared) {
-  if (prepared.source.type !== 'github') return prepared.source.type === 'zip' ? 'fixed' : 'local'
+  if (!['github', 'gitlab'].includes(prepared.source.type)) return prepared.source.type === 'zip' ? 'fixed' : 'local'
   if (['branch', 'tag', 'commit', 'default'].includes(source.refType)) return source.refType
   if (/^[a-f0-9]{40}$/i.test(prepared.source.ref)) return 'commit'
   return prepared.source.ref ? 'branch' : 'default'

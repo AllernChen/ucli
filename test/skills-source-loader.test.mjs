@@ -57,6 +57,34 @@ test('GitHub preparation invokes git without placing credentials in metadata', a
   }
 })
 
+test('GitLab preparation invokes git without placing credentials in metadata', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-gitlab-'))
+  const calls = []
+  try {
+    const loader = createSkillSourceLoader({
+      stagingRoot: join(temp, 'staging'),
+      runGit(args) {
+        calls.push(args)
+        const destination = args.at(-1)
+        if (args[0] === 'clone') createSkill(destination)
+        if (args.includes('rev-parse')) return 'gitlab123\n'
+        return ''
+      }
+    })
+    const preview = await loader.inspect({
+      type: 'gitlab',
+      url: 'https://secret@gitlab.com/example/platform/skills.git',
+      ref: 'main'
+    })
+    assert.equal(preview.source.type, 'gitlab')
+    assert.equal(preview.source.locator, 'https://gitlab.com/example/platform/skills.git')
+    assert.equal(preview.resolvedRevision, 'gitlab123')
+    assert.equal(calls.flat().some((value) => String(value).includes('secret@')), false)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
 test('ZIP source is extracted into a bounded temporary directory', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-zip-'))
   try {

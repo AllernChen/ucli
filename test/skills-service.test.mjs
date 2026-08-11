@@ -771,6 +771,51 @@ test('Claude plugin Skills only load from installed_plugins.json, not stale cach
   })
 })
 
+test('GitLab-installed Skills retain their GitLab source when checking for updates', async () => {
+  let sourceRoot = ''
+  const loaderCalls = []
+  const sourceLoader = {
+    async withPrepared(source, work) {
+      loaderCalls.push(source)
+      return work({
+        workingDirectory: sourceRoot,
+        source: source.type === 'local'
+          ? { type: 'local', locator: source.path, ref: '', subdir: '' }
+          : { type: source.type, locator: source.url, ref: source.ref || '', subdir: source.subdir || '' },
+        resolvedRevision: '0123456789012345678901234567890123456789'
+      })
+    },
+    async inspect() { throw new Error('not used') }
+  }
+
+  await withService(async ({ root, db, service }) => {
+    sourceRoot = join(root, 'source')
+    createSkill(sourceRoot)
+    const installed = await service.install({
+      source: { type: 'local', path: sourceRoot },
+      targetAdapterIds: ['codex'],
+      scopeType: 'user'
+    })
+    db.updateSkillPackage(installed.id, {
+      sourceType: 'gitlab',
+      sourceLocator: 'https://gitlab.com/example/platform/skills.git',
+      sourceRef: 'main',
+      sourceRefType: 'branch'
+    })
+
+    const preview = await service.previewUpdate(installed.id)
+
+    assert.equal(preview.updateable, true)
+    assert.deepEqual(loaderCalls.at(-1), {
+      type: 'gitlab',
+      url: 'https://gitlab.com/example/platform/skills.git',
+      ref: 'main',
+      refType: 'branch',
+      subdir: ''
+    })
+  }, { sourceLoader })
+})
+
 test('Claude plugin Skills remain discoverable through an aliased install root', async () => {
   await withService(async ({ root, service }) => {
     const pluginsRoot = join(root, 'home', '.claude', 'plugins')

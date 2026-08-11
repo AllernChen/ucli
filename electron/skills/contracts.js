@@ -50,17 +50,20 @@ function cleanRelativePath(value, field) {
   return input
 }
 
-export function sanitiseGitHubSource(source = {}) {
+function sanitiseGitSource(source = {}, { host, label, nestedGroups = false }) {
   let url
   try { url = new URL(String(source.url || '')) } catch {
-    throw skillError('GitHub URL is invalid', 'SKILL_SOURCE_INVALID')
+    throw skillError(`${label} URL is invalid`, 'SKILL_SOURCE_INVALID')
   }
-  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com') {
-    throw skillError('Only GitHub HTTPS URLs are supported', 'SKILL_SOURCE_INVALID')
+  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== host) {
+    throw skillError(`Only ${label} HTTPS URLs are supported`, 'SKILL_SOURCE_INVALID')
   }
   const parts = url.pathname.split('/').filter(Boolean)
-  if (parts.length !== 2 || !/^[\w.-]+$/.test(parts[0]) || !/^[\w.-]+(?:\.git)?$/.test(parts[1])) {
-    throw skillError('GitHub repository URL is invalid', 'SKILL_SOURCE_INVALID')
+  const namespaces = parts.slice(0, -1)
+  const repository = parts.at(-1) || ''
+  if ((!nestedGroups && parts.length !== 2) || (nestedGroups && parts.length < 2) ||
+    namespaces.some((part) => !/^[\w.-]+$/.test(part)) || !/^[\w.-]+(?:\.git)?$/.test(repository)) {
+    throw skillError(`${label} repository URL is invalid`, 'SKILL_SOURCE_INVALID')
   }
   url.username = ''
   url.password = ''
@@ -71,8 +74,16 @@ export function sanitiseGitHubSource(source = {}) {
   return {
     url: url.toString().replace(/\/$/, ''),
     ref,
-    subdir: cleanRelativePath(source.subdir, 'GitHub subdirectory')
+    subdir: cleanRelativePath(source.subdir, `${label} subdirectory`)
   }
+}
+
+export function sanitiseGitHubSource(source = {}) {
+  return sanitiseGitSource(source, { host: 'github.com', label: 'GitHub' })
+}
+
+export function sanitiseGitLabSource(source = {}) {
+  return sanitiseGitSource(source, { host: 'gitlab.com', label: 'GitLab', nestedGroups: true })
 }
 
 export function sanitiseSkillError(error) {

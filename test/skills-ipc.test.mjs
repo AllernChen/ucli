@@ -112,6 +112,34 @@ test('Skills IPC validates and forwards install inspection context', async () =>
   )
 })
 
+test('Skills IPC forwards a GitLab source intact', async () => {
+  const { handlers, ipcMain } = registry()
+  const calls = []
+  registerSkillsIpc({
+    ipcMain,
+    service: {
+      inspectSource(source) {
+        calls.push(source)
+        return 'preview'
+      }
+    }
+  })
+
+  const source = {
+    type: 'gitlab',
+    url: 'https://gitlab.com/example/skills.git',
+    refType: 'branch',
+    ref: 'main',
+    subdir: ''
+  }
+  const result = await handlers.get('skills:inspect-source')({}, source, {
+    targetAdapterIds: ['codex'], scopeType: 'user'
+  })
+
+  assert.equal(result, 'preview')
+  assert.deepEqual(calls, [source])
+})
+
 test('Skills IPC sanitizes unexpected errors and never exposes source credentials', async () => {
   const { handlers, ipcMain } = registry()
   registerSkillsIpc({

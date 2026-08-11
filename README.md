@@ -105,7 +105,7 @@ npm run verify:release
 
 0.9.0 新增一级“Skills”页面，统一管理 Claude Code、Codex、OpenCode 和 U-Code 的 Agent Skills：
 
-- 可从本地目录、ZIP 或 GitHub 仓库安装，支持用户级和项目级范围；私有 GitHub 仓库复用本机 Git 登录状态。
+- 可从本地目录、ZIP、GitHub 或 GitLab 仓库安装，支持用户级和项目级范围；私有 GitHub/GitLab 仓库复用本机 Git 登录状态，UCLI 不保存令牌。
 - UCLI 保存独立受管原件，并根据四个 CLI 的兼容发现规则选择最少投放目录；页面会区分直接投放与兼容继承。
 - 支持检查更新、查看文件变化、启停、移除、接管现有 Skill、检测同名冲突和外部修改。
 - 未接管的现有、系统或 CLI 内置 Skills 保持只读。UCLI 不自动覆盖冲突目录，也不会执行 Skill 中包含的脚本。

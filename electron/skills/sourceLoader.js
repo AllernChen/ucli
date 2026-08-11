@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, extname, relative, resolve } from 'node:path'
 import AdmZip from 'adm-zip'
 
-import { sanitiseGitHubSource, validateSkillCompatibility } from './contracts.js'
+import { sanitiseGitHubSource, sanitiseGitLabSource, validateSkillCompatibility } from './contracts.js'
 import { inspectSkillDirectory } from './fileOps.js'
 
 function sourceError(message, code = 'SKILL_SOURCE_INVALID') {
@@ -19,7 +19,7 @@ function defaultRunGit(args) {
       stdio: ['ignore', 'pipe', 'pipe']
     })
   } catch {
-    throw sourceError('GitHub source could not be read', 'SKILL_GIT_FAILED')
+    throw sourceError('Git source could not be read', 'SKILL_GIT_FAILED')
   }
 }
 
@@ -114,9 +114,9 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit } 
       }
     }
 
-    if (source.type === 'github') {
-      const clean = sanitiseGitHubSource(source)
-      const checkout = resolve(root, `github-${randomUUID()}`)
+    if (source.type === 'github' || source.type === 'gitlab') {
+      const clean = source.type === 'github' ? sanitiseGitHubSource(source) : sanitiseGitLabSource(source)
+      const checkout = resolve(root, `${source.type}-${randomUUID()}`)
       mkdirSync(dirname(checkout), { recursive: true })
       if (source.refType === 'commit') {
         runGit(['clone', '--filter=blob:none', '--no-checkout', clean.url, checkout])
@@ -133,7 +133,7 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit } 
       return {
         workingDirectory,
         source: {
-          type: 'github',
+          type: source.type,
           locator: clean.url,
           ref: clean.ref,
           subdir: clean.subdir

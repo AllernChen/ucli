@@ -9,6 +9,7 @@ import {
   buildSkillCliMatrix,
   filterSkillCatalog,
   groupSkillCatalogBySourceProject,
+  normaliseGitLabRepository,
   normaliseGitHubRepository,
   resolveSkillInstallPreflight,
   skillOriginLabel,
@@ -691,6 +692,30 @@ test('GitHub repository URL variants normalize to one safe source-project identi
   assert.equal(normaliseGitHubRepository('file:///C:/skills'), null)
 })
 
+test('GitLab repository URL variants preserve nested groups in one source-project identity', () => {
+  assert.deepEqual(normaliseGitLabRepository('https://gitlab.com/Platform/Agent/skills.git'), {
+    key: 'gitlab:platform/agent/skills',
+    label: 'Platform/Agent/skills',
+    repositoryUrl: 'https://gitlab.com/Platform/Agent/skills'
+  })
+  assert.equal(normaliseGitLabRepository('https://github.com/Platform/skills'), null)
+
+  const entries = aggregateSkillCatalog({
+    packages: [{
+      id: 'pkg-gitlab', name: 'gitlab-skill', description: 'GitLab skill', sourceType: 'gitlab',
+      sourceLocator: 'https://gitlab.com/Platform/Agent/skills.git', visibility: visibleFromCodex,
+      installations: [{
+        id: 'install-gitlab', targetAdapterId: 'codex', targetPath: 'C:/gitlab-skill',
+        scopeType: 'user', enabled: true, status: 'ready', deployedSha256: 'gitlab', visibility: visibleFromCodex
+      }]
+    }]
+  })
+  const groups = groupSkillCatalogBySourceProject(entries)
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].key, 'gitlab:platform/agent/skills')
+  assert.equal(groups[0].repositoryUrl, 'https://gitlab.com/Platform/Agent/skills')
+})
+
 test('catalog groups different Skills from the same GitHub repository once', () => {
   const entries = aggregateSkillCatalog({
     packages: [
@@ -882,6 +907,15 @@ test('Skills page renders source-project groups with safe external navigation', 
   assert.match(page, /ipc\.openExternal\(sourceProject\.repositoryUrl\)/)
   assert.match(page, /status:\s*'all'/)
   assert.match(page, /groupSkillCatalogBySourceProject\(visibleCatalog\.value,\s*\{\s*status:\s*statusFilter\.value\s*\}\)/)
+})
+
+test('Skills install workflow offers separate GitHub and GitLab HTTPS sources', () => {
+  const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
+  assert.match(page, /value="github">GitHub/)
+  assert.match(page, /value="gitlab">GitLab/)
+  assert.match(page, /GitLab 仓库地址/)
+  assert.match(page, /GitLab 源项目/)
+  assert.match(page, /type: installDraft\.sourceType/)
 })
 
 test('Skills page renders an actionable Skill by AI CLI usage matrix', () => {

@@ -352,18 +352,26 @@ export function buildSkillInstallRequest({ source, targetAdapterIds, scopeType, 
 }
 
 export function normaliseGitHubRepository(sourceLocator) {
+  return normaliseGitRepository(sourceLocator, { host: 'github.com', kind: 'github' })
+}
+
+export function normaliseGitLabRepository(sourceLocator) {
+  return normaliseGitRepository(sourceLocator, { host: 'gitlab.com', kind: 'gitlab', nestedGroups: true })
+}
+
+function normaliseGitRepository(sourceLocator, { host, kind, nestedGroups = false }) {
   let url
   try { url = new URL(String(sourceLocator || '')) } catch { return null }
-  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com' || url.username || url.password) return null
+  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== host || url.username || url.password) return null
   const parts = url.pathname.split('/').filter(Boolean)
-  if (parts.length !== 2) return null
-  const owner = parts[0]
-  const repository = parts[1].replace(/\.git$/i, '')
-  if (!owner || !repository || !/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(repository)) return null
+  if ((!nestedGroups && parts.length !== 2) || (nestedGroups && parts.length < 2)) return null
+  const path = [...parts]
+  path[path.length - 1] = path.at(-1).replace(/\.git$/i, '')
+  if (path.some((part) => !part || !/^[\w.-]+$/.test(part))) return null
   return {
-    key: `github:${owner.toLowerCase()}/${repository.toLowerCase()}`,
-    label: `${owner}/${repository}`,
-    repositoryUrl: `https://github.com/${owner}/${repository}`
+    key: `${kind}:${path.map((part) => part.toLowerCase()).join('/')}`,
+    label: path.join('/'),
+    repositoryUrl: `https://${host}/${path.join('/')}`
   }
 }
 
@@ -391,43 +399,49 @@ export function groupSkillCatalogBySourceProject(entries = [], { status = 'all' 
   }
 
   for (const entry of entries) {
-    const githubBuckets = new Map()
+    const gitBuckets = new Map()
     const otherPackages = []
     for (const pkg of entry.packages || []) {
       const repository = pkg.sourceType === 'github'
         ? normaliseGitHubRepository(pkg.sourceLocator)
-        : pkg.sourceProject?.type === 'github'
-          ? normaliseGitHubRepository(pkg.sourceProject.locator)
+        : pkg.sourceType === 'gitlab'
+          ? normaliseGitLabRepository(pkg.sourceLocator)
+          : pkg.sourceProject?.type === 'github'
+            ? normaliseGitHubRepository(pkg.sourceProject.locator)
+            : pkg.sourceProject?.type === 'gitlab'
+              ? normaliseGitLabRepository(pkg.sourceProject.locator)
           : null
       if (!repository) {
         otherPackages.push(pkg)
         continue
       }
-      const bucket = githubBuckets.get(repository.key) || { repository, packages: [], sources: [] }
+      const bucket = gitBuckets.get(repository.key) || { repository, packages: [], sources: [] }
       bucket.packages.push(pkg)
-      githubBuckets.set(repository.key, bucket)
+      gitBuckets.set(repository.key, bucket)
     }
 
     const otherSources = []
     for (const source of entry.sources || []) {
       const repository = source.sourceProject?.type === 'github'
         ? normaliseGitHubRepository(source.sourceProject.locator)
+        : source.sourceProject?.type === 'gitlab'
+          ? normaliseGitLabRepository(source.sourceProject.locator)
         : null
       if (!repository) {
         otherSources.push(source)
         continue
       }
-      const bucket = githubBuckets.get(repository.key) || { repository, packages: [], sources: [] }
+      const bucket = gitBuckets.get(repository.key) || { repository, packages: [], sources: [] }
       bucket.sources.push(source)
-      githubBuckets.set(repository.key, bucket)
+      gitBuckets.set(repository.key, bucket)
     }
 
-    for (const { repository, packages, sources } of githubBuckets.values()) {
+    for (const { repository, packages, sources } of gitBuckets.values()) {
       const packageIds = new Set(packages.map((pkg) => pkg.id))
       const installations = (entry.installations || []).filter((item) => packageIds.has(item.packageId))
       const slicedEntry = sliceCatalogEntry(entry, packages, installations, sources)
       if (matchesCatalogStatus(slicedEntry, status)) {
-        ensureGroup({ ...repository, kind: 'github' }).entries.push(slicedEntry)
+        ensureGroup({ ...repository, kind: repository.key.split(':', 1)[0] }).entries.push(slicedEntry)
       }
     }
 
@@ -476,6 +490,7 @@ export function skillVisibilitySummary(visibility = {}) {
 
 export function skillSourceLabel(pkg = {}) {
   if (pkg.sourceType === 'github') return 'GitHub'
+  if (pkg.sourceType === 'gitlab') return 'GitLab'
   if (pkg.sourceType === 'zip') return '本地 ZIP'
   if (pkg.sourceType === 'adopted') return '接管现有 Skill'
   return '本地目录'
