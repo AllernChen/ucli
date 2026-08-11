@@ -114,6 +114,66 @@
       </a-form>
     </a-card>
 
+    <a-card title="自动工作总结" class="settings-card">
+      <a-form layout="vertical">
+        <a-form-item label="启用自动总结">
+          <a-switch :checked="local.autoEnabled" @change="onSummaryAutoChange" />
+          <div class="muted summary-help">仅在 UCLI 运行时检查，每 15 分钟补齐最新一个已完成周期。</div>
+        </a-form-item>
+        <a-form-item label="总结周期">
+          <a-space wrap>
+            <a-checkbox v-model:checked="local.autoPeriods.day" value="day">每日</a-checkbox>
+            <a-checkbox v-model:checked="local.autoPeriods.week" value="week">每周</a-checkbox>
+            <a-checkbox v-model:checked="local.autoPeriods.month" value="month">每月</a-checkbox>
+            <a-checkbox v-model:checked="local.autoPeriods.quarter" value="quarter">每季度</a-checkbox>
+            <a-checkbox v-model:checked="local.autoPeriods.year" value="year">每年</a-checkbox>
+          </a-space>
+        </a-form-item>
+        <a-form-item label="默认 AI CLI">
+          <a-select
+            v-model:value="local.defaultExecutorId"
+            allow-clear
+            placeholder="选择已安装的 AI CLI"
+            @change="onSummaryExecutorChange"
+          >
+            <a-select-option v-for="tool in summaryExecutorOptions" :key="tool.id" :value="tool.id">
+              {{ tool.displayName }} {{ tool.version ? `· ${tool.version}` : '' }}
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item label="默认配置档案">
+          <a-select
+            v-model:value="local.defaultProfileId"
+            allow-clear
+            placeholder="可选：使用系统登录状态"
+          >
+            <a-select-option v-for="profile in summaryProfileOptions" :key="profile.id" :value="profile.id">
+              {{ profile.name }}
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item label="默认模型">
+          <a-select
+            v-model:value="local.defaultModel"
+            allow-clear
+            show-search
+            placeholder="可选：使用 CLI 或配置档案默认模型"
+          >
+            <a-select-option v-for="model in summaryModelOptions" :key="model" :value="model">
+              {{ model }}
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-alert
+          type="info"
+          show-icon
+          message="数据与费用说明"
+          description="自动总结会把所选会话材料通过配置的 CLI/Provider 发送给对应 AI 服务，并可能产生费用。手动生成时仍可逐次选择 CLI、配置档案和模型。"
+        />
+        <a-button type="primary" style="margin-top: 12px" @click="save">保存自动总结设置</a-button>
+      </a-form>
+    </a-card>
+
     <a-card title="快捷键" class="settings-card">
       <a-list :data-source="bindingsList" item-layout="horizontal">
         <template #renderItem="{ item }">
@@ -242,8 +302,18 @@ const router = useRouter()
 const gatewayDrawerOpen = ref(false)
 const gatewayTrigger = ref(null)
 const adapters = ref([])
-const local = ref({ defaultAdapter: 'claude', defaultTier: 'safety-rules', defaultCwd: '', codexConfigDir: '', language: 'zh-CN' })
+const local = ref({
+  defaultAdapter: 'claude', defaultTier: 'safety-rules', defaultCwd: '', codexConfigDir: '', language: 'zh-CN',
+  autoEnabled: false,
+  autoPeriods: { day: true, week: true, month: false, quarter: false, year: false },
+  defaultExecutorId: null,
+  defaultProfileId: null,
+  defaultModel: null,
+  firstEnableDisclosureAcceptedAt: null,
+  automaticCallLimit: 20
+})
 const cliTools = ref([])
+const summaryProfiles = ref([])
 const detecting = ref(false)
 const runningTool = ref('')
 const lastCliResult = ref(null)
@@ -262,11 +332,19 @@ const lastCliOutput = computed(() => {
 })
 const diagnosticCliSummary = computed(() => formatCliDiagnosticSummary(diagnostics.value?.cliTools || []))
 const diagnosticProfileSummary = computed(() => profileDiagnosticSummary(diagnostics.value?.aiCliProfiles || {}))
+const summaryExecutorOptions = computed(() => cliTools.value.filter(tool => tool.installed))
+const summaryProfileOptions = computed(() => summaryProfiles.value.filter(profile =>
+  profile.adapterId === local.value.defaultExecutorId && profile.status === 'ready'
+))
+const summaryModelOptions = computed(() => {
+  const adapter = adapters.value.find(item => item.id === local.value.defaultExecutorId)
+  return Array.isArray(adapter?.models) ? adapter.models.map(item => typeof item === 'string' ? item : item.id).filter(Boolean) : []
+})
 
 onMounted(async () => {
   stopUpdateListener = ipc.on('update:state', (state) => { updateState.value = state })
   stopCodexRuntimeListener = ipc.onCodexRuntime((snapshot) => { codexRuntime.value = snapshot })
-  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadDiagnostics(), loadUpdateState(), loadCodexRuntime()])
+  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadSummaryProfiles(), loadDiagnostics(), loadUpdateState(), loadCodexRuntime()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
 })
@@ -301,6 +379,15 @@ async function loadCliTools() {
     message.error('CLI 检测失败：' + (e?.message || e))
   } finally {
     detecting.value = false
+  }
+}
+
+async function loadSummaryProfiles() {
+  try {
+    const state = await ipc.getAiCliProfileState()
+    summaryProfiles.value = state?.profiles || []
+  } catch {
+    summaryProfiles.value = []
   }
 }
 
@@ -422,8 +509,50 @@ async function pickCodexConfigDir() {
 }
 
 async function save() {
-  await settings.save(local.value)
-  message.success('设置已保存')
+  try {
+    await settings.save(local.value)
+    message.success('设置已保存')
+  } catch (error) {
+    message.error(error?.message || '设置保存失败')
+  }
+}
+
+function onSummaryAutoChange(enabled) {
+  if (!enabled) {
+    local.value.autoEnabled = false
+    return
+  }
+  if (!summaryExecutorOptions.value.some(tool => tool.id === local.value.defaultExecutorId)) {
+    local.value.autoEnabled = false
+    message.warning('请先选择一个已安装的默认 AI CLI')
+    return
+  }
+  if (local.value.firstEnableDisclosureAcceptedAt) {
+    local.value.autoEnabled = true
+    return
+  }
+  Modal.confirm({
+    title: '开启自动工作总结？',
+    content: '自动总结会把所选会话材料通过配置的 CLI/Provider 发送给对应 AI 服务，并可能产生费用。',
+    okText: '接受并开启',
+    cancelText: '取消',
+    onOk() {
+      local.value.firstEnableDisclosureAcceptedAt = Date.now()
+      local.value.autoEnabled = true
+    },
+    onCancel() {
+      local.value.autoEnabled = false
+    }
+  })
+}
+
+function onSummaryExecutorChange() {
+  local.value.defaultProfileId = null
+  local.value.defaultModel = null
+  if (local.value.autoEnabled &&
+    !summaryExecutorOptions.value.some(tool => tool.id === local.value.defaultExecutorId)) {
+    local.value.autoEnabled = false
+  }
 }
 
 // --- Keybinding config ---

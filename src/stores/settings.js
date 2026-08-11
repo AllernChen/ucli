@@ -11,6 +11,13 @@ export const useSettingsStore = defineStore('settings', {
     theme: 'light',
     keybindings: {},
     workbench: { splitCount: 1, activePane: 0, paneSessionIds: [] },
+    autoEnabled: false,
+    autoPeriods: { day: true, week: true, month: false, quarter: false, year: false },
+    defaultExecutorId: null,
+    defaultProfileId: null,
+    defaultModel: null,
+    firstEnableDisclosureAcceptedAt: null,
+    automaticCallLimit: 20,
     loaded: false
   }),
   actions: {
@@ -20,8 +27,9 @@ export const useSettingsStore = defineStore('settings', {
       this.loaded = true
     },
     async save(patch) {
+      const next = { ...this.$state, ...patch }
+      await ipc.updateSettings(next)
       Object.assign(this, patch)
-      await ipc.updateSettings(this.$state)
     }
   }
 })

@@ -42,6 +42,18 @@ import { createSessionHistoryService, registerSessionHistoryIpc } from './sessio
 import { createUsageRecorder, normalizeAdapterStatsEvent } from './usage/usageRecorder.js'
 import { assertUsageQuery } from './usage/contracts.js'
 import { createUsageQueryService } from './usage/usageQueryService.js'
+import { createEvidenceCollector } from './summaries/evidenceCollector.js'
+import { createSummaryPipeline } from './summaries/chunkPlanner.js'
+import { createReportRepository } from './summaries/reportRepository.js'
+import { createSummaryJobService } from './summaries/summaryJobService.js'
+import { createSummaryRunner } from './summaries/summaryRunner.js'
+import {
+  DEFAULT_SUMMARY_SETTINGS,
+  createLiveSummaryPipeline,
+  createSummaryScheduler,
+  normalizeSummarySettings,
+  updateSummarySettings
+} from './summaries/summaryScheduler.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
 import { GatewayManager } from './gateway/manager.js'
 import { createGatewayPort } from './gateway/orchestratorPort.js'
@@ -63,6 +75,27 @@ const DEFAULT_SETTINGS = {
   codexConfigDir: '',
   language: 'zh-CN',
   theme: 'light'
+}
+
+const SUMMARY_SETTING_FIELDS = new Set([
+  'autoEnabled', 'autoPeriods', 'defaultExecutorId', 'defaultProfileId',
+  'defaultModel', 'firstEnableDisclosureAcceptedAt', 'automaticCallLimit'
+])
+
+function splitSettingsPatch(value = {}) {
+  const appSettings = {}
+  const summary = {}
+  for (const [key, item] of Object.entries(value && typeof value === 'object' ? value : {})) {
+    if (SUMMARY_SETTING_FIELDS.has(key)) summary[key] = item
+    else appSettings[key] = item
+  }
+  return { appSettings, summary }
+}
+
+function summaryUsageGranularity(periodType) {
+  if (periodType === 'day') return 'hour'
+  if (periodType === 'week' || periodType === 'month') return 'day'
+  return 'month'
 }
 
 const USAGE_QUERY_FIELDS = new Set([
@@ -158,6 +191,9 @@ export function createOrchestrator() {
   let skillsService = null
   let usageRecorder = null
   let usageQueryService = null
+  let summarySettings = normalizeSummarySettings(DEFAULT_SUMMARY_SETTINGS)
+  let summaryJobService = null
+  let summaryScheduler = null
   let persistenceRecovery = null
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
@@ -249,6 +285,40 @@ export function createOrchestrator() {
 
   function getCodexHome() {
     return resolveCodexHome({ configuredDir: settings.codexConfigDir })
+  }
+
+  async function initSummaryAutomation(db) {
+    summarySettings = db.getSummarySettings()
+    const repository = createReportRepository({ db })
+    const runner = createSummaryRunner({ profileService })
+    const pipeline = createLiveSummaryPipeline({
+      runner,
+      getSettings: () => summarySettings,
+      createPipeline: createSummaryPipeline
+    })
+    summaryJobService = createSummaryJobService({
+      repository,
+      evidenceCollector: createEvidenceCollector({ historyService }),
+      snapshotUsage: ({ periodType, start, endExclusive, timezone }) =>
+        usageQueryService.queryUsage({
+          granularity: summaryUsageGranularity(periodType),
+          start,
+          endExclusive,
+          timeZone: timezone
+        }),
+      pipeline,
+      listSessions,
+      defaultTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    })
+    summaryJobService.subscribe(() => scheduleFlush())
+    scheduleFlush()
+    summaryScheduler = createSummaryScheduler({
+      getSettings: () => summarySettings,
+      listReports: filters => repository.list(filters),
+      generate: request => summaryJobService.generate(request),
+      cancel: reportId => summaryJobService.cancel(reportId)
+    })
+    await summaryScheduler.start()
   }
 
   function applyCodexProviderPolicy(session, { imported = false } = {}) {
@@ -669,6 +739,13 @@ export function createOrchestrator() {
     }
     db.flush()
     startCodexConfigWatcher()
+    try {
+      await initSummaryAutomation(db)
+    } catch (error) {
+      await summaryScheduler?.stop()
+      summaryScheduler = null
+      log('Summary scheduler startup deferred:', error?.code || 'SUMMARY_SCHEDULER_START_FAILED')
+    }
   }
 
   // ---- hook runner path (dev vs packaged) ----
@@ -2048,14 +2125,39 @@ export function createOrchestrator() {
     })
     ipcMain.handle('stats:query', createStatsQueryHandler(() => usageQueryService))
 
-    ipcMain.handle('settings:get', () => settings)
-    ipcMain.handle('settings:update', (_e, s) => {
-      settings = { ...settings, ...s }
-      const db = getDb(); if (db) { db.saveSettings(settings); scheduleFlush() }
-      if (Object.prototype.hasOwnProperty.call(s || {}, 'codexConfigDir')) {
+    ipcMain.handle('settings:get', () => ({ ...settings, ...summarySettings }))
+    ipcMain.handle('settings:update', async (_e, s) => {
+      const { appSettings, summary } = splitSettingsPatch(s)
+      const candidate = normalizeSummarySettings({
+        ...summarySettings,
+        ...summary,
+        autoPeriods: { ...summarySettings.autoPeriods, ...(summary.autoPeriods || {}) }
+      })
+      const db = getDb()
+      const automationAvailable = Boolean(db && summaryScheduler)
+      const availableExecutors = candidate.autoEnabled && automationAvailable
+        ? await inspectCliTools()
+        : []
+      const availableProfiles = candidate.autoEnabled && automationAvailable && candidate.defaultExecutorId
+        ? profileService?.listProfiles({ adapterId: candidate.defaultExecutorId }) || []
+        : []
+      const nextSummary = updateSummarySettings(summarySettings, summary, {
+        availableExecutors,
+        availableProfiles,
+        automationAvailable
+      })
+      settings = { ...settings, ...appSettings }
+      summarySettings = nextSummary
+      if (db) {
+        db.saveSettings(settings)
+        db.setSummarySettings(summarySettings)
+        scheduleFlush()
+      }
+      if (Object.prototype.hasOwnProperty.call(appSettings, 'codexConfigDir')) {
         const snapshot = startCodexConfigWatcher()
         publishCodexRuntime(snapshot)
       }
+      await summaryScheduler?.tick()
       return true
     })
 
@@ -2105,6 +2207,8 @@ export function createOrchestrator() {
       }
       codexConfigWatcher?.stop()
       codexConfigWatcher = null
+      await summaryScheduler?.stop()
+      summaryScheduler = null
       for (const notification of approvalNotifications.values()) notification.close()
       approvalNotifications.clear()
       for (const notification of completionNotifications) notification.close()
@@ -2125,6 +2229,10 @@ export function createOrchestrator() {
         await server?.close()
       } catch (error) {
         console.error('Failed to close permission hook server:', error)
+      }
+      if (flushTimer) {
+        clearTimeout(flushTimer)
+        flushTimer = null
       }
       if (db) {
         log('shutdown — calling db.flush()')
