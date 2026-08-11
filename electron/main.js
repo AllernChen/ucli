@@ -10,7 +10,10 @@ import { describeDatabaseRecovery } from './persistence/recoveryMessage.js'
 import { applyMacLoginPath } from './macEnvironment.js'
 import { installOutputErrorGuards } from './brokenPipeGuard.js'
 import { resolveWindowBounds } from './windowState.js'
-import { openAllowedExternalUrl } from './externalLinks.js'
+import {
+  isAllowedApplicationNavigation,
+  openAllowedExternalUrl
+} from './externalLinks.js'
 import { createUpdateService } from './updateService.js'
 import { safeStartupFailure, startMainWindowLifecycle } from './startupLifecycle.js'
 
@@ -145,6 +148,10 @@ function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     openAllowedExternalUrl(url, (allowedUrl) => shell.openExternal(allowedUrl)).catch(() => {})
     return { action: 'deny' }
+  })
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const currentUrl = mainWindow?.webContents.getURL() || ''
+    if (!isAllowedApplicationNavigation(currentUrl, url)) event.preventDefault()
   })
 
   // Dev: load the electron-vite renderer dev server. Prod: load the built file.

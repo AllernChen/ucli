@@ -498,6 +498,7 @@ export class ClaudeAdapter extends BaseAdapter {
       this.emitEvent({
         type: 'stats_update',
         usage: { inputTokens: 0, outputTokens: 0 },
+        synthetic: true,
         costUsd: 0,
         turns: 0,
         model: this.session.model || null

@@ -157,6 +157,9 @@ export function createUsageRecorder({ db, now = Date.now }) {
 
   return {
     observe(update) {
+      if (update?.synthetic === true) {
+        return Promise.resolve({ observedAt: null, session: null, models: [], skipped: true })
+      }
       // Capture occurrence time when the update enters the recorder, not when
       // an earlier queued transaction happens to finish.
       const normalized = normalizeUsageUpdate(update, now())

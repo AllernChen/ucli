@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { isAllowedExternalUrl, openAllowedExternalUrl } from '../electron/externalLinks.js'
+import { readFileSync } from 'node:fs'
+import {
+  isAllowedApplicationNavigation,
+  isAllowedExternalUrl,
+  openAllowedExternalUrl
+} from '../electron/externalLinks.js'
 
 test('allows absolute HTTP and HTTPS external URLs', () => {
   assert.equal(isAllowedExternalUrl('https://example.com/path?source=terminal'), true)
@@ -31,4 +36,32 @@ test('invokes the external opener for an allowed URL', async () => {
 
   assert.equal(opened, true)
   assert.equal(openedUrl, 'https://example.com')
+})
+
+test('main window navigation stays on the current application document', () => {
+  assert.equal(isAllowedApplicationNavigation(
+    'file:///C:/UCLI/renderer/index.html#/stats',
+    'file:///C:/UCLI/renderer/index.html#/stats?tab=summary'
+  ), true)
+  assert.equal(isAllowedApplicationNavigation(
+    'http://localhost:5173/#/stats',
+    'http://localhost:5173/#/session'
+  ), true)
+  assert.equal(isAllowedApplicationNavigation(
+    'file:///C:/UCLI/renderer/index.html#/stats',
+    'https://attacker.example/from-ai-markdown'
+  ), false)
+  assert.equal(isAllowedApplicationNavigation(
+    'http://localhost:5173/#/stats',
+    'http://localhost:5173/remote-document'
+  ), false)
+  assert.equal(isAllowedApplicationNavigation(
+    'http://localhost:5173/#/stats',
+    'http://user:password@localhost:5173/#/stats'
+  ), false)
+
+  const main = readFileSync(new URL('../electron/main.js', import.meta.url), 'utf8')
+  assert.match(main, /webContents\.on\('will-navigate'/)
+  assert.match(main, /event\.preventDefault\(\)/)
+  assert.match(main, /isAllowedApplicationNavigation\(currentUrl, url\)/)
 })

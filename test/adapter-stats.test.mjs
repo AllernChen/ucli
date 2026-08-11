@@ -5,6 +5,7 @@ import { ClaudeAdapter, parseClaudeTranscriptStats } from '../electron/adapters/
 import {
   buildCodexArgs,
   classifyCodexTerminalNotification,
+  codexDescriptor,
   CodexAdapter,
   consumeOsc9Notifications,
   parseCodexTranscriptStats
@@ -102,6 +103,42 @@ test('parses Codex token_count events and session metadata', () => {
   assert.equal(stats.turnsCount, 1)
   assert.equal(stats.completedTurnsCount, 1)
   assert.equal(stats.lastModel, 'gpt-5.5')
+})
+
+test('Codex token statistics explicitly declare provider cost unavailable', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-codex-unknown-cost-'))
+  const transcript = join(root, 'rollout.jsonl')
+  writeFileSync(transcript, [
+    JSON.stringify({ type: 'session_meta', payload: { id: 'native-1', model: 'gpt-5.5' } }),
+    JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: {
+          total_token_usage: { input_tokens: 40, output_tokens: 8, total_tokens: 48 }
+        }
+      }
+    })
+  ].join('\n'))
+  const adapter = new CodexAdapter({
+    session: { id: 's1', cwd: root, cliSessionId: null },
+    engine: null,
+    settings: { codexHome: root }
+  })
+  const events = []
+  adapter.on('event', event => events.push(event))
+  adapter._transcriptPath = transcript
+
+  try {
+    adapter._extractStats()
+    const update = events.find(event => event.type === 'stats_update')
+    assert.equal(codexDescriptor.costAvailable, false)
+    assert.equal(update.costAvailable, false)
+    assert.equal(update.costUsd, null)
+  } finally {
+    await adapter.dispose()
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('Codex stats keep the current rollout ID when resumed history contains ancestor metadata', () => {
@@ -548,6 +585,23 @@ test('orchestrator records ledger observations beside legacy cumulative stats', 
   assert.match(statsCase, /db\.upsertStats\(sessionId,/)
   assert.match(statsCase, /db\.upsertModelStats\(sessionId,/)
   assert.match(source, /onApprovalResolved\(req\)[\s\S]*usageRecorder\.recordApproval\([\s\S]*approvalId:\s*req\.requestId/)
+})
+
+test('adapter startup zeroes stay visible but are marked synthetic before ledger recording', () => {
+  for (const file of ['claudeAdapter.js', 'codexAdapter.js', 'openCodeAdapter.js']) {
+    const source = readFileSync(new URL(`../electron/adapters/${file}`, import.meta.url), 'utf8')
+    assert.match(
+      source,
+      /type:\s*'stats_update',[\s\S]{0,180}usage:\s*\{\s*inputTokens:\s*0,\s*outputTokens:\s*0\s*\},[\s\S]{0,180}synthetic:\s*true/,
+      file
+    )
+  }
+  const orchestrator = readFileSync(
+    new URL('../electron/orchestrator.js', import.meta.url),
+    'utf8'
+  )
+  const statsCase = orchestrator.match(/case 'stats_update':[\s\S]*?case 'profile-model'/)?.[0] || ''
+  assert.match(statsCase, /usageRecorder\.observe\(\{[\s\S]*synthetic:\s*evt\.synthetic/)
 })
 
 test('orchestrator stats normalization accepts nested and parser-style adapter fields', () => {

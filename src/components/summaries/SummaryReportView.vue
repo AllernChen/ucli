@@ -32,7 +32,12 @@
       <a-button @click="$emit('export-markdown', report.id)">导出 Markdown</a-button>
       <a-button @click="$emit('export-html', report.id)">导出 HTML</a-button>
     </div>
-    <article v-if="report.markdown" class="markdown-body" v-html="safeHtml" />
+    <article
+      v-if="report.markdown"
+      class="markdown-body"
+      v-html="safeHtml"
+      @click="handleReportLink"
+    />
     <a-empty v-else description="报告内容尚未生成" />
   </a-card>
   <a-empty v-else description="请选择或生成一份工作总结" />
@@ -42,6 +47,8 @@
 import { computed } from 'vue'
 import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
+import ipc from '../../ipc.js'
+import { openSummaryReportLink } from '../../summaryLinks.js'
 
 const props = defineProps({ report: Object, progress: Object })
 defineEmits(['cancel', 'confirm', 'export-markdown', 'export-html'])
@@ -60,6 +67,7 @@ const coverageWarning = computed(() => {
   return props.report?.partial ? '当前周期尚未结束，报告为部分覆盖。' : ''
 })
 async function copyMarkdown() { await navigator.clipboard.writeText(props.report?.markdown || '') }
+function handleReportLink(event) { openSummaryReportLink(event, ipc.openExternal) }
 </script>
 
 <style scoped>

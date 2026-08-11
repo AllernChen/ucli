@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { createPinia, setActivePinia } from 'pinia'
 import { parse as parseSfc } from '@vue/compiler-sfc'
+import { openSummaryReportLink } from '../src/summaryLinks.js'
 
 let progressHandler = null
 let subscriptions = 0
@@ -106,6 +107,30 @@ test('summary workspace components cover generation, safe reading, history, retr
   assert.match(all, /DOMPurify\.sanitize/)
   assert.match(all, /mode:\s*['"]light['"]/)
   assert.match(all, /failed|interrupted/)
+})
+
+test('AI-authored report links cannot navigate the renderer and use only narrow external IPC', () => {
+  const opened = []
+  let prevented = 0
+  const anchor = { getAttribute: () => 'https://attacker.example/from-ai-markdown' }
+  const handled = openSummaryReportLink({
+    target: { closest: selector => selector === 'a[href]' ? anchor : null },
+    preventDefault() { prevented += 1 }
+  }, url => { opened.push(url) })
+
+  assert.equal(handled, true)
+  assert.equal(prevented, 1)
+  assert.deepEqual(opened, ['https://attacker.example/from-ai-markdown'])
+
+  const reportView = readFileSync(
+    new URL('../src/components/summaries/SummaryReportView.vue', import.meta.url),
+    'utf8'
+  )
+  const preload = readFileSync(new URL('../electron/preload.js', import.meta.url), 'utf8')
+  assert.match(reportView, /@click="handleReportLink"/)
+  assert.match(reportView, /openSummaryReportLink\(event, ipc\.openExternal\)/)
+  assert.match(preload, /openExternal:\s*\(url\)\s*=>\s*ipcRenderer\.invoke\('shell:open-external', url\)/)
+  assert.doesNotMatch(preload, /(?:navigate|loadURL)\s*:/)
 })
 
 test('Stats replaces the summary placeholder without regressing the cumulative usage tab', () => {

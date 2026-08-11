@@ -7,8 +7,10 @@ import { join } from 'node:path'
 import { openDb } from '../electron/persistence/db.js'
 import {
   createUsageRecorder,
+  normalizeAdapterStatsEvent,
   normalizeUsageUpdate
 } from '../electron/usage/usageRecorder.js'
+import { createUsageQueryService } from '../electron/usage/usageQueryService.js'
 
 function realAdapterUpdate(overrides = {}) {
   return {
@@ -109,6 +111,80 @@ test('explicit unavailable cost wins over a numeric provider placeholder', () =>
   assert.equal(normalized.session.costUsd, null)
   assert.equal(normalized.models[0].costAvailable, false)
   assert.equal(normalized.models[0].costUsd, null)
+})
+
+test('Codex token events remain unknown-cost through the recorder and trend query', async () => {
+  await withDb('ucli-codex-unknown-cost-', async (db) => {
+    const exactSince = db.getUsageLedgerMetadata().exactSince
+    const observedAt = exactSince + 60_000
+    const event = normalizeAdapterStatsEvent({
+      type: 'stats_update',
+      usage: { inputTokens: 40, outputTokens: 8 },
+      costUsd: null,
+      costAvailable: false,
+      turns: 1,
+      model: 'gpt-5.5'
+    })
+    assert.equal(event.costAvailable, false)
+    assert.equal(event.costUsd, null)
+
+    const recorder = createUsageRecorder({ db, now: () => observedAt })
+    await recorder.observe({
+      ...event,
+      sessionId: 'codex-session',
+      projectPath: 'F:/projects/ucli',
+      adapterId: 'codex'
+    })
+    const result = createUsageQueryService({ db }).queryUsage({
+      granularity: 'hour',
+      start: exactSince,
+      endExclusive: observedAt + 60_000,
+      timeZone: 'UTC',
+      adapterIds: ['codex']
+    })
+
+    assert.equal(result.totals.inputTokens, 40)
+    assert.equal(result.totals.outputTokens, 8)
+    assert.equal(result.totals.knownCostUsd, 0)
+    assert.equal(result.totals.costCoverage, 0)
+  })
+})
+
+test('synthetic adapter startup zeroes never reset persisted usage checkpoints', async () => {
+  await withDb('ucli-synthetic-startup-', async (db) => {
+    const exactSince = db.getUsageLedgerMetadata().exactSince
+    let tick = 0
+    const recorder = createUsageRecorder({ db, now: () => exactSince + (++tick * 1000) })
+
+    for (const adapterId of ['claude', 'codex', 'opencode']) {
+      const sessionId = `${adapterId}-session`
+      const update = (inputTokens, outputTokens, synthetic = false) => ({
+        sessionId,
+        projectPath: 'F:/projects/ucli',
+        adapterId,
+        usage: { inputTokens, outputTokens },
+        costUsd: null,
+        costAvailable: false,
+        turns: 0,
+        synthetic
+      })
+      await recorder.observe(update(100, 20))
+      const skipped = await recorder.observe(update(0, 0, true))
+      assert.equal(skipped.skipped, true)
+      await recorder.observe(update(100, 20))
+      await recorder.observe(update(110, 25))
+
+      const result = createUsageQueryService({ db }).queryUsage({
+        granularity: 'hour',
+        start: exactSince,
+        endExclusive: exactSince + 60_000,
+        timeZone: 'UTC',
+        adapterIds: [adapterId]
+      })
+      assert.equal(result.totals.inputTokens, 110, adapterId)
+      assert.equal(result.totals.outputTokens, 25, adapterId)
+    }
+  })
 })
 
 test('records session and model scopes without assigning turns to model detail', async () => {

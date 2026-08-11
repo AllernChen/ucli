@@ -536,7 +536,8 @@ export class CodexAdapter extends BaseAdapter {
             reasoningOutputTokens: stats.reasoningOutputTokens,
             totalTokens: stats.totalTokens
           },
-          costUsd: 0,
+          costUsd: null,
+          costAvailable: false,
           turns: stats.turnsCount,
           completedTurns: stats.completedTurnsCount,
           model: stats.lastModel,
@@ -709,7 +710,9 @@ export class CodexAdapter extends BaseAdapter {
       this.emitEvent({
         type: 'stats_update',
         usage: { inputTokens: 0, outputTokens: 0 },
-        costUsd: 0,
+        synthetic: true,
+        costUsd: null,
+        costAvailable: false,
         turns: 0,
         model: this.session.model || null
       })
@@ -791,6 +794,7 @@ export const codexDescriptor = {
   id: 'codex',
   displayName: DISPLAY_NAME,
   icon: ICON,
+  costAvailable: false,
   models: ['default', 'gpt-5', 'gpt-5.1', 'gpt-5.5'],
   listNativeSessions: (cwd) => {
     return listCodexTranscriptSessionsInHome(resolveCodexHome(), cwd)

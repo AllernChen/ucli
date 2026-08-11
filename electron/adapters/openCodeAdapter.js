@@ -563,6 +563,7 @@ export class OpenCodeAdapter extends BaseAdapter {
       this.emitEvent({
         type: 'stats_update',
         usage: { inputTokens: 0, outputTokens: 0 },
+        synthetic: true,
         costUsd: null,
         costAvailable: false,
         turns: 0,
