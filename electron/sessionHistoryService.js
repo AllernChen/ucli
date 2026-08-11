@@ -376,9 +376,13 @@ export function createSessionHistoryService({
     }
 
     const available = history.items
-      .filter(item => Number.isFinite(item?.timestamp) &&
+      .map((item, sourceIndex) => ({ item, sourceIndex }))
+      .filter(({ item }) => Number.isFinite(item?.timestamp) &&
         item.timestamp >= start && item.timestamp < endExclusive)
-      .map(item => ({
+      .sort((left, right) =>
+        left.item.timestamp - right.item.timestamp || left.sourceIndex - right.sourceIndex
+      )
+      .map(({ item }) => ({
         id: String(item.id),
         role: item.role,
         text: String(item.text),

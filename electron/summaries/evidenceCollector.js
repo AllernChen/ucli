@@ -12,11 +12,24 @@ const UNTRUSTED_WARNING =
 function canonicalProjectPath(value) {
   const source = typeof value === 'string' && value.trim() ? value.trim() : '(未设置项目)'
   if (/^[A-Za-z]:[\\/]/.test(source)) {
-    const normalized = win32.normalize(source).replace(/\\/g, '/').replace(/\/+$/, '')
+    let normalized = win32.normalize(source).replace(/\\/g, '/')
+    if (!/^[A-Za-z]:\/$/.test(normalized)) normalized = normalized.replace(/\/+$/, '')
     return `${normalized[0].toUpperCase()}${normalized.slice(1)}`
   }
   const normalized = posix.normalize(source.replace(/\\/g, '/'))
   return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized
+}
+
+function canonicalProjectKey(value) {
+  const original = String(value || '').trim()
+  if (!original) return ''
+  let normalized = original.replace(/\\/g, '/').replace(/\/+/g, '/')
+  if (normalized.length > 1 && !/^[A-Za-z]:\/$/.test(normalized)) {
+    normalized = normalized.replace(/\/+$/, '')
+  }
+  return /^[A-Za-z]:\//.test(normalized) || original.startsWith('\\\\')
+    ? normalized.toLowerCase()
+    : normalized
 }
 
 function xmlEscape(value) {
@@ -28,12 +41,33 @@ function xmlEscape(value) {
     .replace(/'/g, '&apos;')
 }
 
+function escapedWithinUtf8(value, maxBytes) {
+  const chunks = []
+  let bytes = 0
+  let consumed = 0
+  const source = String(value)
+  for (const character of source) {
+    const escaped = xmlEscape(character)
+    const size = Buffer.byteLength(escaped, 'utf8')
+    if (bytes + size > maxBytes) break
+    chunks.push(escaped)
+    bytes += size
+    consumed += character.length
+  }
+  return {
+    text: chunks.join(''),
+    bytes,
+    clipped: consumed < source.length
+  }
+}
+
 function normalizedSession(entry) {
   const source = entry?.session && typeof entry.session === 'object' ? entry.session : entry || {}
   return {
     id: source.id || entry?.id,
     adapterId: source.adapterId || entry?.adapterId || 'unknown',
     projectPath: canonicalProjectPath(source.cwd || source.projectPath || entry?.cwd),
+    projectKey: canonicalProjectKey(source.cwd || source.projectPath || entry?.cwd),
     note: source.taskNote || entry?.taskNote || '',
     nativeDigest: source.nativeDigest || source.compactSummary || entry?.nativeDigest || null,
     createdAt: source.createdAt ?? source.startedAt ?? entry?.createdAt ?? entry?.startedAt,
@@ -57,8 +91,18 @@ function redactedXml(value, redactions) {
   return xmlEscape(result.text)
 }
 
-function evidenceLine(prefix, value, redactions) {
-  return `${prefix} ${redactedXml(value, redactions)}`
+function boundedEvidenceLine(prefix, value, maxBytes) {
+  const prefixText = `${prefix} `
+  const prefixBytes = Buffer.byteLength(prefixText, 'utf8')
+  if (prefixBytes >= maxBytes) return null
+  const redacted = redactEvidenceText(value)
+  const escaped = escapedWithinUtf8(redacted.text, maxBytes - prefixBytes)
+  if (!escaped.text && redacted.text) return null
+  return {
+    text: `${prefixText}${escaped.text}`,
+    clipped: escaped.clipped,
+    redactions: redacted.counts
+  }
 }
 
 function warningMessages(missing, truncated) {
@@ -115,47 +159,76 @@ export async function collectSummaryEvidence({
     const items = (Array.isArray(range.items) ? range.items : [])
       .filter(item => Number.isFinite(item?.timestamp) &&
         item.timestamp >= start && item.timestamp < endExclusive)
-    if (range.missing) coverage.sessionsMissing += 1
-    if (range.truncated) coverage.truncatedSessions += 1
     const overlaps = overlapsPeriod(session, items, start, endExclusive)
     const note = overlaps && typeof session.note === 'string' ? session.note.trim() : ''
     const digestValue = range.nativeDigest || session.nativeDigest
     const nativeDigest = overlaps && typeof digestValue === 'string' ? digestValue.trim() : ''
-    if (!items.length && !note && !nativeDigest) continue
-
-    const sources = []
-    if (items.length) {
-      sources.push('transcript')
-      coverage.sources.transcript += 1
-      coverage.messagesIncluded += items.length
-    }
-    if (note) {
-      sources.push('note')
-      coverage.sources.note += 1
-    }
-    if (nativeDigest) {
-      sources.push('nativeDigest')
-      coverage.sources.nativeDigest += 1
+    if (overlaps && range.missing) coverage.sessionsMissing += 1
+    if (!items.length && !note && !nativeDigest) {
+      if (overlaps && range.truncated) coverage.truncatedSessions += 1
+      continue
     }
 
-    const safeProject = redactedXml(session.projectPath, coverage.redactions)
-    const safeSessionId = redactedXml(session.id, coverage.redactions)
+    const blockRedactions = emptyRedactionCounts()
+    const safeProject = redactedXml(session.projectPath, blockRedactions)
+    const safeSessionId = redactedXml(session.id, blockRedactions)
     const lines = [
       `<evidence project="${safeProject}" session="${safeSessionId}">`,
       UNTRUSTED_WARNING
     ]
+    const closing = '</evidence>'
+    const byteLimit = Number.isInteger(maxBytesPerSession) && maxBytesPerSession > 0
+      ? maxBytesPerSession
+      : 4 * 1024 * 1024
+    let bytesUsed = Buffer.byteLength(`${lines.join('\n')}\n${closing}`, 'utf8')
+    let blockTruncated = range.truncated === true
+    let itemCount = 0
+    let noteIncluded = false
+    let digestIncluded = false
+
+    const appendLine = (prefix, value) => {
+      const available = byteLimit - bytesUsed - 1
+      const candidate = boundedEvidenceLine(prefix, value, available)
+      if (!candidate) {
+        blockTruncated = true
+        return false
+      }
+      lines.push(candidate.text)
+      bytesUsed += Buffer.byteLength(candidate.text, 'utf8') + 1
+      blockTruncated ||= candidate.clipped
+      mergeRedactionCounts(blockRedactions, candidate.redactions)
+      return true
+    }
+
     for (const item of items) {
       const timestamp = new Date(item.timestamp).toISOString()
       const role = ['user', 'assistant', 'tool', 'system'].includes(item.role)
         ? item.role
         : 'system'
-      lines.push(evidenceLine(`[${role}] [${timestamp}]`, item.text, coverage.redactions))
+      if (appendLine(`[${role}] [${timestamp}]`, item.text)) itemCount += 1
     }
-    if (note) lines.push(evidenceLine('[note]', note, coverage.redactions))
-    if (nativeDigest) {
-      lines.push(evidenceLine('[nativeDigest]', nativeDigest, coverage.redactions))
+    if (note) noteIncluded = appendLine('[note]', note)
+    if (nativeDigest) digestIncluded = appendLine('[nativeDigest]', nativeDigest)
+    lines.push(closing)
+
+    const sources = []
+    if (itemCount) sources.push('transcript')
+    if (noteIncluded) sources.push('note')
+    if (digestIncluded) sources.push('nativeDigest')
+    if (!sources.length || bytesUsed > byteLimit) {
+      if (overlaps && (range.truncated || items.length || note || nativeDigest)) {
+        coverage.truncatedSessions += 1
+      }
+      continue
     }
-    lines.push('</evidence>')
+    if (itemCount) {
+      coverage.sources.transcript += 1
+      coverage.messagesIncluded += itemCount
+    }
+    if (noteIncluded) coverage.sources.note += 1
+    if (digestIncluded) coverage.sources.nativeDigest += 1
+    if (blockTruncated) coverage.truncatedSessions += 1
+    mergeRedactionCounts(coverage.redactions, blockRedactions)
 
     const block = {
       id: `evidence:${session.id}`,
@@ -163,19 +236,21 @@ export async function collectSummaryEvidence({
       sessionId: session.id,
       adapterId: session.adapterId,
       sources,
-      itemCount: items.length,
+      itemCount,
+      truncated: blockTruncated,
+      bytes: bytesUsed,
       text: lines.join('\n')
     }
     blocks.push(block)
     coverage.sessionsIncluded += 1
-    if (!projects.has(session.projectPath)) {
-      projects.set(session.projectPath, { projectPath: session.projectPath, sessions: [] })
+    if (!projects.has(session.projectKey)) {
+      projects.set(session.projectKey, { projectPath: session.projectPath, sessions: [] })
     }
-    projects.get(session.projectPath).sessions.push({
+    projects.get(session.projectKey).sessions.push({
       sessionId: session.id,
       adapterId: session.adapterId,
       sources,
-      itemCount: items.length,
+      itemCount,
       blockId: block.id
     })
   }

@@ -363,6 +363,33 @@ test('main-process range loading filters timestamps and keeps the newest bounded
   assert.doesNotMatch(JSON.stringify(result), /private|native-1\.jsonl/)
 })
 
+test('range loading sorts timestamps stably before keeping newest items', async () => {
+  const start = Date.parse('2026-07-29T02:00:00.000Z')
+  const endExclusive = Date.parse('2026-07-29T02:00:05.000Z')
+  const rows = [
+    { id: 'late', timestamp: '2026-07-29T02:00:04.000Z', text: 'late' },
+    { id: 'early', timestamp: '2026-07-29T02:00:01.000Z', text: 'early' },
+    { id: 'middle-a', timestamp: '2026-07-29T02:00:02.000Z', text: 'middle-a' },
+    { id: 'middle-b', timestamp: '2026-07-29T02:00:02.000Z', text: 'middle-b' }
+  ]
+  const service = createSessionHistoryService({
+    resolveSession: () => ({
+      id: 'unordered', adapterId: 'claude', cliSessionId: 'native-unordered'
+    }),
+    resolveClaudeTranscript: () => 'unordered.jsonl',
+    readFile: async () => rows.map(({ id, timestamp, text }) => JSON.stringify({
+      type: 'user', uuid: id, timestamp,
+      message: { content: [{ type: 'text', text }] }
+    })).join('\n')
+  })
+
+  const result = await service.loadRange({
+    sessionId: 'unordered', start, endExclusive, maxItems: 3, maxBytes: 100
+  })
+
+  assert.deepEqual(result.items.map(item => item.text), ['middle-a', 'middle-b', 'late'])
+})
+
 test('range loading returns safe missing metadata and bounded normalized text', async () => {
   const sessions = new Map([
     ['missing', {
