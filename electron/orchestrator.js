@@ -53,6 +53,7 @@ import { createSummaryRunner } from './summaries/summaryRunner.js'
 import { createSummaryCacheService } from './summaries/summaryCacheService.js'
 import { resolveSummaryStorageRoot, resolveSummaryChild } from './summaries/summaryStoragePaths.js'
 import { createSummaryWorkspaceService } from './summaries/summaryWorkspaceService.js'
+import { runSummaryMaintenance, runSummaryStartupLifecycle } from './startupLifecycle.js'
 import { SUMMARY_THEME_IDS } from './summaries/summaryThemeCatalog.js'
 import {
   createSummaryOperationalLogEntry,
@@ -654,24 +655,19 @@ export function createOrchestrator() {
       failedRetentionMs: summarySettings.failedWorkspaceRetentionDays * 24 * 60 * 60 * 1000
     })
     summaryWorkspaceService = Object.fromEntries(
-      ['create', 'writeArtifact', 'markStage', 'complete', 'fail', 'recover', 'remove', 'usage']
+      ['create', 'writeArtifact', 'markStage', 'complete', 'fail', 'recover', 'remove', 'usage', 'clearFailed', 'pruneExpired']
         .map(method => [method, (...args) => workspaceForSettings()[method](...args)])
     )
-    await summaryWorkspaceService.recover()
     const cacheForSettings = () => createSummaryCacheService({
       root: summaryRoot,
       repository: db,
       quotaBytes: summarySettings.cacheMaxBytes
     })
     const cache = Object.fromEntries(
-      ['get', 'put', 'evict', 'prune', 'stats', 'clear']
+      ['get', 'put', 'evict', 'prune', 'stats', 'clear', 'verify']
         .map(method => [method, (...args) => cacheForSettings()[method](...args)])
     )
     summaryCacheService = cache
-    if (summarySettings.cacheEnabled) {
-      await cache.prune()
-      summaryCacheLastPrunedAt = Date.now()
-    }
     const runner = createSummaryRunner({ profileService, validateWorkspaceDirectory })
     summaryExportService = createReportExportService({
       repository: summaryRepository,
@@ -735,9 +731,40 @@ export function createOrchestrator() {
       getSettings: () => summarySettings,
       listReports: filters => summaryRepository.list(filters),
       generate: request => summaryJobService.generate(request),
-      cancel: reportId => summaryJobService.cancel(reportId)
+      cancel: reportId => summaryJobService.cancel(reportId),
+      maintain: async () => {
+        const result = await runSummaryMaintenance({
+          pruneExpiredWorkspaces: () => summaryWorkspaceService.pruneExpired(),
+          pruneCache: () => summarySettings.cacheEnabled
+            ? summaryCacheService.prune()
+            : { removed: 0, bytes: 0 },
+          onEvent: event => log('summary-maintenance', event)
+        })
+        summaryCacheLastPrunedAt = Date.now()
+        log('summary-maintenance', {
+          phase: 'daily-maintenance',
+          failedWorkspacesRemoved: result.workspaces?.removed || 0,
+          workspaceBytesRemoved: result.workspaces?.bytes || 0,
+          cacheEntriesRemoved: result.cache?.removed || 0,
+          cacheBytes: result.cache?.bytes || 0
+        })
+        return result
+      },
+      onMaintenanceError: event => log('summary-maintenance', event)
     })
-    await summaryScheduler.start()
+    await runSummaryStartupLifecycle({
+      recoverWorkspaces: () => summaryWorkspaceService.recover(),
+      maintainCache: async () => {
+        if (!summarySettings.cacheEnabled) return
+        const verified = await cache.verify()
+        const pruned = await cache.prune()
+        summaryCacheLastPrunedAt = Date.now()
+        return { verified, pruned }
+      },
+      interruptStaleJobs: () => summaryRepository.interruptStale(),
+      startScheduler: () => summaryScheduler.start(),
+      onEvent: event => log('summary-startup', event)
+    })
   }
 
   function applyCodexProviderPolicy(session, { imported = false } = {}) {
@@ -2235,6 +2262,7 @@ export function createOrchestrator() {
   }
 
   async function saveSummarySettingsPatch(summary) {
+    const previousCacheMaxBytes = summarySettings.cacheMaxBytes
     const candidate = {
       ...summarySettings,
       ...summary,
@@ -2262,6 +2290,10 @@ export function createOrchestrator() {
     if (db) {
       db.setSummarySettings(summarySettings)
       scheduleFlush()
+    }
+    if (summarySettings.cacheEnabled && summarySettings.cacheMaxBytes < previousCacheMaxBytes) {
+      await summaryCacheService?.prune()
+      summaryCacheLastPrunedAt = Date.now()
     }
     await summaryScheduler?.tick()
     return summarySettings
@@ -2764,6 +2796,8 @@ export function createOrchestrator() {
       codexConfigWatcher = null
       await summaryScheduler?.stop()
       summaryScheduler = null
+      await summaryJobService?.shutdown()
+      await summaryWorkspaceService?.recover()
       for (const notification of approvalNotifications.values()) notification.close()
       approvalNotifications.clear()
       for (const notification of completionNotifications) notification.close()

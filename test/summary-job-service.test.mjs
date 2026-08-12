@@ -430,7 +430,7 @@ test('cancellation wins while usage snapshot is resolving on an empty report', a
   assert.equal(report.isCurrent, false)
 })
 
-test('service startup marks stale queued, running, and awaiting reports interrupted', () => {
+test('repository startup recovery marks stale queued, running, and awaiting reports interrupted', () => {
   const db = new MemoryDb()
   let id = 0
   const repository = createReportRepository({ db, idFactory: () => `stale-${++id}` })
@@ -440,12 +440,7 @@ test('service startup marks stale queued, running, and awaiting reports interrup
   const awaiting = repository.createQueued(request())
   repository.update(awaiting.id, { status: 'awaiting_confirmation' })
 
-  createSummaryJobService({
-    repository,
-    evidenceCollector: { async collect() { return evidence() } },
-    snapshotUsage: async () => ({}),
-    pipeline: { async run() { return pipelineResult() } }
-  })
+  repository.interruptStale()
 
   assert.equal(repository.get(queued.id).status, 'interrupted')
   assert.equal(repository.get(running.id).status, 'interrupted')
@@ -637,4 +632,64 @@ test('job order is queued persistence, evidence coverage, usage snapshot, pipeli
   const job = service.generate(request())
   await job.completion
   assert.deepEqual(order, ['queued', 'collect', 'usage', 'pipeline', 'current'])
+})
+
+test('shutdown is idempotent, rejects new jobs, cancels active work, and drains its workspace', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-shutdown-'))
+  let pipelineStarted
+  const started = new Promise(resolve => { pipelineStarted = resolve })
+  try {
+    const workspaceService = createSummaryWorkspaceService({ root })
+    const { service, repository } = createHarness({
+      workspaceService,
+      pipeline: {
+        run({ signal }) {
+          pipelineStarted()
+          return new Promise((resolve, reject) => signal.addEventListener('abort', () => {
+            reject(Object.assign(new Error('cancelled'), { code: 'SUMMARY_RUNNER_ABORTED' }))
+          }, { once: true }))
+        }
+      }
+    })
+    const job = service.generate(request())
+    await started
+    const first = service.shutdown()
+    const second = service.shutdown()
+    assert.equal(first, second)
+    await first
+    assert.equal(repository.get(job.reportId).status, 'cancelled')
+    const manifest = JSON.parse(readFileSync(
+      join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
+    ))
+    assert.notEqual(manifest.status, 'running')
+    assert.throws(
+      () => service.generate(request()),
+      error => error.code === 'SUMMARY_SERVICE_SHUTTING_DOWN'
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('shutdown compacts an awaiting-confirmation workspace instead of leaving it running', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-shutdown-awaiting-'))
+  try {
+    const workspaceService = createSummaryWorkspaceService({ root })
+    const { service, repository } = createHarness({
+      workspaceService,
+      pipeline: { async run() {
+        return { requiresConfirmation: true, estimatedCalls: 24, confirmationCallLimit: 24 }
+      } }
+    })
+    const job = service.generate(request())
+    await waitFor(() => repository.get(job.reportId).status === 'awaiting_confirmation')
+    await service.shutdown()
+    const manifest = JSON.parse(readFileSync(
+      join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
+    ))
+    assert.equal(repository.get(job.reportId).status, 'cancelled')
+    assert.equal(manifest.status, 'failed')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

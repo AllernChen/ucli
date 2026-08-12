@@ -275,5 +275,32 @@ export function createSummaryCacheService({
     return { removed: entries.length, bytes: 0 }
   }
 
-  return { get, put, evict, prune, stats, clear }
+  async function verify() {
+    const entries = repository.listSummaryCacheEntries()
+    let removed = 0
+    for (const entry of entries) {
+      try {
+        const value = await get(entry.key)
+        if (value === null) removed += 1
+      } catch {
+        try {
+          const existed = await evict(entry.key)
+          if (existed) removed += 1
+        } catch {
+          repository.deleteSummaryCacheEntries([entry.key])
+          removed += 1
+        }
+      }
+    }
+    const remaining = repository.listSummaryCacheEntries()
+    return {
+      checked: entries.length,
+      removed,
+      bytes: Math.min(Number.MAX_SAFE_INTEGER, remaining.reduce(
+        (total, entry) => total + Math.max(0, entry.sizeBytes), 0
+      ))
+    }
+  }
+
+  return { get, put, evict, prune, stats, clear, verify }
 }

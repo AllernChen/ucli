@@ -206,6 +206,35 @@ test('clearFailed removes only failed and interrupted workspaces and skips malfo
   assert.equal(existsSync(join(root, 'workspaces')), true)
 })
 
+test('pruneExpired removes only expired failed workspaces and reports bounded bytes', async t => {
+  let currentTime = Date.parse('2026-08-12T00:00:00.000Z')
+  const { service } = await withWorkspace(t, { now: () => currentTime, failedRetentionMs: 1000 })
+  const expired = await service.create('report-expired-prune')
+  await service.writeArtifact(expired.id, 'input/evidence.json', '12345')
+  await service.fail(expired.id, 'SUMMARY_FAILED')
+  const current = await service.create('report-current-prune')
+  await service.fail(current.id, 'SUMMARY_FAILED')
+  const running = await service.create('report-running-safe')
+  const completed = await service.create('report-completed-safe')
+  await service.complete(completed.id, { markdown: 'done' })
+  const invalidExpiry = await service.create('report-invalid-expiry-safe')
+  await service.fail(invalidExpiry.id, 'SUMMARY_FAILED')
+  const invalidManifest = await readManifest(invalidExpiry.path)
+  await writeFile(join(invalidExpiry.path, 'manifest.json'), JSON.stringify({
+    ...invalidManifest,
+    expiresAt: 'not-a-date'
+  }))
+
+  currentTime += 1001
+  const result = await service.pruneExpired()
+  assert.deepEqual(result, { removed: 2, bytes: 5 })
+  assert.equal(existsSync(expired.path), false)
+  assert.equal(existsSync(current.path), false)
+  assert.equal(existsSync(running.path), true)
+  assert.equal(existsSync(completed.path), true)
+  assert.equal(existsSync(invalidExpiry.path), true)
+})
+
 function temporaryPathFragment(root) {
   return basename(join(root, '..'))
 }

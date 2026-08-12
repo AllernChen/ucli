@@ -244,3 +244,19 @@ test('orchestrator merges summary settings compatibly and owns scheduler startup
   assert.match(source, /failedWorkspaceRetentionDays:\s*candidate\.failedWorkspaceRetentionDays/)
   assert.match(source, /mapConcurrency:\s*candidate\.mapConcurrency/)
 })
+
+test('lowering the cache quota prunes before automatic scheduler work', () => {
+  const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+  const save = source.indexOf('async function saveSummarySettingsPatch')
+  const quotaChanged = source.indexOf('cacheMaxBytes', save)
+  const prune = source.indexOf('await summaryCacheService?.prune()', quotaChanged)
+  const tick = source.indexOf('await summaryScheduler?.tick()', prune)
+  assert.ok(save >= 0 && quotaChanged > save && prune > quotaChanged && tick > prune)
+})
+
+test('orchestrator retains failed-workspace cleanup on the dynamic workspace facade', () => {
+  const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+  const facade = source.indexOf('summaryWorkspaceService = Object.fromEntries')
+  const cacheFactory = source.indexOf('const cacheForSettings', facade)
+  assert.match(source.slice(facade, cacheFactory), /['"]clearFailed['"]/)
+})

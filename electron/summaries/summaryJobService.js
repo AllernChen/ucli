@@ -87,10 +87,11 @@ export function createSummaryJobService({
   if (typeof snapshotUsage !== 'function') throw new TypeError('snapshotUsage is required')
   if (!pipeline?.run) throw new TypeError('pipeline.run is required')
 
-  repository.interruptStale()
   const listeners = new Set()
   const jobs = new Map()
   let queue = Promise.resolve()
+  let shuttingDown = false
+  let shutdownPromise = null
 
   const publish = (report, progress = null) => {
     for (const listener of listeners) {
@@ -275,8 +276,38 @@ export function createSummaryJobService({
     }
   }
 
+  const shutdown = () => {
+    if (shutdownPromise) return shutdownPromise
+    shuttingDown = true
+    const active = [...jobs.values()]
+    for (const job of active) {
+      const report = repository.get(job.reportId)
+      if (!report || terminal(report.status)) continue
+      job.cancelled = true
+      job.controller.abort()
+      const cancelled = update(job.reportId, {
+        status: 'cancelled',
+        errorText: 'SUMMARY_CANCELLED'
+      })
+      if (['queued', 'awaiting_confirmation'].includes(report.status)) finish(job, cancelled)
+    }
+    shutdownPromise = Promise.allSettled(active.map(async job => {
+      await job.done.promise
+      if (job.workspace) {
+        await settleWorkspaceUpdates(job)
+        await workspaceService.fail(job.reportId, 'SUMMARY_CANCELLED').catch(() => {})
+      }
+    })).then(() => undefined)
+    return shutdownPromise
+  }
+
   return {
     generate(input) {
+      if (shuttingDown) {
+        throw Object.assign(new Error('Summary service is shutting down'), {
+          code: 'SUMMARY_SERVICE_SHUTTING_DOWN'
+        })
+      }
       const request = { ...input, timezone: input.timezone || defaultTimezone }
       const queued = repository.createQueued(request)
       const job = {
@@ -341,6 +372,8 @@ export function createSummaryJobService({
       if (typeof listener !== 'function') throw new TypeError('listener is required')
       listeners.add(listener)
       return () => listeners.delete(listener)
-    }
+    },
+
+    shutdown
   }
 }

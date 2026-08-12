@@ -267,5 +267,30 @@ export function createSummaryWorkspaceService({
     return { removed }
   }
 
-  return { create, writeArtifact, markStage, complete, fail, recover, remove, usage, clearFailed }
+  async function pruneExpired() {
+    let removed = 0
+    let bytes = 0
+    const currentTime = now()
+    for (const reportId of await listWorkspaceIds()) {
+      try {
+        const manifest = await readManifest(workspacePath(root, reportId))
+        const expiresAt = Date.parse(manifest?.expiresAt)
+        if (!['failed', 'interrupted'].includes(manifest?.status) ||
+          typeof manifest.expiresAt !== 'string' || !Number.isFinite(expiresAt) ||
+          expiresAt > currentTime) continue
+        const retainedBytes = Number.isSafeInteger(manifest.bytes) && manifest.bytes >= 0 ? manifest.bytes : 0
+        await remove(reportId)
+        removed += 1
+        bytes = Math.min(Number.MAX_SAFE_INTEGER, bytes + retainedBytes)
+      } catch {
+        // Unknown, corrupt, unsafe, or transient entries are retained.
+      }
+    }
+    return { removed, bytes }
+  }
+
+  return {
+    create, writeArtifact, markStage, complete, fail, recover, remove, usage,
+    clearFailed, pruneExpired
+  }
 }

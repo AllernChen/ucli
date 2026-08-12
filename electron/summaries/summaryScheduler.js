@@ -165,6 +165,8 @@ export function createSummaryScheduler({
   listReports,
   generate,
   cancel = () => false,
+  maintain = () => ({}),
+  onMaintenanceError = () => {},
   now = Date.now,
   timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
   setIntervalFn = setInterval,
@@ -180,9 +182,26 @@ export function createSummaryScheduler({
   let stopped = false
   const scheduled = new Set()
   const activeJobs = new Map()
+  let lastMaintenanceDay = null
+
+  const runMaintenance = async () => {
+    const day = new Date(now()).toISOString().slice(0, 10)
+    if (lastMaintenanceDay === day) return null
+    lastMaintenanceDay = day
+    try {
+      return await maintain()
+    } catch (error) {
+      const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{2,80}$/.test(error.code)
+        ? error.code
+        : 'SUMMARY_MAINTENANCE_FAILED'
+      try { onMaintenanceError({ phase: 'daily-maintenance', code }) } catch { /* log isolation */ }
+      return null
+    }
+  }
 
   const runTick = async () => {
     if (stopped) return []
+    await runMaintenance()
     const settings = normalizeSummarySettings(await getSettings())
     if (!settings.autoEnabled || !settings.defaultExecutorId ||
       !settings.firstEnableDisclosureAcceptedAt) return []

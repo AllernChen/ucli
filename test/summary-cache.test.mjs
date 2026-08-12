@@ -300,3 +300,23 @@ test('evict drops unsafe metadata without touching an external file', async t =>
   assert.equal(await readFile(outside, 'utf8'), 'keep')
   assert.equal(repository.getSummaryCacheEntry(key), null)
 })
+
+test('verify removes corrupt metadata best-effort and returns only bounded counters', async t => {
+  const { root, repository, cache } = await harness(t)
+  const keys = ['a', 'b', 'c'].map(prompt => cacheKeyForInvocation({ ...invocation, prompt }))
+  await cache.put({ key: keys[0], kind: 'map', value: { ok: true } })
+  await cache.put({ key: keys[1], kind: 'final', value: { ok: true } })
+  const broken = repository.getSummaryCacheEntry(keys[1])
+  await writeFile(join(root, 'cache', ...broken.relativePath.split('/')), '{broken')
+  repository.upsertSummaryCacheEntry({
+    key: keys[2], kind: 'project', relativePath: `project/${keys[2].slice(7, 9)}/${keys[2].slice(7)}.json`,
+    sizeBytes: 12, createdAt: 1, lastAccessedAt: 1, expiresAt: null
+  })
+
+  const result = await cache.verify()
+  assert.deepEqual(result, { checked: 3, removed: 2, bytes: 33 })
+  assert.deepEqual(Object.keys(result).sort(), ['bytes', 'checked', 'removed'])
+  assert.equal(repository.getSummaryCacheEntry(keys[0]) !== null, true)
+  assert.equal(repository.getSummaryCacheEntry(keys[1]), null)
+  assert.equal(repository.getSummaryCacheEntry(keys[2]), null)
+})
