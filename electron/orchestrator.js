@@ -53,6 +53,7 @@ import { createSummaryRunner } from './summaries/summaryRunner.js'
 import { createSummaryCacheService } from './summaries/summaryCacheService.js'
 import { resolveSummaryStorageRoot, resolveSummaryChild } from './summaries/summaryStoragePaths.js'
 import { createSummaryWorkspaceService } from './summaries/summaryWorkspaceService.js'
+import { SUMMARY_THEME_IDS } from './summaries/summaryThemeCatalog.js'
 import {
   createSummaryOperationalLogEntry,
   safeSummaryErrorCode
@@ -104,7 +105,8 @@ const SUMMARY_GENERATE_FIELDS = new Set([
 ])
 const SUMMARY_CONFIRM_FIELDS = new Set(['reportId', 'confirm', 'confirmationCallLimit'])
 const SUMMARY_EXPORT_FIELDS = new Set(['reportId', 'style', 'executorId', 'profileId', 'model'])
-const SUMMARY_STYLE_FIELDS = new Set(['mode', 'requirement'])
+const SUMMARY_STYLE_FIELDS = new Set(['mode', 'themeId', 'requirement'])
+const SUMMARY_HTML_THEME_IDS = new Set(SUMMARY_THEME_IDS)
 const SUMMARY_PERIODS = new Set(['day', 'week', 'month', 'quarter', 'year'])
 const SUMMARY_EXECUTORS = new Set(['claude', 'codex', 'opencode', 'ucode'])
 const SUMMARY_ERROR_MESSAGES = Object.freeze({
@@ -254,11 +256,18 @@ function validateSummaryExport(value, { html = false } = {}) {
   const result = { ...summaryObject(value, fields), reportId: validateSummaryId(value.reportId) }
   if (html) {
     const style = { ...summaryObject(result.style, SUMMARY_STYLE_FIELDS) }
-    if (!['light', 'dark', 'custom'].includes(style.mode)) throw invalidSummaryIpc()
-    if (style.mode === 'custom') {
+    const styleKeys = Object.keys(style)
+    if (style.mode === 'theme') {
+      if (styleKeys.length !== 2 || !styleKeys.includes('themeId') || !SUMMARY_HTML_THEME_IDS.has(style.themeId)) {
+        throw invalidSummaryIpc()
+      }
+    } else if (style.mode === 'custom' || style.mode === 'ai-custom') {
+      if (styleKeys.length !== 2 || !styleKeys.includes('requirement')) throw invalidSummaryIpc()
       if (typeof style.requirement !== 'string' || !style.requirement.trim() ||
         style.requirement.length > 1000 || style.requirement.includes('\0')) throw invalidSummaryIpc()
-    } else if (style.requirement !== undefined) {
+    } else if (style.mode === 'light' || style.mode === 'dark') {
+      if (styleKeys.length !== 1) throw invalidSummaryIpc()
+    } else {
       throw invalidSummaryIpc()
     }
     if (result.executorId !== undefined && result.executorId !== null && !SUMMARY_EXECUTORS.has(result.executorId)) {

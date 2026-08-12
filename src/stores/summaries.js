@@ -179,7 +179,7 @@ export const useSummariesStore = defineStore('summaries', {
       return ipc.exportSummaryMarkdown({ reportId })
     },
 
-    exportHtml(reportId, style = { mode: 'light' }) {
+    exportHtml(reportId, style = { mode: 'theme', themeId: 'executive' }) {
       return ipc.exportSummaryHtml({ reportId, style })
     },
 

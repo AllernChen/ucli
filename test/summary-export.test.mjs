@@ -157,7 +157,7 @@ test('Markdown copy and export use only persisted text, a sanitized filename, an
   }
 })
 
-test('light, dark, and custom HTML requests contain only persisted Markdown and style data', async () => {
+test('AI custom HTML requests contain only persisted Markdown and style data', async () => {
   const calls = []
   const service = createReportExportService({
     repository: repository(),
@@ -166,12 +166,11 @@ test('light, dark, and custom HTML requests contain only persisted Markdown and 
     writeUtf8: async () => {}
   })
   for (const style of [
-    { mode: 'light' },
-    { mode: 'dark' },
+    { mode: 'ai-custom', requirement: 'compact engineering layout' },
     { mode: 'custom', requirement: '深蓝色科技风，重点数字使用青色' }
   ]) await service.exportHtml({ reportId: 'report-1', style })
 
-  assert.equal(calls.length, 3)
+  assert.equal(calls.length, 2)
   for (const call of calls) {
     assert.equal(call.executorId, 'codex')
     assert.equal(call.profileId, 'profile-1')
@@ -181,8 +180,73 @@ test('light, dark, and custom HTML requests contain only persisted Markdown and 
     assert.match(call.prompt, /固定左侧导航/)
     assert.doesNotMatch(call.prompt, /report-1|profile-1|gpt-5/)
   }
-  assert.match(calls[1].prompt, /"mode":"dark"/)
-  assert.match(calls[2].prompt, /深蓝色科技风，重点数字使用青色/)
+  assert.match(calls[0].prompt, /compact engineering layout/)
+  assert.match(calls[1].prompt, /深蓝色科技风，重点数字使用青色/)
+})
+
+test('built-in themes export locally without invoking the runner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-theme-export-'))
+  let runnerCalls = 0
+  try {
+    for (const themeId of ['executive', 'engineering', 'timeline', 'dashboard', 'print']) {
+      const destination = join(root, `${themeId}.html`)
+      const service = createReportExportService({
+        repository: repository(report({ usageSnapshot: { totals: { inputTokens: 10, outputTokens: 2, turns: 1 } } })),
+        runner: { async run() { runnerCalls += 1; throw new Error('must not run') } },
+        showSaveDialog: async () => ({ canceled: false, filePath: destination })
+      })
+      const result = await service.exportHtml({ reportId: 'report-1', style: { mode: 'theme', themeId } })
+      assert.deepEqual(result, { canceled: false, filePath: destination, generation: 'local' })
+      assert.match(await readFile(destination, 'utf8'), new RegExp(`data-summary-theme="${themeId}"`))
+    }
+    assert.equal(runnerCalls, 0)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('unknown themes fail before the save dialog and a canceled theme does no rendering work', async () => {
+  let dialogs = 0
+  let writes = 0
+  let runners = 0
+  const service = createReportExportService({
+    repository: repository(),
+    runner: { async run() { runners += 1 } },
+    showSaveDialog: async () => { dialogs += 1; return { canceled: true } },
+    writeUtf8: async () => { writes += 1 }
+  })
+  await assert.rejects(
+    service.exportHtml({ reportId: 'report-1', style: { mode: 'theme', themeId: 'unknown' } }),
+    error => error.code === 'INVALID_SUMMARY_EXPORT_STYLE'
+  )
+  assert.equal(dialogs, 0)
+  assert.deepEqual(await service.exportHtml({
+    reportId: 'report-1', style: { mode: 'theme', themeId: 'executive' }
+  }), { canceled: true, generation: 'local' })
+  assert.deepEqual({ dialogs, writes, runners }, { dialogs: 1, writes: 0, runners: 0 })
+})
+
+test('legacy presets map to local themes while custom modes remain one AI call', async () => {
+  const calls = []
+  const writes = []
+  const service = createReportExportService({
+    repository: repository(),
+    runner: { async run(options) { calls.push(options); return { value: safeHtml(), usage: {} } } },
+    showSaveDialog: async () => ({ canceled: false, filePath: `chosen-${writes.length}.html` }),
+    writeUtf8: async (filePath, content) => { writes.push([filePath, content]) }
+  })
+  const light = await service.exportHtml({ reportId: 'report-1', style: { mode: 'light' } })
+  const dark = await service.exportHtml({ reportId: 'report-1', style: { mode: 'dark' } })
+  const custom = await service.exportHtml({ reportId: 'report-1', style: { mode: 'custom', requirement: '杂志排版' } })
+  const aiCustom = await service.exportHtml({ reportId: 'report-1', style: { mode: 'ai-custom', requirement: '瑞士排版' } })
+  assert.deepEqual([light.generation, dark.generation, custom.generation, aiCustom.generation], [
+    'local', 'local', 'ai', 'ai'
+  ])
+  assert.match(writes[0][1], /data-summary-theme="executive"/)
+  assert.match(writes[1][1], /data-summary-theme="engineering"/)
+  assert.equal(calls.length, 2)
+  assert.match(calls[0].prompt, /杂志排版/)
+  assert.match(calls[1].prompt, /瑞士排版/)
 })
 
 test('canceling the HTML destination returns before invoking the AI runner', async () => {
@@ -195,7 +259,7 @@ test('canceling the HTML destination returns before invoking the AI runner', asy
 
   assert.deepEqual(
     await service.exportHtml({ reportId: 'report-1', style: { mode: 'light' } }),
-    { canceled: true }
+    { canceled: true, generation: 'local' }
   )
   assert.equal(calls, 0)
 })
@@ -214,7 +278,7 @@ test('HTML export requests a raw HTML response without a JSON schema wrapper', a
     writeUtf8: async () => {}
   })
 
-  await service.exportHtml({ reportId: 'report-1', style: { mode: 'light' } })
+  await service.exportHtml({ reportId: 'report-1', style: { mode: 'ai-custom', requirement: 'clean' } })
 
   assert.equal(call.outputMode, 'text')
   assert.equal(Object.hasOwn(call, 'schema'), false)
@@ -237,7 +301,7 @@ test('HTML runner failures become safe export errors and use the extended genera
   })
 
   await assert.rejects(
-    service.exportHtml({ reportId: 'report-1', style: { mode: 'light' } }),
+    service.exportHtml({ reportId: 'report-1', style: { mode: 'ai-custom', requirement: 'clean' } }),
     error => error.code === 'SUMMARY_HTML_GENERATION_FAILED' &&
       error.message === 'AI CLI failed while generating HTML' &&
       !JSON.stringify(error).includes('private-secret')
@@ -258,7 +322,7 @@ test('HTML profile credential failures remain actionable without leaking profile
     showSaveDialog: async () => ({ canceled: false, filePath: 'chosen.html' })
   })
   await assert.rejects(
-    service.exportHtml({ reportId: 'report-1', style: { mode: 'dark' } }),
+    service.exportHtml({ reportId: 'report-1', style: { mode: 'ai-custom', requirement: 'clean' } }),
     error => error.code === 'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE' &&
       !error.message.includes('private')
   )
@@ -277,7 +341,7 @@ test('HTML runner profile failures remain profile errors instead of generic gene
     showSaveDialog: async () => ({ canceled: false, filePath: 'chosen.html' })
   })
   await assert.rejects(
-    service.exportHtml({ reportId: 'report-1', style: { mode: 'light' } }),
+    service.exportHtml({ reportId: 'report-1', style: { mode: 'ai-custom', requirement: 'clean' } }),
     error => error.code === 'SUMMARY_PROFILE_UNAVAILABLE'
   )
 })
@@ -298,7 +362,7 @@ test('HTML export sanitizes a single draft and writes it without a repair round-
   })
   try {
     const result = await service.exportHtml({
-      reportId: 'report-1', style: { mode: 'light' },
+      reportId: 'report-1', style: { mode: 'ai-custom', requirement: 'clean' },
       executorId: 'claude', profileId: null, model: 'sonnet'
     })
     assert.equal(result.canceled, false)
@@ -327,7 +391,7 @@ test('an empty AI CLI response surfaces a typed error and never writes the desti
   })
   try {
     await assert.rejects(
-      service.exportHtml({ reportId: 'report-1', style: { mode: 'dark' } }),
+      service.exportHtml({ reportId: 'report-1', style: { mode: 'ai-custom', requirement: 'clean' } }),
       error => error.code === 'SUMMARY_HTML_INVALID'
     )
     assert.equal(calls, 1)

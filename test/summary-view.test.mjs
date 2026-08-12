@@ -207,7 +207,8 @@ test('summary workspace components cover generation, safe reading, history, retr
     '../src/components/summaries/SummaryGenerateDialog.vue',
     '../src/components/summaries/SummaryReportView.vue',
     '../src/components/summaries/SummaryHistory.vue',
-    '../src/components/summaries/WorkSummaryPanel.vue'
+    '../src/components/summaries/WorkSummaryPanel.vue',
+    '../src/components/summaries/SummaryHtmlStyleDialog.vue'
   ]
   const sources = files.map(file => readFileSync(new URL(file, import.meta.url), 'utf8'))
   for (const [index, source] of sources.entries()) {
@@ -224,19 +225,22 @@ test('summary workspace components cover generation, safe reading, history, retr
   assert.match(all, /exportingHtml\.value\s*=\s*true/)
   assert.match(all, /exportingHtml\.value\s*=\s*false/)
   assert.match(all, /HTML\s*已导出/)
-  for (const text of ['浅色', '深色', '自定义', '自定义风格要求', '将再次调用所选 AI CLI']) {
+  for (const themeId of ['executive', 'engineering', 'timeline', 'dashboard', 'print']) {
+    assert.match(all, new RegExp(themeId))
+  }
+  assert.match(all, /SUMMARY_THEMES/)
+  assert.match(all, /mode:\s*['"]theme['"]/)
+  assert.match(all, /mode:\s*['"]ai-custom['"]/)
+  for (const text of ['AI 自定义', '较慢', '产生 AI 用量', '即时生成']) {
     assert.match(all, new RegExp(text))
   }
-  assert.match(all, /v-model:value="htmlStyle\.mode"/)
-  assert.match(all, /htmlStyle\.mode\s*===\s*['"]custom['"]/)
   assert.match(all, /:confirm-loading="exportingHtml"/)
-  assert.match(all, /v-if="exportingHtml"[\s\S]{0,180}正在生成 HTML/)
-  assert.match(all, /requirement:\s*htmlStyle\.requirement\.trim\(\)/)
+  assert.match(all, /if\s*\(exportingHtml\.value\)\s*return/)
+  assert.match(all, /themeId:\s*['"]executive['"]/)
   assert.match(all, /@confirm="\$emit\('delete-report', report\.id\)"/)
   assert.match(all, /summaries\.deleteReport/)
   assert.match(all, /MarkdownIt\(\{\s*html:\s*false/)
   assert.match(all, /DOMPurify\.sanitize/)
-  assert.match(all, /mode:\s*['"]light['"]/)
   assert.match(all, /failed|interrupted/)
 })
 

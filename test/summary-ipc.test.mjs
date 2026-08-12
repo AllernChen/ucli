@@ -108,6 +108,38 @@ test('HTML runner failures remain actionable without exposing provider output', 
   assert.doesNotMatch(JSON.stringify(response), /secret|Bearer|stderr/i)
 })
 
+test('HTML export IPC accepts the strict theme and AI custom unions plus legacy presets', async () => {
+  const handlers = new Map()
+  const calls = []
+  registerSummaryIpc({
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    service: { exportHtml: value => { calls.push(value); return value.style } }
+  })
+  const invoke = style => handlers.get('summary:export-html')({}, { reportId: 'report-1', style })
+  for (const style of [
+    { mode: 'theme', themeId: 'dashboard' },
+    { mode: 'ai-custom', requirement: 'Swiss layout' },
+    { mode: 'light' },
+    { mode: 'dark' },
+    { mode: 'custom', requirement: 'legacy layout' }
+  ]) assert.equal((await invoke(style)).ok, true)
+
+  for (const style of [
+    { mode: 'theme', themeId: 'unknown' },
+    { mode: 'theme', themeId: 'executive', requirement: 'extra' },
+    { mode: 'theme', themeId: 'executive', path: 'C:\\secret' },
+    { mode: 'ai-custom', requirement: '' },
+    { mode: 'ai-custom', requirement: 'clean', themeId: 'print' },
+    { mode: 'light', requirement: 'extra' }
+  ]) {
+    const response = await invoke(style)
+    assert.equal(response.ok, false)
+    assert.equal(response.error.code, 'INVALID_SUMMARY_IPC')
+    assert.doesNotMatch(JSON.stringify(response), /secret/i)
+  }
+  assert.equal(calls.length, 5)
+})
+
 test('preload exposes named summary calls and one removable progress listener', async () => {
   const source = readFileSync(new URL('../electron/preload.js', import.meta.url), 'utf8')
     .replace("import { contextBridge, ipcRenderer } from 'electron'", '')
