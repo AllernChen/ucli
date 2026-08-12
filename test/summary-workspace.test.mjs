@@ -235,6 +235,40 @@ test('pruneExpired removes only expired failed workspaces and reports bounded by
   assert.equal(existsSync(invalidExpiry.path), true)
 })
 
+test('pruneCompleted uses stable LRU until the shared budget and protects active workspaces', async t => {
+  let currentTime = Date.parse('2026-08-12T00:00:00.000Z')
+  const { service } = await withWorkspace(t, { now: () => currentTime })
+  const oldest = await service.create('report-completed-a')
+  await service.complete(oldest.id, { markdown: '1234' })
+  const protectedWorkspace = await service.create('report-completed-b')
+  await service.complete(protectedWorkspace.id, { markdown: '1234' })
+  currentTime += 1
+  const newest = await service.create('report-completed-c')
+  await service.complete(newest.id, { markdown: '1234' })
+  const running = await service.create('report-running-budget')
+  await service.writeArtifact(running.id, 'input/evidence.txt', '12')
+  const failed = await service.create('report-failed-budget')
+  await service.writeArtifact(failed.id, 'input/evidence.txt', '12')
+  await service.fail(failed.id, 'SUMMARY_FAILED')
+  const corruptCompleted = await service.create('report-completed-corrupt')
+  await service.complete(corruptCompleted.id, { markdown: '1234' })
+  const corruptManifest = await readManifest(corruptCompleted.path)
+  await writeFile(join(corruptCompleted.path, 'manifest.json'), JSON.stringify({
+    ...corruptManifest,
+    updatedAt: 'not-a-date'
+  }))
+
+  assert.deepEqual(await service.pruneCompleted({
+    maxBytes: 10,
+    isProtected: reportId => reportId === protectedWorkspace.id
+  }), { removed: 2, bytes: 12 })
+  assert.equal(existsSync(oldest.path), false)
+  assert.equal(existsSync(newest.path), false)
+  for (const workspace of [protectedWorkspace, running, failed, corruptCompleted]) {
+    assert.equal(existsSync(workspace.path), true)
+  }
+})
+
 function temporaryPathFragment(root) {
   return basename(join(root, '..'))
 }

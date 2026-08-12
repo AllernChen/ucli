@@ -368,6 +368,10 @@ export function createSummaryJobService({
         : null
     },
 
+    isActive(reportId) {
+      return jobs.has(reportId)
+    },
+
     subscribe(listener) {
       if (typeof listener !== 'function') throw new TypeError('listener is required')
       listeners.add(listener)

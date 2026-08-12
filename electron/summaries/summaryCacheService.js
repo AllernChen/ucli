@@ -218,7 +218,10 @@ export function createSummaryCacheService({
     return operation
   }
 
-  async function prune() {
+  async function prune(maxBytes = quotaBytes) {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+      throw cacheError('SUMMARY_CACHE_QUOTA_INVALID')
+    }
     const entries = repository.listSummaryCacheEntries()
     let bytes = entries.reduce((total, entry) => total + entry.sizeBytes, 0)
     const sorted = [...entries].sort((left, right) =>
@@ -228,10 +231,16 @@ export function createSummaryCacheService({
     )
     const removed = []
     for (const entry of sorted) {
-      if (bytes <= quotaBytes) break
+      if (bytes <= maxBytes) break
       let target = null
       try { target = targetFor(root, entry.relativePath) } catch { /* index only */ }
-      if (target) await rm(target, { force: true }).catch(() => {})
+      if (target) {
+        try {
+          await rm(target, { force: true })
+        } catch {
+          continue
+        }
+      }
       removed.push(entry.key)
       bytes -= entry.sizeBytes
     }

@@ -693,3 +693,15 @@ test('shutdown compacts an awaiting-confirmation workspace instead of leaving it
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('isActive protects queued work only until the job reaches a terminal state', async () => {
+  const { service, repository } = createHarness({
+    pipeline: { run: async () => pipelineResult('done') }
+  })
+  const job = service.generate(request())
+  assert.equal(service.isActive(job.reportId), true)
+  await job.completion
+  assert.equal(repository.get(job.reportId).status, 'completed')
+  assert.equal(service.isActive(job.reportId), false)
+  assert.equal(service.isActive('missing'), false)
+})

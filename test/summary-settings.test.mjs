@@ -249,9 +249,30 @@ test('lowering the cache quota prunes before automatic scheduler work', () => {
   const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
   const save = source.indexOf('async function saveSummarySettingsPatch')
   const quotaChanged = source.indexOf('cacheMaxBytes', save)
-  const prune = source.indexOf('await summaryCacheService?.prune()', quotaChanged)
-  const tick = source.indexOf('await summaryScheduler?.tick()', prune)
-  assert.ok(save >= 0 && quotaChanged > save && prune > quotaChanged && tick > prune)
+  const maintain = source.indexOf('await summaryStorageMaintenance?.()', quotaChanged)
+  const tick = source.indexOf('await summaryScheduler?.tick()', maintain)
+  assert.ok(save >= 0 && quotaChanged > save && maintain > quotaChanged && tick > maintain)
+  const quotaGuard = source.lastIndexOf('if (summarySettings.', maintain)
+  assert.match(source.slice(quotaGuard, maintain), /if \(summarySettings\.cacheMaxBytes < previousCacheMaxBytes\)/)
+})
+
+test('startup applies the shared workspace quota even when result caching is disabled', () => {
+  const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+  const startup = source.indexOf('maintainCache: async () =>')
+  const interrupt = source.indexOf('interruptStaleJobs:', startup)
+  const block = source.slice(startup, interrupt)
+  assert.match(block, /summaryStorageMaintenance\(\)/)
+  assert.doesNotMatch(block, /if \(!summarySettings\.cacheEnabled\) return/)
+})
+
+test('shared quota maintenance counts retained cache files even when cache reuse is disabled', () => {
+  const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+  const maintenance = source.indexOf('summaryStorageMaintenance = async () =>')
+  const scheduler = source.indexOf('summaryScheduler = createSummaryScheduler', maintenance)
+  const block = source.slice(maintenance, scheduler)
+  assert.match(block, /pruneCache:\s*maxBytes => summaryCacheService\.prune\(maxBytes\)/)
+  assert.match(block, /getCacheUsage:\s*\(\) => summaryCacheService\.stats\(\)/)
+  assert.doesNotMatch(block, /cacheEnabled/)
 })
 
 test('orchestrator retains failed-workspace cleanup on the dynamic workspace facade', () => {

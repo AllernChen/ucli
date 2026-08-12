@@ -53,7 +53,7 @@ import { createSummaryRunner } from './summaries/summaryRunner.js'
 import { createSummaryCacheService } from './summaries/summaryCacheService.js'
 import { resolveSummaryStorageRoot, resolveSummaryChild } from './summaries/summaryStoragePaths.js'
 import { createSummaryWorkspaceService } from './summaries/summaryWorkspaceService.js'
-import { runSummaryMaintenance, runSummaryStartupLifecycle } from './startupLifecycle.js'
+import { runSummaryMaintenance, runSummaryStartupLifecycle, safeStartupFailure } from './startupLifecycle.js'
 import { SUMMARY_THEME_IDS } from './summaries/summaryThemeCatalog.js'
 import {
   createSummaryOperationalLogEntry,
@@ -428,6 +428,23 @@ export function registerSummaryIpc({ ipcMain, service }) {
     service.clearCache(validateSummaryCacheClear(value))))
 }
 
+export async function deleteSummaryReportAndWorkspace(reportId, {
+  repository, jobService, workspaceService, onEvent = () => {}
+}) {
+  const result = await repository.delete(reportId)
+  if (!jobService?.isActive(reportId)) {
+    try {
+      await workspaceService?.remove(reportId)
+    } catch (error) {
+      const typed = error?.code
+        ? safeStartupFailure('workspace-delete', error)
+        : { phase: 'workspace-delete', code: 'SUMMARY_WORKSPACE_DELETE_FAILED' }
+      try { onEvent(typed) } catch { /* logging isolation */ }
+    }
+  }
+  return result
+}
+
 function summaryUsageGranularity(periodType) {
   if (periodType === 'day') return 'hour'
   if (periodType === 'week' || periodType === 'month') return 'day'
@@ -531,6 +548,7 @@ export function createOrchestrator() {
   let summaryRepository = null
   let summaryJobService = null
   let summaryScheduler = null
+  let summaryStorageMaintenance = null
   let summaryExportService = null
   let summaryWorkspaceService = null
   let summaryCacheService = null
@@ -655,7 +673,7 @@ export function createOrchestrator() {
       failedRetentionMs: summarySettings.failedWorkspaceRetentionDays * 24 * 60 * 60 * 1000
     })
     summaryWorkspaceService = Object.fromEntries(
-      ['create', 'writeArtifact', 'markStage', 'complete', 'fail', 'recover', 'remove', 'usage', 'clearFailed', 'pruneExpired']
+      ['create', 'writeArtifact', 'markStage', 'complete', 'fail', 'recover', 'remove', 'usage', 'clearFailed', 'pruneExpired', 'pruneCompleted']
         .map(method => [method, (...args) => workspaceForSettings()[method](...args)])
     )
     const cacheForSettings = () => createSummaryCacheService({
@@ -727,39 +745,46 @@ export function createOrchestrator() {
       }
     })
     scheduleFlush()
+    summaryStorageMaintenance = async () => {
+      const result = await runSummaryMaintenance({
+        quotaBytes: summarySettings.cacheMaxBytes,
+        pruneExpiredWorkspaces: () => summaryWorkspaceService.pruneExpired(),
+        getWorkspaceUsage: () => summaryWorkspaceService.usage(),
+        pruneCache: maxBytes => summaryCacheService.prune(maxBytes),
+        getCacheUsage: () => summaryCacheService.stats(),
+        pruneCompletedWorkspaces: maxBytes => summaryWorkspaceService.pruneCompleted({
+          maxBytes,
+          isProtected: reportId => summaryJobService.isActive(reportId)
+        }),
+        onEvent: event => log('summary-maintenance', event)
+      })
+      summaryCacheLastPrunedAt = Date.now()
+      log('summary-maintenance', {
+        phase: 'daily-maintenance',
+        failedWorkspacesRemoved: result.workspaces?.removed || 0,
+        workspaceBytesRemoved: result.workspaces?.bytes || 0,
+        cacheEntriesRemoved: result.cache?.removed || 0,
+        cacheBytes: result.cache?.bytes || 0,
+        completedWorkspacesRemoved: result.completed?.removed || 0,
+        totalBytes: result.total?.bytes || 0,
+        overQuotaBytes: result.total?.overQuotaBytes || 0
+      })
+      return result
+    }
     summaryScheduler = createSummaryScheduler({
       getSettings: () => summarySettings,
       listReports: filters => summaryRepository.list(filters),
       generate: request => summaryJobService.generate(request),
       cancel: reportId => summaryJobService.cancel(reportId),
-      maintain: async () => {
-        const result = await runSummaryMaintenance({
-          pruneExpiredWorkspaces: () => summaryWorkspaceService.pruneExpired(),
-          pruneCache: () => summarySettings.cacheEnabled
-            ? summaryCacheService.prune()
-            : { removed: 0, bytes: 0 },
-          onEvent: event => log('summary-maintenance', event)
-        })
-        summaryCacheLastPrunedAt = Date.now()
-        log('summary-maintenance', {
-          phase: 'daily-maintenance',
-          failedWorkspacesRemoved: result.workspaces?.removed || 0,
-          workspaceBytesRemoved: result.workspaces?.bytes || 0,
-          cacheEntriesRemoved: result.cache?.removed || 0,
-          cacheBytes: result.cache?.bytes || 0
-        })
-        return result
-      },
+      maintain: () => summaryStorageMaintenance(),
       onMaintenanceError: event => log('summary-maintenance', event)
     })
     await runSummaryStartupLifecycle({
       recoverWorkspaces: () => summaryWorkspaceService.recover(),
       maintainCache: async () => {
-        if (!summarySettings.cacheEnabled) return
-        const verified = await cache.verify()
-        const pruned = await cache.prune()
-        summaryCacheLastPrunedAt = Date.now()
-        return { verified, pruned }
+        const verified = summarySettings.cacheEnabled ? await cache.verify() : null
+        const maintained = await summaryStorageMaintenance()
+        return { verified, maintained }
       },
       interruptStaleJobs: () => summaryRepository.interruptStale(),
       startScheduler: () => summaryScheduler.start(),
@@ -2291,9 +2316,8 @@ export function createOrchestrator() {
       db.setSummarySettings(summarySettings)
       scheduleFlush()
     }
-    if (summarySettings.cacheEnabled && summarySettings.cacheMaxBytes < previousCacheMaxBytes) {
-      await summaryCacheService?.prune()
-      summaryCacheLastPrunedAt = Date.now()
+    if (summarySettings.cacheMaxBytes < previousCacheMaxBytes) {
+      await summaryStorageMaintenance?.()
     }
     await summaryScheduler?.tick()
     return summarySettings
@@ -2361,7 +2385,12 @@ export function createOrchestrator() {
         },
         async deleteReport(reportId) {
           if (!summaryRepository) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
-          const result = await summaryRepository.delete(reportId)
+          const result = await deleteSummaryReportAndWorkspace(reportId, {
+            repository: summaryRepository,
+            jobService: summaryJobService,
+            workspaceService: summaryWorkspaceService,
+            onEvent: event => log('summary-maintenance', event)
+          })
           scheduleFlush()
           return result
         },

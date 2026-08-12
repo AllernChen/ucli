@@ -289,8 +289,43 @@ export function createSummaryWorkspaceService({
     return { removed, bytes }
   }
 
+  async function pruneCompleted({ maxBytes, isProtected = () => false } = {}) {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || typeof isProtected !== 'function') {
+      throw Object.assign(new Error('Invalid workspace budget'), { code: 'SUMMARY_WORKSPACE_QUOTA_INVALID' })
+    }
+    const entries = []
+    let bytes = 0
+    for (const reportId of await listWorkspaceIds()) {
+      try {
+        const manifest = await readManifest(workspacePath(root, reportId))
+        const entryBytes = Number.isSafeInteger(manifest.bytes) && manifest.bytes >= 0 ? manifest.bytes : 0
+        bytes = Math.min(Number.MAX_SAFE_INTEGER, bytes + entryBytes)
+        if (manifest.status === 'completed' && !isProtected(reportId)) {
+          const updatedAt = Date.parse(manifest.updatedAt)
+          if (Number.isFinite(updatedAt)) entries.push({ reportId, bytes: entryBytes, updatedAt })
+        }
+      } catch {
+        // Corrupt, unknown, unsafe, and transient workspaces are retained.
+      }
+    }
+    entries.sort((left, right) => left.updatedAt - right.updatedAt ||
+      left.reportId.localeCompare(right.reportId))
+    let removed = 0
+    for (const entry of entries) {
+      if (bytes <= maxBytes) break
+      try {
+        await remove(entry.reportId)
+        bytes = Math.max(0, bytes - entry.bytes)
+        removed += 1
+      } catch {
+        // A failed item cannot block later safe candidates.
+      }
+    }
+    return { removed, bytes }
+  }
+
   return {
     create, writeArtifact, markStage, complete, fail, recover, remove, usage,
-    clearFailed, pruneExpired
+    clearFailed, pruneExpired, pruneCompleted
   }
 }

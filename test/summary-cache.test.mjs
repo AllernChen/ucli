@@ -259,6 +259,33 @@ test('prune removes least-recent entries with stable tie breaking until within q
   })
 })
 
+test('prune accepts a smaller shared-storage budget without changing the configured quota', async t => {
+  const encodedSize = Buffer.byteLength('{"version":1,"value":{"n":1}}')
+  const { cache } = await harness(t, { now: () => 5000, quotaBytes: encodedSize * 3 })
+  for (const prompt of ['a', 'b', 'c']) {
+    await cache.put({ key: cacheKeyForInvocation({ ...invocation, prompt }), kind: 'map', value: { n: 1 } })
+  }
+  assert.deepEqual(await cache.prune(encodedSize), { removed: 2, bytes: encodedSize })
+  assert.equal((await cache.stats()).quotaBytes, encodedSize * 3)
+})
+
+test('prune retains metadata and bytes when a cache file cannot be removed', async t => {
+  const { root, repository, cache } = await harness(t, { quotaBytes: 1000 })
+  const blockedKey = cacheKeyForInvocation({ ...invocation, prompt: 'blocked' })
+  const blockedHex = blockedKey.slice(7)
+  const relativePath = `map/${blockedHex.slice(0, 2)}/${blockedHex}.json`
+  const target = join(root, 'cache', ...relativePath.split('/'))
+  await mkdir(target, { recursive: true })
+  repository.upsertSummaryCacheEntry({
+    key: blockedKey, kind: 'map', relativePath, sizeBytes: 40,
+    createdAt: 1, lastAccessedAt: 1, expiresAt: null
+  })
+
+  assert.deepEqual(await cache.prune(0), { removed: 0, bytes: 40 })
+  assert.notEqual(repository.getSummaryCacheEntry(blockedKey), null)
+  assert.equal(existsSync(target), true)
+})
+
 test('clear deletes only the guarded cache subtree and all cache metadata', async t => {
   const { root, temporaryRoot, repository, cache } = await harness(t)
   const key = cacheKeyForInvocation(invocation)

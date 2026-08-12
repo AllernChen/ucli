@@ -5,7 +5,7 @@ import test from 'node:test'
 
 register('./fixtures/electron-stub-loader.mjs', import.meta.url)
 
-const { normalizeSummaryStorageStats, registerSummaryIpc, summaryProgressPayload } = await import(`../electron/orchestrator.js?summary-ipc=${Date.now()}`)
+const { deleteSummaryReportAndWorkspace, normalizeSummaryStorageStats, registerSummaryIpc, summaryProgressPayload } = await import(`../electron/orchestrator.js?summary-ipc=${Date.now()}`)
 
 const CHANNELS = [
   'summary:get-settings', 'summary:set-settings', 'summary:list-reports',
@@ -76,6 +76,41 @@ test('summary IPC returns typed safe errors without provider output', async () =
   assert.match(source, /SUMMARY_SERVICE_UNAVAILABLE:\s*'Summary service is unavailable'/)
   assert.match(source, /SUMMARY_EXPORT_UNAVAILABLE:\s*'Summary export is unavailable'/)
   assert.doesNotMatch(source, /safeSummaryError[\s\S]{0,800}error\.message/)
+})
+
+test('report deletion keeps database success when best-effort workspace cleanup fails', async () => {
+  const events = []
+  const result = await deleteSummaryReportAndWorkspace('report-1', {
+    repository: { delete: async () => ({ deletedReportId: 'report-1', currentReportId: null }) },
+    jobService: { isActive: () => false },
+    workspaceService: { remove: async () => { throw new Error('C:\\private\\prompt') } },
+    onEvent: event => events.push(event)
+  })
+  assert.deepEqual(result, { deletedReportId: 'report-1', currentReportId: null })
+  assert.deepEqual(events, [{ phase: 'workspace-delete', code: 'SUMMARY_WORKSPACE_DELETE_FAILED' }])
+  assert.doesNotMatch(JSON.stringify(events), /private|prompt/i)
+})
+
+test('report deletion never removes a workspace while its job is active', async () => {
+  let removals = 0
+  const result = await deleteSummaryReportAndWorkspace('report-active', {
+    repository: { delete: async () => ({ deletedReportId: 'report-active', currentReportId: null }) },
+    jobService: { isActive: () => true },
+    workspaceService: { remove: async () => { removals += 1 } }
+  })
+  assert.equal(result.deletedReportId, 'report-active')
+  assert.equal(removals, 0)
+})
+
+test('successful report deletion removes its inactive derived workspace', async () => {
+  const removals = []
+  const result = await deleteSummaryReportAndWorkspace('report-completed', {
+    repository: { delete: async () => ({ deletedReportId: 'report-completed', currentReportId: 'report-old' }) },
+    jobService: { isActive: () => false },
+    workspaceService: { remove: async reportId => { removals.push(reportId) } }
+  })
+  assert.deepEqual(result, { deletedReportId: 'report-completed', currentReportId: 'report-old' })
+  assert.deepEqual(removals, ['report-completed'])
 })
 
 test('HTML runner failures remain actionable without exposing provider output', async () => {

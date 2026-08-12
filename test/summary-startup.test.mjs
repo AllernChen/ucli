@@ -91,6 +91,22 @@ test('daily maintenance isolates workspace and cache phases and exposes only saf
   assert.doesNotMatch(JSON.stringify([result, events]), /private|prompt|secret|key|path/i)
 })
 
+test('shared quota maintenance prunes expired workspaces, cache, then completed workspaces', async () => {
+  const calls = []
+  let workspaceBytes = 80
+  let cacheBytes = 50
+  const result = await runSummaryMaintenance({
+    quotaBytes: 100,
+    pruneExpiredWorkspaces: async () => { calls.push('expired'); workspaceBytes = 70; return { removed: 1, bytes: 10 } },
+    getWorkspaceUsage: async () => ({ bytes: workspaceBytes }),
+    pruneCache: async maxBytes => { calls.push(`cache:${maxBytes}`); cacheBytes = 30; return { removed: 2, bytes: cacheBytes } },
+    getCacheUsage: async () => ({ bytes: cacheBytes }),
+    pruneCompletedWorkspaces: async maxBytes => { calls.push(`completed:${maxBytes}`); workspaceBytes = 60; return { removed: 1, bytes: workspaceBytes } }
+  })
+  assert.deepEqual(calls, ['expired', 'cache:30', 'completed:70'])
+  assert.deepEqual(result.total, { bytes: 90, quotaBytes: 100, overQuotaBytes: 0 })
+})
+
 test('summary recovery happens after persistence and before scheduler catch-up', () => {
   const orchestrator = readFileSync(
     new URL('../electron/orchestrator.js', import.meta.url),

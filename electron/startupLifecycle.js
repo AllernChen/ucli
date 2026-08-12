@@ -40,8 +40,48 @@ function safeMaintenanceResult(value) {
 }
 
 export async function runSummaryMaintenance({
-  pruneExpiredWorkspaces = () => ({}), pruneCache = () => ({}), onEvent = () => {}
+  quotaBytes,
+  pruneExpiredWorkspaces = () => ({}),
+  getWorkspaceUsage = () => ({ bytes: 0 }),
+  pruneCache = () => ({}),
+  getCacheUsage = () => ({ bytes: 0 }),
+  pruneCompletedWorkspaces = () => ({}),
+  onEvent = () => {}
 } = {}) {
+  if (Number.isSafeInteger(quotaBytes) && quotaBytes >= 0) {
+    const result = { workspaces: null, cache: null, completed: null, total: null }
+    try { result.workspaces = safeMaintenanceResult(await pruneExpiredWorkspaces()) } catch (error) {
+      try { onEvent(safeStartupFailure('workspace-prune', error)) } catch { /* logging isolation */ }
+    }
+    let workspaceBytes = 0
+    try { workspaceBytes = safeMaintenanceResult(await getWorkspaceUsage()).bytes } catch (error) {
+      try { onEvent(safeStartupFailure('workspace-usage', error)) } catch { /* logging isolation */ }
+    }
+    try {
+      result.cache = safeMaintenanceResult(await pruneCache(Math.max(0, quotaBytes - workspaceBytes)))
+    } catch (error) {
+      try { onEvent(safeStartupFailure('cache-prune', error)) } catch { /* logging isolation */ }
+    }
+    let cacheBytes = 0
+    try { cacheBytes = safeMaintenanceResult(await getCacheUsage()).bytes } catch (error) {
+      try { onEvent(safeStartupFailure('cache-usage', error)) } catch { /* logging isolation */ }
+    }
+    try {
+      result.completed = safeMaintenanceResult(await pruneCompletedWorkspaces(
+        Math.max(0, quotaBytes - cacheBytes)
+      ))
+      workspaceBytes = result.completed.bytes
+    } catch (error) {
+      try { onEvent(safeStartupFailure('completed-workspace-prune', error)) } catch { /* logging isolation */ }
+    }
+    const totalBytes = Math.min(Number.MAX_SAFE_INTEGER, workspaceBytes + cacheBytes)
+    result.total = {
+      bytes: totalBytes,
+      quotaBytes,
+      overQuotaBytes: Math.max(0, totalBytes - quotaBytes)
+    }
+    return result
+  }
   const result = { workspaces: null, cache: null }
   for (const [phase, key, operation] of [
     ['workspace-prune', 'workspaces', pruneExpiredWorkspaces],
