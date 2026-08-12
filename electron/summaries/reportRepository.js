@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
-const JSON_FIELDS = ['usageSnapshot', 'coverage', 'generationUsage']
+const JSON_FIELDS = ['usageSnapshot', 'coverage', 'generationUsage', 'generationMetrics']
 const STATUSES = new Set([
   'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted',
   'awaiting_confirmation', 'skipped_empty'
@@ -9,7 +9,7 @@ const GENERATED_BY = new Set(['manual', 'automatic'])
 const PERIOD_TYPES = new Set(['day', 'week', 'month', 'quarter', 'year'])
 const PATCH_FIELDS = new Set([
   'status', 'markdown', 'executorId', 'profileId', 'model', 'usageSnapshot', 'coverage',
-  'generationUsage', 'generationCostUsd', 'promptVersion', 'sourceHash', 'generatedBy',
+  'generationUsage', 'generationMetrics', 'generationCostUsd', 'promptVersion', 'sourceHash', 'generatedBy',
   'errorText', 'updatedAt', 'partial'
 ])
 
@@ -111,6 +111,7 @@ export function createReportRepository({
         usageSnapshot: {},
         coverage: {},
         generationUsage: {},
+        generationMetrics: {},
         generationCostUsd: null,
         promptVersion: input.promptVersion || 'summary-v1',
         sourceHash: null,

@@ -76,6 +76,7 @@ test('report repository assigns monotonic versions per logical key and validates
   assert.deepEqual(first.usageSnapshot, {})
   assert.deepEqual(first.coverage, {})
   assert.deepEqual(first.generationUsage, {})
+  assert.deepEqual(first.generationMetrics, {})
 
   db.rows[0].coverage = '{"sessionsIncluded":2}'
   assert.deepEqual(repository.get(first.id).coverage, { sessionsIncluded: 2 })
@@ -106,6 +107,13 @@ test('report repository assigns monotonic versions per logical key and validates
       sources: { transcript: 4, note: 1, nativeDigest: 0 }
     }
   }))
+  assert.deepEqual(repository.update(second.id, {
+    generationMetrics: { strategy: 'direct', aiCalls: 1, cacheHits: 0 }
+  }).generationMetrics, { strategy: 'direct', aiCalls: 1, cacheHits: 0 })
+  assert.throws(
+    () => repository.update(second.id, { generationMetrics: [] }),
+    error => error.code === 'INVALID_SUMMARY_REPORT_JSON'
+  )
   assert.throws(
     () => repository.update(second.id, { coverage: { sources: { transcript: 'raw transcript' } } }),
     error => error.code === 'SUMMARY_SENSITIVE_JSON_FORBIDDEN'

@@ -87,6 +87,7 @@ function summaryReport(overrides = {}) {
     usageSnapshot: { inputTokens: 30, outputTokens: 10 },
     coverage: { sessionsIncluded: 2 },
     generationUsage: { inputTokens: 0, outputTokens: 0 },
+    generationMetrics: {},
     generationCostUsd: null,
     promptVersion: 'summary-v1',
     sourceHash: 'source-1',
@@ -677,6 +678,7 @@ test('summary report CRUD maps fields and validates JSON at the database boundar
       markdown: '# 周报',
       coverage: { sessionsIncluded: 3 },
       generationUsage: { inputTokens: 200, outputTokens: 50 },
+      generationMetrics: { strategy: 'map-reduce', aiCalls: 3, cacheHits: 2 },
       generationCostUsd: 0.25,
       updatedAt: 2000
     })
@@ -685,15 +687,103 @@ test('summary report CRUD maps fields and validates JSON at the database boundar
       markdown: '# 周报',
       coverage: { sessionsIncluded: 3 },
       generationUsage: { inputTokens: 200, outputTokens: 50 },
+      generationMetrics: { strategy: 'map-reduce', aiCalls: 3, cacheHits: 2 },
       generationCostUsd: 0.25,
       updatedAt: 2000
     }))
 
-    db.sql.run("UPDATE summary_reports SET usage_snapshot_json = '{broken', coverage_json = '[]', generation_usage_json = 'null' WHERE id = 'report-1'")
+    db.sql.run("UPDATE summary_reports SET usage_snapshot_json = '{broken', coverage_json = '[]', generation_usage_json = 'null', generation_metrics_json = '{broken' WHERE id = 'report-1'")
     const tolerant = db.getSummaryReport('report-1')
     assert.deepEqual(tolerant.usageSnapshot, {})
     assert.deepEqual(tolerant.coverage, {})
     assert.deepEqual(tolerant.generationUsage, {})
+    assert.deepEqual(tolerant.generationMetrics, {})
+  })
+})
+
+test('summary report migration adds metrics without changing a legacy row', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ucli-summary-report-metrics-migration-'))
+  const path = join(dir, 'ucli.db')
+  const initSqlJs = (await import('sql.js')).default
+  const SQL = await initSqlJs()
+  const legacy = new SQL.Database()
+  legacy.run(`
+    CREATE TABLE summary_reports (
+      id TEXT PRIMARY KEY, period_type TEXT NOT NULL, period_start INTEGER NOT NULL,
+      period_end_exclusive INTEGER NOT NULL, timezone TEXT NOT NULL, partial INTEGER NOT NULL,
+      version INTEGER NOT NULL, status TEXT NOT NULL, markdown TEXT, executor_id TEXT,
+      profile_id TEXT, model TEXT, usage_snapshot_json TEXT NOT NULL DEFAULT '{}',
+      coverage_json TEXT NOT NULL DEFAULT '{}', generation_usage_json TEXT NOT NULL DEFAULT '{}',
+      generation_cost_usd REAL, prompt_version TEXT, source_hash TEXT, is_current INTEGER NOT NULL,
+      generated_by TEXT NOT NULL, error_text TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    )
+  `)
+  legacy.run(`
+    INSERT INTO summary_reports VALUES (
+      'legacy-report', 'week', 100, 200, 'Asia/Shanghai', 0, 1, 'completed', '# Legacy',
+      'claude', NULL, 'sonnet', '{"inputTokens":30}', '{"sessionsIncluded":2}',
+      '{"inputTokens":10}', 0.25, 'summary-v1', 'source-1', 1, 'manual', NULL, 1000, 2000
+    )
+  `)
+  writeFileSync(path, Buffer.from(legacy.export()))
+  legacy.close()
+
+  const db = await openDb(path)
+  try {
+    const report = db.getSummaryReport('legacy-report')
+    assert.equal(report.markdown, '# Legacy')
+    assert.equal(report.isCurrent, true)
+    assert.deepEqual(report.generationUsage, { inputTokens: 10 })
+    assert.deepEqual(report.generationMetrics, {})
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('summary cache metadata validates keys, kinds, paths, sizes, and timestamps', async () => {
+  await withDb('ucli-summary-cache-metadata-', async db => {
+    const hex = 'a'.repeat(64)
+    const key = `sha256:${hex}`
+    const entry = {
+      key,
+      kind: 'map',
+      relativePath: `map/aa/${hex}.json`,
+      sizeBytes: 123,
+      createdAt: 1000,
+      lastAccessedAt: 2000,
+      expiresAt: null
+    }
+    assert.deepEqual(db.upsertSummaryCacheEntry(entry), entry)
+    assert.deepEqual(db.getSummaryCacheEntry(key), entry)
+    assert.deepEqual(db.listSummaryCacheEntries(), [entry])
+    assert.deepEqual(db.touchSummaryCacheEntry(key, 3000), { ...entry, lastAccessedAt: 3000 })
+
+    for (const invalid of [
+      { ...entry, key: 'sha256:not-a-key' },
+      { ...entry, kind: 'chunk' },
+      { ...entry, relativePath: `map/ab/${hex}.json` },
+      { ...entry, relativePath: `map\\aa\\${hex}.json` },
+      { ...entry, relativePath: '../escape.json' },
+      { ...entry, relativePath: `/map/aa/${hex}.json` },
+      { ...entry, sizeBytes: -1 },
+      { ...entry, sizeBytes: 1.5 },
+      { ...entry, createdAt: -1 },
+      { ...entry, lastAccessedAt: Number.MAX_SAFE_INTEGER + 1 },
+      { ...entry, expiresAt: -1 }
+    ]) {
+      assert.throws(
+        () => db.upsertSummaryCacheEntry(invalid),
+        error => error?.code === 'INVALID_SUMMARY_CACHE_ENTRY'
+      )
+    }
+
+    assert.throws(
+      () => db.touchSummaryCacheEntry('sha256:bad', 3000),
+      error => error?.code === 'INVALID_SUMMARY_CACHE_ENTRY'
+    )
+    assert.equal(db.deleteSummaryCacheEntries([key]), 1)
+    assert.equal(db.getSummaryCacheEntry(key), null)
   })
 })
 
@@ -836,7 +926,11 @@ test('summary settings expose safe defaults and merge validated updates', async 
       defaultProfileId: null,
       defaultModel: null,
       firstEnableDisclosureAcceptedAt: null,
-      automaticCallLimit: 20
+      automaticCallLimit: 20,
+      cacheEnabled: true,
+      cacheMaxBytes: 1_073_741_824,
+      failedWorkspaceRetentionDays: 7,
+      mapConcurrency: 2
     }
     assert.deepEqual(db.getSummarySettings(), defaults)
 
@@ -846,6 +940,10 @@ test('summary settings expose safe defaults and merge validated updates', async 
       defaultExecutorId: 'codex',
       defaultProfileId: 'profile-1',
       automaticCallLimit: 30,
+      cacheEnabled: false,
+      cacheMaxBytes: 2 * 1024 * 1024 * 1024,
+      failedWorkspaceRetentionDays: 14,
+      mapConcurrency: 3,
       ignored: 'not persisted'
     }), {
       ...defaults,
@@ -853,10 +951,31 @@ test('summary settings expose safe defaults and merge validated updates', async 
       autoPeriods: { ...defaults.autoPeriods, month: true },
       defaultExecutorId: 'codex',
       defaultProfileId: 'profile-1',
-      automaticCallLimit: 30
+      automaticCallLimit: 30,
+      cacheEnabled: false,
+      cacheMaxBytes: 2 * 1024 * 1024 * 1024,
+      failedWorkspaceRetentionDays: 14,
+      mapConcurrency: 3
     })
 
     db.sql.run("UPDATE summary_settings SET settings_json = '{broken' WHERE id = 1")
     assert.deepEqual(db.getSummarySettings(), defaults)
+  })
+})
+
+test('summary settings reject cache, retention, and concurrency values outside their bounds', async () => {
+  await withDb('ucli-summary-settings-validation-', async db => {
+    for (const [patch, code] of [
+      [{ cacheEnabled: 'yes' }, 'INVALID_SUMMARY_CACHE_ENABLED'],
+      [{ cacheMaxBytes: 256 * 1024 * 1024 - 1 }, 'INVALID_SUMMARY_CACHE_LIMIT'],
+      [{ cacheMaxBytes: 5 * 1024 * 1024 * 1024 + 1 }, 'INVALID_SUMMARY_CACHE_LIMIT'],
+      [{ cacheMaxBytes: 1.5 }, 'INVALID_SUMMARY_CACHE_LIMIT'],
+      [{ failedWorkspaceRetentionDays: 0 }, 'INVALID_SUMMARY_WORKSPACE_RETENTION'],
+      [{ failedWorkspaceRetentionDays: 31 }, 'INVALID_SUMMARY_WORKSPACE_RETENTION'],
+      [{ mapConcurrency: 0 }, 'INVALID_SUMMARY_MAP_CONCURRENCY'],
+      [{ mapConcurrency: 4 }, 'INVALID_SUMMARY_MAP_CONCURRENCY']
+    ]) {
+      assert.throws(() => db.setSummarySettings(patch), error => error?.code === code)
+    }
   })
 })
