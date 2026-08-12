@@ -369,7 +369,7 @@ export function normalizeSummaryStorageStats(value = {}) {
   }
 }
 
-function summaryProgressPayload(report, confirmationCallLimit = null, pipelineProgress = null) {
+export function summaryProgressPayload(report, confirmationCallLimit = null, pipelineProgress = null) {
   const phaseByStatus = {
     queued: 'queued', running: 'collecting', awaiting_confirmation: 'awaiting_confirmation',
     completed: 'completed', failed: 'failed', cancelled: 'cancelled',
@@ -386,7 +386,7 @@ function summaryProgressPayload(report, confirmationCallLimit = null, pipelinePr
   const terminal = ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(report?.status)
   if (pipelineProgress) {
     const progressText = {
-      collecting: '正在收集材料', mapping: '正在分析材料',
+      'cache-check': '正在检查缓存', collecting: '正在收集材料', mapping: '正在分析材料',
       reducing: '正在汇总项目', rendering: '正在生成报告'
     }
     return {

@@ -89,6 +89,7 @@ test('report repository assigns monotonic versions per logical key and validates
     () => repository.get(first.id),
     error => error.code === 'INVALID_SUMMARY_REPORT_JSON'
   )
+  db.rows[0].generationUsage = {}
   assert.throws(
     () => repository.update(second.id, { usageSnapshot: [] }),
     error => error.code === 'INVALID_SUMMARY_REPORT_JSON'
@@ -112,11 +113,30 @@ test('report repository assigns monotonic versions per logical key and validates
     }
   }))
   assert.deepEqual(repository.update(second.id, {
-    generationMetrics: { strategy: 'direct', aiCalls: 1, cacheHits: 0 }
-  }).generationMetrics, { strategy: 'direct', aiCalls: 1, cacheHits: 0 })
+    generationMetrics: {
+      strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0,
+      durationMs: 25, mapConcurrency: 2
+    }
+  }).generationMetrics, {
+    strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0,
+    durationMs: 25, mapConcurrency: 2
+  })
+  for (const generationMetrics of [
+    { strategy: 'batch', plannedCalls: 1, aiCalls: 1, cacheHits: 0, durationMs: 1, mapConcurrency: 2 },
+    { strategy: 'direct', plannedCalls: -1, aiCalls: 1, cacheHits: 0, durationMs: 1, mapConcurrency: 2 },
+    { strategy: 'direct', plannedCalls: 1, aiCalls: 1001, cacheHits: 0, durationMs: 1, mapConcurrency: 2 },
+    { strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0, durationMs: -1, mapConcurrency: 2 },
+    { strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0, durationMs: 1, mapConcurrency: 4 },
+    { strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0, durationMs: 1, mapConcurrency: 2, prompt: 'secret' }
+  ]) {
+    assert.throws(
+      () => repository.update(second.id, { generationMetrics }),
+      error => error.code === 'INVALID_SUMMARY_GENERATION_METRICS'
+    )
+  }
   assert.throws(
     () => repository.update(second.id, { generationMetrics: [] }),
-    error => error.code === 'INVALID_SUMMARY_REPORT_JSON'
+    error => error.code === 'INVALID_SUMMARY_GENERATION_METRICS'
   )
   assert.throws(
     () => repository.update(second.id, { coverage: { sources: { transcript: 'raw transcript' } } }),
@@ -126,6 +146,10 @@ test('report repository assigns monotonic versions per logical key and validates
     () => repository.update(second.id, { status: 'done' }),
     error => error.code === 'INVALID_SUMMARY_REPORT'
   )
+  db.rows[0].generationMetrics = {
+    strategy: 'direct', aiCalls: 1, prompt: 'legacy unsafe detail'
+  }
+  assert.deepEqual(repository.get(first.id).generationMetrics, {})
   assert.equal(db.getSummaryReport(second.id).status, 'queued')
 })
 
@@ -151,7 +175,10 @@ function pipelineResult(markdown = '## 摘要\n完成') {
     value: { executiveSummary: '完成' },
     markdown,
     generationUsage: { inputTokens: 10, outputTokens: 2, costUsd: null },
-    generationMetrics: { strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0 }
+    generationMetrics: {
+      strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0,
+      durationMs: 25, mapConcurrency: 2
+    }
   }
 }
 
@@ -294,6 +321,7 @@ test('pipeline progress is forwarded ephemerally without changing persisted repo
   const { service, repository } = createHarness({
     pipeline: {
       async run({ onProgress }) {
+        onProgress({ phase: 'cache-check', cacheKey: 'must not escape' })
         onProgress({ phase: 'mapping', current: 2, total: 4, evidence: 'must not escape' })
         onProgress({ phase: 'reducing' })
         return pipelineResult()
@@ -307,10 +335,30 @@ test('pipeline progress is forwarded ephemerally without changing persisted repo
   const job = service.generate(request())
   await job.completion
   assert.deepEqual(events, [
+    { reportId: job.reportId, phase: 'cache-check', completed: 0, total: 1 },
     { reportId: job.reportId, phase: 'mapping', completed: 2, total: 4 },
     { reportId: job.reportId, phase: 'reducing', completed: 0, total: 1 }
   ])
   assert.equal('progress' in repository.get(job.reportId), false)
+})
+
+test('completed jobs persist only bounded generation metrics that survive repository restart', async () => {
+  const unsafeMetrics = {
+    strategy: 'map-reduce', plannedCalls: 4, aiCalls: 2, cacheHits: 5,
+    durationMs: 38000, mapConcurrency: 3,
+    prompt: 'raw prompt', cacheKey: 'sha256:secret', path: 'C:\\private', providerOutput: 'secret'
+  }
+  const { service, repository, db } = createHarness({
+    pipeline: { async run() { return { ...pipelineResult(), generationMetrics: unsafeMetrics } } }
+  })
+  const job = service.generate(request())
+  await job.completion
+  const restarted = createReportRepository({ db })
+  assert.deepEqual(restarted.get(job.reportId).generationMetrics, {
+    strategy: 'map-reduce', plannedCalls: 4, aiCalls: 2, cacheHits: 5,
+    durationMs: 38000, mapConcurrency: 3
+  })
+  assert.doesNotMatch(JSON.stringify(restarted.get(job.reportId)), /raw prompt|sha256:secret|private|providerOutput/)
 })
 
 async function waitFor(predicate) {

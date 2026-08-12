@@ -9,6 +9,14 @@
       <a-descriptions-item label="时区">{{ report.timezone }}</a-descriptions-item>
       <a-descriptions-item label="生成费用">{{ report.generationCostUsd == null ? '不可用' : `$${report.generationCostUsd}` }}</a-descriptions-item>
     </a-descriptions>
+    <a-alert
+      v-if="generationPerformance"
+      style="margin-top:12px"
+      type="info"
+      show-icon
+      message="生成性能"
+      :description="generationPerformance"
+    />
     <a-alert v-if="coverageWarning" style="margin-top:12px" type="warning" show-icon :message="coverageWarning" />
     <a-alert
       v-if="awaitingConfirmation"
@@ -71,6 +79,14 @@ const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].inc
 const awaitingConfirmation = computed(() => props.progress?.phase === 'awaiting_confirmation')
 const statusColor = computed(() => props.report?.status === 'completed' ? 'green' : props.report?.status === 'failed' ? 'red' : 'blue')
 const periodLabel = computed(() => props.report ? `${new Date(props.report.periodStart).toLocaleDateString()} — ${new Date(props.report.periodEndExclusive).toLocaleDateString()}` : '')
+const generationPerformance = computed(() => {
+  if (props.report?.status !== 'completed') return ''
+  const metrics = props.report?.generationMetrics
+  if (!metrics || !['direct', 'map-reduce'].includes(metrics.strategy)) return ''
+  const seconds = (metrics.durationMs / 1000).toLocaleString('zh-CN', { maximumFractionDigits: 1 })
+  const strategy = metrics.strategy === 'direct' ? '直接生成' : '分块汇总'
+  return `${strategy} · 计划调用 ${metrics.plannedCalls} 次 · AI 调用 ${metrics.aiCalls} 次 · 缓存命中 ${metrics.cacheHits} 次 · 耗时 ${seconds} 秒 · 并发 ${metrics.mapConcurrency}`
+})
 const coverageWarning = computed(() => {
   const coverage = props.report?.coverage || {}
   if (Array.isArray(coverage.warnings) && coverage.warnings.length) return coverage.warnings.join('；')

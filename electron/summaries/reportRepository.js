@@ -50,6 +50,37 @@ function jsonObject(value, field) {
   }
 }
 
+const METRIC_FIELDS = new Set([
+  'strategy', 'plannedCalls', 'aiCalls', 'cacheHits', 'durationMs', 'mapConcurrency'
+])
+
+function generationMetrics(value, { allowEmpty = false } = {}) {
+  let metrics
+  try { metrics = jsonObject(value, 'generationMetrics') } catch {
+    throw repositoryError('INVALID_SUMMARY_GENERATION_METRICS', 'Invalid summary generation metrics')
+  }
+  if (allowEmpty && Object.keys(metrics).length === 0) return metrics
+  if (Object.keys(metrics).length !== METRIC_FIELDS.size ||
+    Object.keys(metrics).some(key => !METRIC_FIELDS.has(key)) ||
+    !['direct', 'map-reduce'].includes(metrics.strategy)) {
+    throw repositoryError('INVALID_SUMMARY_GENERATION_METRICS', 'Invalid summary generation metrics')
+  }
+  for (const field of ['plannedCalls', 'aiCalls', 'cacheHits']) {
+    if (!Number.isInteger(metrics[field]) || metrics[field] < 0 || metrics[field] > 1000) {
+      throw repositoryError('INVALID_SUMMARY_GENERATION_METRICS', 'Invalid summary generation metrics')
+    }
+  }
+  if (!Number.isSafeInteger(metrics.durationMs) || metrics.durationMs < 0 ||
+    !Number.isInteger(metrics.mapConcurrency) || metrics.mapConcurrency < 1 || metrics.mapConcurrency > 3) {
+    throw repositoryError('INVALID_SUMMARY_GENERATION_METRICS', 'Invalid summary generation metrics')
+  }
+  return metrics
+}
+
+function persistedGenerationMetrics(value) {
+  try { return generationMetrics(value, { allowEmpty: true }) } catch { return {} }
+}
+
 function normalizeReport(report) {
   if (!report) return null
   if (!STATUSES.has(report.status) || !GENERATED_BY.has(report.generatedBy) ||
@@ -57,7 +88,11 @@ function normalizeReport(report) {
     throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report record')
   }
   const normalized = { ...report }
-  for (const field of JSON_FIELDS) normalized[field] = jsonObject(report[field] ?? {}, field)
+  for (const field of JSON_FIELDS) {
+    normalized[field] = field === 'generationMetrics'
+      ? persistedGenerationMetrics(report[field] ?? {})
+      : jsonObject(report[field] ?? {}, field)
+  }
   return normalized
 }
 
@@ -146,7 +181,9 @@ export function createReportRepository({
         throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report origin')
       }
       for (const field of JSON_FIELDS) {
-        if (safe[field] !== undefined) safe[field] = jsonObject(safe[field], field)
+        if (safe[field] !== undefined) safe[field] = field === 'generationMetrics'
+          ? generationMetrics(safe[field], { allowEmpty: true })
+          : jsonObject(safe[field], field)
       }
       return normalizeReport(db.updateSummaryReport(reportId, safe))
     },

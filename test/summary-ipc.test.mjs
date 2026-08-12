@@ -5,7 +5,7 @@ import test from 'node:test'
 
 register('./fixtures/electron-stub-loader.mjs', import.meta.url)
 
-const { normalizeSummaryStorageStats, registerSummaryIpc } = await import(`../electron/orchestrator.js?summary-ipc=${Date.now()}`)
+const { normalizeSummaryStorageStats, registerSummaryIpc, summaryProgressPayload } = await import(`../electron/orchestrator.js?summary-ipc=${Date.now()}`)
 
 const CHANNELS = [
   'summary:get-settings', 'summary:set-settings', 'summary:list-reports',
@@ -138,6 +138,16 @@ test('HTML export IPC accepts the strict theme and AI custom unions plus legacy 
     assert.doesNotMatch(JSON.stringify(response), /secret/i)
   }
   assert.equal(calls.length, 5)
+})
+
+test('cache-check progress is a narrow localized payload without cache metadata', () => {
+  assert.deepEqual(summaryProgressPayload({ id: 'report-1', status: 'running' }, null, {
+    phase: 'cache-check', completed: 0, total: 1,
+    cacheKey: 'sha256:secret', path: 'C:\\private', providerOutput: 'secret'
+  }), {
+    reportId: 'report-1', phase: 'cache-check', completed: 0, total: 1,
+    text: '正在检查缓存'
+  })
 })
 
 test('preload exposes named summary calls and one removable progress listener', async () => {

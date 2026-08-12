@@ -244,6 +244,36 @@ test('summary workspace components cover generation, safe reading, history, retr
   assert.match(all, /failed|interrupted/)
 })
 
+test('completed reports show bounded generation performance without renderer-sensitive fields', () => {
+  const reportView = readFileSync(
+    new URL('../src/components/summaries/SummaryReportView.vue', import.meta.url),
+    'utf8'
+  )
+  for (const text of ['生成性能', 'AI 调用', '缓存命中', '耗时', '并发']) {
+    assert.match(reportView, new RegExp(text))
+  }
+  assert.match(reportView, /report\?\.status\s*===\s*['"]completed['"]/)
+  assert.match(reportView, /generationMetrics/)
+  assert.match(reportView, /direct|map-reduce/)
+  assert.doesNotMatch(reportView, /cacheKey|providerOutput|rawPrompt|workspaceDirectory/)
+})
+
+test('summary store preserves cache-check progress until the existing terminal refresh', async () => {
+  getCalls = 0
+  const store = freshStore()
+  await store.init()
+  progressHandler({
+    reportId: 'report-cache', phase: 'cache-check', completed: 0, total: 1,
+    text: '正在检查缓存'
+  })
+  assert.deepEqual(store.progress['report-cache'], {
+    reportId: 'report-cache', phase: 'cache-check', completed: 0, total: 1,
+    text: '正在检查缓存'
+  })
+  assert.equal(getCalls, 0)
+  store.dispose()
+})
+
 test('AI-authored report links cannot navigate the renderer and use only narrow external IPC', () => {
   const opened = []
   let prevented = 0

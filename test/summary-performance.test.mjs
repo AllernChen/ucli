@@ -225,8 +225,42 @@ test('small complete evidence uses one direct AI call with deterministic metrics
     plannedCalls: 1,
     aiCalls: 1,
     cacheHits: 0,
-    durationMs: 125
+    durationMs: 125,
+    mapConcurrency: 2
   })
+})
+
+test('generation metrics report the configured map concurrency for every strategy', async () => {
+  const direct = createSummaryPipeline({ runner: fakeRunner(), contextWindow: 10_000, mapConcurrency: 1 })
+  const reduced = createSummaryPipeline({ runner: fakeRunner(), contextWindow: 10_000, mapConcurrency: 3 })
+  const directResult = await direct.run({
+    executorId: 'claude', evidence: evidence(['/work/a']), period, usage: {}, mode: 'manual'
+  })
+  const reducedResult = await reduced.run({
+    executorId: 'claude', evidence: evidence(['/work/a', '/work/b']), period, usage: {}, mode: 'manual',
+    forceMapReduce: true
+  })
+  assert.equal(directResult.generationMetrics.mapConcurrency, 1)
+  assert.equal(reducedResult.generationMetrics.mapConcurrency, 3)
+})
+
+test('cache-check progress is emitted once only when cache lookup work begins', async () => {
+  const progress = []
+  const cache = memoryCache()
+  const pipeline = createSummaryPipeline({ runner: fakeRunner(), cache, contextWindow: 10_000, automaticCallLimit: 1 })
+  const confirmation = await pipeline.run({
+    executorId: 'claude', evidence: evidence(['/work/a', '/work/b']), period, usage: {},
+    mode: 'manual', forceMapReduce: true, onProgress: event => progress.push(event.phase)
+  })
+  assert.equal(confirmation.requiresConfirmation, true)
+  assert.deepEqual(progress, ['collecting'])
+
+  progress.length = 0
+  await pipeline.run({
+    executorId: 'claude', evidence: evidence(['/work/a']), period, usage: {}, mode: 'manual',
+    onProgress: event => progress.push(event.phase)
+  })
+  assert.equal(progress.filter(phase => phase === 'cache-check').length, 1)
 })
 
 test('forced map-reduce reuses a single project digest and plans exact calls', async () => {

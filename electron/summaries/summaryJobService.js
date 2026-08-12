@@ -48,13 +48,29 @@ function terminal(status) {
 }
 
 function safePipelineProgress(event) {
-  const phase = ['collecting', 'mapping', 'reducing', 'rendering'].includes(event?.phase)
+  const phase = ['cache-check', 'collecting', 'mapping', 'reducing', 'rendering'].includes(event?.phase)
     ? event.phase
     : null
   if (!phase) return null
   const total = Number.isInteger(event?.total) && event.total > 0 ? event.total : 1
   const current = Number.isInteger(event?.current) && event.current >= 0 ? event.current : 0
   return { phase, completed: Math.min(current, total), total }
+}
+
+function safeGenerationMetrics(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const safe = {}
+  if (['direct', 'map-reduce'].includes(value.strategy)) safe.strategy = value.strategy
+  for (const field of ['plannedCalls', 'aiCalls', 'cacheHits']) {
+    if (Number.isInteger(value[field])) safe[field] = Math.max(0, Math.min(1000, value[field]))
+  }
+  if (Number.isFinite(value.durationMs)) {
+    safe.durationMs = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(value.durationMs)))
+  }
+  if (Number.isInteger(value.mapConcurrency)) {
+    safe.mapConcurrency = Math.max(1, Math.min(3, value.mapConcurrency))
+  }
+  return Object.keys(safe).length === 6 ? safe : {}
 }
 
 export function createSummaryJobService({
@@ -169,7 +185,7 @@ export function createSummaryJobService({
       usageSnapshot: context.usageSnapshot,
       coverage: context.evidence.coverage || {},
       generationUsage: result.generationUsage || {},
-      generationMetrics: result.generationMetrics || {},
+      generationMetrics: safeGenerationMetrics(result.generationMetrics),
       generationCostUsd: result.generationUsage?.costUsd ?? null,
       sourceHash: context.sourceHash,
       errorText: null

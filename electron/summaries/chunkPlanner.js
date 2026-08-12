@@ -314,6 +314,7 @@ export function createSummaryPipeline({
         : estimatedCalls
       const manualCallLimit = confirmed ? confirmedCallLimit : callLimit
       const generationUsage = { inputTokens: 0, outputTokens: 0, costUsd: null }
+      let cacheCheckReported = false
       const invoke = async ({ stage, prompt, schema }) => {
         abortIfNeeded(signal)
         const requiredTokens = promptTokens(prompt, schema)
@@ -335,6 +336,10 @@ export function createSummaryPipeline({
             })
           : null
         if (key) {
+          if (!cacheCheckReported) {
+            cacheCheckReported = true
+            onProgress?.({ phase: 'cache-check' })
+          }
           let cached = null
           try { cached = await cache.get(key) } catch { /* cache is an optional optimization */ }
           if (cached !== null && cached !== undefined) {
@@ -407,7 +412,8 @@ export function createSummaryPipeline({
             plannedCalls: plan.plannedCalls,
             aiCalls: callCount,
             cacheHits,
-            durationMs: Math.max(0, now() - startedAt)
+            durationMs: Math.max(0, now() - startedAt),
+            mapConcurrency
           }
         }
       }
@@ -491,7 +497,8 @@ export function createSummaryPipeline({
           plannedCalls: plan.plannedCalls,
           aiCalls: callCount,
           cacheHits,
-          durationMs: Math.max(0, now() - startedAt)
+          durationMs: Math.max(0, now() - startedAt),
+          mapConcurrency
         }
       }
     }
