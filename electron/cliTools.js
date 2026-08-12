@@ -1,6 +1,16 @@
 import { spawn } from 'child_process'
-import { delimiter, posix, win32 } from 'path'
+import { delimiter, join, posix, win32 } from 'path'
 import { getSummaryExecutorCapability } from './summaries/nativeCapabilities.js'
+import {
+  buildSummaryProcessEnvironment,
+  hasSummaryProviderAuthentication,
+  stripSummaryProviderEndpoints,
+  withIsolatedWorkingDirectory
+} from './summaries/runners/processRunner.js'
+import {
+  inspectClaudeFileAuthentication,
+  inspectOpenCodeAuthentication
+} from './summaries/runners/authBridge.js'
 
 const CLI_TOOLS = {
   claude: {
@@ -42,12 +52,66 @@ function summaryCapability(tool) {
   return {
     ...tool,
     safeForSummary,
-    summaryExecutorAvailable: safeForSummary,
-    summaryExecutorUnavailableReason: safeForSummary ? '' : (capability?.reason || 'unsupported-executor')
+    summaryExecutorAvailable: false,
+    summaryExecutorUnavailableReason: safeForSummary
+      ? 'summary-authentication-unverified'
+      : (capability?.reason || 'unsupported-executor'),
+    summaryAuthenticationSource: null
   }
 }
 
-export async function inspectCliTool(id, runner = runFixedCommand) {
+async function inspectSummaryAuthentication(id, {
+  installed,
+  env = process.env,
+  homeDirectory,
+  platform = process.platform,
+  runner = runFixedCommand
+} = {}) {
+  const capability = getSummaryExecutorCapability(id)
+  if (capability?.available !== true) {
+    return { available: false, reason: capability?.reason || 'unsupported-executor', source: null }
+  }
+  if (!installed) return { available: false, reason: 'cli-not-installed', source: null }
+  if (hasSummaryProviderAuthentication(id, env)) {
+    return { available: true, reason: '', source: 'provider-env' }
+  }
+  if (id === 'opencode') {
+    return inspectOpenCodeAuthentication({ env, homeDirectory, platform })
+  }
+  if (id === 'claude') {
+    const fileAuthentication = await inspectClaudeFileAuthentication({ env, homeDirectory, platform })
+    if (fileAuthentication.available) return fileAuthentication
+    if (platform === 'darwin') {
+      return withIsolatedWorkingDirectory(async directory => {
+        const probeEnv = await buildSummaryProcessEnvironment({
+          provider: 'claude',
+          isolatedHome: join(directory, 'home'),
+          baseEnv: env
+        })
+        stripSummaryProviderEndpoints('claude', probeEnv)
+        const result = await runner('claude auth status --json', 10_000, probeEnv)
+        try {
+          const status = JSON.parse(result.stdout)
+          if (result.code === 0 && status?.loggedIn === true) {
+            return { available: true, reason: '', source: 'keychain' }
+          }
+        } catch {}
+        return {
+          available: false,
+          reason: 'requires-allowlisted-env-or-managed-profile',
+          source: null
+        }
+      })
+    }
+  }
+  return {
+    available: false,
+    reason: 'requires-allowlisted-env-or-managed-profile',
+    source: null
+  }
+}
+
+export async function inspectCliTool(id, runner = runFixedCommand, options = {}) {
   const tool = requireTool(id)
   if (id === 'opencode' || id === 'ucode') {
     await prependNpmGlobalBinToPath(runner)
@@ -60,8 +124,18 @@ export async function inspectCliTool(id, runner = runFixedCommand) {
     runner(`${tool.executable} --version`, 10_000)
   ])
   const installed = versionResult.code === 0
+  const summaryAuthentication = await inspectSummaryAuthentication(id, {
+    installed,
+    env: options.env || process.env,
+    homeDirectory: options.homeDirectory,
+    platform: options.platform || process.platform,
+    runner
+  })
   return {
     ...summaryCapability(tool),
+    summaryExecutorAvailable: summaryAuthentication.available,
+    summaryExecutorUnavailableReason: summaryAuthentication.reason || '',
+    summaryAuthenticationSource: summaryAuthentication.source,
     installed,
     path: firstLine(pathResult.stdout),
     version: installed ? firstLine(versionResult.stdout || versionResult.stderr) : '',
@@ -119,14 +193,14 @@ function firstLine(value = '') {
   return value.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || ''
 }
 
-function runFixedCommand(command, timeoutMs) {
+function runFixedCommand(command, timeoutMs, env = process.env) {
   return new Promise((resolve) => {
     const shell = process.platform === 'win32'
       ? { file: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', command] }
       : { file: '/bin/sh', args: ['-lc', command] }
     const child = spawn(shell.file, shell.args, {
       windowsHide: true,
-      env: process.env,
+      env,
       stdio: ['ignore', 'pipe', 'pipe']
     })
     let stdout = ''

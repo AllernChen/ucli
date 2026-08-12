@@ -303,9 +303,48 @@ const PROVIDER_ENV_KEYS = Object.freeze({
   ])
 })
 
+const PROVIDER_AUTH_ENV_KEYS = Object.freeze({
+  claude: Object.freeze(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']),
+  opencode: Object.freeze([
+    'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY',
+    'AZURE_OPENAI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'GEMINI_API_KEY',
+    'MISTRAL_API_KEY', 'GROQ_API_KEY', 'XAI_API_KEY', 'OPENROUTER_API_KEY',
+    'COHERE_API_KEY'
+  ])
+})
+
+const PROVIDER_ENDPOINT_AUTH_KEYS = Object.freeze({
+  claude: Object.freeze({
+    ANTHROPIC_BASE_URL: Object.freeze(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'])
+  }),
+  opencode: Object.freeze({
+    ANTHROPIC_BASE_URL: Object.freeze(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']),
+    OPENAI_BASE_URL: Object.freeze(['OPENAI_API_KEY'])
+  })
+})
+
 function envValue(source, name) {
   const key = Object.keys(source || {}).find(candidate => candidate.toUpperCase() === name)
   return key ? source[key] : undefined
+}
+
+export function hasSummaryProviderAuthentication(provider, env = {}) {
+  return (PROVIDER_AUTH_ENV_KEYS[provider] || []).some(name => {
+    const value = envValue(env, name)
+    return typeof value === 'string' && value.trim().length > 0
+  })
+}
+
+export function stripSummaryProviderEndpoints(provider, env = {}) {
+  const endpointAuthentication = PROVIDER_ENDPOINT_AUTH_KEYS[provider] || {}
+  for (const key of Object.keys(env)) {
+    const requiredAuthentication = endpointAuthentication[key.toUpperCase()]
+    if (requiredAuthentication && !requiredAuthentication.some(name => {
+      const value = envValue(env, name)
+      return typeof value === 'string' && value.trim()
+    })) delete env[key]
+  }
+  return env
 }
 
 export async function buildSummaryProcessEnvironment({

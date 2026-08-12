@@ -50,13 +50,37 @@ function settingsError(code, message) {
   return Object.assign(new Error(message), { code })
 }
 
-function executorState(availableExecutors, executorId) {
+export function profileProvidesSummaryAuthentication(profile, executorId) {
+  const connectionMode = profile?.connectionMode || profile?.config?.connectionMode
+  return executorId === 'claude' &&
+    profile?.adapterId === executorId &&
+    profile?.kind === 'managed' &&
+    profile?.status === 'ready' &&
+    ['api_key', 'bearer'].includes(connectionMode)
+}
+
+export function profileAvailableForSummary(profile, executorId, executorAuthenticated = false) {
+  if (profileProvidesSummaryAuthentication(profile, executorId)) return true
+  const connectionMode = profile?.connectionMode || profile?.config?.connectionMode
+  return executorAuthenticated === true &&
+    executorId === 'claude' &&
+    profile?.adapterId === executorId &&
+    profile?.kind === 'reference' &&
+    profile?.status === 'ready' &&
+    connectionMode === 'subscription'
+}
+
+function executorState(availableExecutors, executorId, profileId, availableProfiles) {
   const executor = (Array.isArray(availableExecutors) ? availableExecutors : [])
     .find(item => item?.id === executorId)
   if (!executor || executor.installed !== true) return 'unavailable'
-  return executor.summaryExecutorAvailable === true && executor.safeForSummary !== false
+  if (executor.safeForSummary === false) return 'unsafe'
+  if (executor.summaryExecutorAvailable === true) return 'available'
+  const profile = profileId && (Array.isArray(availableProfiles) ? availableProfiles : [])
+    .find(item => item?.id === profileId)
+  return profileProvidesSummaryAuthentication(profile, executorId)
     ? 'available'
-    : 'unsafe'
+    : 'auth-unavailable'
 }
 
 export function updateSummarySettings(current = {}, patch = {}, {
@@ -82,17 +106,33 @@ export function updateSummarySettings(current = {}, patch = {}, {
       throw settingsError('SUMMARY_DISCLOSURE_REQUIRED', 'Automatic summaries require disclosure acceptance')
     }
     const state = next.defaultExecutorId
-      ? executorState(availableExecutors, next.defaultExecutorId)
+      ? executorState(
+          availableExecutors,
+          next.defaultExecutorId,
+          next.defaultProfileId,
+          availableProfiles
+        )
       : 'unavailable'
     if (state === 'unsafe') {
       throw settingsError('SUMMARY_EXECUTOR_UNSAFE', 'Selected AI CLI cannot guarantee tool-free summary execution')
     }
     if (state !== 'available') {
+      if (state === 'auth-unavailable') {
+        throw settingsError(
+          'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE',
+          'Selected AI CLI requires an isolated summary credential'
+        )
+      }
       throw settingsError('SUMMARY_EXECUTOR_UNAVAILABLE', 'Select an available default AI CLI')
     }
     if (next.defaultProfileId && Array.isArray(availableProfiles) &&
       !availableProfiles.some(profile => profile?.id === next.defaultProfileId &&
-        profile?.adapterId === next.defaultExecutorId && profile?.status === 'ready')) {
+        profileAvailableForSummary(
+          profile,
+          next.defaultExecutorId,
+          availableExecutors.some(executor =>
+            executor?.id === next.defaultExecutorId && executor?.summaryExecutorAvailable === true)
+        ))) {
       throw settingsError('SUMMARY_PROFILE_UNAVAILABLE', 'Select an available default AI CLI profile')
     }
   }

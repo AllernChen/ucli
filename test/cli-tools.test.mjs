@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import * as cliTools from '../electron/cliTools.js'
 
@@ -26,11 +28,149 @@ test('CLI catalog keeps installation separate from safe summary execution', () =
     summaryExecutorAvailable: tool.summaryExecutorAvailable,
     summaryExecutorUnavailableReason: tool.summaryExecutorUnavailableReason
   })), [
-    { id: 'claude', safeForSummary: true, summaryExecutorAvailable: true, summaryExecutorUnavailableReason: '' },
+    { id: 'claude', safeForSummary: true, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'summary-authentication-unverified' },
     { id: 'codex', safeForSummary: false, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'no-guaranteed-no-tools-mode' },
-    { id: 'opencode', safeForSummary: true, summaryExecutorAvailable: true, summaryExecutorUnavailableReason: '' },
+    { id: 'opencode', safeForSummary: true, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'summary-authentication-unverified' },
     { id: 'ucode', safeForSummary: false, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'no-guaranteed-no-tools-mode' }
   ])
+})
+
+function installedRunner(version = '1.0.0') {
+  return async (command) => {
+    if (command === 'npm prefix -g') return { code: 0, stdout: `${npmPrefix}\n`, stderr: '' }
+    if (command.startsWith('where ') || command.startsWith('command -v ')) {
+      return { code: 0, stdout: `${npmBin}${path.sep}tool\n`, stderr: '' }
+    }
+    return { code: 0, stdout: `${version}\n`, stderr: '' }
+  }
+}
+
+test('OpenCode inventory requires an allowlisted credential or validated auth bridge', async () => {
+  const dataHome = mkdtempSync(path.join(tmpdir(), 'ucli-cli-auth-inventory-'))
+  const env = { PATH: process.env.PATH, XDG_DATA_HOME: dataHome }
+  try {
+    const unavailable = await inspectCliTool('opencode', installedRunner('1.18.14'), { env })
+    assert.equal(unavailable.installed, true)
+    assert.equal(unavailable.safeForSummary, true)
+    assert.equal(unavailable.summaryExecutorAvailable, false)
+    assert.equal(unavailable.summaryExecutorUnavailableReason, 'summary-authentication-unavailable')
+
+    mkdirSync(path.join(dataHome, 'opencode'))
+    writeFileSync(
+      path.join(dataHome, 'opencode', 'auth.json'),
+      '{"openai":{"type":"api","key":"inventory-test-secret"}}',
+      { mode: 0o600 }
+    )
+    const bridged = await inspectCliTool('opencode', installedRunner('1.18.14'), { env })
+    assert.equal(bridged.summaryExecutorAvailable, true)
+    assert.equal(bridged.summaryExecutorUnavailableReason, '')
+    assert.equal(JSON.stringify(bridged).includes('inventory-test-secret'), false)
+  } finally {
+    rmSync(dataHome, { recursive: true, force: true })
+  }
+})
+
+test('OpenCode inventory rejects linked auth but accepts explicit allowlisted provider env', async (t) => {
+  const dataHome = mkdtempSync(path.join(tmpdir(), 'ucli-cli-linked-auth-'))
+  const authDirectory = path.join(dataHome, 'opencode')
+  mkdirSync(authDirectory)
+  const target = path.join(dataHome, 'real-auth.json')
+  writeFileSync(target, '{"openai":{"type":"api"}}', { mode: 0o600 })
+  try {
+    try {
+      symlinkSync(target, path.join(authDirectory, 'auth.json'), 'file')
+      const linked = await inspectCliTool('opencode', installedRunner(), {
+        env: { PATH: process.env.PATH, XDG_DATA_HOME: dataHome }
+      })
+      assert.equal(linked.summaryExecutorAvailable, false)
+      assert.equal(linked.summaryExecutorUnavailableReason, 'unsafe-auth-file')
+    } catch (error) {
+      if (!['EPERM', 'EACCES'].includes(error?.code)) throw error
+      t.diagnostic('symlink creation is unavailable on this host')
+    }
+    const explicit = await inspectCliTool('opencode', installedRunner(), {
+      env: {
+        PATH: process.env.PATH,
+        XDG_DATA_HOME: dataHome,
+        OPENAI_API_KEY: 'allowlisted-test-value',
+        AWS_SECRET_ACCESS_KEY: 'must-not-count'
+      }
+    })
+    assert.equal(explicit.summaryExecutorAvailable, true)
+    assert.equal(explicit.summaryExecutorUnavailableReason, '')
+  } finally {
+    rmSync(dataHome, { recursive: true, force: true })
+  }
+})
+
+test('Claude inventory does not assume system login crosses the isolated home boundary', async () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'ucli-claude-cli-auth-'))
+  try {
+    const noCredential = await inspectCliTool('claude', installedRunner('2.0.0'), {
+      env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home },
+      homeDirectory: home
+    })
+    assert.equal(noCredential.summaryExecutorAvailable, false)
+    assert.equal(noCredential.summaryExecutorUnavailableReason, 'requires-allowlisted-env-or-managed-profile')
+
+    mkdirSync(path.join(home, '.claude'))
+    writeFileSync(
+      path.join(home, '.claude', '.credentials.json'),
+      '{"x":1}',
+      { mode: 0o600 }
+    )
+    const invalidShape = await inspectCliTool('claude', installedRunner('2.0.0'), {
+      env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home },
+      homeDirectory: home
+    })
+    assert.equal(invalidShape.summaryExecutorAvailable, false)
+    writeFileSync(
+      path.join(home, '.claude', '.credentials.json'),
+      '{"claudeAiOauth":{"accessToken":"inventory-secret"}}',
+      { mode: 0o600 }
+    )
+    const bridged = await inspectCliTool('claude', installedRunner('2.0.0'), {
+      env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home },
+      homeDirectory: home
+    })
+    assert.equal(bridged.summaryExecutorAvailable, true)
+    assert.equal(bridged.summaryAuthenticationSource, 'auth-file')
+    assert.equal(JSON.stringify(bridged).includes('inventory-secret'), false)
+
+    const explicit = await inspectCliTool('claude', installedRunner('2.0.0'), {
+      env: { PATH: process.env.PATH, ANTHROPIC_API_KEY: 'allowlisted-test-value' },
+      homeDirectory: home
+    })
+    assert.equal(explicit.summaryExecutorAvailable, true)
+    assert.equal(explicit.summaryExecutorUnavailableReason, '')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('Claude macOS inventory probes Keychain login with an isolated no-model auth status command', async () => {
+  const calls = []
+  const runner = async (command, _timeout, env) => {
+    calls.push({ command, env })
+    if (command.includes('auth status')) {
+      return { code: 0, stdout: '{"loggedIn":true,"authMethod":"oauth"}', stderr: '' }
+    }
+    if (command.startsWith('where ') || command.startsWith('command -v ')) {
+      return { code: 0, stdout: '/usr/local/bin/claude\n', stderr: '' }
+    }
+    return { code: 0, stdout: '2.0.0\n', stderr: '' }
+  }
+  const status = await inspectCliTool('claude', runner, {
+    platform: 'darwin',
+    env: { PATH: process.env.PATH, ANTHROPIC_BASE_URL: 'https://attacker.invalid' }
+  })
+  assert.equal(status.summaryExecutorAvailable, true)
+  assert.equal(status.summaryAuthenticationSource, 'keychain')
+  const probe = calls.find(call => call.command === 'claude auth status --json')
+  assert.ok(probe)
+  assert.ok(probe.env.HOME)
+  assert.notEqual(probe.env.HOME, process.env.HOME)
+  assert.equal(probe.env.ANTHROPIC_BASE_URL, undefined)
 })
 
 test('OpenCode upgrade runs the npm global installer', async () => {

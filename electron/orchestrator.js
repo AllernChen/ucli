@@ -58,6 +58,8 @@ import {
   createLiveSummaryPipeline,
   createSummaryScheduler,
   normalizeSummarySettings,
+  profileAvailableForSummary,
+  profileProvidesSummaryAuthentication,
   updateSummarySettings
 } from './summaries/summaryScheduler.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
@@ -110,6 +112,7 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   SUMMARY_REPORT_NOT_COMPLETED: 'Only a completed report can be current',
   SUMMARY_AUTOMATION_UNAVAILABLE: 'Automatic summaries require local persistence',
   SUMMARY_EXECUTOR_UNAVAILABLE: 'Select an available default AI CLI',
+  SUMMARY_EXECUTOR_AUTH_UNAVAILABLE: 'Selected AI CLI requires an isolated summary credential',
   SUMMARY_EXECUTOR_UNSAFE: 'Selected AI CLI cannot guarantee tool-free summary execution',
   SUMMARY_PROFILE_UNAVAILABLE: 'Select an available default AI CLI profile',
   SUMMARY_DISCLOSURE_REQUIRED: 'Automatic summaries require disclosure acceptance'
@@ -267,14 +270,24 @@ function validateManualSummaryRequest(input, {
   if (!executor) {
     throw Object.assign(new Error(), { code: 'SUMMARY_EXECUTOR_UNAVAILABLE' })
   }
-  if (executor.summaryExecutorAvailable !== true || executor.safeForSummary === false) {
+  if (executor.safeForSummary === false) {
     throw Object.assign(new Error(), { code: 'SUMMARY_EXECUTOR_UNSAFE' })
   }
+  const profile = input.profileId
+    ? availableProfiles.find(item => item?.id === input.profileId)
+    : null
   if (input.profileId) {
-    if (!availableProfiles.some(profile => profile?.id === input.profileId &&
-      profile?.adapterId === input.executorId && profile?.status === 'ready')) {
+    if (!profileAvailableForSummary(
+      profile,
+      input.executorId,
+      executor.summaryExecutorAvailable === true
+    )) {
       throw Object.assign(new Error(), { code: 'SUMMARY_PROFILE_UNAVAILABLE' })
     }
+  }
+  if (executor.summaryExecutorAvailable !== true &&
+    !profileProvidesSummaryAuthentication(profile, input.executorId)) {
+    throw Object.assign(new Error(), { code: 'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE' })
   }
   return {
     ...input,

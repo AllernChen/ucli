@@ -61,16 +61,43 @@ const periodOptions = [
 const selectedExecutor = computed(() => useDefaults.value ? summaries.settings?.defaultExecutorId : form.executorId)
 const selectedProfile = computed(() => useDefaults.value ? summaries.settings?.defaultProfileId : form.profileId)
 const selectedModel = computed(() => useDefaults.value ? summaries.settings?.defaultModel : form.model)
-const executorOptions = computed(() => tools.value
-  .filter(tool => tool.installed && tool.summaryExecutorAvailable)
-  .map(tool => ({ label: tool.displayName, value: tool.id })))
-const profileOptions = computed(() => profiles.value.filter(profile => profile.adapterId === selectedExecutor.value && profile.status === 'ready').map(profile => ({ label: profile.name, value: profile.id })))
-const canGenerate = computed(() => {
-  const executable = tools.value.some(tool =>
-    tool.id === selectedExecutor.value && tool.installed && tool.summaryExecutorAvailable
+const managedSummaryProfile = (profile, executorId) =>
+  executorId === 'claude' &&
+  profile?.adapterId === executorId &&
+  profile?.kind === 'managed' &&
+  profile?.status === 'ready' &&
+  ['api_key', 'bearer'].includes(profile?.connectionMode || profile?.config?.connectionMode)
+const summaryProfileUsable = (profile, tool) =>
+  managedSummaryProfile(profile, tool?.id) || (
+    tool?.summaryExecutorAvailable === true &&
+    tool?.id === 'claude' &&
+    profile?.adapterId === tool.id &&
+    profile?.kind === 'reference' &&
+    profile?.status === 'ready' &&
+    (profile?.connectionMode || profile?.config?.connectionMode) === 'subscription'
   )
-  const profile = !selectedProfile.value || profiles.value.some(item => item.id === selectedProfile.value && item.adapterId === selectedExecutor.value && item.status === 'ready')
-  return executable && profile
+const summaryExecutorUsable = (tool, profileId = null, allowAnyManaged = false) => {
+  if (!tool?.installed || tool.safeForSummary !== true) return false
+  const selected = profileId
+    ? profiles.value.find(profile => profile.id === profileId)
+    : null
+  if (profileId && !summaryProfileUsable(selected, tool)) return false
+  if (tool.summaryExecutorAvailable === true) return true
+  if (selected && managedSummaryProfile(selected, tool.id)) return true
+  return allowAnyManaged && profiles.value.some(profile => managedSummaryProfile(profile, tool.id))
+}
+const executorOptions = computed(() => tools.value
+  .filter(tool => summaryExecutorUsable(tool, null, true))
+  .map(tool => ({ label: tool.displayName, value: tool.id })))
+const profileOptions = computed(() => profiles.value
+  .filter(profile => summaryProfileUsable(
+    profile,
+    tools.value.find(tool => tool.id === selectedExecutor.value)
+  ))
+  .map(profile => ({ label: profile.name, value: profile.id })))
+const canGenerate = computed(() => {
+  const executable = tools.value.find(tool => tool.id === selectedExecutor.value)
+  return summaryExecutorUsable(executable, selectedProfile.value)
 })
 const estimatedChunks = computed(() => Math.max(1, sessionCount.value))
 const estimatedCalls = computed(() => estimatedChunks.value * 2 + 1)

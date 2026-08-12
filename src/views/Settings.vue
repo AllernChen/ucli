@@ -332,11 +332,37 @@ const lastCliOutput = computed(() => {
 })
 const diagnosticCliSummary = computed(() => formatCliDiagnosticSummary(diagnostics.value?.cliTools || []))
 const diagnosticProfileSummary = computed(() => profileDiagnosticSummary(diagnostics.value?.aiCliProfiles || {}))
+const managedSummaryProfile = (profile, executorId) =>
+  executorId === 'claude' &&
+  profile?.adapterId === executorId &&
+  profile?.kind === 'managed' &&
+  profile?.status === 'ready' &&
+  ['api_key', 'bearer'].includes(profile?.connectionMode || profile?.config?.connectionMode)
+const summaryProfileUsable = (profile, tool) =>
+  managedSummaryProfile(profile, tool?.id) || (
+    tool?.summaryExecutorAvailable === true &&
+    tool?.id === 'claude' &&
+    profile?.adapterId === tool.id &&
+    profile?.kind === 'reference' &&
+    profile?.status === 'ready' &&
+    (profile?.connectionMode || profile?.config?.connectionMode) === 'subscription'
+  )
+const summaryExecutorUsable = (tool, profileId = null, allowAnyManaged = false) => {
+  if (!tool?.installed || tool.safeForSummary !== true) return false
+  if (tool.summaryExecutorAvailable === true) return !profileId || summaryProfiles.value.some(profile =>
+    profile.id === profileId && summaryProfileUsable(profile, tool))
+  return summaryProfiles.value.some(profile =>
+    managedSummaryProfile(profile, tool.id) &&
+    (allowAnyManaged || profile.id === profileId))
+}
 const summaryExecutorOptions = computed(() => cliTools.value.filter(tool =>
-  tool.installed && tool.summaryExecutorAvailable
+  summaryExecutorUsable(tool, null, true)
 ))
 const summaryProfileOptions = computed(() => summaryProfiles.value.filter(profile =>
-  profile.adapterId === local.value.defaultExecutorId && profile.status === 'ready'
+  summaryProfileUsable(
+    profile,
+    cliTools.value.find(tool => tool.id === local.value.defaultExecutorId)
+  )
 ))
 const summaryModelOptions = computed(() => {
   const adapter = adapters.value.find(item => item.id === local.value.defaultExecutorId)
@@ -524,7 +550,8 @@ function onSummaryAutoChange(enabled) {
     local.value.autoEnabled = false
     return
   }
-  if (!summaryExecutorOptions.value.some(tool => tool.id === local.value.defaultExecutorId)) {
+  const executor = cliTools.value.find(tool => tool.id === local.value.defaultExecutorId)
+  if (!summaryExecutorUsable(executor, local.value.defaultProfileId)) {
     local.value.autoEnabled = false
     message.warning('请先选择一个已安装的默认 AI CLI')
     return
@@ -551,8 +578,8 @@ function onSummaryAutoChange(enabled) {
 function onSummaryExecutorChange() {
   local.value.defaultProfileId = null
   local.value.defaultModel = null
-  if (local.value.autoEnabled &&
-    !summaryExecutorOptions.value.some(tool => tool.id === local.value.defaultExecutorId)) {
+  const executor = cliTools.value.find(tool => tool.id === local.value.defaultExecutorId)
+  if (local.value.autoEnabled && !summaryExecutorUsable(executor, local.value.defaultProfileId)) {
     local.value.autoEnabled = false
   }
 }

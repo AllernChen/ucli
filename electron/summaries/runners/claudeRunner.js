@@ -3,13 +3,16 @@ import { join } from 'node:path'
 
 import {
   buildSummaryProcessEnvironment,
+  hasSummaryProviderAuthentication,
   normalizeRunnerResult,
   parseJsonOutput,
   resolveSafeCliLaunch,
   runProcess,
   runnerError,
+  stripSummaryProviderEndpoints,
   withIsolatedWorkingDirectory
 } from './processRunner.js'
+import { bridgeClaudeAuthentication } from './authBridge.js'
 
 function defaultExecutableResolver() {
   return resolveSafeCliLaunch('claude')
@@ -27,7 +30,9 @@ export function createClaudeRunner({
   profileService,
   resolveExecutable = defaultExecutableResolver,
   processRunner = runProcess,
-  maxBudgetUsd = null
+  maxBudgetUsd = null,
+  baseEnv = process.env,
+  platform = process.platform
 } = {}) {
   return {
     async run(options) {
@@ -36,9 +41,10 @@ export function createClaudeRunner({
         const isolatedHome = join(artifactDirectory, 'home')
         await mkdir(workingDirectory)
         const launch = resolveExecutable() || {}
-        const baseEnv = await buildSummaryProcessEnvironment({
+        const isolatedBaseEnv = await buildSummaryProcessEnvironment({
           provider: 'claude',
           isolatedHome,
+          baseEnv,
           launchEnv: launch.env
         })
         let profileLaunch = { args: [], env: {} }
@@ -49,7 +55,7 @@ export function createClaudeRunner({
           profileLaunch = profileService.resolveLaunchProfile({
             profileId: options.profileId,
             session: { model: options.model },
-            baseEnv
+            baseEnv: isolatedBaseEnv
           })
         }
         const args = [
@@ -71,18 +77,34 @@ export function createClaudeRunner({
           args.push('--max-budget-usd', String(budget))
         }
 
+        const env = await buildSummaryProcessEnvironment({
+          provider: 'claude',
+          isolatedHome,
+          baseEnv: isolatedBaseEnv,
+          launchEnv: launch.env,
+          profileEnv: profileLaunch.env
+        })
+        stripSummaryProviderEndpoints('claude', env)
+        if (!hasSummaryProviderAuthentication('claude', env)) {
+          const authentication = await bridgeClaudeAuthentication({
+            sourceEnv: { ...baseEnv, ...(launch.env || {}) },
+            isolatedConfigDirectory: env.CLAUDE_CONFIG_DIR,
+            platform
+          })
+          if (!authentication.available && platform !== 'darwin') {
+            throw runnerError(
+              'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE',
+              'Claude summary authentication is unavailable'
+            )
+          }
+        }
+
         const processResult = await processRunner({
           file: launch.file,
           args,
           prompt: options.prompt,
           cwd: workingDirectory,
-          env: await buildSummaryProcessEnvironment({
-            provider: 'claude',
-            isolatedHome,
-            baseEnv,
-            launchEnv: launch.env,
-            profileEnv: profileLaunch.env
-          }),
+          env,
           timeoutMs: options.timeoutMs,
           maxOutputBytes: options.maxOutputBytes,
           signal: options.signal,

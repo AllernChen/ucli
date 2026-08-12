@@ -6,13 +6,16 @@ import { resolveUCodeLaunch } from '../../adapters/ucodeAdapter.js'
 
 import {
   buildSummaryProcessEnvironment,
+  hasSummaryProviderAuthentication,
   normalizeRunnerResult,
   parseJsonLines,
   parseJsonOutput,
   runProcess,
   runnerError,
+  stripSummaryProviderEndpoints,
   withIsolatedWorkingDirectory
 } from './processRunner.js'
+import { bridgeOpenCodeAuthentication } from './authBridge.js'
 
 function strictPrompt(prompt, schema) {
   return `${prompt}\n\nReturn only JSON matching this schema: ${JSON.stringify(schema || {})}`
@@ -46,7 +49,8 @@ function eventUsage(events) {
 export function createOpenCodeRunner({
   adapterId = 'opencode',
   resolveExecutable,
-  processRunner = runProcess
+  processRunner = runProcess,
+  baseEnv = process.env
 } = {}) {
   if (!['opencode', 'ucode'].includes(adapterId)) {
     throw runnerError('SUMMARY_RUNNER_UNSUPPORTED_EXECUTOR', `Unsupported executor: ${adapterId}`)
@@ -77,8 +81,22 @@ export function createOpenCodeRunner({
         const env = await buildSummaryProcessEnvironment({
           provider: 'opencode',
           isolatedHome,
+          baseEnv,
           launchEnv: launch.env
         })
+        stripSummaryProviderEndpoints('opencode', env)
+        if (!hasSummaryProviderAuthentication('opencode', env)) {
+          const authentication = await bridgeOpenCodeAuthentication({
+            sourceEnv: { ...baseEnv, ...(launch.env || {}) },
+            isolatedDataHome: env.XDG_DATA_HOME
+          })
+          if (!authentication.available) {
+            throw runnerError(
+              'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE',
+              'OpenCode summary authentication is unavailable'
+            )
+          }
+        }
         Object.assign(env, {
           OPENCODE_CLIENT: 'ucli-summary',
           OPENCODE_PERMISSION: JSON.stringify({ '*': 'deny' }),

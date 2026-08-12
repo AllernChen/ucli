@@ -10,7 +10,12 @@ import {
 } from '../electron/summaries/summaryScheduler.js'
 
 const available = id => ({ id, installed: true, summaryExecutorAvailable: true })
-const unsafe = id => ({ id, installed: true, summaryExecutorAvailable: false })
+const authUnavailable = id => ({ id, installed: true, safeForSummary: true, summaryExecutorAvailable: false })
+const unsafe = id => ({ id, installed: true, safeForSummary: false, summaryExecutorAvailable: false })
+const managedClaudeProfile = {
+  id: 'claude-managed', adapterId: 'claude', kind: 'managed',
+  connectionMode: 'api_key', status: 'ready'
+}
 
 test('summary settings expose the exact opt-in defaults', () => {
   assert.deepEqual(DEFAULT_SUMMARY_SETTINGS, {
@@ -79,6 +84,68 @@ test('enabled automation keeps a valid executor and clears stale executor-specif
   assert.equal(changed.defaultModel, null)
 })
 
+test('automatic summaries allow a ready managed Claude credential but never an unsafe executor', () => {
+  const enabled = updateSummarySettings({}, {
+    autoEnabled: true,
+    defaultExecutorId: 'claude',
+    defaultProfileId: managedClaudeProfile.id,
+    firstEnableDisclosureAcceptedAt: 123
+  }, {
+    availableExecutors: [authUnavailable('claude')],
+    availableProfiles: [managedClaudeProfile]
+  })
+  assert.equal(enabled.autoEnabled, true)
+  assert.equal(enabled.defaultProfileId, managedClaudeProfile.id)
+
+  assert.throws(() => updateSummarySettings({}, {
+    autoEnabled: true,
+    defaultExecutorId: 'claude',
+    firstEnableDisclosureAcceptedAt: 123
+  }, {
+    availableExecutors: [authUnavailable('claude')],
+    availableProfiles: []
+  }), error => error.code === 'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE')
+
+  assert.throws(() => updateSummarySettings({}, {
+    autoEnabled: true,
+    defaultExecutorId: 'codex',
+    defaultProfileId: 'codex-managed',
+    firstEnableDisclosureAcceptedAt: 123
+  }, {
+    availableExecutors: [unsafe('codex')],
+    availableProfiles: [{
+      id: 'codex-managed', adapterId: 'codex', kind: 'managed', status: 'ready'
+    }]
+  }), error => error.code === 'SUMMARY_EXECUTOR_UNSAFE')
+})
+
+test('subscription/reference profiles do not claim isolated Claude authentication', () => {
+  const reference = {
+    id: 'claude-login', adapterId: 'claude', kind: 'reference',
+    connectionMode: 'subscription', status: 'ready'
+  }
+  assert.throws(() => updateSummarySettings({}, {
+    autoEnabled: true,
+    defaultExecutorId: 'claude',
+    defaultProfileId: 'claude-login',
+    firstEnableDisclosureAcceptedAt: 123
+  }, {
+    availableExecutors: [authUnavailable('claude')],
+    availableProfiles: [reference]
+  }), error => error.code === 'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE')
+
+  const enabled = updateSummarySettings({}, {
+    autoEnabled: true,
+    defaultExecutorId: 'claude',
+    defaultProfileId: reference.id,
+    firstEnableDisclosureAcceptedAt: 123
+  }, {
+    availableExecutors: [available('claude')],
+    availableProfiles: [reference]
+  })
+  assert.equal(enabled.defaultProfileId, reference.id)
+})
+
 test('automatic enablement is rejected when durable scheduling is unavailable', () => {
   assert.throws(
     () => updateSummarySettings({}, {
@@ -127,9 +194,11 @@ test('renderer settings expose automatic cadence, default CLI/profile/model, and
     assert.match(view, new RegExp(`value="${period}"`))
   }
   assert.match(view, /onSummaryAutoChange/)
-  assert.match(view, /tool\.installed\s*&&\s*tool\.summaryExecutorAvailable/)
+  assert.match(view, /managedSummaryProfile/)
+  assert.match(view, /summaryExecutorUsable/)
   const dialog = readFileSync(new URL('../src/components/summaries/SummaryGenerateDialog.vue', import.meta.url), 'utf8')
-  assert.match(dialog, /tool\.installed\s*&&\s*tool\.summaryExecutorAvailable/)
+  assert.match(dialog, /managedSummaryProfile/)
+  assert.match(dialog, /summaryExecutorUsable/)
   assert.match(view, /会话材料/)
   assert.match(view, /配置的 CLI\/Provider/)
   assert.match(view, /可能产生费用/)
