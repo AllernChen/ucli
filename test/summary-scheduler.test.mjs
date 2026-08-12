@@ -9,7 +9,7 @@ function enabledSettings(overrides = {}) {
   return {
     autoEnabled: true,
     autoPeriods: { day: true, week: true, month: true, quarter: true, year: true },
-    defaultExecutorId: 'codex',
+    defaultExecutorId: 'claude',
     defaultProfileId: null,
     defaultModel: null,
     firstEnableDisclosureAcceptedAt: 1,
@@ -35,7 +35,7 @@ test('startup enqueues the latest missing completed period in cadence order', as
   assert.deepEqual(enqueued.map(item => item.periodType), ['day', 'week', 'month', 'quarter', 'year'])
   assert.equal(enqueued.filter(item => item.periodType === 'day').length, 1)
   assert.ok(enqueued.every(item => item.generatedBy === 'automatic'))
-  assert.ok(enqueued.every(item => item.executorId === 'codex'))
+  assert.ok(enqueued.every(item => item.executorId === 'claude'))
   scheduler.stop()
 })
 
@@ -84,6 +84,22 @@ test('master and per-period switches suppress automatic work', async () => {
   })
   await scheduler.tick()
   assert.deepEqual(enqueued.map(item => item.periodType), ['week'])
+})
+
+test('persisted unsafe executors never enqueue automatic work', async () => {
+  const enqueued = []
+  const scheduler = createSummaryScheduler({
+    getSettings: () => enabledSettings({ defaultExecutorId: 'codex' }),
+    listReports: () => [],
+    generate: request => { enqueued.push(request); return {} },
+    now: () => NOW,
+    timeZone: 'UTC',
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {}
+  })
+
+  await scheduler.start()
+  assert.deepEqual(enqueued, [])
 })
 
 test('completed, current, and skipped empty periods are not enqueued again', async () => {

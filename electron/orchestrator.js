@@ -110,6 +110,7 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   SUMMARY_REPORT_NOT_COMPLETED: 'Only a completed report can be current',
   SUMMARY_AUTOMATION_UNAVAILABLE: 'Automatic summaries require local persistence',
   SUMMARY_EXECUTOR_UNAVAILABLE: 'Select an available default AI CLI',
+  SUMMARY_EXECUTOR_UNSAFE: 'Selected AI CLI cannot guarantee tool-free summary execution',
   SUMMARY_PROFILE_UNAVAILABLE: 'Select an available default AI CLI profile',
   SUMMARY_DISCLOSURE_REQUIRED: 'Automatic summaries require disclosure acceptance'
 })
@@ -261,8 +262,13 @@ function validateManualSummaryRequest(input, {
     throw invalidSummaryIpc()
   }
 
-  if (!availableExecutors.some(tool => tool?.id === input.executorId && tool?.installed === true)) {
+  const executor = availableExecutors.find(tool =>
+    tool?.id === input.executorId && tool?.installed === true)
+  if (!executor) {
     throw Object.assign(new Error(), { code: 'SUMMARY_EXECUTOR_UNAVAILABLE' })
+  }
+  if (executor.summaryExecutorAvailable !== true || executor.safeForSummary === false) {
+    throw Object.assign(new Error(), { code: 'SUMMARY_EXECUTOR_UNSAFE' })
   }
   if (input.profileId) {
     if (!availableProfiles.some(profile => profile?.id === input.profileId &&

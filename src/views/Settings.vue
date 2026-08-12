@@ -332,7 +332,9 @@ const lastCliOutput = computed(() => {
 })
 const diagnosticCliSummary = computed(() => formatCliDiagnosticSummary(diagnostics.value?.cliTools || []))
 const diagnosticProfileSummary = computed(() => profileDiagnosticSummary(diagnostics.value?.aiCliProfiles || {}))
-const summaryExecutorOptions = computed(() => cliTools.value.filter(tool => tool.installed))
+const summaryExecutorOptions = computed(() => cliTools.value.filter(tool =>
+  tool.installed && tool.summaryExecutorAvailable
+))
 const summaryProfileOptions = computed(() => summaryProfiles.value.filter(profile =>
   profile.adapterId === local.value.defaultExecutorId && profile.status === 'ready'
 ))

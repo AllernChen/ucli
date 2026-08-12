@@ -18,6 +18,21 @@ test('CLI catalog exposes only fixed install and upgrade commands', () => {
   assert.equal(tools[3].upgradeCommand, 'npm install -g @allenchen77/ucode-cli')
 })
 
+test('CLI catalog keeps installation separate from safe summary execution', () => {
+  const tools = listCliToolDefinitions()
+  assert.deepEqual(tools.map(tool => ({
+    id: tool.id,
+    safeForSummary: tool.safeForSummary,
+    summaryExecutorAvailable: tool.summaryExecutorAvailable,
+    summaryExecutorUnavailableReason: tool.summaryExecutorUnavailableReason
+  })), [
+    { id: 'claude', safeForSummary: true, summaryExecutorAvailable: true, summaryExecutorUnavailableReason: '' },
+    { id: 'codex', safeForSummary: false, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'no-guaranteed-no-tools-mode' },
+    { id: 'opencode', safeForSummary: true, summaryExecutorAvailable: true, summaryExecutorUnavailableReason: '' },
+    { id: 'ucode', safeForSummary: false, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'no-guaranteed-no-tools-mode' }
+  ])
+})
+
 test('OpenCode upgrade runs the npm global installer', async () => {
   const originalPath = process.env.PATH
   try {

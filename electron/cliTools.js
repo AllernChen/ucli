@@ -1,5 +1,6 @@
 import { spawn } from 'child_process'
 import { delimiter, posix, win32 } from 'path'
+import { getSummaryExecutorCapability } from './summaries/nativeCapabilities.js'
 
 const CLI_TOOLS = {
   claude: {
@@ -32,7 +33,18 @@ const CLI_TOOLS = {
   }
 }
 export function listCliToolDefinitions() {
-  return Object.values(CLI_TOOLS).map((tool) => ({ ...tool }))
+  return Object.values(CLI_TOOLS).map(summaryCapability)
+}
+
+function summaryCapability(tool) {
+  const capability = getSummaryExecutorCapability(tool.id)
+  const safeForSummary = capability?.available === true
+  return {
+    ...tool,
+    safeForSummary,
+    summaryExecutorAvailable: safeForSummary,
+    summaryExecutorUnavailableReason: safeForSummary ? '' : (capability?.reason || 'unsupported-executor')
+  }
 }
 
 export async function inspectCliTool(id, runner = runFixedCommand) {
@@ -49,7 +61,7 @@ export async function inspectCliTool(id, runner = runFixedCommand) {
   ])
   const installed = versionResult.code === 0
   return {
-    ...tool,
+    ...summaryCapability(tool),
     installed,
     path: firstLine(pathResult.stdout),
     version: installed ? firstLine(versionResult.stdout || versionResult.stderr) : '',

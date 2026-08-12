@@ -9,6 +9,9 @@ import {
   updateSummarySettings
 } from '../electron/summaries/summaryScheduler.js'
 
+const available = id => ({ id, installed: true, summaryExecutorAvailable: true })
+const unsafe = id => ({ id, installed: true, summaryExecutorAvailable: false })
+
 test('summary settings expose the exact opt-in defaults', () => {
   assert.deepEqual(DEFAULT_SUMMARY_SETTINGS, {
     autoEnabled: false,
@@ -24,7 +27,7 @@ test('summary settings expose the exact opt-in defaults', () => {
 test('automatic enablement requires an installed default executor and accepted disclosure', () => {
   assert.throws(
     () => updateSummarySettings({}, { autoEnabled: true, defaultExecutorId: 'codex' }, {
-      availableExecutors: ['codex']
+      availableExecutors: [available('claude')]
     }),
     error => error.code === 'SUMMARY_DISCLOSURE_REQUIRED'
   )
@@ -33,16 +36,16 @@ test('automatic enablement requires an installed default executor and accepted d
       autoEnabled: true,
       defaultExecutorId: 'claude',
       firstEnableDisclosureAcceptedAt: 123
-    }, { availableExecutors: ['codex'] }),
+    }, { availableExecutors: [available('opencode')] }),
     error => error.code === 'SUMMARY_EXECUTOR_UNAVAILABLE'
   )
 
   const enabled = updateSummarySettings({}, {
     autoEnabled: true,
-    defaultExecutorId: 'codex',
+    defaultExecutorId: 'claude',
     firstEnableDisclosureAcceptedAt: 123,
     autoPeriods: { month: true }
-  }, { availableExecutors: ['codex'] })
+  }, { availableExecutors: [available('claude')] })
   assert.equal(enabled.autoEnabled, true)
   assert.equal(enabled.autoPeriods.day, true)
   assert.equal(enabled.autoPeriods.month, true)
@@ -51,26 +54,26 @@ test('automatic enablement requires an installed default executor and accepted d
 test('enabled automation keeps a valid executor and clears stale executor-specific defaults', () => {
   const current = {
     autoEnabled: true,
-    defaultExecutorId: 'codex',
-    defaultProfileId: 'codex-profile',
-    defaultModel: 'codex-model',
+    defaultExecutorId: 'claude',
+    defaultProfileId: 'claude-profile',
+    defaultModel: 'claude-model',
     firstEnableDisclosureAcceptedAt: 123
   }
   assert.throws(
     () => updateSummarySettings(current, { defaultExecutorId: null }, {
-      availableExecutors: ['codex']
+      availableExecutors: [available('claude')]
     }),
     error => error.code === 'SUMMARY_EXECUTOR_UNAVAILABLE'
   )
   assert.throws(
-    () => updateSummarySettings(current, { defaultExecutorId: 'claude' }, {
-      availableExecutors: ['codex']
+    () => updateSummarySettings(current, { defaultExecutorId: 'ucode' }, {
+      availableExecutors: [available('claude'), unsafe('ucode')]
     }),
-    error => error.code === 'SUMMARY_EXECUTOR_UNAVAILABLE'
+    error => error.code === 'SUMMARY_EXECUTOR_UNSAFE'
   )
 
-  const changed = updateSummarySettings(current, { defaultExecutorId: 'claude' }, {
-    availableExecutors: ['codex', 'claude']
+  const changed = updateSummarySettings(current, { defaultExecutorId: 'opencode' }, {
+    availableExecutors: [available('claude'), available('opencode')]
   })
   assert.equal(changed.defaultProfileId, null)
   assert.equal(changed.defaultModel, null)
@@ -80,10 +83,10 @@ test('automatic enablement is rejected when durable scheduling is unavailable', 
   assert.throws(
     () => updateSummarySettings({}, {
       autoEnabled: true,
-      defaultExecutorId: 'codex',
+      defaultExecutorId: 'claude',
       firstEnableDisclosureAcceptedAt: 123
     }, {
-      availableExecutors: ['codex'],
+      availableExecutors: [available('claude')],
       automationAvailable: false
     }),
     error => error.code === 'SUMMARY_AUTOMATION_UNAVAILABLE'
@@ -124,6 +127,9 @@ test('renderer settings expose automatic cadence, default CLI/profile/model, and
     assert.match(view, new RegExp(`value="${period}"`))
   }
   assert.match(view, /onSummaryAutoChange/)
+  assert.match(view, /tool\.installed\s*&&\s*tool\.summaryExecutorAvailable/)
+  const dialog = readFileSync(new URL('../src/components/summaries/SummaryGenerateDialog.vue', import.meta.url), 'utf8')
+  assert.match(dialog, /tool\.installed\s*&&\s*tool\.summaryExecutorAvailable/)
   assert.match(view, /会话材料/)
   assert.match(view, /配置的 CLI\/Provider/)
   assert.match(view, /可能产生费用/)

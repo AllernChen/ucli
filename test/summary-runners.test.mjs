@@ -7,7 +7,8 @@ import test from 'node:test'
 
 import {
   NATIVE_CAPABILITY_MATRIX,
-  getNativeCapabilityMetadata
+  getNativeCapabilityMetadata,
+  getSummaryExecutorCapability
 } from '../electron/summaries/nativeCapabilities.js'
 import {
   parseJsonOutput,
@@ -15,7 +16,10 @@ import {
   runProcess
 } from '../electron/summaries/runners/processRunner.js'
 import { createClaudeRunner } from '../electron/summaries/runners/claudeRunner.js'
-import { createCodexRunner } from '../electron/summaries/runners/codexRunner.js'
+import {
+  createCodexRunner,
+  readBoundedCodexOutput
+} from '../electron/summaries/runners/codexRunner.js'
 import { createOpenCodeRunner } from '../electron/summaries/runners/openCodeRunner.js'
 import { createSummaryRunner } from '../electron/summaries/summaryRunner.js'
 
@@ -38,8 +42,9 @@ function createFakeExecutable() {
     process.stdin.on('end', () => {
       const args = process.argv.slice(2)
       const mode = args[0]
-      if (process.env.FAKE_CWD_CAPTURE) writeFileSync(process.env.FAKE_CWD_CAPTURE, process.cwd())
-      if (process.env.FAKE_SLEEP) {
+      const captureIndex = args.indexOf('--fake-capture')
+      if (captureIndex >= 0) writeFileSync(args[captureIndex + 1], process.cwd())
+      if (args.includes('--fake-sleep')) {
         setTimeout(() => process.stdout.write('{}'), 10000)
         return
       }
@@ -58,11 +63,21 @@ function createFakeExecutable() {
         process.stdout.write('{"ok":true}')
       } else if (args.includes('-p')) {
         const value = {
-          summary: process.env.FAKE_INVALID_SCHEMA ? 42 : 'claude summary',
+          summary: input === 'bad' ? 42 : 'claude summary',
           prompt: input,
           cwd: process.cwd(),
           entries: readdirSync(process.cwd()),
-          args
+          args,
+          env: {
+            HOME: process.env.HOME,
+            USERPROFILE: process.env.USERPROFILE,
+            XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+            APPDATA: process.env.APPDATA,
+            ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+            AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+            SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK,
+            UNRELATED_SECRET: process.env.UNRELATED_SECRET
+          }
         }
         process.stdout.write(JSON.stringify({
           type: 'result',
@@ -73,7 +88,7 @@ function createFakeExecutable() {
       } else if (args.includes('exec')) {
         const outputIndex = args.indexOf('-o')
         const value = {
-          summary: process.env.FAKE_INVALID_SCHEMA ? 42 : 'codex summary',
+          summary: input === 'bad' ? 42 : 'codex summary',
           prompt: input,
           cwd: process.cwd(),
           entries: readdirSync(process.cwd()),
@@ -86,11 +101,23 @@ function createFakeExecutable() {
         }))
       } else if (args.includes('run')) {
         const value = {
-          summary: process.env.FAKE_INVALID_SCHEMA ? 42 : process.env.FAKE_ADAPTER + ' summary',
+          summary: 'opencode summary',
           prompt: input,
           cwd: process.cwd(),
           entries: readdirSync(process.cwd()),
-          args
+          args,
+          env: {
+            HOME: process.env.HOME,
+            USERPROFILE: process.env.USERPROFILE,
+            OPENCODE_PERMISSION: process.env.OPENCODE_PERMISSION,
+            OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT,
+            OPENCODE_DISABLE_DEFAULT_PLUGINS: process.env.OPENCODE_DISABLE_DEFAULT_PLUGINS,
+            OPENCODE_DISABLE_CLAUDE_CODE: process.env.OPENCODE_DISABLE_CLAUDE_CODE,
+            OPENCODE_DISABLE_LSP_DOWNLOAD: process.env.OPENCODE_DISABLE_LSP_DOWNLOAD,
+            OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+            AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+            SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK
+          }
         }
         process.stdout.write(JSON.stringify({ type: 'text', part: { text: JSON.stringify(value) } }) + '\\n')
         process.stdout.write(JSON.stringify({
@@ -149,6 +176,27 @@ test('AI CLI capabilities are explicit and Claude insights stays manual experime
   assert.equal(getNativeCapabilityMetadata('claude').invokeNativeRetrospective, undefined)
 })
 
+test('summary executor safety is distinct from general CLI capability', () => {
+  assert.deepEqual(getSummaryExecutorCapability('claude'), {
+    available: true,
+    noToolsEnforcement: 'cli-flag',
+    reason: null
+  })
+  assert.deepEqual(getSummaryExecutorCapability('opencode'), {
+    available: true,
+    noToolsEnforcement: 'permission-wildcard',
+    reason: null
+  })
+  for (const adapterId of ['codex', 'ucode']) {
+    assert.deepEqual(getSummaryExecutorCapability(adapterId), {
+      available: false,
+      noToolsEnforcement: null,
+      reason: 'no-guaranteed-no-tools-mode'
+    })
+    assert.equal(NATIVE_CAPABILITY_MATRIX[adapterId].structuredOutput, true)
+  }
+})
+
 function executableResolver(fake, adapterId, extraEnv = {}) {
   return () => ({
     file: fake.file,
@@ -165,7 +213,13 @@ test('Claude runner uses print JSON schema mode, a resolved profile, and an isol
       profileCalls.push(options)
       return {
         args: ['--profile-marker'],
-        env: { ...process.env, FAKE_ADAPTER: 'claude' },
+        env: {
+          ...process.env,
+          ANTHROPIC_API_KEY: 'allowed-claude-auth',
+          AWS_SECRET_ACCESS_KEY: 'must-not-leak',
+          SSH_AUTH_SOCK: 'must-not-leak',
+          UNRELATED_SECRET: 'must-not-leak'
+        },
         artifact: { adapterId: 'claude' }
       }
     }
@@ -186,14 +240,24 @@ test('Claude runner uses print JSON schema mode, a resolved profile, and an isol
     })
 
     assert.equal(profileCalls[0].profileId, 'profile-1')
-    assert.deepEqual(result.value.args.slice(-13), [
-      '--profile-marker', '--model', 'sonnet', '-p', '--output-format', 'json',
+    assert.deepEqual(result.value.args.slice(-15), [
+      '--profile-marker', '--model', 'sonnet', '--disable-slash-commands',
+      '--no-chrome', '-p', '--output-format', 'json',
       '--json-schema', JSON.stringify(SUMMARY_SCHEMA), '--no-session-persistence',
       '--tools', '', '--max-budget-usd', '0.25'
     ])
     assert.equal(result.value.prompt, 'review work')
     assert.notEqual(result.value.cwd, 'F:\\must-not-run-here')
     assert.deepEqual(result.value.entries, [])
+    assert.equal(result.value.env.ANTHROPIC_API_KEY, 'allowed-claude-auth')
+    assert.equal(result.value.env.AWS_SECRET_ACCESS_KEY, undefined)
+    assert.equal(result.value.env.SSH_AUTH_SOCK, undefined)
+    assert.equal(result.value.env.UNRELATED_SECRET, undefined)
+    assert.ok(result.value.env.HOME)
+    assert.equal(result.value.env.HOME, result.value.env.USERPROFILE)
+    assert.notEqual(result.value.env.HOME, process.env.HOME)
+    assert.ok(result.value.env.XDG_CONFIG_HOME.startsWith(result.value.env.HOME))
+    assert.ok(result.value.env.APPDATA.startsWith(result.value.env.HOME))
     assert.equal(existsSync(result.value.cwd), false)
     assert.deepEqual(result.usage, { inputTokens: 11, outputTokens: 4, costUsd: 0.12 })
     assert.equal(result.rawMetadata.adapterId, 'claude')
@@ -202,79 +266,94 @@ test('Claude runner uses print JSON schema mode, a resolved profile, and an isol
   }
 })
 
-test('Codex runner uses ephemeral read-only exec, temp schema/output, and stdin', async () => {
-  const fake = createFakeExecutable()
-  const profileService = {
-    resolveLaunchProfile() {
-      return {
-        args: ['--profile', 'team'],
-        env: { CODEX_API_KEY: 'fake' },
-        artifact: { adapterId: 'codex' }
-      }
-    }
-  }
+test('Codex summary execution fails closed because exec has no no-tools mode', async () => {
+  let processCalled = false
+  const runner = createCodexRunner({
+    resolveExecutable: () => { throw new Error('must not resolve') },
+    processRunner: async () => { processCalled = true }
+  })
+  await assert.rejects(
+    runner.run({ prompt: 'untrusted evidence', schema: SUMMARY_SCHEMA }),
+    error => error.code === 'SUMMARY_EXECUTOR_UNSAFE'
+  )
+  assert.equal(processCalled, false)
+})
+
+test('Codex output files are byte-bounded before JSON or schema parsing', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ucli-codex-output-limit-'))
+  const outputPath = join(directory, 'output.json')
   try {
-    const result = await createCodexRunner({
-      profileService,
-      resolveExecutable: executableResolver(fake, 'codex')
-    }).run({
-      prompt: 'summarize codex',
+    writeFileSync(outputPath, Buffer.alloc(1025, 0x78))
+    await assert.rejects(
+      readBoundedCodexOutput(outputPath, 1024),
+      error => error.code === 'SUMMARY_RUNNER_OUTPUT_LIMIT' &&
+        error.stream === 'output-file' && error.maxOutputBytes === 1024
+    )
+    writeFileSync(outputPath, '{"summary":"ok"}')
+    assert.equal(await readBoundedCodexOutput(outputPath, 1024), '{"summary":"ok"}')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('OpenCode denies every tool and runs pure with isolated config and allowlisted auth', async () => {
+  const fake = createFakeExecutable()
+  try {
+    const runner = createOpenCodeRunner({
+      adapterId: 'opencode',
+      resolveExecutable: executableResolver(fake, 'opencode', {
+        OPENAI_API_KEY: 'allowed-openai-auth',
+        AWS_SECRET_ACCESS_KEY: 'must-not-leak',
+        SSH_AUTH_SOCK: 'must-not-leak'
+      })
+    })
+    const result = await runner.run({
+      prompt: 'summarize opencode',
       schema: SUMMARY_SCHEMA,
-      profileId: 'codex-profile',
-      model: 'gpt-test',
+      model: 'openai/test-model',
       cwd: 'F:\\project',
       timeoutMs: 5000,
       maxOutputBytes: 8192
     })
-    const args = result.value.args
-    assert.deepEqual(args.slice(0, 6), [
-      '--profile', 'team', 'exec', '--ephemeral', '--sandbox', 'read-only'
+    assert.deepEqual(result.value.args.slice(-7), [
+      '--pure', 'run', '--format', 'json', '--model', 'openai/test-model', '-'
     ])
-    assert.ok(args.includes('--output-schema'))
-    assert.ok(args.includes('-o'))
-    assert.equal(args.at(-1), '-')
-    assert.equal(result.value.prompt, 'summarize codex')
+    assert.equal(result.value.env.OPENCODE_PERMISSION, JSON.stringify({ '*': 'deny' }))
+    assert.deepEqual(JSON.parse(result.value.env.OPENCODE_CONFIG_CONTENT), {
+      permission: { '*': 'deny' },
+      instructions: [],
+      plugin: [],
+      mcp: {},
+      lsp: false
+    })
+    assert.equal(result.value.env.OPENCODE_DISABLE_DEFAULT_PLUGINS, '1')
+    assert.equal(result.value.env.OPENCODE_DISABLE_CLAUDE_CODE, '1')
+    assert.equal(result.value.env.OPENCODE_DISABLE_LSP_DOWNLOAD, '1')
+    assert.equal(result.value.env.OPENAI_API_KEY, 'allowed-openai-auth')
+    assert.equal(result.value.env.AWS_SECRET_ACCESS_KEY, undefined)
+    assert.equal(result.value.env.SSH_AUTH_SOCK, undefined)
+    assert.ok(result.value.env.HOME)
+    assert.equal(result.value.env.HOME, result.value.env.USERPROFILE)
     assert.notEqual(result.value.cwd, 'F:\\project')
     assert.deepEqual(result.value.entries, [])
     assert.equal(existsSync(result.value.cwd), false)
-    assert.deepEqual(result.usage, { inputTokens: 9, outputTokens: 3, costUsd: null })
   } finally {
     fake.cleanup()
   }
 })
 
-test('OpenCode and U-Code run JSONL mode in isolated directories and normalize usage', async () => {
-  const fake = createFakeExecutable()
-  try {
-    for (const adapterId of ['opencode', 'ucode']) {
-      const runner = createOpenCodeRunner({
-        adapterId,
-        resolveExecutable: executableResolver(fake, adapterId)
-      })
-      const result = await runner.run({
-        prompt: `summarize ${adapterId}`,
-        schema: SUMMARY_SCHEMA,
-        model: 'test-model',
-        cwd: 'F:\\project',
-        timeoutMs: 5000,
-        maxOutputBytes: 8192
-      })
-      assert.deepEqual(result.value.args.slice(-6), [
-        'run', '--format', 'json', '--model', 'test-model', '-'
-      ])
-      assert.match(result.value.prompt, new RegExp(`^summarize ${adapterId}`))
-      assert.match(result.value.prompt, /Return only JSON/)
-      assert.deepEqual(result.value.entries, [])
-      assert.equal(existsSync(result.value.cwd), false)
-      assert.deepEqual(result.usage, {
-        inputTokens: 7,
-        outputTokens: 2,
-        costUsd: adapterId === 'opencode' ? 0.05 : null
-      })
-    }
-  } finally {
-    fake.cleanup()
-  }
+test('U-Code summary execution fails closed without a guaranteed no-tools mode', async () => {
+  let processCalled = false
+  const runner = createOpenCodeRunner({
+    adapterId: 'ucode',
+    resolveExecutable: () => { throw new Error('must not resolve') },
+    processRunner: async () => { processCalled = true }
+  })
+  await assert.rejects(
+    runner.run({ prompt: 'untrusted evidence', schema: SUMMARY_SCHEMA }),
+    error => error.code === 'SUMMARY_EXECUTOR_UNSAFE'
+  )
+  assert.equal(processCalled, false)
 })
 
 test('summary runner routes providers and rejects unsupported executors and invalid schema results', async () => {
@@ -302,7 +381,7 @@ test('summary runner routes providers and rejects unsupported executors and inva
     )
 
     const invalidRunner = createClaudeRunner({
-      resolveExecutable: executableResolver(fake, 'claude', { FAKE_INVALID_SCHEMA: '1' })
+      resolveExecutable: executableResolver(fake, 'claude')
     })
     await assert.rejects(
       invalidRunner.run({ prompt: 'bad', schema: SUMMARY_SCHEMA }),
@@ -406,9 +485,9 @@ test('provider abort waits for process exit before deleting the isolated cwd', a
   const controller = new AbortController()
   try {
     const pending = createClaudeRunner({
-      resolveExecutable: executableResolver(fake, 'claude', {
-        FAKE_SLEEP: '1',
-        FAKE_CWD_CAPTURE: capturePath
+      resolveExecutable: () => ({
+        file: fake.file,
+        prefixArgs: [...fake.prefixArgs, '--fake-sleep', '--fake-capture', capturePath]
       })
     }).run({
       prompt: 'abort this',

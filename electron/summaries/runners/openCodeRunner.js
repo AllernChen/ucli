@@ -1,7 +1,11 @@
+import { mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
+
 import { resolveOpenCodeLaunch } from '../../adapters/openCodeAdapter.js'
 import { resolveUCodeLaunch } from '../../adapters/ucodeAdapter.js'
 
 import {
+  buildSummaryProcessEnvironment,
   normalizeRunnerResult,
   parseJsonLines,
   parseJsonOutput,
@@ -50,23 +54,53 @@ export function createOpenCodeRunner({
   const resolver = resolveExecutable || (adapterId === 'ucode' ? resolveUCodeLaunch : resolveOpenCodeLaunch)
   return {
     async run(options) {
+      if (adapterId === 'ucode') {
+        throw runnerError(
+          'SUMMARY_EXECUTOR_UNSAFE',
+          'ucode summary execution is unavailable because no guaranteed no-tools mode is available'
+        )
+      }
       if (options.profileId) {
         throw runnerError('SUMMARY_RUNNER_PROFILE_UNSUPPORTED', `${adapterId} does not support AI CLI profiles`)
       }
-      return withIsolatedWorkingDirectory(async (workingDirectory) => {
+      return withIsolatedWorkingDirectory(async (artifactDirectory) => {
+        const workingDirectory = join(artifactDirectory, 'work')
+        const isolatedHome = join(artifactDirectory, 'home')
+        await mkdir(workingDirectory)
         const launch = resolver() || {}
         const args = [
           ...(launch.prefixArgs || []),
-          'run', '--format', 'json'
+          '--pure', 'run', '--format', 'json'
         ]
         if (options.model) args.push('--model', options.model)
         args.push('-')
+        const env = await buildSummaryProcessEnvironment({
+          provider: 'opencode',
+          isolatedHome,
+          launchEnv: launch.env
+        })
+        Object.assign(env, {
+          OPENCODE_CLIENT: 'ucli-summary',
+          OPENCODE_PERMISSION: JSON.stringify({ '*': 'deny' }),
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({
+            permission: { '*': 'deny' },
+            instructions: [],
+            plugin: [],
+            mcp: {},
+            lsp: false
+          }),
+          OPENCODE_DISABLE_DEFAULT_PLUGINS: '1',
+          OPENCODE_DISABLE_CLAUDE_CODE: '1',
+          OPENCODE_DISABLE_CLAUDE_CODE_PROMPT: '1',
+          OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
+          OPENCODE_DISABLE_LSP_DOWNLOAD: '1'
+        })
         const processResult = await processRunner({
           file: launch.file,
           args,
           prompt: strictPrompt(options.prompt, options.schema),
           cwd: workingDirectory,
-          env: { ...process.env, ...(launch.env || {}) },
+          env,
           timeoutMs: options.timeoutMs,
           maxOutputBytes: options.maxOutputBytes,
           signal: options.signal,

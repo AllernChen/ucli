@@ -61,10 +61,14 @@ const periodOptions = [
 const selectedExecutor = computed(() => useDefaults.value ? summaries.settings?.defaultExecutorId : form.executorId)
 const selectedProfile = computed(() => useDefaults.value ? summaries.settings?.defaultProfileId : form.profileId)
 const selectedModel = computed(() => useDefaults.value ? summaries.settings?.defaultModel : form.model)
-const executorOptions = computed(() => tools.value.filter(tool => tool.installed).map(tool => ({ label: tool.displayName, value: tool.id })))
+const executorOptions = computed(() => tools.value
+  .filter(tool => tool.installed && tool.summaryExecutorAvailable)
+  .map(tool => ({ label: tool.displayName, value: tool.id })))
 const profileOptions = computed(() => profiles.value.filter(profile => profile.adapterId === selectedExecutor.value && profile.status === 'ready').map(profile => ({ label: profile.name, value: profile.id })))
 const canGenerate = computed(() => {
-  const executable = tools.value.some(tool => tool.id === selectedExecutor.value && tool.installed)
+  const executable = tools.value.some(tool =>
+    tool.id === selectedExecutor.value && tool.installed && tool.summaryExecutorAvailable
+  )
   const profile = !selectedProfile.value || profiles.value.some(item => item.id === selectedProfile.value && item.adapterId === selectedExecutor.value && item.status === 'ready')
   return executable && profile
 })

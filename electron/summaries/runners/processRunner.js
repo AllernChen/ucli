@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, win32 } from 'node:path'
 
@@ -288,6 +288,70 @@ export function normalizeRunnerResult({ value, schema, usage = {}, rawMetadata =
     },
     rawMetadata
   }
+}
+
+const RUNTIME_ENV_KEYS = Object.freeze([
+  'PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'LANG', 'LC_ALL', 'TZ'
+])
+const PROVIDER_ENV_KEYS = Object.freeze({
+  claude: Object.freeze(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL']),
+  opencode: Object.freeze([
+    'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+    'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'AZURE_OPENAI_API_KEY',
+    'GOOGLE_GENERATIVE_AI_API_KEY', 'GEMINI_API_KEY', 'MISTRAL_API_KEY',
+    'GROQ_API_KEY', 'XAI_API_KEY', 'OPENROUTER_API_KEY', 'COHERE_API_KEY'
+  ])
+})
+
+function envValue(source, name) {
+  const key = Object.keys(source || {}).find(candidate => candidate.toUpperCase() === name)
+  return key ? source[key] : undefined
+}
+
+export async function buildSummaryProcessEnvironment({
+  provider,
+  isolatedHome,
+  baseEnv = process.env,
+  launchEnv = {},
+  profileEnv = {}
+}) {
+  if (!isolatedHome) throw new TypeError('isolatedHome is required')
+  const sources = [baseEnv, launchEnv, profileEnv]
+  const env = {}
+  for (const name of RUNTIME_ENV_KEYS) {
+    for (const source of sources) {
+      const value = envValue(source, name)
+      if (value !== undefined) env[name] = value
+    }
+  }
+  for (const name of PROVIDER_ENV_KEYS[provider] || []) {
+    for (const source of sources) {
+      const value = envValue(source, name)
+      if (value !== undefined) env[name] = value
+    }
+  }
+
+  const directories = {
+    HOME: isolatedHome,
+    USERPROFILE: isolatedHome,
+    XDG_CONFIG_HOME: join(isolatedHome, 'config'),
+    XDG_DATA_HOME: join(isolatedHome, 'data'),
+    XDG_CACHE_HOME: join(isolatedHome, 'cache'),
+    APPDATA: join(isolatedHome, 'appdata'),
+    LOCALAPPDATA: join(isolatedHome, 'localappdata'),
+    TEMP: join(isolatedHome, 'tmp'),
+    TMP: join(isolatedHome, 'tmp')
+  }
+  await Promise.all([...new Set(Object.values(directories))].map(directory =>
+    mkdir(directory, { recursive: true })
+  ))
+  Object.assign(env, directories)
+  if (provider === 'claude') {
+    env.CLAUDE_CONFIG_DIR = join(isolatedHome, 'claude')
+    env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = '1'
+    await mkdir(env.CLAUDE_CONFIG_DIR, { recursive: true })
+  }
+  return env
 }
 
 export async function withIsolatedWorkingDirectory(work) {

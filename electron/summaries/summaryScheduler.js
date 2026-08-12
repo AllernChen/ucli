@@ -1,4 +1,5 @@
 import { completedPeriod } from '../usage/periods.js'
+import { getSummaryExecutorCapability } from './nativeCapabilities.js'
 
 export const SUMMARY_SCHEDULER_INTERVAL_MS = 15 * 60 * 1000
 export const SUMMARY_CADENCES = Object.freeze(['day', 'week', 'month', 'quarter', 'year'])
@@ -49,11 +50,13 @@ function settingsError(code, message) {
   return Object.assign(new Error(message), { code })
 }
 
-function executorIds(availableExecutors) {
-  return new Set((Array.isArray(availableExecutors) ? availableExecutors : [])
-    .filter(item => typeof item === 'string' || item?.installed === true)
-    .map(item => typeof item === 'string' ? item : item.id)
-    .filter(Boolean))
+function executorState(availableExecutors, executorId) {
+  const executor = (Array.isArray(availableExecutors) ? availableExecutors : [])
+    .find(item => item?.id === executorId)
+  if (!executor || executor.installed !== true) return 'unavailable'
+  return executor.summaryExecutorAvailable === true && executor.safeForSummary !== false
+    ? 'available'
+    : 'unsafe'
 }
 
 export function updateSummarySettings(current = {}, patch = {}, {
@@ -78,7 +81,13 @@ export function updateSummarySettings(current = {}, patch = {}, {
     if (!next.firstEnableDisclosureAcceptedAt) {
       throw settingsError('SUMMARY_DISCLOSURE_REQUIRED', 'Automatic summaries require disclosure acceptance')
     }
-    if (!next.defaultExecutorId || !executorIds(availableExecutors).has(next.defaultExecutorId)) {
+    const state = next.defaultExecutorId
+      ? executorState(availableExecutors, next.defaultExecutorId)
+      : 'unavailable'
+    if (state === 'unsafe') {
+      throw settingsError('SUMMARY_EXECUTOR_UNSAFE', 'Selected AI CLI cannot guarantee tool-free summary execution')
+    }
+    if (state !== 'available') {
       throw settingsError('SUMMARY_EXECUTOR_UNAVAILABLE', 'Select an available default AI CLI')
     }
     if (next.defaultProfileId && Array.isArray(availableProfiles) &&
@@ -137,6 +146,7 @@ export function createSummaryScheduler({
     const settings = normalizeSummarySettings(await getSettings())
     if (!settings.autoEnabled || !settings.defaultExecutorId ||
       !settings.firstEnableDisclosureAcceptedAt) return []
+    if (getSummaryExecutorCapability(settings.defaultExecutorId)?.available !== true) return []
     const enqueued = []
     for (const periodType of SUMMARY_CADENCES) {
       if (stopped) break

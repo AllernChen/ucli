@@ -1,104 +1,43 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { open } from 'node:fs/promises'
 
-import {
-  normalizeRunnerResult,
-  parseJsonLines,
-  resolveSafeCliLaunch,
-  runProcess,
-  runnerError,
-  withIsolatedWorkingDirectory
-} from './processRunner.js'
+import { runnerError } from './processRunner.js'
 
-function defaultExecutableResolver() {
-  return resolveSafeCliLaunch('codex')
-}
-
-function usageFromEvents(events) {
-  const usage = [...events].reverse().find((event) => event?.usage)?.usage || {}
-  return {
-    inputTokens: usage.input_tokens ?? usage.inputTokens,
-    outputTokens: usage.output_tokens ?? usage.outputTokens,
-    costUsd: usage.cost_usd ?? usage.costUsd
+export async function readBoundedCodexOutput(path, maxOutputBytes) {
+  if (!Number.isInteger(maxOutputBytes) || maxOutputBytes < 1) {
+    throw new TypeError('maxOutputBytes must be a positive integer')
   }
-}
-
-function optionalJsonEvents(output) {
-  if (!String(output || '').trim()) return []
+  const handle = await open(path, 'r')
   try {
-    return parseJsonLines(output)
-  } catch {
-    return []
+    const metadata = await handle.stat()
+    if (metadata.size > maxOutputBytes) {
+      throw runnerError(
+        'SUMMARY_RUNNER_OUTPUT_LIMIT',
+        'Codex output file exceeded the output limit',
+        { stream: 'output-file', maxOutputBytes }
+      )
+    }
+    const buffer = Buffer.allocUnsafe(maxOutputBytes + 1)
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+    if (bytesRead > maxOutputBytes) {
+      throw runnerError(
+        'SUMMARY_RUNNER_OUTPUT_LIMIT',
+        'Codex output file exceeded the output limit',
+        { stream: 'output-file', maxOutputBytes }
+      )
+    }
+    return buffer.subarray(0, bytesRead).toString('utf8')
+  } finally {
+    await handle.close()
   }
 }
 
-export function createCodexRunner({
-  profileService,
-  resolveExecutable = defaultExecutableResolver,
-  processRunner = runProcess
-} = {}) {
+export function createCodexRunner() {
   return {
-    async run(options) {
-      return withIsolatedWorkingDirectory(async (artifactDirectory) => {
-        const workingDirectory = join(artifactDirectory, 'work')
-        await mkdir(workingDirectory)
-        const schemaPath = join(artifactDirectory, 'output-schema.json')
-        const outputPath = join(artifactDirectory, 'output.json')
-        await writeFile(schemaPath, JSON.stringify(options.schema || {}), 'utf8')
-
-        const launch = resolveExecutable() || {}
-        let profileLaunch = { args: [], env: {} }
-        if (options.profileId) {
-          if (!profileService?.resolveLaunchProfile) {
-            throw runnerError('SUMMARY_RUNNER_PROFILE_UNAVAILABLE', 'Codex profile resolution is unavailable')
-          }
-          profileLaunch = profileService.resolveLaunchProfile({
-            profileId: options.profileId,
-            session: { model: options.model },
-            baseEnv: process.env
-          })
-        }
-        const args = [
-          ...(launch.prefixArgs || []),
-          ...(profileLaunch.args || []),
-          'exec', '--ephemeral', '--sandbox', 'read-only',
-          '--output-schema', schemaPath,
-          '-o', outputPath
-        ]
-        if (options.model) args.push('--model', options.model)
-        args.push('-')
-
-        const processResult = await processRunner({
-          file: launch.file,
-          args,
-          prompt: options.prompt,
-          cwd: workingDirectory,
-          env: { ...process.env, ...(launch.env || {}), ...(profileLaunch.env || {}) },
-          timeoutMs: options.timeoutMs,
-          maxOutputBytes: options.maxOutputBytes,
-          signal: options.signal,
-          onProgress: options.onProgress
-        })
-        let value
-        try {
-          value = JSON.parse(await readFile(outputPath, 'utf8'))
-        } catch (error) {
-          throw runnerError('SUMMARY_RUNNER_INVALID_JSON', 'Codex did not produce valid structured output', {
-            cause: error
-          })
-        }
-        const events = optionalJsonEvents(processResult.stdout)
-        return normalizeRunnerResult({
-          value,
-          schema: options.schema,
-          usage: usageFromEvents(events),
-          rawMetadata: {
-            adapterId: 'codex',
-            exitCode: processResult.exitCode,
-            eventCount: events.length
-          }
-        })
-      })
+    async run() {
+      throw runnerError(
+        'SUMMARY_EXECUTOR_UNSAFE',
+        'Codex summary execution is unavailable because codex exec has no guaranteed no-tools mode'
+      )
     }
   }
 }

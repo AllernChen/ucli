@@ -44,10 +44,37 @@ const NATIVE_CAPABILITY_METADATA = Object.freeze({
   ucode: capability({})
 })
 
+const SUMMARY_EXECUTOR_CAPABILITIES = Object.freeze({
+  claude: capability({
+    available: true,
+    noToolsEnforcement: 'cli-flag',
+    reason: null
+  }),
+  codex: capability({
+    available: false,
+    noToolsEnforcement: null,
+    reason: 'no-guaranteed-no-tools-mode'
+  }),
+  opencode: capability({
+    available: true,
+    noToolsEnforcement: 'permission-wildcard',
+    reason: null
+  }),
+  ucode: capability({
+    available: false,
+    noToolsEnforcement: null,
+    reason: 'no-guaranteed-no-tools-mode'
+  })
+})
+
 export function getNativeCapabilities(adapterId) {
   return NATIVE_CAPABILITY_MATRIX[adapterId] || null
 }
 
 export function getNativeCapabilityMetadata(adapterId) {
   return NATIVE_CAPABILITY_METADATA[adapterId] || null
+}
+
+export function getSummaryExecutorCapability(adapterId) {
+  return SUMMARY_EXECUTOR_CAPABILITIES[adapterId] || null
 }

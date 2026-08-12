@@ -1,4 +1,8 @@
+import { mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
+
 import {
+  buildSummaryProcessEnvironment,
   normalizeRunnerResult,
   parseJsonOutput,
   resolveSafeCliLaunch,
@@ -27,8 +31,16 @@ export function createClaudeRunner({
 } = {}) {
   return {
     async run(options) {
-      return withIsolatedWorkingDirectory(async (workingDirectory) => {
+      return withIsolatedWorkingDirectory(async (artifactDirectory) => {
+        const workingDirectory = join(artifactDirectory, 'work')
+        const isolatedHome = join(artifactDirectory, 'home')
+        await mkdir(workingDirectory)
         const launch = resolveExecutable() || {}
+        const baseEnv = await buildSummaryProcessEnvironment({
+          provider: 'claude',
+          isolatedHome,
+          launchEnv: launch.env
+        })
         let profileLaunch = { args: [], env: {} }
         if (options.profileId) {
           if (!profileService?.resolveLaunchProfile) {
@@ -37,7 +49,7 @@ export function createClaudeRunner({
           profileLaunch = profileService.resolveLaunchProfile({
             profileId: options.profileId,
             session: { model: options.model },
-            baseEnv: process.env
+            baseEnv
           })
         }
         const args = [
@@ -46,6 +58,8 @@ export function createClaudeRunner({
         ]
         if (options.model && !args.includes('--model')) args.push('--model', options.model)
         args.push(
+          '--disable-slash-commands',
+          '--no-chrome',
           '-p',
           '--output-format', 'json',
           '--json-schema', JSON.stringify(options.schema || {}),
@@ -62,7 +76,13 @@ export function createClaudeRunner({
           args,
           prompt: options.prompt,
           cwd: workingDirectory,
-          env: { ...process.env, ...(launch.env || {}), ...(profileLaunch.env || {}) },
+          env: await buildSummaryProcessEnvironment({
+            provider: 'claude',
+            isolatedHome,
+            baseEnv,
+            launchEnv: launch.env,
+            profileEnv: profileLaunch.env
+          }),
           timeoutMs: options.timeoutMs,
           maxOutputBytes: options.maxOutputBytes,
           signal: options.signal,
