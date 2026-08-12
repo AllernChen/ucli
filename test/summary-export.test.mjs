@@ -4,17 +4,38 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { validateSummaryHtml } from '../electron/summaries/htmlSafety.js'
+import { sanitizeSummaryHtml } from '../electron/summaries/htmlSafety.js'
 import { createReportExportService } from '../electron/summaries/reportExportService.js'
 
 const markdown = '# 周报\n\n## 摘要\n\n完成 A。\n\n## 下一步\n\n继续 B。\n'
 
+// A clean, complete standalone document. The sanitizer must pass it through.
 function safeHtml(theme = 'light') {
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>周报</title>
 <style>:root{color-scheme:${theme}} nav{position:fixed;left:0;top:0} main{margin-left:220px}</style>
 </head><body><nav><a href="#report">周报</a><a href="#summary">摘要</a><a href="#next">下一步</a></nav>
 <main><h1 id="report">周报</h1><h2 id="summary">摘要</h2><p>完成 A。</p><h2 id="next">下一步</h2><p>继续 B。</p></main></body></html>`
+}
+
+// Realistic AI-CLI output: colors on headings/links/cells, scrollable nav & code,
+// multi-level selectors, a heading inside nav. The old validator rejected all of this;
+// the sanitizer must keep it.
+function richHtml() {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>周报</title>
+<style>
+html { background-color: #ffffff; color: #1a1a1a; font-size: 16px; }
+nav { position: fixed; left: 0; top: 0; width: 20rem; height: 100vh; overflow-y: auto; background-color: #f4f1ea; color: #2b2b2b; }
+nav h2 { color: #5a5a5a; }
+nav a { color: #2b2b2b; }
+main { margin-left: 21rem; }
+main h2 { color: #6b4f1d; }
+main th { background-color: #6b4f1d; color: #ffffff; }
+main pre { overflow-x: auto; }
+main p code, main li code { background-color: #f0ece4; color: #6b4f1d; }
+</style></head>
+<body><nav><h2>目录</h2><ul><li><a href="#report">周报</a></li></ul></nav>
+<main><h1 id="report">周报</h1><p>正文。</p><pre><code>npm run build</code></pre></main></body></html>`
 }
 
 function report(overrides = {}) {
@@ -30,92 +51,80 @@ function repository(value = report()) {
   return { get: id => id === value.id ? structuredClone(value) : null }
 }
 
-test('parse5 validation accepts a complete standalone document with fixed left navigation', () => {
-  assert.deepEqual(validateSummaryHtml({ html: safeHtml(), markdown }), { valid: true, errors: [] })
+test('sanitizer passes a clean standalone document through', () => {
+  const result = sanitizeSummaryHtml({ html: safeHtml() })
+  assert.equal(result.ok, true)
+  assert.match(result.html, /<html[\s>]/)
+  assert.match(result.html, /完成 A/)
 })
 
-test('HTML validation rejects executable, remote, structural, and section-integrity violations', () => {
+test('sanitizer keeps benign styling the strict validator used to reject', () => {
+  const result = sanitizeSummaryHtml({ html: richHtml() })
+  assert.equal(result.ok, true)
+  assert.match(result.html, /color: #6b4f1d/, 'heading colors must be retained')
+  assert.match(result.html, /color: #2b2b2b/, 'link colors must be retained')
+  assert.match(result.html, /overflow-y: auto/, 'scrollable nav must be retained')
+  assert.match(result.html, /overflow-x: auto/, 'scrollable code must be retained')
+  assert.match(result.html, /main p code/, 'multi-level selectors must be retained')
+  assert.match(result.html, /目录/, 'headings inside nav must be retained')
+})
+
+test('sanitizer keeps a document that has no left navigation at all', () => {
+  const html = '<!doctype html><html><head><style>h1{color:#333}</style></head><body><main><h1>周报</h1><p>正文。</p></main></body></html>'
+  const result = sanitizeSummaryHtml({ html })
+  assert.equal(result.ok, true)
+  assert.match(result.html, /正文/)
+})
+
+test('sanitizer strips executable, remote, and concealing content', () => {
   const cases = [
-    ['FORBIDDEN_ELEMENT', html => html.replace('</main>', '<script>alert(1)</script></main>')],
-    ['FORBIDDEN_ELEMENT', html => html.replace('</main>', '<iframe src="about:blank"></iframe></main>')],
-    ['FORBIDDEN_ELEMENT', html => html.replace('</main>', '<object></object><embed><form></form></main>')],
-    ['INLINE_EVENT_HANDLER', html => html.replace('<main>', '<main onclick="alert(1)">')],
-    ['JAVASCRIPT_URL', html => html.replace('href="#report"', 'href="javascript:alert(1)"')],
-    ['EXTERNAL_RESOURCE', html => html.replace('href="#report"', 'href="https://example.com/report"')],
-    ['EXTERNAL_RESOURCE', html => html.replace('<main>', '<main data="https://example.com/payload">')],
-    ['EXTERNAL_RESOURCE', html => html.replace('</main>', '<img src="https://example.com/a.png"></main>')],
-    ['EXTERNAL_RESOURCE', html => html.replace('</main>', '<img src="../a.png"></main>')],
-    ['EXTERNAL_RESOURCE', html => html.replace('</main>', '<img src="file:///tmp/a.png"></main>')],
-    ['EXTERNAL_RESOURCE', html => html.replace('</main>', '<picture><source srcset="https://example.com/a.png 1x"></picture></main>')],
-    ['EXTERNAL_RESOURCE', html => html.replace('</main>', '<svg><image href="//example.com/a.png"></image></svg></main>')],
-    ['EXTERNAL_RESOURCE', html => html.replace('</main>', '<svg><filter><feImage href="https://example.com/a.png"></feImage></filter></svg></main>')],
-    ['EXTERNAL_RESOURCE', html => html.replace('</main>', '<video><track src="https://example.com/a.vtt"></video></main>')],
-    ['EXTERNAL_RESOURCE', html => html.replace('<body>', '<body background="https://example.com/a.png">')],
-    ['FORBIDDEN_ELEMENT', html => html.replace('</main>', '<svg><animate attributeName="href" values="https://example.com/a.png"></animate></svg></main>')],
-    ['FORBIDDEN_ELEMENT', html => html.replace('</main>', '<svg><set attributeName="href" to="https://example.com/a.png"></set></svg></main>')],
-    ['FORBIDDEN_ELEMENT', html => html.replace('<p>', '<svg><title>').replace('</p>', '</title></svg>')],
-    ['FORBIDDEN_ELEMENT', html => html.replace('<p>', '<audio>').replace('</p>', '</audio>')],
-    ['FORBIDDEN_ELEMENT', html => html.replace('<p>', '<canvas>').replace('</p>', '</canvas>')],
-    ['FORBIDDEN_ELEMENT', html => html.replace('<p>', '<title>').replace('</p>', '</title>')],
-    ['FORBIDDEN_ELEMENT', html => html.replace('</main>', '<svg><rect filter="url(https://example.com/f.svg#x)"></rect></svg></main>')],
-    ['EXTERNAL_RESOURCE', html => html.replace('</head>', '<link rel="stylesheet" href="https://example.com/a.css"></head>')],
-    ['CSS_IMPORT_FORBIDDEN', html => html.replace('<style>', '<style>@import "https://example.com/a.css";')],
-    ['EXTERNAL_CSS_URL', html => html.replace('<style>', '<style>main{background:url(https://example.com/a.png)}')],
-    ['EXTERNAL_CSS_URL', html => html.replace('<style>', '<style>main{background:url(javascript:alert(1))}')],
-    ['EXTERNAL_CSS_URL', html => html.replace('<style>', '<style>main{background:u\\72l(h\\74tps://example.com/a.png)}')],
-    ['EXTERNAL_CSS_URL', html => html.replace('<style>', '<style>main{background:u\\rl(https://example.com/a.png)}')],
-    ['EXTERNAL_CSS_URL', html => html.replace('<style>', '<style>main{background-image:image-set("https://example.com/a.png" 1x)}')],
-    ['EXTERNAL_CSS_URL', html => html.replace('<style>', '<style>main{background-image:cross-fade(red,blue,50%)}')],
-    ['CSS_IMPORT_FORBIDDEN', html => html.replace('<style>', '<style>@\\import "https://example.com/a.css";')],
-    ['CSS_AT_RULE_FORBIDDEN', html => html.replace('<style>', '<style>@media (min-width:1px){main{color:black}}')],
-    ['EXTERNAL_FONT_FORBIDDEN', html => html.replace('<style>', '<style>@font-face{font-family:x;src:url(data:font/woff;base64,AA)}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{display:none}main::after{content:"伪造内容"}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<main>', '<main hidden>')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{clip-path:inset(100%)}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>:root{--hide:none}main{display:var(--hide)}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{opacity:calc(0)}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{color:rgba(0,0,0,0)}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{position:absolute;left:-99999px}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{font:0px serif}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{font-size:0.0px}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{color:#0000}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{color:#fff;background:#fff}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{color:red;background-color:red}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{color:rgb(0,0,0);background-color:rgb(0,0,0)}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('<style>', '<style>main{color:#fff;background:linear-gradient(#fff,#fff)}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('nav{position:fixed;left:0;top:0}', 'nav{position:fixed;left:0;top:0;width:100%;height:100%}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('nav{position:fixed;left:0;top:0}', 'nav{position:fixed;left:0;top:0;width:320px;height:100%;box-shadow:0 0 0 9999px #fff}')],
-    ['CONTENT_CONCEALMENT_FORBIDDEN', html => html.replace('nav{position:fixed;left:0;top:0}', 'nav{position:fixed;left:0;top:0;width:320px;height:100%;border-right:9999px solid #fff}')],
-    ['ATTRIBUTE_FORBIDDEN', html => html.replace('<main>', '<main popover>')],
-    ['LEFT_NAV_REQUIRED', html => html.replace(/<nav>[\s\S]*?<\/nav>/, '')],
-    ['LEFT_NAV_REQUIRED', html => html.replace(/<nav>[\s\S]*?<\/nav>/, '<nav></nav>')],
-    ['LEFT_NAV_REQUIRED', html => html.replace('<nav>', '<nav><p>FORGED REPORT BODY</p>')],
-    ['MARKDOWN_HEADINGS_CHANGED', html => html.replace('>下一步</h2>', '>已完成</h2>')],
-    ['MARKDOWN_CONTENT_CHANGED', html => html.replace('<p>完成 A。</p>', '')],
-    ['MARKDOWN_CONTENT_CHANGED', html => html
-      .replace('<main>', '<main><span style="display:none">周报摘要完成 A。下一步继续 B。</span>')
-      .replace('<p>完成 A。</p>', '<p>已延期。</p>')],
-    ['MARKDOWN_CONTENT_CHANGED', html => html.replace('</body>', '<footer>伪造结论</footer></body>')],
-    ['MARKDOWN_CONTENT_CHANGED', html => html.replace('</body>', '<aside class="fullscreen-overlay"></aside></body>')],
-    ['MARKDOWN_CONTENT_CHANGED', html => html.replace('</body>', '<main>伪造结论</main></body>')]
+    ['script-element', html => html.replace('</main>', '<script>alert(1)</script></main>'), '<script'],
+    ['iframe-element', html => html.replace('</main>', '<iframe src="about:blank"></iframe></main>'), '<iframe'],
+    ['object-embed-form', html => html.replace('</main>', '<object></object><embed></embed><form></form></main>'), /<(?:object|embed|form)[\s>]/],
+    ['inline-event-handler', html => html.replace('<main>', '<main onclick="alert(1)">'), 'onclick'],
+    ['javascript-url', html => html.replace('href="#report"', 'href="javascript:alert(1)"'), 'javascript:'],
+    ['external-href', html => html.replace('href="#report"', 'href="https://example.com/report"'), 'example.com'],
+    ['external-data-attr', html => html.replace('<main>', '<main data="https://example.com/payload">'), 'example.com'],
+    ['external-img', html => html.replace('</main>', '<img src="https://example.com/a.png"></main>'), /<(?:img)[\s>]/],
+    ['picture-source', html => html.replace('</main>', '<picture><source srcset="https://example.com/a.png 1x"></picture></main>'), 'example.com'],
+    ['svg-image', html => html.replace('</main>', '<svg><image href="//example.com/a.png"></image></svg></main>'), /<(?:svg)[\s>]/],
+    ['audio-canvas', html => html.replace('<p>', '<audio>').replace('</p>', '</audio>'), '<audio'],
+    ['link-stylesheet', html => html.replace('</head>', '<link rel="stylesheet" href="https://example.com/a.css"></head>'), 'example.com'],
+    ['css-import', html => html.replace('<style>', '<style>@import "https://example.com/a.css";'), /@import|example\.com/],
+    ['css-external-url', html => html.replace('<style>', '<style>main{background:url(https://example.com/a.png)}'), /url\(|example\.com/],
+    ['css-javascript-url', html => html.replace('<style>', '<style>main{background:url(javascript:alert(1))}'), 'javascript:'],
+    ['css-escaped-url', html => html.replace('<style>', '<style>main{background:u\\72l(h\\74tps://example.com/a.png)}'), /example\.com/],
+    ['css-image-set', html => html.replace('<style>', '<style>main{background-image:image-set("https://example.com/a.png" 1x)}'), 'example.com'],
+    ['font-face', html => html.replace('<style>', '<style>@font-face{font-family:x;src:url(data:font/woff;base64,AA)}'), '@font-face'],
+    ['display-none', html => html.replace('<style>', '<style>main{display:none}'), 'display: none'],
+    ['generated-content', html => html.replace('<style>', '<style>main::after{content:"伪造内容"}'), '伪造内容'],
+    ['clip-path', html => html.replace('<style>', '<style>main{clip-path:inset(100%)}'), 'clip-path'],
+    ['css-var-hide', html => html.replace('<style>', '<style>:root{--hide:none}main{display:var(--hide)}'), 'var(--hide)'],
+    ['opacity-calc', html => html.replace('<style>', '<style>main{opacity:calc(0)}'), 'opacity'],
+    ['transparent-color', html => html.replace('<style>', '<style>main{color:rgba(0,0,0,0)}'), 'rgba('],
+    ['off-screen-position', html => html.replace('<style>', '<style>main{position:absolute;left:-99999px}'), '-99999'],
+    ['font-shorthand-zero', html => html.replace('<style>', '<style>main{font:0px serif}'), /font:[^;]*0/],
+    ['font-size-zero', html => html.replace('<style>', '<style>main{font-size:0.0px}'), 'font-size: 0'],
+    ['alpha-hex-color', html => html.replace('<style>', '<style>main{color:#0000}'), '#0000'],
+    ['same-color-pair', html => html.replace('<style>', '<style>main{color:#fff;background:#fff}'), 'background'],
+    ['hidden-attribute', html => html.replace('<main>', '<main hidden>'), 'hidden'],
+    ['meta-refresh', html => html.replace('<head>', '<head><meta http-equiv="refresh" content="0;url=https://example.com">'), 'http-equiv']
   ]
-  for (const [index, [code, mutate]] of cases.entries()) {
-    const result = validateSummaryHtml({ html: mutate(safeHtml()), markdown })
-    assert.equal(result.valid, false, `${index}:${code}`)
-    assert.ok(result.errors.some(error => error.code === code), `${index}:${code}: ${JSON.stringify(result.errors)}`)
+  for (const [name, mutate, forbidden] of cases) {
+    const result = sanitizeSummaryHtml({ html: mutate(safeHtml()) })
+    assert.equal(result.ok, true, `${name}: should still produce a document`)
+    const pattern = forbidden instanceof RegExp
+      ? forbidden
+      : new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    assert.doesNotMatch(result.html, pattern, `${name}: forbidden token survived sanitization`)
   }
 })
 
-test('content integrity preserves meaningful prose and code whitespace', () => {
-  const proseMarkdown = '# Report\n\n## Status\n\nnot complete'
-  const proseHtml = '<!doctype html><html><head><style>nav{position:fixed;left:0;top:0}</style></head><body><nav><a href="#report">Report</a><a href="#status">Status</a></nav><main><h1 id="report">Report</h1><h2 id="status">Status</h2><p>notcomplete</p></main></body></html>'
-  const codeMarkdown = '# Report\n\n## Command\n\n`npm run build`'
-  const codeHtml = '<!doctype html><html><head><style>nav{position:fixed;left:0;top:0}</style></head><body><nav><a href="#report">Report</a><a href="#command">Command</a></nav><main><h1 id="report">Report</h1><h2 id="command">Command</h2><p><code>npm runbuild</code></p></main></body></html>'
-  for (const [markdownValue, html] of [[proseMarkdown, proseHtml], [codeMarkdown, codeHtml]]) {
-    const result = validateSummaryHtml({ html, markdown: markdownValue })
-    assert.equal(result.valid, false)
-    assert.ok(result.errors.some(error => error.code === 'MARKDOWN_CONTENT_CHANGED'))
-  }
+test('sanitizer rejects empty or non-string input', () => {
+  assert.equal(sanitizeSummaryHtml({ html: '' }).ok, false)
+  assert.equal(sanitizeSummaryHtml({ html: '   ' }).ok, false)
+  assert.equal(sanitizeSummaryHtml({}).ok, false)
+  assert.equal(sanitizeSummaryHtml({ html: null }).ok, false)
 })
 
 test('Markdown copy and export use only persisted text, a sanitized filename, and UTF-8', async () => {
@@ -263,7 +272,7 @@ test('HTML runner profile failures remain profile errors instead of generic gene
   )
 })
 
-test('HTML export supports an explicit runner override and repairs an invalid draft once', async () => {
+test('HTML export sanitizes a single draft and writes it without a repair round-trip', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ucli-summary-export-'))
   const destination = join(root, 'chosen.html')
   const calls = []
@@ -272,7 +281,7 @@ test('HTML export supports an explicit runner override and repairs an invalid dr
     runner: {
       async run(options) {
         calls.push(options)
-        return { value: calls.length === 1 ? safeHtml().replace('</main>', '<script>x</script></main>') : safeHtml(), usage: {} }
+        return { value: safeHtml().replace('</main>', '<script>alert(1)</script></main>'), usage: {} }
       }
     },
     showSaveDialog: async () => ({ canceled: false, filePath: destination })
@@ -283,38 +292,35 @@ test('HTML export supports an explicit runner override and repairs an invalid dr
       executorId: 'claude', profileId: null, model: 'sonnet'
     })
     assert.equal(result.canceled, false)
-    assert.equal(calls.length, 2)
-    assert.deepEqual(calls.map(({ executorId, profileId, model }) => ({ executorId, profileId, model })), [
-      { executorId: 'claude', profileId: null, model: 'sonnet' },
+    assert.equal(calls.length, 1, 'sanitizer must not need a repair round-trip')
+    assert.deepEqual(
+      { executorId: calls[0].executorId, profileId: calls[0].profileId, model: calls[0].model },
       { executorId: 'claude', profileId: null, model: 'sonnet' }
-    ])
-    assert.match(calls[1].prompt, /FORBIDDEN_ELEMENT/)
-    assert.match(calls[1].prompt, /<script>x<\/script>/)
-    assert.match(calls[1].prompt, /仅修复列出的验证错误/)
-    assert.equal(await readFile(destination, 'utf8'), safeHtml())
+    )
+    const written = await readFile(destination, 'utf8')
+    assert.doesNotMatch(written, /<script/, 'script must be stripped before writing')
+    assert.match(written, /完成 A/, 'report content must remain')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 })
 
-test('a second invalid draft surfaces typed errors and never writes the chosen destination', async () => {
+test('an empty AI CLI response surfaces a typed error and never writes the destination', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ucli-summary-export-'))
   const destination = join(root, 'must-not-exist.html')
   let calls = 0
-  let dialogs = 0
-  const invalid = safeHtml().replace(/<nav>[\s\S]*?<\/nav>/, '')
   const service = createReportExportService({
     repository: repository(),
-    runner: { async run() { calls += 1; return { value: invalid, usage: {} } } },
-    showSaveDialog: async () => { dialogs += 1; return { canceled: false, filePath: destination } }
+    runner: { async run() { calls += 1; return { value: '   ', usage: {} } } },
+    showSaveDialog: async () => ({ canceled: false, filePath: destination }),
+    writeUtf8: async () => { throw new Error('must not write') }
   })
   try {
     await assert.rejects(
       service.exportHtml({ reportId: 'report-1', style: { mode: 'dark' } }),
-      error => error.code === 'SUMMARY_HTML_INVALID' && error.validationErrors.some(item => item.code === 'LEFT_NAV_REQUIRED')
+      error => error.code === 'SUMMARY_HTML_INVALID'
     )
-    assert.equal(calls, 2)
-    assert.equal(dialogs, 1)
+    assert.equal(calls, 1)
     await assert.rejects(stat(destination), error => error.code === 'ENOENT')
   } finally {
     await rm(root, { recursive: true, force: true })

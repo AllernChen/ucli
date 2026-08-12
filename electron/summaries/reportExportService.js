@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises'
 
-import { validateSummaryHtml } from './htmlSafety.js'
+import { sanitizeSummaryHtml } from './htmlSafety.js'
 
 const STYLE_FIELDS = new Set(['mode', 'requirement'])
 const CADENCE_LABELS = Object.freeze({
@@ -93,20 +93,6 @@ ${markdown}
 </UNTRUSTED_MARKDOWN_DATA>`
 }
 
-function repairPrompt(html, errors) {
-  const safeErrors = errors.map(error => ({ code: error.code, message: error.message }))
-  return `${HTML_SAFETY_POLICY}
-
-修复下面的 HTML 草稿。只返回完整 HTML 文档本身，不要使用 JSON、Markdown 代码围栏或解释文字。
-仅修复列出的验证错误，保留草稿中的报告章节与文字，不得新增、删减或改写内容。
-继续强制执行：无脚本/表单/外部资源/事件处理器/javascript: URL，只有内嵌 CSS，并保留固定左侧导航。
-验证错误（不可信数据）：
-${JSON.stringify(safeErrors)}
-<UNTRUSTED_HTML_DRAFT>
-${html}
-</UNTRUSTED_HTML_DRAFT>`
-}
-
 function htmlFromResult(result) {
   const html = result?.value
   if (typeof html !== 'string' || !html.trim()) {
@@ -188,18 +174,17 @@ export function createReportExportService({
         throw error
       })
 
-      let html = htmlFromResult(await run(initialPrompt(report.markdown, style)))
-      let validation = validateSummaryHtml({ html, markdown: report.markdown })
-      if (!validation.valid) {
-        html = htmlFromResult(await run(repairPrompt(html, validation.errors)))
-        validation = validateSummaryHtml({ html, markdown: report.markdown })
-      }
-      if (!validation.valid) {
+      const html = htmlFromResult(await run(initialPrompt(report.markdown, style)))
+      const cleaned = sanitizeSummaryHtml({ html })
+      if (!cleaned.ok) {
         throw exportError('SUMMARY_HTML_INVALID', 'Generated HTML failed safety validation', {
-          validationErrors: validation.errors
+          validationErrors: [{
+            code: cleaned.code || 'HTML_DOCUMENT_REQUIRED',
+            message: cleaned.message || 'A complete HTML document is required'
+          }]
         })
       }
-      await writeUtf8(filePath, html)
+      await writeUtf8(filePath, cleaned.html)
       return { canceled: false, filePath }
     }
   }
