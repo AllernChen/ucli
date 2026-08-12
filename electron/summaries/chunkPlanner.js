@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import {
+  buildDirectReportPrompt,
   buildFinalReducePrompt,
   buildMapPrompt,
   buildProjectReducePrompt
@@ -156,6 +157,35 @@ function mapReserveTokens({ blocks = [], period, usage, coverage }) {
   }), projectDigestSchema)
 }
 
+export function planSummaryExecution({
+  evidence = {}, period, usage = {}, contextWindow, forceMapReduce = false
+} = {}) {
+  const targetTokens = inputTargetTokens(contextWindow)
+  const directPrompt = buildDirectReportPrompt({
+    evidence, period, usage, coverage: evidence.coverage
+  })
+  if (!forceMapReduce && promptTokens(directPrompt, finalReportSchema) <= targetTokens) {
+    return { strategy: 'direct', chunks: [], plannedCalls: 1 }
+  }
+  const chunks = planEvidenceChunks({
+    blocks: evidence.blocks,
+    contextWindow,
+    reservedTokens: mapReserveTokens({
+      blocks: evidence.blocks || [], period, usage, coverage: evidence.coverage
+    })
+  })
+  const chunksPerProject = new Map()
+  for (const chunk of chunks) {
+    chunksPerProject.set(chunk.projectPath, (chunksPerProject.get(chunk.projectPath) || 0) + 1)
+  }
+  const projectReduceCalls = [...chunksPerProject.values()].filter(count => count > 1).length
+  return {
+    strategy: 'map-reduce',
+    chunks,
+    plannedCalls: chunks.length + projectReduceCalls + 1
+  }
+}
+
 function fragmentReductionItem(item, fits) {
   const source = JSON.stringify(item)
   const fragments = []
@@ -210,20 +240,24 @@ function promptAwareBatches(items, buildPrompt, schema, targetTokens) {
 export function createSummaryPipeline({
   runner,
   contextWindow,
-  automaticCallLimit = 20
+  automaticCallLimit = 20,
+  now = Date.now
 } = {}) {
   if (!runner || typeof runner.run !== 'function') throw new TypeError('runner.run is required')
   const callLimit = Number.isFinite(automaticCallLimit) && automaticCallLimit > 0
     ? Math.min(20, Math.floor(automaticCallLimit))
     : 20
   return {
-    estimate({ evidence } = {}) {
-      const chunks = planEvidenceChunks({ blocks: evidence?.blocks, contextWindow })
+    estimate(options = {}) {
+      const plan = planSummaryExecution({ ...options, contextWindow })
+      const chunks = plan.chunks
       const projects = new Set(chunks.map((chunk) => chunk.projectPath)).size
       return {
+        strategy: plan.strategy,
         chunks: chunks.length,
         projects,
-        estimatedCalls: chunks.length * 2 + Math.max(projects, 1)
+        plannedCalls: plan.plannedCalls,
+        estimatedCalls: plan.plannedCalls
       }
     },
 
@@ -232,17 +266,15 @@ export function createSummaryPipeline({
         evidence = {}, period, usage = {}, signal, onProgress,
         mode = 'automatic', confirmed = false
       } = options
+      const startedAt = now()
       abortIfNeeded(signal)
       onProgress?.({ phase: 'collecting' })
-      const chunks = planEvidenceChunks({
-        blocks: evidence.blocks,
-        contextWindow,
-        reservedTokens: mapReserveTokens({
-          blocks: evidence.blocks || [], period, usage, coverage: evidence.coverage
-        })
+      const plan = planSummaryExecution({
+        evidence, period, usage, contextWindow,
+        forceMapReduce: options.forceMapReduce === true
       })
-      const projectCount = new Set(chunks.map((chunk) => chunk.projectPath)).size
-      const estimatedCalls = chunks.length * 2 + Math.max(projectCount, 1)
+      const chunks = plan.chunks
+      const estimatedCalls = plan.plannedCalls
       const reduceTargetTokens = inputTargetTokens(contextWindow)
       if (estimatedCalls > callLimit) {
         if (mode === 'manual' && !confirmed) {
@@ -295,6 +327,7 @@ export function createSummaryPipeline({
             estimatedCalls, callLimit
           })
         }
+        callCount += 1
         const result = await runner.run({
           executorId: options.executorId,
           prompt,
@@ -305,11 +338,34 @@ export function createSummaryPipeline({
           maxOutputBytes: options.maxOutputBytes,
           signal
         })
-        callCount += 1
         abortIfNeeded(signal)
         validateStructuredOutput(result?.value, schema)
         addUsage(generationUsage, result?.usage)
         return result.value
+      }
+
+      if (plan.strategy === 'direct') {
+        const value = await invoke({
+          prompt: buildDirectReportPrompt({
+            evidence, period, usage, coverage: evidence.coverage
+          }),
+          schema: finalReportSchema
+        })
+        onProgress?.({ phase: 'rendering' })
+        return {
+          value,
+          markdown: renderSummaryMarkdown(value),
+          estimatedCalls,
+          callCount,
+          generationUsage,
+          generationMetrics: {
+            strategy: plan.strategy,
+            plannedCalls: plan.plannedCalls,
+            aiCalls: callCount,
+            cacheHits: 0,
+            durationMs: Math.max(0, now() - startedAt)
+          }
+        }
       }
 
       const mappedByProject = new Map()
@@ -326,6 +382,7 @@ export function createSummaryPipeline({
 
       onProgress?.({ phase: 'reducing' })
       const reduceProject = async (projectPath, digests, depth = 0) => {
+        if (digests.length === 1) return digests[0]
         const buildPrompt = inputs => buildProjectReducePrompt({
           projectPath, digests: inputs, period, usage, coverage: evidence.coverage
         })
@@ -374,7 +431,14 @@ export function createSummaryPipeline({
         markdown: renderSummaryMarkdown(value),
         estimatedCalls,
         callCount,
-        generationUsage
+        generationUsage,
+        generationMetrics: {
+          strategy: plan.strategy,
+          plannedCalls: plan.plannedCalls,
+          aiCalls: callCount,
+          cacheHits: 0,
+          durationMs: Math.max(0, now() - startedAt)
+        }
       }
     }
   }
