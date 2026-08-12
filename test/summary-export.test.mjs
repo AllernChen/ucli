@@ -143,7 +143,8 @@ test('light, dark, and custom HTML requests contain only persisted Markdown and 
   const service = createReportExportService({
     repository: repository(),
     runner: { async run(options) { calls.push(options); return { value: { html: safeHtml(options.prompt.includes('dark') ? 'dark' : 'light') }, usage: {} } } },
-    showSaveDialog: async () => ({ canceled: true })
+    showSaveDialog: async () => ({ canceled: false, filePath: 'chosen.html' }),
+    writeUtf8: async () => {}
   })
   for (const style of [
     { mode: 'light' },
@@ -163,6 +164,21 @@ test('light, dark, and custom HTML requests contain only persisted Markdown and 
   }
   assert.match(calls[1].prompt, /"mode":"dark"/)
   assert.match(calls[2].prompt, /深蓝色科技风，重点数字使用青色/)
+})
+
+test('canceling the HTML destination returns before invoking the AI runner', async () => {
+  let calls = 0
+  const service = createReportExportService({
+    repository: repository(),
+    runner: { async run() { calls += 1; return { value: { html: safeHtml() }, usage: {} } } },
+    showSaveDialog: async () => ({ canceled: true })
+  })
+
+  assert.deepEqual(
+    await service.exportHtml({ reportId: 'report-1', style: { mode: 'light' } }),
+    { canceled: true }
+  )
+  assert.equal(calls, 0)
 })
 
 test('HTML export supports an explicit runner override and repairs an invalid draft once', async () => {
@@ -199,7 +215,7 @@ test('HTML export supports an explicit runner override and repairs an invalid dr
   }
 })
 
-test('a second invalid draft surfaces typed errors and never opens or writes a destination', async () => {
+test('a second invalid draft surfaces typed errors and never writes the chosen destination', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ucli-summary-export-'))
   const destination = join(root, 'must-not-exist.html')
   let calls = 0
@@ -216,7 +232,7 @@ test('a second invalid draft surfaces typed errors and never opens or writes a d
       error => error.code === 'SUMMARY_HTML_INVALID' && error.validationErrors.some(item => item.code === 'LEFT_NAV_REQUIRED')
     )
     assert.equal(calls, 2)
-    assert.equal(dialogs, 0)
+    assert.equal(dialogs, 1)
     await assert.rejects(stat(destination), error => error.code === 'ENOENT')
   } finally {
     await rm(root, { recursive: true, force: true })

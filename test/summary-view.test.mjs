@@ -103,6 +103,10 @@ test('summary workspace components cover generation, safe reading, history, retr
     '取消生成', '确认继续', '预计调用', '可能产生费用',
     '复制 Markdown', '导出 Markdown', '导出 HTML', '重试'
   ]) assert.match(all, new RegExp(text))
+  assert.match(all, /:loading="htmlExporting"/)
+  assert.match(all, /exportingHtml\.value\s*=\s*true/)
+  assert.match(all, /exportingHtml\.value\s*=\s*false/)
+  assert.match(all, /HTML\s*已导出/)
   assert.match(all, /MarkdownIt\(\{\s*html:\s*false/)
   assert.match(all, /DOMPurify\.sanitize/)
   assert.match(all, /mode:\s*['"]light['"]/)

@@ -8,6 +8,13 @@
       </a-space>
     </div>
     <a-alert v-if="summaries.error" type="error" show-icon :message="summaries.error.message" />
+    <a-alert
+      v-if="exportMessage"
+      style="margin-bottom:12px"
+      :type="exportingHtml ? 'info' : 'success'"
+      show-icon
+      :message="exportMessage"
+    />
     <a-spin :spinning="summaries.loading">
       <a-row :gutter="14">
         <a-col :span="7">
@@ -24,6 +31,7 @@
           <SummaryReportView
             :report="summaries.selectedReport"
             :progress="summaries.progress[summaries.selectedReport?.id]"
+            :html-exporting="exportingHtml"
             @cancel="cancel"
             @confirm="confirm"
             @export-markdown="exportMarkdown"
@@ -45,6 +53,8 @@ import SummaryReportView from './SummaryReportView.vue'
 
 const summaries = useSummariesStore()
 const dialogOpen = ref(false)
+const exportingHtml = ref(false)
+const exportMessage = ref('')
 const periodOptions = [
   { label: '日', value: 'day' }, { label: '周', value: 'week' }, { label: '月', value: 'month' },
   { label: '季度', value: 'quarter' }, { label: '年', value: 'year' }
@@ -74,6 +84,22 @@ function retry(report) { return safely(() => summaries.retry(report)) }
 function cancel(reportId) { return safely(() => summaries.cancel(reportId)) }
 function confirm(reportId) { return safely(() => summaries.confirm(reportId)) }
 function exportMarkdown(reportId) { return safely(() => summaries.exportMarkdown(reportId)) }
-function exportHtml(reportId) { return safely(() => summaries.exportHtml(reportId, { mode: 'light' })) }
+async function exportHtml(reportId) {
+  if (exportingHtml.value) return null
+  exportingHtml.value = true
+  exportMessage.value = '正在生成 HTML，将调用所选 AI CLI，完成后写入已选择的位置。'
+  try {
+    summaries.error = null
+    const result = await summaries.exportHtml(reportId, { mode: 'light' })
+    exportMessage.value = result?.canceled ? '' : `HTML 已导出：${result.filePath}`
+    return result
+  } catch (error) {
+    exportMessage.value = ''
+    summaries.error = error
+    return null
+  } finally {
+    exportingHtml.value = false
+  }
+}
 </script>
 <style scoped>.toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}.report-list{margin-bottom:12px;max-height:360px;overflow:auto}.report-list :deep(.ant-list-item){cursor:pointer}</style>

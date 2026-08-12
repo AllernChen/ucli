@@ -142,14 +142,19 @@ export function createReportExportService({
   if (!runner?.run) throw new TypeError('runner.run is required')
   if (typeof showSaveDialog !== 'function') throw new TypeError('showSaveDialog is required')
 
-  async function chooseAndWrite(report, extension, content) {
+  async function chooseDestination(report, extension) {
     const result = await showSaveDialog({
       defaultPath: defaultFilename(report, extension),
       filters: [{ name: extension === 'md' ? 'Markdown' : 'HTML', extensions: [extension] }]
     })
-    if (result?.canceled || !result?.filePath) return { canceled: true }
-    await writeUtf8(result.filePath, content)
-    return { canceled: false, filePath: result.filePath }
+    return result?.canceled || !result?.filePath ? null : result.filePath
+  }
+
+  async function chooseAndWrite(report, extension, content) {
+    const filePath = await chooseDestination(report, extension)
+    if (!filePath) return { canceled: true }
+    await writeUtf8(filePath, content)
+    return { canceled: false, filePath }
   }
 
   return {
@@ -166,6 +171,8 @@ export function createReportExportService({
       const report = requireReport(repository, input.reportId)
       const style = validateStyle(input.style)
       const selection = runnerSelection(report, input)
+      const filePath = await chooseDestination(report, 'html')
+      if (!filePath) return { canceled: true }
       const run = prompt => runner.run({
         ...selection,
         prompt,
@@ -183,7 +190,8 @@ export function createReportExportService({
           validationErrors: validation.errors
         })
       }
-      return chooseAndWrite(report, 'html', html)
+      await writeUtf8(filePath, html)
+      return { canceled: false, filePath }
     }
   }
 }

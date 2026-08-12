@@ -30,7 +30,11 @@
     <div class="actions">
       <a-button @click="copyMarkdown">复制 Markdown</a-button>
       <a-button @click="$emit('export-markdown', report.id)">导出 Markdown</a-button>
-      <a-button @click="$emit('export-html', report.id)">导出 HTML</a-button>
+      <a-button
+        :loading="htmlExporting"
+        :disabled="htmlExporting"
+        @click="$emit('export-html', report.id)"
+      >{{ htmlExporting ? '正在生成 HTML' : '导出 HTML' }}</a-button>
     </div>
     <article
       v-if="report.markdown"
@@ -50,7 +54,7 @@ import MarkdownIt from 'markdown-it'
 import ipc from '../../ipc.js'
 import { openSummaryReportLink } from '../../summaryLinks.js'
 
-const props = defineProps({ report: Object, progress: Object })
+const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean })
 defineEmits(['cancel', 'confirm', 'export-markdown', 'export-html'])
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const safeHtml = computed(() => DOMPurify.sanitize(markdown.render(props.report?.markdown || '')))
