@@ -669,7 +669,7 @@ test('summary runner routes providers and rejects unsupported executors and inva
   try {
     const runner = createSummaryRunner({
       executableResolvers: {
-        claude: executableResolver(fake, 'claude'),
+        claude: executableResolver(fake, 'claude', { ANTHROPIC_API_KEY: 'route-test-key' }),
         codex: executableResolver(fake, 'codex'),
         opencode: executableResolver(fake, 'opencode'),
         ucode: executableResolver(fake, 'ucode')
@@ -689,7 +689,7 @@ test('summary runner routes providers and rejects unsupported executors and inva
     )
 
     const invalidRunner = createClaudeRunner({
-      resolveExecutable: executableResolver(fake, 'claude')
+      resolveExecutable: executableResolver(fake, 'claude', { ANTHROPIC_API_KEY: 'schema-test-key' })
     })
     await assert.rejects(
       invalidRunner.run({ prompt: 'bad', schema: SUMMARY_SCHEMA }),
@@ -795,7 +795,8 @@ test('provider abort waits for process exit before deleting the isolated cwd', a
     const pending = createClaudeRunner({
       resolveExecutable: () => ({
         file: fake.file,
-        prefixArgs: [...fake.prefixArgs, '--fake-sleep', '--fake-capture', capturePath]
+        prefixArgs: [...fake.prefixArgs, '--fake-sleep', '--fake-capture', capturePath],
+        env: { ...process.env, ANTHROPIC_API_KEY: 'abort-test-key' }
       })
     }).run({
       prompt: 'abort this',
