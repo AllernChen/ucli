@@ -49,12 +49,14 @@ test('summary recovery happens after persistence and before scheduler catch-up',
   const jobService = orchestrator.indexOf('summaryJobService = createSummaryJobService')
   const scheduler = orchestrator.indexOf('summaryScheduler = createSummaryScheduler')
   const catchUp = orchestrator.indexOf('await summaryScheduler.start()')
+  const workspaceRecovery = orchestrator.indexOf('await summaryWorkspaceService.recover()', automationFactory)
   const interrupt = jobs.indexOf('repository.interruptStale()')
   const generate = jobs.indexOf('generate(input)')
 
   assert.ok(persistence >= 0 && initializeAutomation > persistence)
   assert.ok(automationFactory >= 0 && jobService > automationFactory)
   assert.ok(scheduler > jobService && catchUp > scheduler)
+  assert.ok(workspaceRecovery > automationFactory && workspaceRecovery < scheduler)
   assert.ok(interrupt >= 0 && generate > interrupt)
 })
 

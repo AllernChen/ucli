@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
 import { createReportRepository } from '../electron/summaries/reportRepository.js'
 import { createSummaryJobService } from '../electron/summaries/summaryJobService.js'
+import { createSummaryWorkspaceService } from '../electron/summaries/summaryWorkspaceService.js'
 
 class MemoryDb {
   constructor() {
@@ -146,9 +150,97 @@ function pipelineResult(markdown = '## 摘要\n完成') {
   return {
     value: { executiveSummary: '完成' },
     markdown,
-    generationUsage: { inputTokens: 10, outputTokens: 2, costUsd: null }
+    generationUsage: { inputTokens: 10, outputTokens: 2, costUsd: null },
+    generationMetrics: { strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0 }
   }
 }
+
+test('successful jobs use an opaque persistent workspace then compact it to output and metrics', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-workspace-'))
+  const pipelineCalls = []
+  try {
+    const workspaceService = createSummaryWorkspaceService({ root })
+    const { service, repository } = createHarness({
+      workspaceService,
+      evidenceCollector: {
+        async collect() {
+          return {
+            blocks: [
+              { id: 'evidence:1', projectPath: 'C:\\secret-project\\alpha', text: 'implemented cache' },
+              { id: 'evidence:2', projectPath: 'D:\\secret-project\\beta', text: 'fixed tests' }
+            ],
+            coverage: { sessionsIncluded: 2 }
+          }
+        }
+      },
+      pipeline: {
+        async run(options) {
+          pipelineCalls.push(options)
+          assert.equal(readdirSync(options.workspaceDirectory).length, 0)
+          return pipelineResult('workspace summary')
+        }
+      }
+    })
+
+    const job = service.generate(request())
+    const report = await job.completion
+    const workspace = join(root, 'workspaces', job.reportId)
+    const manifest = JSON.parse(readFileSync(join(workspace, 'manifest.json'), 'utf8'))
+
+    assert.equal(pipelineCalls[0].workspaceDirectory, join(workspace, 'work'))
+    assert.equal(report.generationMetrics.aiCalls, 1)
+    assert.equal(manifest.status, 'completed')
+    assert.deepEqual(manifest.artifacts.map(item => item.path), ['output/summary.md'])
+    assert.equal(readFileSync(join(workspace, 'output', 'summary.md'), 'utf8'), 'workspace summary')
+    assert.equal(existsSync(join(workspace, 'input')), false)
+    assert.equal(existsSync(join(workspace, 'work')), false)
+    assert.doesNotMatch(JSON.stringify(manifest), /secret-project|alpha|beta/)
+    assert.equal(repository.get(job.reportId).generationMetrics.strategy, 'direct')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('failed jobs retain bounded redacted inputs with a seven day expiry', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-failure-'))
+  const now = Date.parse('2026-08-12T00:00:00.000Z')
+  try {
+    const workspaceService = createSummaryWorkspaceService({ root, now: () => now })
+    const { service } = createHarness({
+      workspaceService,
+      evidenceCollector: {
+        async collect() {
+          return {
+            blocks: [{ id: 'raw-session-id', projectPath: 'C:\\clients\\top-secret', text: 'safe work note' }],
+            coverage: { sessionsIncluded: 1 }
+          }
+        }
+      },
+      pipeline: { async run() { throw Object.assign(new Error('credential leak'), { code: 'SUMMARY_PROVIDER_FAILED' }) } }
+    })
+    const job = service.generate(request())
+    await job.completion
+    const workspace = join(root, 'workspaces', job.reportId)
+    const manifest = JSON.parse(readFileSync(join(workspace, 'manifest.json'), 'utf8'))
+    const inputNames = readdirSync(join(workspace, 'input')).sort()
+    const inputText = inputNames.map(name => readFileSync(join(workspace, 'input', name), 'utf8')).join('\n')
+
+    assert.equal(manifest.status, 'failed')
+    assert.equal(manifest.errorCode, 'SUMMARY_PROVIDER_FAILED')
+    assert.equal(manifest.expiresAt, '2026-08-19T00:00:00.000Z')
+    assert.equal(inputNames.includes('period.json'), true)
+    assert.equal(inputNames.includes('usage.json'), true)
+    assert.match(
+      inputNames.find(name => name.startsWith('project-')),
+      /^project-[a-f0-9]{64}-0001\.json$/
+    )
+    assert.doesNotMatch(JSON.stringify(manifest), /clients|top-secret|credential/)
+    assert.doesNotMatch(inputText, /C:\\\\clients|top-secret|raw-session-id/)
+    assert.match(inputText, /safe work note/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 function createHarness(overrides = {}) {
   const db = new MemoryDb()

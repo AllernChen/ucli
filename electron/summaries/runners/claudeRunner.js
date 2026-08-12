@@ -32,14 +32,15 @@ export function createClaudeRunner({
   processRunner = runProcess,
   maxBudgetUsd = null,
   baseEnv = process.env,
-  platform = process.platform
+  platform = process.platform,
+  validateWorkspaceDirectory = null
 } = {}) {
   return {
     async run(options) {
-      return withIsolatedWorkingDirectory(async (artifactDirectory) => {
-        const workingDirectory = join(artifactDirectory, 'work')
+      return withIsolatedWorkingDirectory(async (artifactDirectory, persistentWorkDirectory) => {
+        const workingDirectory = persistentWorkDirectory || join(artifactDirectory, 'work')
         const isolatedHome = join(artifactDirectory, 'home')
-        await mkdir(workingDirectory)
+        if (!persistentWorkDirectory) await mkdir(workingDirectory)
         const launch = resolveExecutable() || {}
         const isolatedBaseEnv = await buildSummaryProcessEnvironment({
           provider: 'claude',
@@ -136,6 +137,9 @@ export function createClaudeRunner({
             resultType: envelope?.type || null
           }
         })
+      }, {
+        workingDirectory: options.workspaceDirectory || null,
+        validateWorkingDirectory: validateWorkspaceDirectory
       })
     }
   }

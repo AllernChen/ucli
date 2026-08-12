@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, win32 } from 'node:path'
+import { isAbsolute, join, resolve, win32 } from 'node:path'
 
 function runnerError(code, message, metadata = {}) {
   return Object.assign(new Error(message), { code, ...metadata })
@@ -393,10 +393,31 @@ export async function buildSummaryProcessEnvironment({
   return env
 }
 
-export async function withIsolatedWorkingDirectory(work) {
+export async function withIsolatedWorkingDirectory(work, {
+  workingDirectory = null,
+  validateWorkingDirectory = null
+} = {}) {
+  let trustedWorkingDirectory = null
+  try {
+    trustedWorkingDirectory = workingDirectory === null
+      ? null
+      : typeof workingDirectory === 'string' && isAbsolute(workingDirectory) &&
+        typeof validateWorkingDirectory === 'function' &&
+        validateWorkingDirectory(resolve(workingDirectory)) === true
+        ? resolve(workingDirectory)
+        : false
+  } catch {
+    trustedWorkingDirectory = false
+  }
+  if (trustedWorkingDirectory === false) {
+    throw runnerError(
+      'SUMMARY_WORKSPACE_DIRECTORY_INVALID',
+      'Summary workspace directory is not trusted'
+    )
+  }
   const directory = await mkdtemp(join(tmpdir(), 'ucli-summary-runner-'))
   try {
-    return await work(directory)
+    return await work(directory, trustedWorkingDirectory)
   } finally {
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }

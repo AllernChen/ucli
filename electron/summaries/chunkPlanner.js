@@ -373,6 +373,7 @@ export function createSummaryPipeline({
           model: options.model,
           timeoutMs: options.timeoutMs,
           maxOutputBytes: options.maxOutputBytes,
+          workspaceDirectory: options.workspaceDirectory,
           signal
         })
         abortIfNeeded(signal)

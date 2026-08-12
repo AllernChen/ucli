@@ -25,6 +25,24 @@ function sourceHash(evidence) {
   return `sha256:${hash.digest('hex')}`
 }
 
+function jsonArtifact(value) {
+  return `${JSON.stringify(value, null, 2)}\n`
+}
+
+function evidenceArtifacts(evidence) {
+  const projects = new Map()
+  for (const block of evidence?.blocks || []) {
+    const projectKey = createHash('sha256').update(String(block?.projectPath || '')).digest('hex')
+    if (!projects.has(projectKey)) projects.set(projectKey, [])
+    projects.get(projectKey).push({ text: String(block?.text || '') })
+  }
+  return [...projects.entries()].sort(([left], [right]) => left.localeCompare(right))
+    .map(([projectKey, blocks], index) => ({
+      path: `input/project-${projectKey}-${String(index + 1).padStart(4, '0')}.json`,
+      content: jsonArtifact({ blocks })
+    }))
+}
+
 function terminal(status) {
   return ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(status)
 }
@@ -44,6 +62,7 @@ export function createSummaryJobService({
   evidenceCollector,
   snapshotUsage,
   pipeline,
+  workspaceService = null,
   listSessions = () => [],
   defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 } = {}) {
@@ -78,7 +97,15 @@ export function createSummaryJobService({
     return result
   }
 
-  const failJob = (job, error) => {
+  const settleWorkspaceUpdates = job => job.workspaceUpdates.catch(() => {})
+  const failJob = async (job, error) => {
+    if (job.workspace) {
+      await settleWorkspaceUpdates(job)
+      await workspaceService.fail(
+        job.reportId,
+        job.cancelled ? 'SUMMARY_CANCELLED' : safeErrorCode(error)
+      ).catch(() => {})
+    }
     if (job.cancelled) {
       const current = repository.get(job.reportId)
       if (current?.status === 'cancelled') return finish(job, current)
@@ -99,6 +126,7 @@ export function createSummaryJobService({
       executorId: request.executorId,
       profileId: request.profileId,
       model: request.model,
+      promptVersion: request.promptVersion || 'summary-v1',
       evidence: context.evidence,
       usage: context.usageSnapshot,
       period: {
@@ -110,9 +138,17 @@ export function createSummaryJobService({
       confirmed,
       confirmedCallLimit,
       signal: job.controller.signal,
+      workspaceDirectory: job.workspace?.workDirectory,
       onProgress(event) {
         const progress = safePipelineProgress(event)
-        if (progress) publish(repository.get(job.reportId), progress)
+        if (progress) {
+          publish(repository.get(job.reportId), progress)
+          if (job.workspace) {
+            job.workspaceUpdates = job.workspaceUpdates
+              .then(() => workspaceService.markStage(job.reportId, progress.phase, progress))
+              .catch(() => {})
+          }
+        }
       }
     })
     if (job.cancelled) {
@@ -133,10 +169,15 @@ export function createSummaryJobService({
       usageSnapshot: context.usageSnapshot,
       coverage: context.evidence.coverage || {},
       generationUsage: result.generationUsage || {},
+      generationMetrics: result.generationMetrics || {},
       generationCostUsd: result.generationUsage?.costUsd ?? null,
       sourceHash: context.sourceHash,
       errorText: null
     }, { notify: false })
+    if (job.workspace) {
+      await settleWorkspaceUpdates(job)
+      await workspaceService.complete(job.reportId, { markdown: result.markdown })
+    }
     const current = await repository.setCurrent(job.reportId)
     publish(current)
     return finish(job, current)
@@ -147,6 +188,7 @@ export function createSummaryJobService({
     update(job.reportId, { status: 'running', errorText: null })
     try {
       const request = job.request
+      if (workspaceService) job.workspace = await workspaceService.create(job.reportId)
       const evidence = await evidenceCollector.collect({
         sessions: await listSessions(),
         start: request.start,
@@ -159,6 +201,17 @@ export function createSummaryJobService({
         coverage: evidence.coverage || {},
         sourceHash: hash
       }, { notify: false })
+      if (job.workspace) {
+        await workspaceService.writeArtifact(job.reportId, 'input/period.json', jsonArtifact({
+          periodType: request.periodType,
+          start: new Date(request.start).toISOString(),
+          endExclusive: new Date(request.endExclusive).toISOString(),
+          timezone: request.timezone
+        }))
+        for (const artifact of evidenceArtifacts(evidence)) {
+          await workspaceService.writeArtifact(job.reportId, artifact.path, artifact.content)
+        }
+      }
       const usageSnapshot = await snapshotUsage({
         periodType: request.periodType,
         start: request.start,
@@ -167,8 +220,14 @@ export function createSummaryJobService({
       })
       if (job.cancelled) throw Object.assign(new Error('cancelled'), { code: 'SUMMARY_CANCELLED' })
       update(job.reportId, { usageSnapshot }, { notify: false })
+      if (job.workspace) {
+        await workspaceService.writeArtifact(
+          job.reportId, 'input/usage.json', jsonArtifact(usageSnapshot)
+        )
+      }
       job.context = { evidence, usageSnapshot, sourceHash: hash }
       if (!evidence.blocks?.length) {
+        if (job.workspace) await workspaceService.complete(job.reportId)
         return finish(job, update(job.reportId, {
           status: 'skipped_empty',
           errorText: 'SUMMARY_EMPTY_EVIDENCE'
@@ -177,6 +236,7 @@ export function createSummaryJobService({
       if (request.generatedBy === 'automatic') {
         const duplicate = repository.findCompletedBySource(request, hash, job.reportId)
         if (duplicate) {
+          if (job.workspace) await workspaceService.complete(job.reportId)
           return finish(job, update(job.reportId, {
             status: 'skipped_empty',
             errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${duplicate.id}`
@@ -210,6 +270,8 @@ export function createSummaryJobService({
         cancelled: false,
         context: null,
         confirmationCallLimit: null,
+        workspace: null,
+        workspaceUpdates: Promise.resolve(),
         done: deferred()
       }
       jobs.set(job.reportId, job)

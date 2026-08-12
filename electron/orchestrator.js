@@ -1,7 +1,8 @@
 import { app, ipcMain, dialog, shell, Notification, safeStorage } from 'electron'
 import { join } from 'path'
+import { homedir } from 'os'
 import { readFileSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { openAllowedExternalUrl } from './externalLinks.js'
 import { PermissionEngine } from './permission/engine.js'
 import { startHookServer } from './permission/hookServer.js'
@@ -49,13 +50,15 @@ import { createReportRepository } from './summaries/reportRepository.js'
 import { createReportExportService } from './summaries/reportExportService.js'
 import { createSummaryJobService } from './summaries/summaryJobService.js'
 import { createSummaryRunner } from './summaries/summaryRunner.js'
+import { createSummaryCacheService } from './summaries/summaryCacheService.js'
+import { resolveSummaryStorageRoot, resolveSummaryChild } from './summaries/summaryStoragePaths.js'
+import { createSummaryWorkspaceService } from './summaries/summaryWorkspaceService.js'
 import {
   createSummaryOperationalLogEntry,
   safeSummaryErrorCode
 } from './summaries/operationalLog.js'
 import {
   DEFAULT_SUMMARY_SETTINGS,
-  createLiveSummaryPipeline,
   createSummaryScheduler,
   normalizeSummarySettings,
   profileAvailableForSummary,
@@ -476,6 +479,7 @@ export function createOrchestrator() {
   let summaryJobService = null
   let summaryScheduler = null
   let summaryExportService = null
+  let summaryWorkspaceService = null
   let persistenceRecovery = null
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
@@ -572,7 +576,45 @@ export function createOrchestrator() {
   async function initSummaryAutomation(db) {
     summarySettings = db.getSummarySettings()
     summaryRepository = createReportRepository({ db })
-    const runner = createSummaryRunner({ profileService })
+    const summaryRoot = resolveSummaryStorageRoot({
+      platform: process.platform,
+      env: process.env,
+      homeDirectory: homedir()
+    })
+    const normalizedWorkspace = candidate => process.platform === 'win32'
+      ? candidate.toLowerCase()
+      : candidate
+    const validateWorkspaceDirectory = candidate => {
+      const parent = join(candidate, '..')
+      const reportId = parent.split(/[\\/]/).at(-1)
+      try {
+        return normalizedWorkspace(candidate) === normalizedWorkspace(
+          join(resolveSummaryChild(summaryRoot, 'workspaces', reportId), 'work')
+        )
+      } catch {
+        return false
+      }
+    }
+    const workspaceForSettings = () => createSummaryWorkspaceService({
+      root: summaryRoot,
+      failedRetentionMs: summarySettings.failedWorkspaceRetentionDays * 24 * 60 * 60 * 1000
+    })
+    summaryWorkspaceService = Object.fromEntries(
+      ['create', 'writeArtifact', 'markStage', 'complete', 'fail', 'recover', 'remove', 'usage']
+        .map(method => [method, (...args) => workspaceForSettings()[method](...args)])
+    )
+    await summaryWorkspaceService.recover()
+    const cacheForSettings = () => createSummaryCacheService({
+      root: summaryRoot,
+      repository: db,
+      quotaBytes: summarySettings.cacheMaxBytes
+    })
+    const cache = Object.fromEntries(
+      ['get', 'put', 'evict', 'prune', 'stats', 'clear']
+        .map(method => [method, (...args) => cacheForSettings()[method](...args)])
+    )
+    if (summarySettings.cacheEnabled) await cache.prune()
+    const runner = createSummaryRunner({ profileService, validateWorkspaceDirectory })
     summaryExportService = createReportExportService({
       repository: summaryRepository,
       runner,
@@ -580,11 +622,27 @@ export function createOrchestrator() {
         ? dialog.showSaveDialog(mainWindow, options)
         : dialog.showSaveDialog(options)
     })
-    const pipeline = createLiveSummaryPipeline({
-      runner,
-      getSettings: () => summarySettings,
-      createPipeline: createSummaryPipeline
-    })
+    const pipeline = {
+      run(options) {
+        const profile = options.profileId
+          ? profileService?.listProfiles({ adapterId: options.executorId })
+            .find(candidate => candidate.id === options.profileId)
+          : null
+        const profileFingerprint = `sha256:${createHash('sha256').update(JSON.stringify({
+          executorId: options.executorId || null,
+          profileId: options.profileId || null,
+          runtimeRevision: profile?.updatedAt || profile?.runtimeRevision || null
+        })).digest('hex')}`
+        return createSummaryPipeline({
+          runner,
+          automaticCallLimit: summarySettings.automaticCallLimit,
+          cache: summarySettings.cacheEnabled ? cache : null,
+          promptVersion: options.promptVersion || 'summary-v1',
+          profileFingerprint,
+          mapConcurrency: summarySettings.mapConcurrency
+        }).run(options)
+      }
+    }
     summaryJobService = createSummaryJobService({
       repository: summaryRepository,
       evidenceCollector: createEvidenceCollector({ historyService }),
@@ -596,6 +654,7 @@ export function createOrchestrator() {
           timeZone: timezone
         }),
       pipeline,
+      workspaceService: summaryWorkspaceService,
       listSessions,
       defaultTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
     })

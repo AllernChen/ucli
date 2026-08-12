@@ -372,6 +372,32 @@ test('map concurrency accepts only the bounded range one through three', () => {
   }
 })
 
+test('every AI invocation receives the report workspace directory', async () => {
+  const directories = []
+  const runner = {
+    async run(options) {
+      directories.push(options.workspaceDirectory)
+      return {
+        value: options.schema === finalReportSchema ? finalValue() : digest('/work/a'),
+        usage: {}
+      }
+    }
+  }
+  const pipeline = createSummaryPipeline({ runner, contextWindow: 10_000 })
+  await pipeline.run({
+    executorId: 'claude',
+    workspaceDirectory: 'C:\\local\\UCLI\\summary\\workspaces\\opaque\\work',
+    evidence: { blocks: [block('evidence:a', '/work/a', 'work')] },
+    period: { start: 's', endExclusive: 'e', timezone: 'UTC' },
+    usage: {},
+    forceMapReduce: true
+  })
+  assert.deepEqual(directories, [
+    'C:\\local\\UCLI\\summary\\workspaces\\opaque\\work',
+    'C:\\local\\UCLI\\summary\\workspaces\\opaque\\work'
+  ])
+})
+
 test('AbortSignal is checked between AI calls', async () => {
   const controller = new AbortController()
   let calls = 0
