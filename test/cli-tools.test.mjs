@@ -173,6 +173,39 @@ test('Claude macOS inventory probes Keychain login with an isolated no-model aut
   assert.equal(probe.env.ANTHROPIC_BASE_URL, undefined)
 })
 
+test('Windows inventory never advertises disk credentials as safe summary authentication', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'ucli-windows-inventory-auth-'))
+  const dataHome = path.join(root, 'data')
+  mkdirSync(path.join(root, '.claude'))
+  mkdirSync(path.join(dataHome, 'opencode'), { recursive: true })
+  writeFileSync(
+    path.join(root, '.claude', '.credentials.json'),
+    '{"claudeAiOauth":{"accessToken":"must-not-bridge"}}'
+  )
+  writeFileSync(
+    path.join(dataHome, 'opencode', 'auth.json'),
+    '{"openai":{"type":"api","key":"must-not-bridge"}}'
+  )
+  try {
+    const claude = await inspectCliTool('claude', installedRunner(), {
+      platform: 'win32',
+      homeDirectory: root,
+      env: { PATH: process.env.PATH, HOME: root, USERPROFILE: root }
+    })
+    const opencode = await inspectCliTool('opencode', installedRunner(), {
+      platform: 'win32',
+      homeDirectory: root,
+      env: { PATH: process.env.PATH, XDG_DATA_HOME: dataHome }
+    })
+    for (const status of [claude, opencode]) {
+      assert.equal(status.summaryExecutorAvailable, false)
+      assert.equal(status.summaryExecutorUnavailableReason, 'windows-disk-auth-bridge-unavailable')
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('OpenCode upgrade runs the npm global installer', async () => {
   const originalPath = process.env.PATH
   try {

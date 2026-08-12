@@ -50,7 +50,8 @@ export function createOpenCodeRunner({
   adapterId = 'opencode',
   resolveExecutable,
   processRunner = runProcess,
-  baseEnv = process.env
+  baseEnv = process.env,
+  platform = process.platform
 } = {}) {
   if (!['opencode', 'ucode'].includes(adapterId)) {
     throw runnerError('SUMMARY_RUNNER_UNSUPPORTED_EXECUTOR', `Unsupported executor: ${adapterId}`)
@@ -88,7 +89,8 @@ export function createOpenCodeRunner({
         if (!hasSummaryProviderAuthentication('opencode', env)) {
           const authentication = await bridgeOpenCodeAuthentication({
             sourceEnv: { ...baseEnv, ...(launch.env || {}) },
-            isolatedDataHome: env.XDG_DATA_HOME
+            isolatedDataHome: env.XDG_DATA_HOME,
+            platform
           })
           if (!authentication.available) {
             throw runnerError(

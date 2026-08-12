@@ -81,6 +81,7 @@ async function inspectSummaryAuthentication(id, {
   if (id === 'claude') {
     const fileAuthentication = await inspectClaudeFileAuthentication({ env, homeDirectory, platform })
     if (fileAuthentication.available) return fileAuthentication
+    if (platform === 'win32') return fileAuthentication
     if (platform === 'darwin') {
       return withIsolatedWorkingDirectory(async directory => {
         const probeEnv = await buildSummaryProcessEnvironment({

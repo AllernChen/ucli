@@ -303,7 +303,9 @@ test('Claude runner uses print JSON schema mode, a resolved profile, and an isol
   }
 })
 
-test('Claude bridges only a validated credentials file into its isolated config and removes it afterward', async () => {
+test('Claude bridges only a validated credentials file into its isolated config and removes it afterward', {
+  skip: process.platform === 'win32'
+}, async () => {
   const fake = createFakeExecutable()
   const sourceHome = mkdtempSync(join(tmpdir(), 'ucli-claude-auth-source-'))
   const sourceConfig = join(sourceHome, '.claude')
@@ -427,7 +429,9 @@ test('OpenCode denies every tool and runs pure with isolated config and allowlis
   }
 })
 
-test('OpenCode bridges only a validated auth.json into isolated data and removes it afterward', async () => {
+test('OpenCode bridges only a validated auth.json into isolated data and removes it afterward', {
+  skip: process.platform === 'win32'
+}, async () => {
   const fake = createFakeExecutable()
   const sourceDataHome = mkdtempSync(join(tmpdir(), 'ucli-opencode-auth-source-'))
   const authDirectory = join(sourceDataHome, 'opencode')
@@ -601,6 +605,48 @@ test('OpenCode fails with a typed authentication error before spawning when no s
     assert.equal(processCalled, false)
   } finally {
     rmSync(sourceDataHome, { recursive: true, force: true })
+  }
+})
+
+test('Windows disk credentials fail closed before either summary process starts', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-windows-disk-auth-'))
+  const claudeConfig = join(root, '.claude')
+  const openCodeData = join(root, 'data')
+  mkdirSync(claudeConfig)
+  mkdirSync(join(openCodeData, 'opencode'), { recursive: true })
+  writeFileSync(
+    join(claudeConfig, '.credentials.json'),
+    '{"claudeAiOauth":{"accessToken":"must-not-bridge"}}'
+  )
+  writeFileSync(
+    join(openCodeData, 'opencode', 'auth.json'),
+    '{"openai":{"type":"api","key":"must-not-bridge"}}'
+  )
+  let processCalls = 0
+  try {
+    const common = {
+      platform: 'win32',
+      resolveExecutable: () => ({ file: 'unused', prefixArgs: [] }),
+      processRunner: async () => { processCalls += 1 }
+    }
+    await assert.rejects(
+      createClaudeRunner({
+        ...common,
+        baseEnv: { PATH: process.env.PATH, USERPROFILE: root, HOME: root }
+      }).run({ prompt: 'summary', schema: SUMMARY_SCHEMA }),
+      error => error.code === 'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE'
+    )
+    await assert.rejects(
+      createOpenCodeRunner({
+        ...common,
+        adapterId: 'opencode',
+        baseEnv: { PATH: process.env.PATH, XDG_DATA_HOME: openCodeData }
+      }).run({ prompt: 'summary', schema: SUMMARY_SCHEMA }),
+      error => error.code === 'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE'
+    )
+    assert.equal(processCalls, 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

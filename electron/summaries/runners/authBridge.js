@@ -141,6 +141,9 @@ export async function inspectOpenCodeAuthentication({
   homeDirectory = homedir(),
   platform = process.platform
 } = {}) {
+  if (platform === 'win32') {
+    return { available: false, source: null, reason: 'windows-disk-auth-bridge-unavailable' }
+  }
   const path = resolveOpenCodeAuthPath({ env, homeDirectory })
   const result = await readSafeOpenCodeAuth(path, { platform })
   return {
@@ -155,6 +158,9 @@ export async function inspectClaudeFileAuthentication({
   homeDirectory,
   platform = process.platform
 } = {}) {
+  if (platform === 'win32') {
+    return { available: false, source: null, reason: 'windows-disk-auth-bridge-unavailable' }
+  }
   const path = resolveClaudeCredentialsPath({ env, homeDirectory, platform })
   const result = await readSafeClaudeCredentials(path, { platform })
   return {
@@ -190,6 +196,9 @@ export async function bridgeClaudeAuthentication({
   if (!isolatedConfigDirectory || !isAbsolute(isolatedConfigDirectory)) {
     throw new TypeError('isolatedConfigDirectory is required')
   }
+  if (platform === 'win32') {
+    return invalid('windows-disk-auth-bridge-unavailable')
+  }
   return copyValidatedCredential({
     sourcePath: resolveClaudeCredentialsPath({ env: sourceEnv, homeDirectory, platform }),
     destinationDirectory: isolatedConfigDirectory,
@@ -207,6 +216,9 @@ export async function bridgeOpenCodeAuthentication({
 } = {}) {
   if (!isolatedDataHome || !isAbsolute(isolatedDataHome)) {
     throw new TypeError('isolatedDataHome is required')
+  }
+  if (platform === 'win32') {
+    return invalid('windows-disk-auth-bridge-unavailable')
   }
   const sourcePath = resolveOpenCodeAuthPath({ env: sourceEnv, homeDirectory })
   return copyValidatedCredential({
