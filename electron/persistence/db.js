@@ -1023,6 +1023,49 @@ class Db {
     })
   }
 
+  async deleteSummaryReport(reportId) {
+    return this.transaction(async () => {
+      const target = this.getSummaryReport(reportId)
+      if (!target) {
+        throw Object.assign(new Error(`Summary report not found: ${reportId}`), {
+          code: 'SUMMARY_REPORT_NOT_FOUND'
+        })
+      }
+      if (['queued', 'running', 'awaiting_confirmation'].includes(target.status)) {
+        throw Object.assign(new Error('Active summary reports cannot be deleted'), {
+          code: 'SUMMARY_REPORT_ACTIVE'
+        })
+      }
+
+      this.sql.run('DELETE FROM summary_reports WHERE id = ?', [reportId])
+      let currentReportId = null
+      if (target.isCurrent) {
+        const replacement = rows(this.sql.exec(
+          `SELECT id FROM summary_reports
+           WHERE period_type = ? AND period_start = ? AND period_end_exclusive = ?
+             AND timezone = ? AND status = 'completed'
+           ORDER BY version DESC, created_at DESC, id
+           LIMIT 1`,
+          [target.periodType, target.periodStart, target.periodEndExclusive, target.timezone]
+        ))[0]
+        if (replacement?.id) {
+          this.sql.run('UPDATE summary_reports SET is_current = 1 WHERE id = ?', [replacement.id])
+          currentReportId = replacement.id
+        }
+      } else {
+        const current = rows(this.sql.exec(
+          `SELECT id FROM summary_reports
+           WHERE period_type = ? AND period_start = ? AND period_end_exclusive = ?
+             AND timezone = ? AND is_current = 1
+           LIMIT 1`,
+          [target.periodType, target.periodStart, target.periodEndExclusive, target.timezone]
+        ))[0]
+        currentReportId = current?.id || null
+      }
+      return { deletedReportId: reportId, currentReportId }
+    })
+  }
+
   getSummarySettings() {
     const value = rows(this.sql.exec(
       'SELECT settings_json FROM summary_settings WHERE id = 1'

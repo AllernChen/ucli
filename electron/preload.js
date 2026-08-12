@@ -144,6 +144,7 @@ const api = {
   }),
   cancelSummary: (reportId) => invokeSummary('summary:cancel', reportId),
   setCurrentSummary: (reportId) => invokeSummary('summary:set-current', reportId),
+  deleteSummaryReport: (reportId) => invokeSummary('summary:delete', reportId),
   exportSummaryMarkdown: (value) => invokeSummary('summary:export-markdown', value),
   exportSummaryHtml: (value) => invokeSummary('summary:export-html', value),
   onSummaryProgress: (handler) => {

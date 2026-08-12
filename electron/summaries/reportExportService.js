@@ -176,7 +176,22 @@ export function createReportExportService({
       const run = prompt => runner.run({
         ...selection,
         prompt,
-        schema: HTML_OUTPUT_SCHEMA
+        schema: HTML_OUTPUT_SCHEMA,
+        timeoutMs: 5 * 60 * 1000
+      }).catch(error => {
+        if (/^SUMMARY_RUNNER_PROFILE_[A-Z0-9_]+$/.test(error?.code || '')) {
+          throw exportError('SUMMARY_PROFILE_UNAVAILABLE', 'Select an available default AI CLI profile')
+        }
+        if (/^SUMMARY_RUNNER_[A-Z0-9_]+$/.test(error?.code || '')) {
+          throw exportError('SUMMARY_HTML_GENERATION_FAILED', 'AI CLI failed while generating HTML')
+        }
+        if (['PROFILE_SECRET_REQUIRED', 'PROFILE_SECRET_UNAVAILABLE', 'PROFILE_SECRET_DECRYPT_FAILED'].includes(error?.code)) {
+          throw exportError('SUMMARY_EXECUTOR_AUTH_UNAVAILABLE', 'Selected AI CLI requires an isolated summary credential')
+        }
+        if (/^(?:PROFILE_|INVALID_(?:CLAUDE_)?PROFILE)/.test(error?.code || '')) {
+          throw exportError('SUMMARY_PROFILE_UNAVAILABLE', 'Select an available default AI CLI profile')
+        }
+        throw error
       })
 
       let html = htmlFromResult(await run(initialPrompt(report.markdown, style)))

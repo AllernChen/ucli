@@ -794,6 +794,39 @@ test('a current completed report cannot transition to a non-completed status', a
   })
 })
 
+test('deleting reports rejects active work and atomically promotes the previous completed version', async () => {
+  await withDb('ucli-summary-report-delete-', async (db) => {
+    db.createSummaryReport(summaryReport({ id: 'week-v1', status: 'completed' }))
+    db.createSummaryReport(summaryReport({
+      id: 'week-v2', status: 'completed', version: 2, isCurrent: true
+    }))
+    db.createSummaryReport(summaryReport({
+      id: 'week-running', status: 'running', version: 3
+    }))
+    db.createSummaryReport(summaryReport({
+      id: 'day-current', periodType: 'day', periodStart: 300, periodEndExclusive: 400,
+      status: 'completed', isCurrent: true
+    }))
+
+    await assert.rejects(
+      db.deleteSummaryReport('missing'),
+      error => error.code === 'SUMMARY_REPORT_NOT_FOUND'
+    )
+    await assert.rejects(
+      db.deleteSummaryReport('week-running'),
+      error => error.code === 'SUMMARY_REPORT_ACTIVE'
+    )
+    assert.ok(db.getSummaryReport('week-running'))
+
+    assert.deepEqual(await db.deleteSummaryReport('week-v2'), {
+      deletedReportId: 'week-v2', currentReportId: 'week-v1'
+    })
+    assert.equal(db.getSummaryReport('week-v2'), null)
+    assert.equal(db.getSummaryReport('week-v1').isCurrent, true)
+    assert.equal(db.getSummaryReport('day-current').isCurrent, true)
+  })
+})
+
 test('summary settings expose safe defaults and merge validated updates', async () => {
   await withDb('ucli-summary-settings-', async (db) => {
     const defaults = {

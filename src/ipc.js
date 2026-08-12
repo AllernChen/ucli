@@ -93,6 +93,7 @@ export const ipc = {
   confirmSummary: (reportId, confirmationCallLimit) => u.confirmSummary(reportId, confirmationCallLimit),
   cancelSummary: (reportId) => u.cancelSummary(reportId),
   setCurrentSummary: (reportId) => u.setCurrentSummary(reportId),
+  deleteSummaryReport: (reportId) => u.deleteSummaryReport(reportId),
   exportSummaryMarkdown: (value) => u.exportSummaryMarkdown(value),
   exportSummaryHtml: (value) => u.exportSummaryHtml(value),
   onSummaryProgress: (handler) => u.onSummaryProgress(handler),

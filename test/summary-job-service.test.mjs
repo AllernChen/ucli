@@ -40,6 +40,13 @@ class MemoryDb {
     }
     return structuredClone(target)
   }
+
+  async deleteSummaryReport(id) {
+    const index = this.rows.findIndex(item => item.id === id)
+    if (index < 0) throw Object.assign(new Error('missing'), { code: 'SUMMARY_REPORT_NOT_FOUND' })
+    const [target] = this.rows.splice(index, 1)
+    return { deletedReportId: target.id, currentReportId: null }
+  }
 }
 
 function request(overrides = {}) {
@@ -108,6 +115,16 @@ test('report repository assigns monotonic versions per logical key and validates
     error => error.code === 'INVALID_SUMMARY_REPORT'
   )
   assert.equal(db.getSummaryReport(second.id).status, 'queued')
+})
+
+test('report repository exposes only the normalized deletion result', async () => {
+  const db = new MemoryDb()
+  const repository = createReportRepository({ db, now: () => 1000, idFactory: () => 'r1' })
+  repository.createQueued(request())
+  assert.deepEqual(await repository.delete('r1'), {
+    deletedReportId: 'r1', currentReportId: null
+  })
+  assert.equal(repository.get('r1'), null)
 })
 
 function evidence(text = 'work') {

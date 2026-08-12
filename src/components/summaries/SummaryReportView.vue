@@ -35,6 +35,15 @@
         :disabled="htmlExporting"
         @click="$emit('export-html', report.id)"
       >{{ htmlExporting ? '正在生成 HTML' : '导出 HTML' }}</a-button>
+      <a-popconfirm
+        v-if="!active"
+        title="确认删除这份总结？此操作不可恢复。"
+        ok-text="确认删除"
+        cancel-text="取消"
+        @confirm="$emit('delete-report', report.id)"
+      >
+        <a-button danger>删除总结</a-button>
+      </a-popconfirm>
     </div>
     <article
       v-if="report.markdown"
@@ -55,7 +64,7 @@ import ipc from '../../ipc.js'
 import { openSummaryReportLink } from '../../summaryLinks.js'
 
 const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean })
-defineEmits(['cancel', 'confirm', 'export-markdown', 'export-html'])
+defineEmits(['cancel', 'confirm', 'export-markdown', 'export-html', 'delete-report'])
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const safeHtml = computed(() => DOMPurify.sanitize(markdown.render(props.report?.markdown || '')))
 const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].includes(props.report?.status))

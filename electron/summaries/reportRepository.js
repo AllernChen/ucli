@@ -154,6 +154,10 @@ export function createReportRepository({
       return normalizeReport(await db.setCurrentSummaryReport(reportId))
     },
 
+    delete(reportId) {
+      return db.deleteSummaryReport(reportId)
+    },
+
     findCompletedBySource(input, sourceHash, excludeId = null) {
       return listForKey(input).find(report =>
         report.id !== excludeId && report.status === 'completed' && report.sourceHash === sourceHash

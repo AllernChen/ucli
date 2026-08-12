@@ -181,6 +181,68 @@ test('canceling the HTML destination returns before invoking the AI runner', asy
   assert.equal(calls, 0)
 })
 
+test('HTML runner failures become safe export errors and use the extended generation timeout', async () => {
+  let timeoutMs = null
+  const service = createReportExportService({
+    repository: repository(),
+    runner: {
+      async run(options) {
+        timeoutMs = options.timeoutMs
+        throw Object.assign(new Error('stderr: Bearer private-secret'), {
+          code: 'SUMMARY_RUNNER_EXIT', stderr: 'C:\\private\\credential.json'
+        })
+      }
+    },
+    showSaveDialog: async () => ({ canceled: false, filePath: 'chosen.html' }),
+    writeUtf8: async () => { throw new Error('must not write') }
+  })
+
+  await assert.rejects(
+    service.exportHtml({ reportId: 'report-1', style: { mode: 'light' } }),
+    error => error.code === 'SUMMARY_HTML_GENERATION_FAILED' &&
+      error.message === 'AI CLI failed while generating HTML' &&
+      !JSON.stringify(error).includes('private-secret')
+  )
+  assert.equal(timeoutMs, 5 * 60 * 1000)
+})
+
+test('HTML profile credential failures remain actionable without leaking profile details', async () => {
+  const service = createReportExportService({
+    repository: repository(),
+    runner: {
+      async run() {
+        throw Object.assign(new Error('secret decrypt failed at C:\\private'), {
+          code: 'PROFILE_SECRET_DECRYPT_FAILED'
+        })
+      }
+    },
+    showSaveDialog: async () => ({ canceled: false, filePath: 'chosen.html' })
+  })
+  await assert.rejects(
+    service.exportHtml({ reportId: 'report-1', style: { mode: 'dark' } }),
+    error => error.code === 'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE' &&
+      !error.message.includes('private')
+  )
+})
+
+test('HTML runner profile failures remain profile errors instead of generic generation errors', async () => {
+  const service = createReportExportService({
+    repository: repository(),
+    runner: {
+      async run() {
+        throw Object.assign(new Error('profile service internal detail'), {
+          code: 'SUMMARY_RUNNER_PROFILE_UNAVAILABLE'
+        })
+      }
+    },
+    showSaveDialog: async () => ({ canceled: false, filePath: 'chosen.html' })
+  })
+  await assert.rejects(
+    service.exportHtml({ reportId: 'report-1', style: { mode: 'light' } }),
+    error => error.code === 'SUMMARY_PROFILE_UNAVAILABLE'
+  )
+})
+
 test('HTML export supports an explicit runner override and repairs an invalid draft once', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ucli-summary-export-'))
   const destination = join(root, 'chosen.html')

@@ -4,6 +4,7 @@ import { ipc } from '../ipc.js'
 
 let unsubscribeProgress = null
 let initPromise = null
+const deletedReportIds = new Set()
 
 function terminalPhase(phase) {
   return ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(phase)
@@ -71,7 +72,9 @@ export const useSummariesStore = defineStore('summaries', {
     },
 
     async refreshReport(reportId) {
+      if (deletedReportIds.has(reportId)) return null
       const report = await ipc.getSummaryReport(reportId)
+      if (deletedReportIds.has(reportId)) return null
       const index = this.reports.findIndex(item => item.id === reportId)
       const summary = withoutMarkdown(report)
       if (index >= 0) this.reports.splice(index, 1, summary)
@@ -137,6 +140,39 @@ export const useSummariesStore = defineStore('summaries', {
       const report = await ipc.setCurrentSummary(reportId)
       await this.selectReport(reportId)
       return report
+    },
+
+    async deleteReport(reportId) {
+      const selectedId = this.selectedReport?.id || null
+      deletedReportIds.add(reportId)
+      let result
+      try {
+        result = await ipc.deleteSummaryReport(reportId)
+      } catch (error) {
+        deletedReportIds.delete(reportId)
+        throw error
+      }
+      const jobs = { ...this.activeJobs }
+      const progress = { ...this.progress }
+      delete jobs[reportId]
+      delete progress[reportId]
+      this.activeJobs = jobs
+      this.progress = progress
+      this.reports = this.reports.filter(report => report.id !== reportId)
+      this.versions = this.versions.filter(report => report.id !== reportId)
+      if (selectedId === reportId) this.selectedReport = null
+
+      await this.loadReports()
+      const nextId =
+        (selectedId !== reportId && this.reports.some(report => report.id === selectedId) ? selectedId : null) ||
+        result.currentReportId ||
+        this.reports[0]?.id || null
+      if (nextId) await this.selectReport(nextId)
+      else {
+        this.selectedReport = null
+        this.versions = []
+      }
+      return result
     },
 
     exportMarkdown(reportId) {

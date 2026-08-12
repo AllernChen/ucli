@@ -106,9 +106,11 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   INVALID_SUMMARY_IPC: 'Invalid summary request',
   SUMMARY_SERVICE_UNAVAILABLE: 'Summary service is unavailable',
   SUMMARY_EXPORT_UNAVAILABLE: 'Summary export is unavailable',
+  SUMMARY_HTML_GENERATION_FAILED: 'AI CLI failed while generating HTML',
   SUMMARY_HTML_INVALID: 'Generated HTML failed safety validation',
   INVALID_SUMMARY_EXPORT_STYLE: 'Invalid HTML export style',
   SUMMARY_REPORT_NOT_FOUND: 'Summary report was not found',
+  SUMMARY_REPORT_ACTIVE: 'Cancel the active summary before deleting it',
   SUMMARY_REPORT_NOT_COMPLETED: 'Only a completed report can be current',
   SUMMARY_AUTOMATION_UNAVAILABLE: 'Automatic summaries require local persistence',
   SUMMARY_EXECUTOR_UNAVAILABLE: 'Select an available default AI CLI',
@@ -297,8 +299,9 @@ function validateManualSummaryRequest(input, {
 }
 
 function safeSummaryError(error) {
-  const code = typeof error?.code === 'string' && SUMMARY_ERROR_MESSAGES[error.code]
-    ? error.code
+  const sourceCode = typeof error?.code === 'string' ? error.code : ''
+  const code = SUMMARY_ERROR_MESSAGES[sourceCode]
+    ? sourceCode
     : 'SUMMARY_SERVICE_UNAVAILABLE'
   const safe = { code, message: SUMMARY_ERROR_MESSAGES[code] }
   if (code === 'SUMMARY_HTML_INVALID' && Array.isArray(error?.validationErrors)) {
@@ -364,6 +367,7 @@ export function registerSummaryIpc({ ipcMain, service }) {
   ipcMain.handle('summary:generate', safeSummaryEnvelope((_event, value) => service.generate(validateSummaryGenerate(value))))
   ipcMain.handle('summary:cancel', safeSummaryEnvelope((_event, value) => service.cancel(validateSummaryId(value))))
   ipcMain.handle('summary:set-current', safeSummaryEnvelope((_event, value) => service.setCurrent(validateSummaryId(value))))
+  ipcMain.handle('summary:delete', safeSummaryEnvelope((_event, value) => service.deleteReport(validateSummaryId(value))))
   ipcMain.handle('summary:export-markdown', safeSummaryEnvelope((_event, value) => service.exportMarkdown(validateSummaryExport(value))))
   ipcMain.handle('summary:export-html', safeSummaryEnvelope((_event, value) => service.exportHtml(validateSummaryExport(value, { html: true }))))
 }
@@ -2200,13 +2204,22 @@ export function createOrchestrator() {
           scheduleFlush()
           return report
         },
+        async deleteReport(reportId) {
+          if (!summaryRepository) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          const result = await summaryRepository.delete(reportId)
+          scheduleFlush()
+          return result
+        },
         exportMarkdown: input => {
           if (!summaryExportService?.exportMarkdown) throw Object.assign(new Error(), { code: 'SUMMARY_EXPORT_UNAVAILABLE' })
           return summaryExportService.exportMarkdown(input)
         },
         exportHtml: input => {
           if (!summaryExportService?.exportHtml) throw Object.assign(new Error(), { code: 'SUMMARY_EXPORT_UNAVAILABLE' })
-          return summaryExportService.exportHtml(input)
+          return summaryExportService.exportHtml(input).catch(error => {
+            log('summary-html-export-failed', safeSummaryErrorCode(error?.code, 'SUMMARY_HTML_EXPORT_FAILED'))
+            throw error
+          })
         }
       }
     })

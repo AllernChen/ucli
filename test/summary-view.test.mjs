@@ -27,6 +27,7 @@ globalThis.window = {
     },
     cancelSummary: async () => true,
     setCurrentSummary: async reportId => ({ id: reportId, status: 'completed', isCurrent: true }),
+    deleteSummaryReport: async reportId => ({ deletedReportId: reportId, currentReportId: null }),
     exportSummaryMarkdown: async () => ({ canceled: false }),
     exportSummaryHtml: async () => ({ canceled: false }),
     onSummaryProgress: handler => {
@@ -85,6 +86,122 @@ test('awaiting confirmation retains the actual call estimate and resumes the sam
   store.dispose()
 })
 
+test('deleting the selected report clears stale state and selects the promoted version', async () => {
+  const originalDelete = window.ucli.deleteSummaryReport
+  const originalList = window.ucli.listSummaryReports
+  const originalGet = window.ucli.getSummaryReport
+  const store = freshStore()
+  try {
+    store.initialized = true
+    store.reports = [
+      { id: 'report-v2', status: 'completed', version: 2 },
+      { id: 'report-v1', status: 'completed', version: 1 }
+    ]
+    store.selectedReport = { id: 'report-v2', status: 'completed', version: 2, markdown: '# v2' }
+    store.versions = [...store.reports]
+    store.activeJobs = { 'report-v2': true }
+    store.progress = { 'report-v2': { phase: 'completed' } }
+
+    window.ucli.deleteSummaryReport = async reportId => ({
+      deletedReportId: reportId, currentReportId: 'report-v1'
+    })
+    window.ucli.listSummaryReports = async filters => filters?.periodType
+      ? [{ id: 'report-v1', status: 'completed', version: 1, isCurrent: true }]
+      : [{ id: 'report-v1', status: 'completed', version: 1, isCurrent: true }]
+    window.ucli.getSummaryReport = async reportId => ({
+      id: reportId, periodType: 'week', periodStart: 100, periodEndExclusive: 200,
+      timezone: 'Asia/Shanghai', status: 'completed', version: 1, isCurrent: true,
+      markdown: '# v1'
+    })
+
+    assert.deepEqual(await store.deleteReport('report-v2'), {
+      deletedReportId: 'report-v2', currentReportId: 'report-v1'
+    })
+    assert.equal(store.selectedReport.id, 'report-v1')
+    assert.equal(store.activeJobs['report-v2'], undefined)
+    assert.equal(store.progress['report-v2'], undefined)
+    assert.deepEqual(store.reports.map(report => report.id), ['report-v1'])
+  } finally {
+    window.ucli.deleteSummaryReport = originalDelete
+    window.ucli.listSummaryReports = originalList
+    window.ucli.getSummaryReport = originalGet
+    store.dispose()
+  }
+})
+
+test('a stale terminal refresh cannot resurrect a report after deletion', async () => {
+  const originalDelete = window.ucli.deleteSummaryReport
+  const originalList = window.ucli.listSummaryReports
+  const originalGet = window.ucli.getSummaryReport
+  let releaseStale
+  let getCallsForDeleted = 0
+  const stale = new Promise(resolve => { releaseStale = resolve })
+  const store = freshStore()
+  try {
+    await store.init()
+    store.reports = [{ id: 'deleted-report', status: 'completed', version: 1 }]
+    store.selectedReport = { id: 'deleted-report', status: 'completed', version: 1, markdown: '# old' }
+    window.ucli.getSummaryReport = async reportId => {
+      if (reportId === 'deleted-report' && getCallsForDeleted++ === 0) return stale
+      return { id: reportId, status: 'completed', version: 1, markdown: '# next' }
+    }
+    window.ucli.deleteSummaryReport = async reportId => ({
+      deletedReportId: reportId, currentReportId: null
+    })
+    window.ucli.listSummaryReports = async () => []
+
+    progressHandler({
+      reportId: 'deleted-report', phase: 'completed', completed: 1, total: 1, text: '完成'
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await store.deleteReport('deleted-report')
+    releaseStale({ id: 'deleted-report', status: 'completed', version: 1, markdown: '# stale' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    assert.deepEqual(store.reports, [])
+    assert.equal(store.selectedReport, null)
+    assert.equal(store.error, null)
+  } finally {
+    window.ucli.deleteSummaryReport = originalDelete
+    window.ucli.listSummaryReports = originalList
+    window.ucli.getSummaryReport = originalGet
+    store.dispose()
+  }
+})
+
+test('a terminal event arriving after deletion does not surface a not-found error', async () => {
+  const originalDelete = window.ucli.deleteSummaryReport
+  const originalList = window.ucli.listSummaryReports
+  const originalGet = window.ucli.getSummaryReport
+  const store = freshStore()
+  try {
+    await store.init()
+    store.reports = [{ id: 'late-report', status: 'completed', version: 1 }]
+    store.selectedReport = { id: 'late-report', status: 'completed', version: 1, markdown: '# old' }
+    window.ucli.deleteSummaryReport = async reportId => ({
+      deletedReportId: reportId, currentReportId: null
+    })
+    window.ucli.listSummaryReports = async () => []
+    window.ucli.getSummaryReport = async () => {
+      throw Object.assign(new Error('not found'), { code: 'SUMMARY_REPORT_NOT_FOUND' })
+    }
+
+    await store.deleteReport('late-report')
+    progressHandler({
+      reportId: 'late-report', phase: 'completed', completed: 1, total: 1, text: '完成'
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    assert.equal(store.error, null)
+    assert.deepEqual(store.reports, [])
+  } finally {
+    window.ucli.deleteSummaryReport = originalDelete
+    window.ucli.listSummaryReports = originalList
+    window.ucli.getSummaryReport = originalGet
+    store.dispose()
+  }
+})
+
 test('summary workspace components cover generation, safe reading, history, retry, and export', () => {
   const files = [
     '../src/components/summaries/SummaryGenerateDialog.vue',
@@ -101,12 +218,22 @@ test('summary workspace components cover generation, safe reading, history, retr
     'periodType', 'partial', 'executorId', 'profileId', 'model',
     'estimatedCalls', 'coverage', '可能产生费用', '设为当前版本',
     '取消生成', '确认继续', '预计调用', '可能产生费用',
-    '复制 Markdown', '导出 Markdown', '导出 HTML', '重试'
+    '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试'
   ]) assert.match(all, new RegExp(text))
   assert.match(all, /:loading="htmlExporting"/)
   assert.match(all, /exportingHtml\.value\s*=\s*true/)
   assert.match(all, /exportingHtml\.value\s*=\s*false/)
   assert.match(all, /HTML\s*已导出/)
+  for (const text of ['浅色', '深色', '自定义', '自定义风格要求', '将再次调用所选 AI CLI']) {
+    assert.match(all, new RegExp(text))
+  }
+  assert.match(all, /v-model:value="htmlStyle\.mode"/)
+  assert.match(all, /htmlStyle\.mode\s*===\s*['"]custom['"]/)
+  assert.match(all, /:confirm-loading="exportingHtml"/)
+  assert.match(all, /v-if="exportingHtml"[\s\S]{0,180}正在生成 HTML/)
+  assert.match(all, /requirement:\s*htmlStyle\.requirement\.trim\(\)/)
+  assert.match(all, /@confirm="\$emit\('delete-report', report\.id\)"/)
+  assert.match(all, /summaries\.deleteReport/)
   assert.match(all, /MarkdownIt\(\{\s*html:\s*false/)
   assert.match(all, /DOMPurify\.sanitize/)
   assert.match(all, /mode:\s*['"]light['"]/)

@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { register } from 'node:module'
 import test from 'node:test'
+
+register('./fixtures/electron-stub-loader.mjs', import.meta.url)
+
+const { registerSummaryIpc } = await import(`../electron/orchestrator.js?summary-ipc=${Date.now()}`)
 
 const CHANNELS = [
   'summary:get-settings', 'summary:set-settings', 'summary:list-reports',
   'summary:get-report', 'summary:generate', 'summary:cancel',
-  'summary:set-current', 'summary:export-markdown', 'summary:export-html'
+  'summary:set-current', 'summary:delete', 'summary:export-markdown', 'summary:export-html'
 ]
 
 test('main summary IPC registers the exact surface and validates every payload', async () => {
@@ -72,6 +77,36 @@ test('summary IPC returns typed safe errors without provider output', async () =
   assert.doesNotMatch(source, /safeSummaryError[\s\S]{0,800}error\.message/)
 })
 
+test('HTML runner failures remain actionable without exposing provider output', async () => {
+  const handlers = new Map()
+  const unavailable = () => { throw Object.assign(new Error('unused'), { code: 'SUMMARY_SERVICE_UNAVAILABLE' }) }
+  registerSummaryIpc({
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    service: {
+      getSettings: unavailable, setSettings: unavailable, listReports: unavailable,
+      getReport: unavailable, generate: unavailable, cancel: unavailable,
+      setCurrent: unavailable, deleteReport: unavailable, exportMarkdown: unavailable,
+      exportHtml() {
+        throw Object.assign(new Error('provider stderr contains C:\\secret\\token.txt'), {
+          code: 'SUMMARY_HTML_GENERATION_FAILED', stderr: 'Bearer private-secret'
+        })
+      }
+    }
+  })
+
+  const response = await handlers.get('summary:export-html')({}, {
+    reportId: 'report-1', style: { mode: 'light' }
+  })
+  assert.deepEqual(response, {
+    ok: false,
+    error: {
+      code: 'SUMMARY_HTML_GENERATION_FAILED',
+      message: 'AI CLI failed while generating HTML'
+    }
+  })
+  assert.doesNotMatch(JSON.stringify(response), /secret|Bearer|stderr/i)
+})
+
 test('preload exposes named summary calls and one removable progress listener', async () => {
   const source = readFileSync(new URL('../electron/preload.js', import.meta.url), 'utf8')
     .replace("import { contextBridge, ipcRenderer } from 'electron'", '')
@@ -95,6 +130,7 @@ test('preload exposes named summary calls and one removable progress listener', 
   await api.confirmSummary('r1', 24)
   await api.cancelSummary('r1')
   await api.setCurrentSummary('r1')
+  await api.deleteSummaryReport('r1')
   await api.exportSummaryMarkdown({ reportId: 'r1' })
   await api.exportSummaryHtml({ reportId: 'r1', style: { mode: 'light' } })
   const progress = []
