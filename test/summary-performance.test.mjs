@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { mapBounded } from '../electron/summaries/boundedExecutor.js'
 import {
   createSummaryPipeline,
   planSummaryExecution
@@ -43,6 +44,104 @@ function evidence(projects) {
 }
 
 const period = { start: 's', endExclusive: 'e', timezone: 'UTC' }
+
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+async function nextTurn() {
+  await new Promise(resolve => setImmediate(resolve))
+}
+
+test('mapBounded overlaps only the limit and restores input result order', async () => {
+  const gates = [deferred(), deferred(), deferred()]
+  const started = []
+  const settled = []
+  const resultPromise = mapBounded(
+    ['chunk:1', 'chunk:2', 'chunk:3'],
+    2,
+    async (item, index) => {
+      started.push(item)
+      await gates[index].promise
+      return item
+    },
+    { onSettled: event => settled.push(event.settled) }
+  )
+
+  await nextTurn()
+  assert.deepEqual(started, ['chunk:1', 'chunk:2'])
+  gates[1].resolve()
+  await nextTurn()
+  assert.deepEqual(started, ['chunk:1', 'chunk:2', 'chunk:3'])
+  gates[2].resolve()
+  gates[0].resolve()
+
+  assert.deepEqual(await resultPromise, ['chunk:1', 'chunk:2', 'chunk:3'])
+  assert.deepEqual(settled, [1, 2, 3])
+})
+
+test('mapBounded aborts queued work and drains tasks already started', async () => {
+  const controller = new AbortController()
+  const gates = [deferred(), deferred(), deferred()]
+  const started = []
+  let rejected = false
+  const resultPromise = mapBounded(
+    ['chunk:1', 'chunk:2', 'chunk:3'],
+    2,
+    async (item, index) => {
+      started.push(item)
+      await gates[index].promise
+      return item
+    },
+    { signal: controller.signal }
+  ).catch(error => {
+    rejected = true
+    throw error
+  })
+
+  await nextTurn()
+  controller.abort()
+  await nextTurn()
+  assert.equal(rejected, false)
+  gates[0].resolve()
+  gates[1].resolve()
+
+  await assert.rejects(resultPromise, error => error?.code === 'SUMMARY_PIPELINE_ABORTED')
+  assert.deepEqual(started, ['chunk:1', 'chunk:2'])
+})
+
+test('mapBounded stops after the first worker error and waits for active work', async () => {
+  const first = deferred()
+  const typed = Object.assign(new Error('typed failure'), { code: 'SUMMARY_RUNNER_EXIT' })
+  const started = []
+  let rejected = false
+  const resultPromise = mapBounded(
+    ['chunk:1', 'chunk:2', 'chunk:3'],
+    2,
+    async (item, index) => {
+      started.push(item)
+      if (index === 1) throw typed
+      await first.promise
+      return item
+    }
+  ).catch(error => {
+    rejected = true
+    throw error
+  })
+
+  await nextTurn()
+  assert.equal(rejected, false)
+  assert.deepEqual(started, ['chunk:1', 'chunk:2'])
+  first.resolve()
+  await assert.rejects(resultPromise, error => error === typed)
+  assert.deepEqual(started, ['chunk:1', 'chunk:2'])
+})
 
 function fakeRunner() {
   const calls = []
@@ -294,4 +393,34 @@ test('cache key programming input errors are not swallowed as cache misses', asy
     }),
     error => error?.code === 'SUMMARY_CACHE_KEY_INVALID'
   )
+})
+
+test('pipeline maps with default concurrency two and reports settled progress', async () => {
+  let active = 0
+  let maxActive = 0
+  const progress = []
+  const runner = {
+    async run(options) {
+      if (options.schema === finalReportSchema) return { value: finalValue(), usage: {} }
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      await new Promise(resolve => setTimeout(resolve, options.prompt.includes('/work/a') ? 15 : 5))
+      active -= 1
+      const project = options.prompt.match(/\/work\/[abc]/)?.[0] || '/work/a'
+      return { value: digest(project), usage: {} }
+    }
+  }
+  const pipeline = createSummaryPipeline({ runner, contextWindow: 10_000, now: () => 1000 })
+
+  const result = await pipeline.run({
+    executorId: 'claude', evidence: evidence(['/work/a', '/work/b', '/work/c']),
+    period, usage: {}, forceMapReduce: true,
+    onProgress: event => {
+      if (event.phase === 'mapping') progress.push(event.current)
+    }
+  })
+
+  assert.equal(maxActive, 2)
+  assert.deepEqual(progress, [1, 2, 3])
+  assert.equal(result.generationMetrics.aiCalls, 4)
 })

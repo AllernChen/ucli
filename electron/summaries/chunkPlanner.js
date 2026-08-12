@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 
+import { mapBounded } from './boundedExecutor.js'
 import { cacheKeyForInvocation } from './summaryCacheService.js'
 import {
   buildDirectReportPrompt,
@@ -245,9 +246,16 @@ export function createSummaryPipeline({
   now = Date.now,
   cache = null,
   promptVersion = 'summary-v1',
-  profileFingerprint = 'profile:none'
+  profileFingerprint = 'profile:none',
+  mapConcurrency = 2
 } = {}) {
   if (!runner || typeof runner.run !== 'function') throw new TypeError('runner.run is required')
+  if (!Number.isInteger(mapConcurrency) || mapConcurrency < 1 || mapConcurrency > 3) {
+    throw runnerError(
+      'SUMMARY_MAP_CONCURRENCY_INVALID',
+      'Map concurrency must be between 1 and 3'
+    )
+  }
   const callLimit = Number.isFinite(automaticCallLimit) && automaticCallLimit > 0
     ? Math.min(20, Math.floor(automaticCallLimit))
     : 20
@@ -403,15 +411,22 @@ export function createSummaryPipeline({
         }
       }
 
-      const mappedByProject = new Map()
-      for (let index = 0; index < chunks.length; index += 1) {
-        const chunk = chunks[index]
-        onProgress?.({ phase: 'mapping', current: index + 1, total: chunks.length })
-        const value = await invoke({
+      const mappedValues = await mapBounded(chunks, mapConcurrency, async chunk => {
+        return invoke({
           stage: 'map',
           prompt: buildMapPrompt({ chunk, period, usage, coverage: evidence.coverage }),
           schema: projectDigestSchema
         })
+      }, {
+        signal,
+        onSettled({ settled, total }) {
+          onProgress?.({ phase: 'mapping', current: settled, total })
+        }
+      })
+      const mappedByProject = new Map()
+      for (let index = 0; index < chunks.length; index += 1) {
+        const chunk = chunks[index]
+        const value = mappedValues[index]
         if (!mappedByProject.has(chunk.projectPath)) mappedByProject.set(chunk.projectPath, [])
         mappedByProject.get(chunk.projectPath).push(value)
       }

@@ -352,6 +352,26 @@ test('configuration can lower but never raise the 20-call automatic ceiling', as
   )
 })
 
+test('map concurrency accepts only the bounded range one through three', () => {
+  for (const mapConcurrency of [0, 4, 1.5]) {
+    assert.throws(
+      () => createSummaryPipeline({
+        runner: { async run() {} },
+        contextWindow: 10_000,
+        mapConcurrency
+      }),
+      error => error?.code === 'SUMMARY_MAP_CONCURRENCY_INVALID'
+    )
+  }
+  for (const mapConcurrency of [1, 2, 3]) {
+    assert.doesNotThrow(() => createSummaryPipeline({
+      runner: { async run() {} },
+      contextWindow: 10_000,
+      mapConcurrency
+    }))
+  }
+})
+
 test('AbortSignal is checked between AI calls', async () => {
   const controller = new AbortController()
   let calls = 0
