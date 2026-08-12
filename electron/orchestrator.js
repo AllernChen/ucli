@@ -673,7 +673,7 @@ export function createOrchestrator() {
       failedRetentionMs: summarySettings.failedWorkspaceRetentionDays * 24 * 60 * 60 * 1000
     })
     summaryWorkspaceService = Object.fromEntries(
-      ['create', 'writeArtifact', 'markStage', 'complete', 'fail', 'recover', 'remove', 'usage', 'clearFailed', 'pruneExpired', 'pruneCompleted']
+      ['create', 'writeArtifact', 'markStage', 'complete', 'fail', 'recover', 'remove', 'usage', 'clearFailed', 'pruneExpired', 'pruneOrphans', 'pruneCompleted']
         .map(method => [method, (...args) => workspaceForSettings()[method](...args)])
     )
     const cacheForSettings = () => createSummaryCacheService({
@@ -749,6 +749,10 @@ export function createOrchestrator() {
       const result = await runSummaryMaintenance({
         quotaBytes: summarySettings.cacheMaxBytes,
         pruneExpiredWorkspaces: () => summaryWorkspaceService.pruneExpired(),
+        pruneOrphanWorkspaces: () => summaryWorkspaceService.pruneOrphans({
+          isProtected: reportId => summaryJobService.isActive(reportId),
+          isRetained: reportId => Boolean(summaryRepository.get(reportId))
+        }),
         getWorkspaceUsage: () => summaryWorkspaceService.usage(),
         pruneCache: maxBytes => summaryCacheService.prune(maxBytes),
         getCacheUsage: () => summaryCacheService.stats(),
@@ -763,6 +767,9 @@ export function createOrchestrator() {
         phase: 'daily-maintenance',
         failedWorkspacesRemoved: result.workspaces?.removed || 0,
         workspaceBytesRemoved: result.workspaces?.bytes || 0,
+        orphanWorkspacesChecked: result.orphans?.checked || 0,
+        orphanWorkspacesRemoved: result.orphans?.removed || 0,
+        orphanBytesRemoved: result.orphans?.bytes || 0,
         cacheEntriesRemoved: result.cache?.removed || 0,
         cacheBytes: result.cache?.bytes || 0,
         completedWorkspacesRemoved: result.completed?.removed || 0,

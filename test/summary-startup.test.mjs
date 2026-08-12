@@ -98,12 +98,14 @@ test('shared quota maintenance prunes expired workspaces, cache, then completed 
   const result = await runSummaryMaintenance({
     quotaBytes: 100,
     pruneExpiredWorkspaces: async () => { calls.push('expired'); workspaceBytes = 70; return { removed: 1, bytes: 10 } },
+    pruneOrphanWorkspaces: async () => { calls.push('orphans'); return { checked: 2, removed: 1, bytes: 5 } },
     getWorkspaceUsage: async () => ({ bytes: workspaceBytes }),
     pruneCache: async maxBytes => { calls.push(`cache:${maxBytes}`); cacheBytes = 30; return { removed: 2, bytes: cacheBytes } },
     getCacheUsage: async () => ({ bytes: cacheBytes }),
     pruneCompletedWorkspaces: async maxBytes => { calls.push(`completed:${maxBytes}`); workspaceBytes = 60; return { removed: 1, bytes: workspaceBytes } }
   })
-  assert.deepEqual(calls, ['expired', 'cache:30', 'completed:70'])
+  assert.deepEqual(calls, ['expired', 'orphans', 'cache:30', 'completed:70'])
+  assert.deepEqual(result.orphans, { checked: 2, removed: 1, bytes: 5 })
   assert.deepEqual(result.total, { bytes: 90, quotaBytes: 100, overQuotaBytes: 0 })
 })
 

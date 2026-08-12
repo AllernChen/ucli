@@ -269,6 +269,51 @@ test('pruneCompleted uses stable LRU until the shared budget and protects active
   }
 })
 
+test('pruneOrphans removes only completed workspaces explicitly absent from retained reports', async t => {
+  const { service } = await withWorkspace(t)
+  const orphan = await service.create('report-orphan')
+  await service.complete(orphan.id, { markdown: 'orphan' })
+  const retained = await service.create('report-retained')
+  await service.complete(retained.id, { markdown: 'retained' })
+  const active = await service.create('report-active')
+  await service.complete(active.id, { markdown: 'active' })
+  const lookupFailed = await service.create('report-lookup-failed')
+  await service.complete(lookupFailed.id, { markdown: 'lookup failed' })
+  const invalidLookup = await service.create('report-invalid-lookup')
+  await service.complete(invalidLookup.id, { markdown: 'invalid lookup' })
+  const protectionFailed = await service.create('report-protection-failed')
+  await service.complete(protectionFailed.id, { markdown: 'protection failed' })
+  const invalidProtection = await service.create('report-invalid-protection')
+  await service.complete(invalidProtection.id, { markdown: 'invalid protection' })
+  const running = await service.create('report-running-orphan-check')
+
+  const retainedChecks = []
+  const result = await service.pruneOrphans({
+    isProtected: reportId => {
+      if (reportId === active.id) return true
+      if (reportId === protectionFailed.id) throw new Error('job service unavailable')
+      if (reportId === invalidProtection.id) return undefined
+      return false
+    },
+    isRetained: async reportId => {
+      retainedChecks.push(reportId)
+      if (reportId === retained.id) return true
+      if (reportId === lookupFailed.id) throw new Error('database unavailable')
+      if (reportId === invalidLookup.id) return undefined
+      return false
+    }
+  })
+
+  assert.deepEqual(result, { checked: 7, removed: 1, bytes: 6 })
+  assert.equal(existsSync(orphan.path), false)
+  for (const workspace of [
+    retained, active, lookupFailed, invalidLookup, protectionFailed, invalidProtection, running
+  ]) {
+    assert.equal(existsSync(workspace.path), true)
+  }
+  assert.equal(retainedChecks.includes(active.id), false)
+})
+
 function temporaryPathFragment(root) {
   return basename(join(root, '..'))
 }

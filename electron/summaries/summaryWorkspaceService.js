@@ -289,6 +289,37 @@ export function createSummaryWorkspaceService({
     return { removed, bytes }
   }
 
+  async function pruneOrphans({ isRetained, isProtected = () => false } = {}) {
+    if (typeof isRetained !== 'function' || typeof isProtected !== 'function') {
+      throw workspaceError('SUMMARY_WORKSPACE_RETENTION_CHECK_INVALID')
+    }
+    let checked = 0
+    let removed = 0
+    let bytes = 0
+    for (const reportId of await listWorkspaceIds()) {
+      try {
+        const manifest = await readManifest(workspacePath(root, reportId))
+        if (manifest?.status !== 'completed') continue
+        checked += 1
+
+        // Only explicit negative answers authorize deletion. Callback failures and
+        // ambiguous values retain the derived workspace for a later maintenance run.
+        if (await isProtected(reportId) !== false) continue
+        if (await isRetained(reportId) !== false) continue
+
+        const retainedBytes = Number.isSafeInteger(manifest.bytes) && manifest.bytes >= 0
+          ? manifest.bytes
+          : 0
+        await remove(reportId)
+        removed += 1
+        bytes = Math.min(Number.MAX_SAFE_INTEGER, bytes + retainedBytes)
+      } catch {
+        // Corrupt state, lookup failures, and transient I/O errors fail closed.
+      }
+    }
+    return { checked, removed, bytes }
+  }
+
   async function pruneCompleted({ maxBytes, isProtected = () => false } = {}) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || typeof isProtected !== 'function') {
       throw Object.assign(new Error('Invalid workspace budget'), { code: 'SUMMARY_WORKSPACE_QUOTA_INVALID' })
@@ -326,6 +357,6 @@ export function createSummaryWorkspaceService({
 
   return {
     create, writeArtifact, markStage, complete, fail, recover, remove, usage,
-    clearFailed, pruneExpired, pruneCompleted
+    clearFailed, pruneExpired, pruneOrphans, pruneCompleted
   }
 }

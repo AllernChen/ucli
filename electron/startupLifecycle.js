@@ -39,9 +39,17 @@ function safeMaintenanceResult(value) {
   }
 }
 
+function safeOrphanResult(value) {
+  return {
+    checked: Number.isSafeInteger(value?.checked) && value.checked >= 0 ? value.checked : 0,
+    ...safeMaintenanceResult(value)
+  }
+}
+
 export async function runSummaryMaintenance({
   quotaBytes,
   pruneExpiredWorkspaces = () => ({}),
+  pruneOrphanWorkspaces = () => ({}),
   getWorkspaceUsage = () => ({ bytes: 0 }),
   pruneCache = () => ({}),
   getCacheUsage = () => ({ bytes: 0 }),
@@ -49,9 +57,12 @@ export async function runSummaryMaintenance({
   onEvent = () => {}
 } = {}) {
   if (Number.isSafeInteger(quotaBytes) && quotaBytes >= 0) {
-    const result = { workspaces: null, cache: null, completed: null, total: null }
+    const result = { workspaces: null, orphans: null, cache: null, completed: null, total: null }
     try { result.workspaces = safeMaintenanceResult(await pruneExpiredWorkspaces()) } catch (error) {
       try { onEvent(safeStartupFailure('workspace-prune', error)) } catch { /* logging isolation */ }
+    }
+    try { result.orphans = safeOrphanResult(await pruneOrphanWorkspaces()) } catch (error) {
+      try { onEvent(safeStartupFailure('orphan-workspace-prune', error)) } catch { /* logging isolation */ }
     }
     let workspaceBytes = 0
     try { workspaceBytes = safeMaintenanceResult(await getWorkspaceUsage()).bytes } catch (error) {

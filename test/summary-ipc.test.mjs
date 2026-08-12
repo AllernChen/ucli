@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { register } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
+
+import { runSummaryMaintenance } from '../electron/startupLifecycle.js'
+import { createSummaryWorkspaceService } from '../electron/summaries/summaryWorkspaceService.js'
 
 register('./fixtures/electron-stub-loader.mjs', import.meta.url)
 
@@ -89,6 +95,46 @@ test('report deletion keeps database success when best-effort workspace cleanup 
   assert.deepEqual(result, { deletedReportId: 'report-1', currentReportId: null })
   assert.deepEqual(events, [{ phase: 'workspace-delete', code: 'SUMMARY_WORKSPACE_DELETE_FAILED' }])
   assert.doesNotMatch(JSON.stringify(events), /private|prompt/i)
+})
+
+test('maintenance reclaims a deleted report workspace after immediate cleanup fails even below quota', async t => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), 'ucli-summary-orphan-test-'))
+  t.after(() => rm(temporaryRoot, { recursive: true, force: true }))
+  const workspaceService = createSummaryWorkspaceService({ root: join(temporaryRoot, 'summary') })
+  const workspace = await workspaceService.create('report-deleted-orphan')
+  await workspaceService.complete(workspace.id, { markdown: 'derived copy' })
+  let firstRemoval = true
+  const cleanupFacade = {
+    async remove(reportId) {
+      if (firstRemoval) {
+        firstRemoval = false
+        throw Object.assign(new Error('locked'), { code: 'SUMMARY_WORKSPACE_DELETE_FAILED' })
+      }
+      return workspaceService.remove(reportId)
+    }
+  }
+
+  await deleteSummaryReportAndWorkspace(workspace.id, {
+    repository: { delete: async () => ({ deletedReportId: workspace.id, currentReportId: null }) },
+    jobService: { isActive: () => false },
+    workspaceService: cleanupFacade
+  })
+  assert.equal(existsSync(workspace.path), true)
+
+  await runSummaryMaintenance({
+    quotaBytes: 1024 * 1024,
+    pruneExpiredWorkspaces: () => workspaceService.pruneExpired(),
+    pruneOrphanWorkspaces: () => workspaceService.pruneOrphans({
+      isProtected: () => false,
+      isRetained: async () => false
+    }),
+    getWorkspaceUsage: () => workspaceService.usage(),
+    pruneCache: async () => ({ removed: 0, bytes: 0 }),
+    getCacheUsage: async () => ({ bytes: 0 }),
+    pruneCompletedWorkspaces: maxBytes => workspaceService.pruneCompleted({ maxBytes })
+  })
+
+  assert.equal(existsSync(workspace.path), false)
 })
 
 test('report deletion never removes a workspace while its job is active', async () => {
