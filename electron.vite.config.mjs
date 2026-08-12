@@ -11,7 +11,7 @@ const packageVersion = JSON.parse(readFileSync(resolve('package.json'), 'utf8'))
 //   renderer -> out/renderer/        (Vue 3 SPA, Vite ESM)
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ['parse5'] })],
     build: {
       rollupOptions: {
         input: { index: resolve('electron/main.js') }
