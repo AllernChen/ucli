@@ -248,6 +248,23 @@ export function createSummaryCacheService({
     }
   }
 
+  async function evict(key) {
+    assertKey(key)
+    const entry = repository.getSummaryCacheEntry(key)
+    if (!entry) return false
+    let target = null
+    try {
+      const expected = relativePathFor(entry.key, entry.kind)
+      if (entry.relativePath !== expected) throw cacheError('SUMMARY_STORAGE_PATH_UNSAFE')
+      target = targetFor(root, expected)
+    } catch {
+      // Unsafe metadata is removed from the index without touching any file.
+    }
+    if (target) await rm(target, { force: true })
+    repository.deleteSummaryCacheEntries([key])
+    return true
+  }
+
   async function clear() {
     const entries = repository.listSummaryCacheEntries()
     const cacheRoot = resolveSummaryChild(root, 'cache', 'entries')
@@ -258,5 +275,5 @@ export function createSummaryCacheService({
     return { removed: entries.length, bytes: 0 }
   }
 
-  return { get, put, prune, stats, clear }
+  return { get, put, evict, prune, stats, clear }
 }

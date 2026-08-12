@@ -273,3 +273,30 @@ test('clear deletes only the guarded cache subtree and all cache metadata', asyn
   assert.equal(await readFile(outside, 'utf8'), 'keep')
   assert.deepEqual(repository.listSummaryCacheEntries(), [])
 })
+
+test('evict removes one validated cache entry and safely ignores missing metadata', async t => {
+  const { root, repository, cache } = await harness(t)
+  const key = cacheKeyForInvocation(invocation)
+  await cache.put({ key, kind: 'map', value: { project: 'A' } })
+  const target = join(root, 'cache', 'map', key.slice(7, 9), `${key.slice(7)}.json`)
+
+  assert.equal(await cache.evict(key), true)
+  assert.equal(existsSync(target), false)
+  assert.equal(repository.getSummaryCacheEntry(key), null)
+  assert.equal(await cache.evict(key), false)
+})
+
+test('evict drops unsafe metadata without touching an external file', async t => {
+  const { temporaryRoot, repository, cache } = await harness(t)
+  const key = cacheKeyForInvocation(invocation)
+  const outside = join(temporaryRoot, 'keep.json')
+  await writeFile(outside, 'keep')
+  repository.entries.set(key, {
+    key, kind: 'map', relativePath: '../keep.json', sizeBytes: 4,
+    createdAt: 1000, lastAccessedAt: 1000, expiresAt: null
+  })
+
+  assert.equal(await cache.evict(key), true)
+  assert.equal(await readFile(outside, 'utf8'), 'keep')
+  assert.equal(repository.getSummaryCacheEntry(key), null)
+})

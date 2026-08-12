@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 
+import { cacheKeyForInvocation } from './summaryCacheService.js'
 import {
   buildDirectReportPrompt,
   buildFinalReducePrompt,
@@ -241,7 +242,10 @@ export function createSummaryPipeline({
   runner,
   contextWindow,
   automaticCallLimit = 20,
-  now = Date.now
+  now = Date.now,
+  cache = null,
+  promptVersion = 'summary-v1',
+  profileFingerprint = 'profile:none'
 } = {}) {
   if (!runner || typeof runner.run !== 'function') throw new TypeError('runner.run is required')
   const callLimit = Number.isFinite(automaticCallLimit) && automaticCallLimit > 0
@@ -295,13 +299,14 @@ export function createSummaryPipeline({
       }
 
       let callCount = 0
+      let cacheHits = 0
       const confirmedCallLimit = Number.isFinite(options.confirmedCallLimit) &&
         options.confirmedCallLimit >= estimatedCalls
         ? Math.floor(options.confirmedCallLimit)
         : estimatedCalls
       const manualCallLimit = confirmed ? confirmedCallLimit : callLimit
       const generationUsage = { inputTokens: 0, outputTokens: 0, costUsd: null }
-      const invoke = async ({ prompt, schema }) => {
+      const invoke = async ({ stage, prompt, schema }) => {
         abortIfNeeded(signal)
         const requiredTokens = promptTokens(prompt, schema)
         if (requiredTokens > reduceTargetTokens) {
@@ -309,6 +314,30 @@ export function createSummaryPipeline({
             requiredTokens,
             targetTokens: reduceTargetTokens
           })
+        }
+        const key = cache
+          ? cacheKeyForInvocation({
+              stage,
+              prompt,
+              schema,
+              executorId: options.executorId ?? '',
+              profileFingerprint,
+              model: options.model ?? '',
+              promptVersion
+            })
+          : null
+        if (key) {
+          let cached = null
+          try { cached = await cache.get(key) } catch { /* cache is an optional optimization */ }
+          if (cached !== null && cached !== undefined) {
+            try {
+              validateStructuredOutput(cached, schema)
+              cacheHits += 1
+              return cached
+            } catch {
+              try { await cache.evict?.(key) } catch { /* best effort */ }
+            }
+          }
         }
         if (callCount >= (mode === 'manual' ? manualCallLimit : callLimit)) {
           if (mode === 'manual') {
@@ -341,11 +370,17 @@ export function createSummaryPipeline({
         abortIfNeeded(signal)
         validateStructuredOutput(result?.value, schema)
         addUsage(generationUsage, result?.usage)
+        if (key) {
+          try {
+            await cache.put({ key, kind: stage === 'direct' ? 'final' : stage, value: result.value })
+          } catch { /* a successful AI result must survive cache I/O failure */ }
+        }
         return result.value
       }
 
       if (plan.strategy === 'direct') {
         const value = await invoke({
+          stage: 'direct',
           prompt: buildDirectReportPrompt({
             evidence, period, usage, coverage: evidence.coverage
           }),
@@ -362,7 +397,7 @@ export function createSummaryPipeline({
             strategy: plan.strategy,
             plannedCalls: plan.plannedCalls,
             aiCalls: callCount,
-            cacheHits: 0,
+            cacheHits,
             durationMs: Math.max(0, now() - startedAt)
           }
         }
@@ -373,6 +408,7 @@ export function createSummaryPipeline({
         const chunk = chunks[index]
         onProgress?.({ phase: 'mapping', current: index + 1, total: chunks.length })
         const value = await invoke({
+          stage: 'map',
           prompt: buildMapPrompt({ chunk, period, usage, coverage: evidence.coverage }),
           schema: projectDigestSchema
         })
@@ -392,6 +428,7 @@ export function createSummaryPipeline({
         const partials = []
         for (const batch of batches) {
           partials.push(await invoke({
+            stage: 'project',
             prompt: buildPrompt(batch),
             schema: projectDigestSchema
           }))
@@ -414,6 +451,7 @@ export function createSummaryPipeline({
         const partials = []
         for (const batch of batches) {
           partials.push(await invoke({
+            stage: 'final',
             prompt: buildPrompt(batch),
             schema: finalReportSchema
           }))
@@ -436,7 +474,7 @@ export function createSummaryPipeline({
           strategy: plan.strategy,
           plannedCalls: plan.plannedCalls,
           aiCalls: callCount,
-          cacheHits: 0,
+          cacheHits,
           durationMs: Math.max(0, now() - startedAt)
         }
       }
