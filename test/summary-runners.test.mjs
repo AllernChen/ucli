@@ -303,6 +303,30 @@ test('Claude runner uses print JSON schema mode, a resolved profile, and an isol
   }
 })
 
+test('Claude text mode returns stdout directly without JSON schema arguments', async () => {
+  let invocation
+  const runner = createClaudeRunner({
+    baseEnv: { ANTHROPIC_API_KEY: 'text-mode-key' },
+    resolveExecutable: () => ({ file: 'claude-test', prefixArgs: [] }),
+    processRunner: async options => {
+      invocation = options
+      return { stdout: '<!doctype html><html><body>report</body></html>', stderr: '', exitCode: 0 }
+    }
+  })
+
+  const result = await runner.run({
+    prompt: 'render HTML only',
+    outputMode: 'text',
+    timeoutMs: 5000,
+    maxOutputBytes: 8192
+  })
+
+  assert.equal(result.value, '<!doctype html><html><body>report</body></html>')
+  assert.ok(invocation.args.includes('--output-format'))
+  assert.equal(invocation.args[invocation.args.indexOf('--output-format') + 1], 'text')
+  assert.equal(invocation.args.includes('--json-schema'), false)
+})
+
 test('Claude bridges only a validated credentials file into its isolated config and removes it afterward', {
   skip: process.platform === 'win32'
 }, async () => {
@@ -427,6 +451,37 @@ test('OpenCode denies every tool and runs pure with isolated config and allowlis
   } finally {
     fake.cleanup()
   }
+})
+
+test('OpenCode text mode concatenates text events without asking the model for JSON', async () => {
+  let invocation
+  const runner = createOpenCodeRunner({
+    adapterId: 'opencode',
+    baseEnv: { OPENAI_API_KEY: 'text-mode-key' },
+    resolveExecutable: () => ({ file: 'opencode-test', prefixArgs: [] }),
+    processRunner: async options => {
+      invocation = options
+      return {
+        stdout: [
+          JSON.stringify({ type: 'text', part: { text: '<!doctype html><html>' } }),
+          JSON.stringify({ type: 'text', part: { text: '<body>report</body></html>' } }),
+          JSON.stringify({ type: 'step_finish', part: { tokens: { input: 3, output: 4 } } })
+        ].join('\n'),
+        stderr: '',
+        exitCode: 0
+      }
+    }
+  })
+
+  const result = await runner.run({
+    prompt: 'render HTML only',
+    outputMode: 'text',
+    timeoutMs: 5000,
+    maxOutputBytes: 8192
+  })
+
+  assert.equal(result.value, '<!doctype html><html><body>report</body></html>')
+  assert.equal(invocation.prompt, 'render HTML only')
 })
 
 test('OpenCode bridges only a validated auth.json into isolated data and removes it afterward', {

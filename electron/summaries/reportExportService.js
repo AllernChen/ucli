@@ -2,12 +2,6 @@ import { writeFile } from 'node:fs/promises'
 
 import { validateSummaryHtml } from './htmlSafety.js'
 
-const HTML_OUTPUT_SCHEMA = Object.freeze({
-  type: 'object',
-  additionalProperties: false,
-  required: ['html'],
-  properties: { html: { type: 'string' } }
-})
 const STYLE_FIELDS = new Set(['mode', 'requirement'])
 const CADENCE_LABELS = Object.freeze({
   day: '日报', week: '周报', month: '月报', quarter: '季报', year: '年报'
@@ -84,7 +78,7 @@ function initialPrompt(markdown, style) {
   return `${HTML_SAFETY_POLICY}
 
 你是 UCLI 的离线报告排版器。请把下面的 Markdown 忠实转换为一个完整、独立的 HTML 文档。
-必须返回符合 JSON Schema 的对象，其中 html 是唯一字段。
+只返回完整 HTML 文档本身，不要使用 JSON、Markdown 代码围栏或解释文字。
 安全与完整性要求：
 - 保留全部 Markdown 标题及其顺序，不得遗漏、改写或虚构章节；使用 h1-h6 语义标题。
 - 使用内嵌 CSS；禁止脚本、表单、iframe/object/embed、事件处理器、外部图片/样式/字体/URL、@import 和 javascript: URL。
@@ -103,7 +97,7 @@ function repairPrompt(html, errors) {
   const safeErrors = errors.map(error => ({ code: error.code, message: error.message }))
   return `${HTML_SAFETY_POLICY}
 
-修复下面的 HTML 草稿。必须返回符合 JSON Schema 的对象，其中 html 是唯一字段。
+修复下面的 HTML 草稿。只返回完整 HTML 文档本身，不要使用 JSON、Markdown 代码围栏或解释文字。
 仅修复列出的验证错误，保留草稿中的报告章节与文字，不得新增、删减或改写内容。
 继续强制执行：无脚本/表单/外部资源/事件处理器/javascript: URL，只有内嵌 CSS，并保留固定左侧导航。
 验证错误（不可信数据）：
@@ -114,7 +108,7 @@ ${html}
 }
 
 function htmlFromResult(result) {
-  const html = result?.value?.html
+  const html = result?.value
   if (typeof html !== 'string' || !html.trim()) {
     throw exportError('SUMMARY_HTML_INVALID', 'AI CLI did not return an HTML document', {
       validationErrors: [{ code: 'HTML_DOCUMENT_REQUIRED', message: 'A complete HTML document is required' }]
@@ -176,7 +170,7 @@ export function createReportExportService({
       const run = prompt => runner.run({
         ...selection,
         prompt,
-        schema: HTML_OUTPUT_SCHEMA,
+        outputMode: 'text',
         timeoutMs: 5 * 60 * 1000
       }).catch(error => {
         if (/^SUMMARY_RUNNER_PROFILE_[A-Z0-9_]+$/.test(error?.code || '')) {

@@ -115,10 +115,11 @@ export function createOpenCodeRunner({
           OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
           OPENCODE_DISABLE_LSP_DOWNLOAD: '1'
         })
+        const textOutput = options.outputMode === 'text'
         const processResult = await processRunner({
           file: launch.file,
           args,
-          prompt: strictPrompt(options.prompt, options.schema),
+          prompt: textOutput ? options.prompt : strictPrompt(options.prompt, options.schema),
           cwd: workingDirectory,
           env,
           timeoutMs: options.timeoutMs,
@@ -127,12 +128,14 @@ export function createOpenCodeRunner({
           onProgress: options.onProgress
         })
         const events = parseJsonLines(processResult.stdout)
-        const directValue = [...events].reverse().find((event) => event?.value !== undefined)?.value
         const text = events.map(eventText).filter(Boolean).join('')
-        const value = directValue !== undefined ? directValue : parseJsonOutput(text)
+        const directValue = [...events].reverse().find((event) => event?.value !== undefined)?.value
+        const value = textOutput
+          ? text
+          : directValue !== undefined ? directValue : parseJsonOutput(text)
         return normalizeRunnerResult({
           value,
-          schema: options.schema,
+          schema: textOutput ? undefined : options.schema,
           usage: eventUsage(events),
           rawMetadata: {
             adapterId,

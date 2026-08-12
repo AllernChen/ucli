@@ -63,12 +63,13 @@ export function createClaudeRunner({
           ...(profileLaunch.args || [])
         ]
         if (options.model && !args.includes('--model')) args.push('--model', options.model)
+        const textOutput = options.outputMode === 'text'
         args.push(
           '--disable-slash-commands',
           '--no-chrome',
           '-p',
-          '--output-format', 'json',
-          '--json-schema', JSON.stringify(options.schema || {}),
+          '--output-format', textOutput ? 'text' : 'json',
+          ...(!textOutput ? ['--json-schema', JSON.stringify(options.schema || {})] : []),
           '--no-session-persistence',
           '--tools', ''
         )
@@ -110,6 +111,16 @@ export function createClaudeRunner({
           signal: options.signal,
           onProgress: options.onProgress
         })
+        if (textOutput) {
+          return normalizeRunnerResult({
+            value: processResult.stdout,
+            rawMetadata: {
+              adapterId: 'claude',
+              exitCode: processResult.exitCode,
+              resultType: 'text'
+            }
+          })
+        }
         const envelope = parseJsonOutput(processResult.stdout)
         return normalizeRunnerResult({
           value: claudeValue(envelope),

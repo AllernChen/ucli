@@ -142,7 +142,7 @@ test('light, dark, and custom HTML requests contain only persisted Markdown and 
   const calls = []
   const service = createReportExportService({
     repository: repository(),
-    runner: { async run(options) { calls.push(options); return { value: { html: safeHtml(options.prompt.includes('dark') ? 'dark' : 'light') }, usage: {} } } },
+    runner: { async run(options) { calls.push(options); return { value: safeHtml(options.prompt.includes('dark') ? 'dark' : 'light'), usage: {} } } },
     showSaveDialog: async () => ({ canceled: false, filePath: 'chosen.html' }),
     writeUtf8: async () => {}
   })
@@ -170,7 +170,7 @@ test('canceling the HTML destination returns before invoking the AI runner', asy
   let calls = 0
   const service = createReportExportService({
     repository: repository(),
-    runner: { async run() { calls += 1; return { value: { html: safeHtml() }, usage: {} } } },
+    runner: { async run() { calls += 1; return { value: safeHtml(), usage: {} } } },
     showSaveDialog: async () => ({ canceled: true })
   })
 
@@ -179,6 +179,26 @@ test('canceling the HTML destination returns before invoking the AI runner', asy
     { canceled: true }
   )
   assert.equal(calls, 0)
+})
+
+test('HTML export requests a raw HTML response without a JSON schema wrapper', async () => {
+  let call
+  const service = createReportExportService({
+    repository: repository(),
+    runner: {
+      async run(options) {
+        call = options
+        return { value: safeHtml(), usage: {} }
+      }
+    },
+    showSaveDialog: async () => ({ canceled: false, filePath: 'chosen.html' }),
+    writeUtf8: async () => {}
+  })
+
+  await service.exportHtml({ reportId: 'report-1', style: { mode: 'light' } })
+
+  assert.equal(call.outputMode, 'text')
+  assert.equal(Object.hasOwn(call, 'schema'), false)
 })
 
 test('HTML runner failures become safe export errors and use the extended generation timeout', async () => {
@@ -252,7 +272,7 @@ test('HTML export supports an explicit runner override and repairs an invalid dr
     runner: {
       async run(options) {
         calls.push(options)
-        return { value: { html: calls.length === 1 ? safeHtml().replace('</main>', '<script>x</script></main>') : safeHtml() }, usage: {} }
+        return { value: calls.length === 1 ? safeHtml().replace('</main>', '<script>x</script></main>') : safeHtml(), usage: {} }
       }
     },
     showSaveDialog: async () => ({ canceled: false, filePath: destination })
@@ -285,7 +305,7 @@ test('a second invalid draft surfaces typed errors and never writes the chosen d
   const invalid = safeHtml().replace(/<nav>[\s\S]*?<\/nav>/, '')
   const service = createReportExportService({
     repository: repository(),
-    runner: { async run() { calls += 1; return { value: { html: invalid }, usage: {} } } },
+    runner: { async run() { calls += 1; return { value: invalid, usage: {} } } },
     showSaveDialog: async () => { dialogs += 1; return { canceled: false, filePath: destination } }
   })
   try {
@@ -305,7 +325,7 @@ test('invalid custom styles and missing reports fail before invoking the CLI', a
   let calls = 0
   const service = createReportExportService({
     repository: repository(),
-    runner: { async run() { calls += 1; return { value: { html: safeHtml() }, usage: {} } } },
+    runner: { async run() { calls += 1; return { value: safeHtml(), usage: {} } } },
     showSaveDialog: async () => ({ canceled: true })
   })
   await assert.rejects(
@@ -318,7 +338,7 @@ test('invalid custom styles and missing reports fail before invoking the CLI', a
       runner: {
         async run() {
           calls += 1
-          return { value: { html: safeHtml() }, usage: {} }
+          return { value: safeHtml(), usage: {} }
         }
       },
       showSaveDialog: async () => ({ canceled: true })
