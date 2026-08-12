@@ -93,6 +93,16 @@ test('report repository assigns monotonic versions per logical key and validates
     () => repository.update(second.id, { coverage: { evidence: 'raw transcript' } }),
     error => error.code === 'SUMMARY_SENSITIVE_JSON_FORBIDDEN'
   )
+  assert.doesNotThrow(() => repository.update(second.id, {
+    coverage: {
+      sessionsIncluded: 4,
+      sources: { transcript: 4, note: 1, nativeDigest: 0 }
+    }
+  }))
+  assert.throws(
+    () => repository.update(second.id, { coverage: { sources: { transcript: 'raw transcript' } } }),
+    error => error.code === 'SUMMARY_SENSITIVE_JSON_FORBIDDEN'
+  )
   assert.throws(
     () => repository.update(second.id, { status: 'done' }),
     error => error.code === 'INVALID_SUMMARY_REPORT'

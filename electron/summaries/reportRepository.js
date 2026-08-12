@@ -17,13 +17,17 @@ function repositoryError(code, message) {
   return Object.assign(new TypeError(message), { code })
 }
 
-function hasSensitiveJson(value) {
+function hasSensitiveJson(value, path = []) {
   if (!value || typeof value !== 'object') return false
-  if (Array.isArray(value)) return value.some(hasSensitiveJson)
-  return Object.entries(value).some(([key, child]) =>
-    /^(?:evidence|prompt|raw(?:output|metadata)?|transcript|messages?)$/i.test(key) ||
-    hasSensitiveJson(child)
-  )
+  if (Array.isArray(value)) return value.some((child, index) => hasSensitiveJson(child, [...path, index]))
+  return Object.entries(value).some(([key, child]) => {
+    const coverageTranscriptCount = path.length === 2 && path[0] === 'coverage' &&
+      path[1] === 'sources' && key === 'transcript' &&
+      typeof child === 'number' && Number.isFinite(child) && child >= 0
+    return (!coverageTranscriptCount &&
+      /^(?:evidence|prompt|raw(?:output|metadata)?|transcript|messages?)$/i.test(key)) ||
+      hasSensitiveJson(child, [...path, key])
+  })
 }
 
 function jsonObject(value, field) {
@@ -36,7 +40,7 @@ function jsonObject(value, field) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw repositoryError('INVALID_SUMMARY_REPORT_JSON', `${field} must be a JSON object`)
   }
-  if (hasSensitiveJson(parsed)) {
+  if (hasSensitiveJson(parsed, [field])) {
     throw repositoryError('SUMMARY_SENSITIVE_JSON_FORBIDDEN', `${field} contains sensitive content`)
   }
   try {

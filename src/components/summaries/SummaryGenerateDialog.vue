@@ -42,6 +42,12 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ipc } from '../../ipc.js'
+import {
+  managedSummaryProfile,
+  selectSummaryExecution,
+  summaryExecutorUsable as isSummaryExecutorUsable,
+  summaryProfileUsable
+} from '../../summaryExecutionSelection.js'
 import { useSummariesStore } from '../../stores/summaries.js'
 
 const props = defineProps({ open: Boolean })
@@ -61,30 +67,8 @@ const periodOptions = [
 const selectedExecutor = computed(() => useDefaults.value ? summaries.settings?.defaultExecutorId : form.executorId)
 const selectedProfile = computed(() => useDefaults.value ? summaries.settings?.defaultProfileId : form.profileId)
 const selectedModel = computed(() => useDefaults.value ? summaries.settings?.defaultModel : form.model)
-const managedSummaryProfile = (profile, executorId) =>
-  executorId === 'claude' &&
-  profile?.adapterId === executorId &&
-  profile?.kind === 'managed' &&
-  profile?.status === 'ready' &&
-  ['api_key', 'bearer'].includes(profile?.connectionMode || profile?.config?.connectionMode)
-const summaryProfileUsable = (profile, tool) =>
-  managedSummaryProfile(profile, tool?.id) || (
-    tool?.summaryExecutorAvailable === true &&
-    tool?.id === 'claude' &&
-    profile?.adapterId === tool.id &&
-    profile?.kind === 'reference' &&
-    profile?.status === 'ready' &&
-    (profile?.connectionMode || profile?.config?.connectionMode) === 'subscription'
-  )
 const summaryExecutorUsable = (tool, profileId = null, allowAnyManaged = false) => {
-  if (!tool?.installed || tool.safeForSummary !== true) return false
-  const selected = profileId
-    ? profiles.value.find(profile => profile.id === profileId)
-    : null
-  if (profileId && !summaryProfileUsable(selected, tool)) return false
-  if (tool.summaryExecutorAvailable === true) return true
-  if (selected && managedSummaryProfile(selected, tool.id)) return true
-  return allowAnyManaged && profiles.value.some(profile => managedSummaryProfile(profile, tool.id))
+  return isSummaryExecutorUsable(tool, profileId, profiles.value, allowAnyManaged)
 }
 const executorOptions = computed(() => tools.value
   .filter(tool => summaryExecutorUsable(tool, null, true))
@@ -110,13 +94,24 @@ onMounted(async () => {
   tools.value = inventory
   profiles.value = profileState?.profiles || []
   sessionCount.value = sessions.length
+  if (props.open) applyExecutionSelection()
 })
 watch(() => props.open, value => {
   if (!value) return
-  form.executorId = summaries.settings?.defaultExecutorId || null
-  form.profileId = summaries.settings?.defaultProfileId || null
-  form.model = summaries.settings?.defaultModel || null
+  applyExecutionSelection()
 })
+
+function applyExecutionSelection() {
+  const selection = selectSummaryExecution({
+    settings: summaries.settings || {},
+    tools: tools.value,
+    profiles: profiles.value
+  })
+  useDefaults.value = selection.useDefaults
+  form.executorId = selection.executorId
+  form.profileId = selection.profileId
+  form.model = selection.model
+}
 
 function periodRange(periodType, partial) {
   const now = new Date()
