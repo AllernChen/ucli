@@ -5,12 +5,13 @@ import test from 'node:test'
 
 register('./fixtures/electron-stub-loader.mjs', import.meta.url)
 
-const { registerSummaryIpc } = await import(`../electron/orchestrator.js?summary-ipc=${Date.now()}`)
+const { normalizeSummaryStorageStats, registerSummaryIpc } = await import(`../electron/orchestrator.js?summary-ipc=${Date.now()}`)
 
 const CHANNELS = [
   'summary:get-settings', 'summary:set-settings', 'summary:list-reports',
   'summary:get-report', 'summary:generate', 'summary:cancel',
-  'summary:set-current', 'summary:delete', 'summary:export-markdown', 'summary:export-html'
+  'summary:set-current', 'summary:delete', 'summary:export-markdown', 'summary:export-html',
+  'summary:cache-stats', 'summary:cache-clear'
 ]
 
 test('main summary IPC registers the exact surface and validates every payload', async () => {
@@ -133,6 +134,8 @@ test('preload exposes named summary calls and one removable progress listener', 
   await api.deleteSummaryReport('r1')
   await api.exportSummaryMarkdown({ reportId: 'r1' })
   await api.exportSummaryHtml({ reportId: 'r1', style: { mode: 'light' } })
+  await api.getSummaryCacheStats()
+  await api.clearSummaryCache({ includeFailedWorkspaces: true })
   const progress = []
   const dispose = api.onSummaryProgress(value => progress.push(value))
   listeners.get('summary:progress')({}, { reportId: 'r1', phase: 'mapping' })
@@ -146,4 +149,68 @@ test('preload exposes named summary calls and one removable progress listener', 
   }])
   assert.deepEqual(progress, [{ reportId: 'r1', phase: 'mapping' }])
   assert.equal(listeners.has('summary:progress'), false)
+})
+
+test('cache IPC accepts no stats payload and only the failed-workspace boolean for clear', async () => {
+  const handlers = new Map()
+  const calls = []
+  registerSummaryIpc({
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    service: {
+      getCacheStats: (...args) => { calls.push(['stats', ...args]); return { totalBytes: 0 } },
+      clearCache: value => { calls.push(['clear', value]); return { removed: 0 } }
+    }
+  })
+
+  assert.equal((await handlers.get('summary:cache-stats')({})).ok, true)
+  assert.equal((await handlers.get('summary:cache-stats')({}, { path: 'C:\\secret' })).ok, false)
+  assert.equal((await handlers.get('summary:cache-clear')({}, {
+    includeFailedWorkspaces: true
+  })).ok, true)
+  for (const invalid of [{}, { includeFailedWorkspaces: 1 }, {
+    includeFailedWorkspaces: false, path: 'C:\\secret'
+  }]) {
+    const response = await handlers.get('summary:cache-clear')({}, invalid)
+    assert.equal(response.ok, false)
+    assert.equal(response.error.code, 'INVALID_SUMMARY_IPC')
+    assert.doesNotMatch(JSON.stringify(response), /secret/)
+  }
+  assert.deepEqual(calls, [
+    ['stats'],
+    ['clear', { includeFailedWorkspaces: true }]
+  ])
+})
+
+test('cache stats expose bounded nonnegative counters without paths or extra metadata', () => {
+  assert.deepEqual(normalizeSummaryStorageStats({
+    cacheBytes: 12,
+    quotaBytes: 268435456,
+    entries: 2,
+    workspaceBytes: 8,
+    failedWorkspaces: 1,
+    lastPrunedAt: 123,
+    path: 'C:\\secret',
+    totalBytes: 999
+  }), {
+    totalBytes: 20,
+    quotaBytes: 268435456,
+    cacheBytes: 12,
+    workspaceBytes: 8,
+    entries: 2,
+    failedWorkspaces: 1,
+    lastPrunedAt: 123
+  })
+  assert.deepEqual(normalizeSummaryStorageStats({
+    cacheBytes: -1, quotaBytes: Infinity, entries: 1.5,
+    workspaceBytes: Number.MAX_SAFE_INTEGER,
+    failedWorkspaces: -2, lastPrunedAt: -1
+  }), {
+    totalBytes: Number.MAX_SAFE_INTEGER,
+    quotaBytes: 0,
+    cacheBytes: 0,
+    workspaceBytes: Number.MAX_SAFE_INTEGER,
+    entries: 0,
+    failedWorkspaces: 0,
+    lastPrunedAt: null
+  })
 })

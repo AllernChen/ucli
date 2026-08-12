@@ -205,6 +205,31 @@ test('renderer settings expose automatic cadence, default CLI/profile/model, and
   assert.match(view, /手动生成时仍可逐次选择/)
 })
 
+test('renderer cache settings expose bounded choices, safe storage actions, and stale-safe state', () => {
+  const store = readFileSync(new URL('../src/stores/settings.js', import.meta.url), 'utf8')
+  const view = readFileSync(new URL('../src/views/Settings.vue', import.meta.url), 'utf8')
+  const component = readFileSync(
+    new URL('../src/components/settings/SummaryCacheSettings.vue', import.meta.url), 'utf8'
+  )
+  assert.deepEqual(parseSfc(component, { filename: 'SummaryCacheSettings.vue' }).errors, [])
+  for (const field of [
+    'cacheEnabled', 'cacheMaxBytes', 'failedWorkspaceRetentionDays', 'mapConcurrency'
+  ]) {
+    assert.match(store, new RegExp(field))
+    assert.match(component, new RegExp(field))
+  }
+  for (const bytes of [268435456, 536870912, 1073741824, 2147483648, 5368709120]) {
+    assert.match(component, new RegExp(String(bytes)))
+  }
+  assert.match(component, /getSummaryCacheStats/)
+  assert.match(component, /clearSummaryCache/)
+  assert.match(component, /Modal\.confirm/)
+  assert.match(component, /formatBytes/)
+  assert.match(component, /loading/)
+  assert.match(component, /error/)
+  assert.match(view, /SummaryCacheSettings/)
+})
+
 test('orchestrator merges summary settings compatibly and owns scheduler startup and shutdown', () => {
   const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
   assert.match(source, /createSummaryScheduler/)
@@ -214,4 +239,8 @@ test('orchestrator merges summary settings compatibly and owns scheduler startup
   assert.match(source, /summaryScheduler\?\.stop\(\)/)
   assert.match(source, /summaryJobService\.subscribe\(\(report, pipelineProgress\) => \{[\s\S]*?scheduleFlush\(\)[\s\S]*?summary:progress/)
   assert.match(source, /updateSummarySettings/)
+  assert.match(source, /cacheEnabled:\s*candidate\.cacheEnabled/)
+  assert.match(source, /cacheMaxBytes:\s*candidate\.cacheMaxBytes/)
+  assert.match(source, /failedWorkspaceRetentionDays:\s*candidate\.failedWorkspaceRetentionDays/)
+  assert.match(source, /mapConcurrency:\s*candidate\.mapConcurrency/)
 })

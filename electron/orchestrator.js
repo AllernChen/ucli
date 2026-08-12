@@ -90,8 +90,10 @@ const DEFAULT_SETTINGS = {
 
 const SUMMARY_SETTINGS_FIELDS = new Set([
   'autoEnabled', 'autoPeriods', 'defaultExecutorId', 'defaultProfileId',
-  'defaultModel', 'firstEnableDisclosureAcceptedAt', 'automaticCallLimit'
+  'defaultModel', 'firstEnableDisclosureAcceptedAt', 'automaticCallLimit',
+  'cacheEnabled', 'cacheMaxBytes', 'failedWorkspaceRetentionDays', 'mapConcurrency'
 ])
+const SUMMARY_CACHE_CLEAR_FIELDS = new Set(['includeFailedWorkspaces'])
 const SUMMARY_REPORT_FILTER_FIELDS = new Set([
   'periodType', 'status', 'generatedBy', 'timezone', 'periodStart',
   'periodEndExclusive', 'isCurrent'
@@ -181,6 +183,23 @@ function validateSummarySettings(value) {
     (!Number.isInteger(result.automaticCallLimit) || result.automaticCallLimit < 1 || result.automaticCallLimit > 100)) {
     throw invalidSummaryIpc()
   }
+  if (result.cacheEnabled !== undefined && typeof result.cacheEnabled !== 'boolean') {
+    throw invalidSummaryIpc()
+  }
+  if (result.cacheMaxBytes !== undefined && ![
+    268435456, 536870912, 1073741824, 2147483648, 5368709120
+  ].includes(result.cacheMaxBytes)) throw invalidSummaryIpc()
+  if (result.failedWorkspaceRetentionDays !== undefined &&
+    ![1, 3, 7, 14, 30].includes(result.failedWorkspaceRetentionDays)) throw invalidSummaryIpc()
+  if (result.mapConcurrency !== undefined && ![1, 2, 3].includes(result.mapConcurrency)) {
+    throw invalidSummaryIpc()
+  }
+  return result
+}
+
+function validateSummaryCacheClear(value) {
+  const result = { ...summaryObject(value, SUMMARY_CACHE_CLEAR_FIELDS) }
+  if (typeof result.includeFailedWorkspaces !== 'boolean') throw invalidSummaryIpc()
   return result
 }
 
@@ -323,6 +342,24 @@ function safeSummaryEnvelope(operation) {
   }
 }
 
+function storageCounter(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0
+}
+
+export function normalizeSummaryStorageStats(value = {}) {
+  const cacheBytes = storageCounter(value.cacheBytes)
+  const workspaceBytes = storageCounter(value.workspaceBytes)
+  return {
+    totalBytes: Math.min(Number.MAX_SAFE_INTEGER, cacheBytes + workspaceBytes),
+    quotaBytes: storageCounter(value.quotaBytes),
+    cacheBytes,
+    workspaceBytes,
+    entries: storageCounter(value.entries),
+    failedWorkspaces: storageCounter(value.failedWorkspaces),
+    lastPrunedAt: storageCounter(value.lastPrunedAt) || null
+  }
+}
+
 function summaryProgressPayload(report, confirmationCallLimit = null, pipelineProgress = null) {
   const phaseByStatus = {
     queued: 'queued', running: 'collecting', awaiting_confirmation: 'awaiting_confirmation',
@@ -373,6 +410,12 @@ export function registerSummaryIpc({ ipcMain, service }) {
   ipcMain.handle('summary:delete', safeSummaryEnvelope((_event, value) => service.deleteReport(validateSummaryId(value))))
   ipcMain.handle('summary:export-markdown', safeSummaryEnvelope((_event, value) => service.exportMarkdown(validateSummaryExport(value))))
   ipcMain.handle('summary:export-html', safeSummaryEnvelope((_event, value) => service.exportHtml(validateSummaryExport(value, { html: true }))))
+  ipcMain.handle('summary:cache-stats', safeSummaryEnvelope((_event, ...args) => {
+    if (args.length > 0) throw invalidSummaryIpc()
+    return service.getCacheStats()
+  }))
+  ipcMain.handle('summary:cache-clear', safeSummaryEnvelope((_event, value) =>
+    service.clearCache(validateSummaryCacheClear(value))))
 }
 
 function summaryUsageGranularity(periodType) {
@@ -480,6 +523,8 @@ export function createOrchestrator() {
   let summaryScheduler = null
   let summaryExportService = null
   let summaryWorkspaceService = null
+  let summaryCacheService = null
+  let summaryCacheLastPrunedAt = null
   let persistenceRecovery = null
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
@@ -613,7 +658,11 @@ export function createOrchestrator() {
       ['get', 'put', 'evict', 'prune', 'stats', 'clear']
         .map(method => [method, (...args) => cacheForSettings()[method](...args)])
     )
-    if (summarySettings.cacheEnabled) await cache.prune()
+    summaryCacheService = cache
+    if (summarySettings.cacheEnabled) {
+      await cache.prune()
+      summaryCacheLastPrunedAt = Date.now()
+    }
     const runner = createSummaryRunner({ profileService, validateWorkspaceDirectory })
     summaryExportService = createReportExportService({
       repository: summaryRepository,
@@ -2177,11 +2226,11 @@ export function createOrchestrator() {
   }
 
   async function saveSummarySettingsPatch(summary) {
-    const candidate = normalizeSummarySettings({
+    const candidate = {
       ...summarySettings,
       ...summary,
       autoPeriods: { ...summarySettings.autoPeriods, ...(summary.autoPeriods || {}) }
-    })
+    }
     const db = getDb()
     const automationAvailable = Boolean(db && summaryScheduler)
     const availableExecutors = candidate.autoEnabled && automationAvailable
@@ -2190,11 +2239,17 @@ export function createOrchestrator() {
     const availableProfiles = candidate.autoEnabled && automationAvailable && candidate.defaultExecutorId
       ? profileService?.listProfiles({ adapterId: candidate.defaultExecutorId }) || []
       : []
-    summarySettings = updateSummarySettings(summarySettings, summary, {
-      availableExecutors,
-      availableProfiles,
-      automationAvailable
-    })
+    summarySettings = {
+      ...updateSummarySettings(summarySettings, summary, {
+        availableExecutors,
+        availableProfiles,
+        automationAvailable
+      }),
+      cacheEnabled: candidate.cacheEnabled,
+      cacheMaxBytes: candidate.cacheMaxBytes,
+      failedWorkspaceRetentionDays: candidate.failedWorkspaceRetentionDays,
+      mapConcurrency: candidate.mapConcurrency
+    }
     if (db) {
       db.setSummarySettings(summarySettings)
       scheduleFlush()
@@ -2279,6 +2334,37 @@ export function createOrchestrator() {
             log('summary-html-export-failed', safeSummaryErrorCode(error?.code, 'SUMMARY_HTML_EXPORT_FAILED'))
             throw error
           })
+        },
+        async getCacheStats() {
+          if (!summaryCacheService || !summaryWorkspaceService) {
+            throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          }
+          const [cacheStats, workspaceStats] = await Promise.all([
+            summaryCacheService.stats(),
+            summaryWorkspaceService.usage({ includeFailedWorkspaces: true })
+          ])
+          return normalizeSummaryStorageStats({
+            quotaBytes: cacheStats.quotaBytes,
+            cacheBytes: cacheStats.bytes,
+            workspaceBytes: workspaceStats.bytes,
+            entries: cacheStats.entries,
+            failedWorkspaces: workspaceStats.failedWorkspaces,
+            lastPrunedAt: summaryCacheLastPrunedAt
+          })
+        },
+        async clearCache({ includeFailedWorkspaces }) {
+          if (!summaryCacheService || !summaryWorkspaceService) {
+            throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          }
+          const cacheResult = await summaryCacheService.clear()
+          const workspaceResult = includeFailedWorkspaces
+            ? await summaryWorkspaceService.clearFailed()
+            : { removed: 0 }
+          summaryCacheLastPrunedAt = Date.now()
+          return {
+            cacheEntriesRemoved: cacheResult.removed,
+            failedWorkspacesRemoved: workspaceResult.removed
+          }
         }
       }
     })

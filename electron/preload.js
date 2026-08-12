@@ -147,6 +147,8 @@ const api = {
   deleteSummaryReport: (reportId) => invokeSummary('summary:delete', reportId),
   exportSummaryMarkdown: (value) => invokeSummary('summary:export-markdown', value),
   exportSummaryHtml: (value) => invokeSummary('summary:export-html', value),
+  getSummaryCacheStats: () => invokeSummary('summary:cache-stats'),
+  clearSummaryCache: (value) => invokeSummary('summary:cache-clear', value),
   onSummaryProgress: (handler) => {
     const wrapped = (_event, payload) => handler(payload)
     ipcRenderer.on('summary:progress', wrapped)

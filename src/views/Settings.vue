@@ -174,6 +174,8 @@
       </a-form>
     </a-card>
 
+    <SummaryCacheSettings :settings="local" />
+
     <a-card title="快捷键" class="settings-card">
       <a-list :data-source="bindingsList" item-layout="horizontal">
         <template #renderItem="{ item }">
@@ -284,6 +286,7 @@ import { useSettingsStore } from '../stores/settings.js'
 import { useSessionsStore } from '../stores/sessions.js'
 import { useGatewayStore } from '../stores/gateway.js'
 import GatewayConfigDrawer from '../components/gateway/GatewayConfigDrawer.vue'
+import SummaryCacheSettings from '../components/settings/SummaryCacheSettings.vue'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { formatCliDiagnosticSummary, persistenceStatusLabel, profileDiagnosticSummary } from '../diagnosticsPresentation.js'
@@ -310,7 +313,11 @@ const local = ref({
   defaultProfileId: null,
   defaultModel: null,
   firstEnableDisclosureAcceptedAt: null,
-  automaticCallLimit: 20
+  automaticCallLimit: 20,
+  cacheEnabled: true,
+  cacheMaxBytes: 1073741824,
+  failedWorkspaceRetentionDays: 7,
+  mapConcurrency: 2
 })
 const cliTools = ref([])
 const summaryProfiles = ref([])

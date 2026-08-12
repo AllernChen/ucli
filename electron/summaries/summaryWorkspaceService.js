@@ -232,20 +232,40 @@ export function createSummaryWorkspaceService({
     return result
   }
 
-  async function usage() {
+  async function usage({ includeFailedWorkspaces = false } = {}) {
     let bytes = 0
     let workspaces = 0
+    let failedWorkspaces = 0
     for (const reportId of await listWorkspaceIds()) {
       try {
         const manifest = await readManifest(workspacePath(root, reportId))
         bytes += Number.isSafeInteger(manifest.bytes) && manifest.bytes >= 0 ? manifest.bytes : 0
         workspaces += 1
+        if (['failed', 'interrupted'].includes(manifest.status)) failedWorkspaces += 1
       } catch {
         // Ignore untrusted or incomplete directory entries.
       }
     }
-    return { bytes, workspaces }
+    return includeFailedWorkspaces
+      ? { bytes, workspaces, failedWorkspaces }
+      : { bytes, workspaces }
   }
 
-  return { create, writeArtifact, markStage, complete, fail, recover, remove, usage }
+  async function clearFailed() {
+    let removed = 0
+    for (const reportId of await listWorkspaceIds()) {
+      try {
+        const workspace = workspacePath(root, reportId)
+        const manifest = await readManifest(workspace)
+        if (!['failed', 'interrupted'].includes(manifest?.status)) continue
+        await remove(reportId)
+        removed += 1
+      } catch {
+        // Malformed, unsafe, or transient entries are retained.
+      }
+    }
+    return { removed }
+  }
+
+  return { create, writeArtifact, markStage, complete, fail, recover, remove, usage, clearFailed }
 }

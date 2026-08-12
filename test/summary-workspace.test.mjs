@@ -176,6 +176,34 @@ test('usage reports retained artifact bytes and workspace count', async t => {
   await service.writeArtifact('report-usage-2', 'output/b.txt', '12')
 
   assert.deepEqual(await service.usage(), { bytes: 6, workspaces: 2 })
+  await service.fail('report-usage-1', 'SUMMARY_RUNNER_EXIT')
+  assert.deepEqual(await service.usage({ includeFailedWorkspaces: true }), {
+    bytes: 6, workspaces: 2, failedWorkspaces: 1
+  })
+})
+
+test('clearFailed removes only failed and interrupted workspaces and skips malformed manifests', async t => {
+  const { root, service } = await withWorkspace(t)
+  const failed = await service.create('report-failed-clear')
+  await service.fail('report-failed-clear', 'SUMMARY_RUNNER_EXIT')
+  const interrupted = await service.create('report-interrupted-clear')
+  await service.recover()
+  const completed = await service.create('report-completed-keep')
+  await service.complete('report-completed-keep', { markdown: 'keep' })
+  const running = await service.create('report-running-keep')
+  const malformed = await service.create('report-malformed-keep')
+  await writeFile(join(malformed.path, 'manifest.json'), '{broken')
+  const unknown = await service.create('report-unknown-keep')
+  const unknownManifest = await readManifest(unknown.path)
+  await writeFile(join(unknown.path, 'manifest.json'), JSON.stringify({ ...unknownManifest, status: 'other' }))
+
+  assert.deepEqual(await service.clearFailed(), { removed: 2 })
+  assert.equal(existsSync(failed.path), false)
+  assert.equal(existsSync(interrupted.path), false)
+  for (const workspace of [completed, running, malformed, unknown]) {
+    assert.equal(existsSync(workspace.path), true)
+  }
+  assert.equal(existsSync(join(root, 'workspaces')), true)
 })
 
 function temporaryPathFragment(root) {

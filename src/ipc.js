@@ -96,6 +96,8 @@ export const ipc = {
   deleteSummaryReport: (reportId) => u.deleteSummaryReport(reportId),
   exportSummaryMarkdown: (value) => u.exportSummaryMarkdown(value),
   exportSummaryHtml: (value) => u.exportSummaryHtml(value),
+  getSummaryCacheStats: () => u.getSummaryCacheStats(),
+  clearSummaryCache: (value) => u.clearSummaryCache(value),
   onSummaryProgress: (handler) => u.onSummaryProgress(handler),
   // communication Gateway
   getGatewayState: () => u.getGatewayState(),
