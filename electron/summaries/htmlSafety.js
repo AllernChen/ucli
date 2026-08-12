@@ -264,13 +264,29 @@ function sanitizeCss(css) {
   return rebuildCss(stripped)
 }
 
+// AI CLIs non-deterministically wrap the HTML in markdown code fences or add a
+// conversational preamble/epilogue. Unwrap fences, then crop to the actual document
+// (<!doctype html>…</html> or <html>…</html>) so the parser sees real markup, not text.
+function extractHtmlDocument(text) {
+  let value = String(text || '')
+    .replace(/```[a-zA-Z0-9]*\r?\n?([\s\S]*?)\r?\n?```/g, '$1')
+    .trim()
+  const doctype = value.search(/<!doctype html/i)
+  const htmlStart = value.search(/<html[\s>]/i)
+  const start = doctype >= 0 ? doctype : htmlStart
+  if (start < 0) return value
+  const end = value.toLowerCase().lastIndexOf('</html>')
+  return end > start ? value.slice(start, end + '</html>'.length) : value.slice(start)
+}
+
 export function sanitizeSummaryHtml({ html } = {}) {
   if (typeof html !== 'string' || !html.trim()) {
     return { ok: false, code: 'HTML_DOCUMENT_REQUIRED', message: 'AI CLI did not return an HTML document' }
   }
+  const documentHtml = extractHtmlDocument(html)
   let document
   try {
-    document = parse(html, { sourceCodeLocationInfo: false })
+    document = parse(documentHtml, { sourceCodeLocationInfo: false })
   } catch {
     return { ok: false, code: 'HTML_DOCUMENT_REQUIRED', message: 'AI CLI output could not be parsed as HTML' }
   }

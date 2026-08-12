@@ -76,6 +76,16 @@ test('sanitizer keeps a document that has no left navigation at all', () => {
   assert.match(result.html, /正文/)
 })
 
+test('sanitizer unwraps markdown fences and conversational preamble so markup is not rendered as text', () => {
+  const wrapped = `好的，这是导出的 HTML：\n\n\`\`\`html\n${safeHtml()}\n\`\`\`\n\n如需修改请告诉我。`
+  const result = sanitizeSummaryHtml({ html: wrapped })
+  assert.equal(result.ok, true)
+  assert.doesNotMatch(result.html, /```/, 'code fences must be stripped')
+  assert.doesNotMatch(result.html.slice(0, 60), /body/i, 'document must start with doctype/html, not body text')
+  assert.match(result.html, /<h1 id="report"/, 'report headings must remain real markup')
+  assert.match(result.html, /完成 A/, 'report content must remain')
+})
+
 test('sanitizer strips executable, remote, and concealing content', () => {
   const cases = [
     ['script-element', html => html.replace('</main>', '<script>alert(1)</script></main>'), '<script'],
