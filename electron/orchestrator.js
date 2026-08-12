@@ -1355,6 +1355,21 @@ export function createOrchestrator() {
         }
         break
       case 'stats_update':
+        if (evt.synthetic === true) {
+          evt = {
+            ...evt,
+            usage: {
+              ...evt.usage,
+              inputTokens: entry.stats.tokens.input,
+              outputTokens: entry.stats.tokens.output
+            },
+            costUsd: entry.stats.costUsd,
+            costAvailable: entry.stats.costAvailable,
+            turns: entry.stats.turns,
+            model: entry.session.model || evt.model || null
+          }
+          break
+        }
         evt = normalizeAdapterStatsEvent(evt, entry.stats)
         entry.stats.tokens = { input: evt.usage.inputTokens, output: evt.usage.outputTokens }
         if (evt.costAvailable === false) {

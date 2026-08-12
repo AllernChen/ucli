@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { register } from 'node:module'
 
 import { ClaudeAdapter, parseClaudeTranscriptStats } from '../electron/adapters/claudeAdapter.js'
 import {
@@ -10,7 +11,8 @@ import {
   consumeOsc9Notifications,
   parseCodexTranscriptStats
 } from '../electron/adapters/codexAdapter.js'
-import { OpenCodeAdapter } from '../electron/adapters/openCodeAdapter.js'
+import { OpenCodeAdapter, openCodeDescriptor } from '../electron/adapters/openCodeAdapter.js'
+import { getDb, openDb } from '../electron/persistence/db.js'
 import { normalizeAdapterStatsEvent } from '../electron/usage/usageRecorder.js'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -602,6 +604,120 @@ test('adapter startup zeroes stay visible but are marked synthetic before ledger
   )
   const statsCase = orchestrator.match(/case 'stats_update':[\s\S]*?case 'profile-model'/)?.[0] || ''
   assert.match(statsCase, /usageRecorder\.observe\(\{[\s\S]*synthetic:\s*evt\.synthetic/)
+})
+
+test('restored session totals and model totals survive a synthetic adapter restart', async () => {
+  register('./fixtures/electron-stub-loader.mjs', import.meta.url)
+  const electron = await import('electron')
+  const handlers = new Map()
+  electron.ipcMain.handle = (channel, handler) => handlers.set(channel, handler)
+
+  const root = mkdtempSync(join(tmpdir(), 'ucli-restored-synthetic-'))
+  const userData = join(root, 'user-data')
+  mkdirSync(userData, { recursive: true })
+  const sessionId = 'restored-opencode-session'
+  const model = 'glm/glm-5.2'
+  const dbPath = join(userData, 'ucli.db')
+  const seed = await openDb(dbPath)
+  seed.insertSession({
+    id: sessionId,
+    project_path: 'F:/projects/ucli',
+    adapter_id: 'opencode',
+    native_session_id: 'native-session',
+    name: 'Restored',
+    tier: 'safety-rules',
+    model,
+    status: 'offline',
+    created_at: 1
+  })
+  seed.upsertStats(sessionId, {
+    inputTokens: 100, outputTokens: 25, costUsd: null,
+    costAvailable: false, turnsDelta: 4
+  })
+  seed.upsertModelStats(sessionId, model, {
+    inputTokens: 100, outputTokens: 25, costUsd: null, costAvailable: false
+  })
+  seed.flush()
+  seed.close()
+
+  let eventHandler = null
+  const fakeAdapter = {
+    on(type, handler) { if (type === 'event') eventHandler = handler },
+    async start() {
+      await eventHandler({
+        type: 'stats_update', synthetic: true,
+        usage: { inputTokens: 0, outputTokens: 0 },
+        costUsd: null, costAvailable: false, turns: 0, model
+      })
+      return true
+    },
+    async emitStats(inputTokens, outputTokens, turns) {
+      await eventHandler({
+        type: 'stats_update',
+        usage: { inputTokens, outputTokens },
+        costUsd: null, costAvailable: false, turns, model,
+        modelBreakdown: [{
+          model, inputTokens, outputTokens, costUsd: null, costAvailable: false
+        }]
+      })
+    },
+    async dispose() {}
+  }
+  const originalCreate = openCodeDescriptor.create
+  const previousUserData = process.env.UCLI_TEST_USER_DATA
+  process.env.UCLI_TEST_USER_DATA = userData
+  openCodeDescriptor.create = () => fakeAdapter
+  let orchestrator = null
+  const rendererEvents = []
+  try {
+    const { createOrchestrator } = await import(`../electron/orchestrator.js?synthetic-restored=${Date.now()}`)
+    orchestrator = createOrchestrator()
+    await orchestrator.initPersistence()
+    orchestrator.setMainWindow({
+      isDestroyed: () => false,
+      webContents: { send: (channel, payload) => rendererEvents.push({ channel, payload }) }
+    })
+    orchestrator.registerIpc()
+
+    await handlers.get('session:restart')({}, sessionId)
+    const syntheticEvent = rendererEvents.find(({ payload }) =>
+      payload.type === 'stats_update' && payload.synthetic === true
+    )?.payload
+    assert.deepEqual(syntheticEvent.usage, { inputTokens: 100, outputTokens: 25 })
+    assert.equal(syntheticEvent.turns, 4)
+    let restored = (await handlers.get('session:list')()).find(item => item.id === sessionId)
+    assert.deepEqual(restored.stats.tokens, { input: 100, output: 25 })
+    assert.equal(restored.stats.turns, 4)
+    assert.deepEqual(getDb().getModelStatsForSession(sessionId), [{
+      model, input_tokens: 100, output_tokens: 25,
+      cost_usd: 0, cost_available: 0
+    }])
+
+    await fakeAdapter.emitStats(100, 25, 4)
+    await fakeAdapter.emitStats(110, 30, 5)
+    restored = (await handlers.get('session:list')()).find(item => item.id === sessionId)
+    assert.deepEqual(restored.stats.tokens, { input: 110, output: 30 })
+    assert.equal(restored.stats.turns, 5)
+    assert.deepEqual(getDb().getModelStatsForSession(sessionId), [{
+      model, input_tokens: 110, output_tokens: 30,
+      cost_usd: 0, cost_available: 0
+    }])
+    assert.deepEqual(
+      getDb().queryUsageEvents({ scopes: ['session'], adapterIds: ['opencode'] })
+        .map(event => ({ inputTokens: event.inputTokens, outputTokens: event.outputTokens, turns: event.turns })),
+      [
+        { inputTokens: 100, outputTokens: 25, turns: 4 },
+        { inputTokens: 10, outputTokens: 5, turns: 1 }
+      ]
+    )
+  } finally {
+    openCodeDescriptor.create = originalCreate
+    await orchestrator?.shutdown()
+    getDb()?.close()
+    if (previousUserData === undefined) delete process.env.UCLI_TEST_USER_DATA
+    else process.env.UCLI_TEST_USER_DATA = previousUserData
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('orchestrator stats normalization accepts nested and parser-style adapter fields', () => {
