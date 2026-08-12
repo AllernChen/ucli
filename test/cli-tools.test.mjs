@@ -45,11 +45,13 @@ function installedRunner(version = '1.0.0') {
   }
 }
 
-test('OpenCode inventory requires an allowlisted credential or validated auth bridge', async () => {
+test('OpenCode inventory requires an allowlisted credential or validated auth bridge', {
+  skip: process.platform === 'win32' && 'POSIX disk-auth semantics are covered on Linux'
+}, async () => {
   const dataHome = mkdtempSync(path.join(tmpdir(), 'ucli-cli-auth-inventory-'))
   const env = { PATH: process.env.PATH, XDG_DATA_HOME: dataHome }
   try {
-    const unavailable = await inspectCliTool('opencode', installedRunner('1.18.14'), { env })
+    const unavailable = await inspectCliTool('opencode', installedRunner('1.18.14'), { env, platform: 'linux' })
     assert.equal(unavailable.installed, true)
     assert.equal(unavailable.safeForSummary, true)
     assert.equal(unavailable.summaryExecutorAvailable, false)
@@ -61,7 +63,7 @@ test('OpenCode inventory requires an allowlisted credential or validated auth br
       '{"openai":{"type":"api","key":"inventory-test-secret"}}',
       { mode: 0o600 }
     )
-    const bridged = await inspectCliTool('opencode', installedRunner('1.18.14'), { env })
+    const bridged = await inspectCliTool('opencode', installedRunner('1.18.14'), { env, platform: 'linux' })
     assert.equal(bridged.summaryExecutorAvailable, true)
     assert.equal(bridged.summaryExecutorUnavailableReason, '')
     assert.equal(JSON.stringify(bridged).includes('inventory-test-secret'), false)
@@ -80,7 +82,8 @@ test('OpenCode inventory rejects linked auth but accepts explicit allowlisted pr
     try {
       symlinkSync(target, path.join(authDirectory, 'auth.json'), 'file')
       const linked = await inspectCliTool('opencode', installedRunner(), {
-        env: { PATH: process.env.PATH, XDG_DATA_HOME: dataHome }
+        env: { PATH: process.env.PATH, XDG_DATA_HOME: dataHome },
+        platform: 'linux'
       })
       assert.equal(linked.summaryExecutorAvailable, false)
       assert.equal(linked.summaryExecutorUnavailableReason, 'unsafe-auth-file')
@@ -94,7 +97,8 @@ test('OpenCode inventory rejects linked auth but accepts explicit allowlisted pr
         XDG_DATA_HOME: dataHome,
         OPENAI_API_KEY: 'allowlisted-test-value',
         AWS_SECRET_ACCESS_KEY: 'must-not-count'
-      }
+      },
+      platform: 'linux'
     })
     assert.equal(explicit.summaryExecutorAvailable, true)
     assert.equal(explicit.summaryExecutorUnavailableReason, '')
@@ -103,12 +107,15 @@ test('OpenCode inventory rejects linked auth but accepts explicit allowlisted pr
   }
 })
 
-test('Claude inventory does not assume system login crosses the isolated home boundary', async () => {
+test('Claude inventory does not assume system login crosses the isolated home boundary', {
+  skip: process.platform === 'win32' && 'POSIX disk-auth semantics are covered on Linux'
+}, async () => {
   const home = mkdtempSync(path.join(tmpdir(), 'ucli-claude-cli-auth-'))
   try {
     const noCredential = await inspectCliTool('claude', installedRunner('2.0.0'), {
       env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home },
-      homeDirectory: home
+      homeDirectory: home,
+      platform: 'linux'
     })
     assert.equal(noCredential.summaryExecutorAvailable, false)
     assert.equal(noCredential.summaryExecutorUnavailableReason, 'requires-allowlisted-env-or-managed-profile')
@@ -121,7 +128,8 @@ test('Claude inventory does not assume system login crosses the isolated home bo
     )
     const invalidShape = await inspectCliTool('claude', installedRunner('2.0.0'), {
       env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home },
-      homeDirectory: home
+      homeDirectory: home,
+      platform: 'linux'
     })
     assert.equal(invalidShape.summaryExecutorAvailable, false)
     writeFileSync(
@@ -131,7 +139,8 @@ test('Claude inventory does not assume system login crosses the isolated home bo
     )
     const bridged = await inspectCliTool('claude', installedRunner('2.0.0'), {
       env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home },
-      homeDirectory: home
+      homeDirectory: home,
+      platform: 'linux'
     })
     assert.equal(bridged.summaryExecutorAvailable, true)
     assert.equal(bridged.summaryAuthenticationSource, 'auth-file')
