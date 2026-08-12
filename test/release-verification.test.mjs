@@ -12,14 +12,14 @@ function verifyReleaseArtifacts({ rootDir }) {
   return verifyReleaseArtifactsForPlatform({ rootDir, platform: 'win32', arch: 'x64' })
 }
 
-test('0.10.0 release package and user documentation agree', async () => {
+test('0.10.1 release package and acceptance documentation agree', async () => {
   const [packageSource, readme, changelog, acceptance] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../README.md', import.meta.url), 'utf8'),
     readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8'),
     readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8')
   ])
-  assert.equal(JSON.parse(packageSource).version, '0.10.0')
+  assert.equal(JSON.parse(packageSource).version, '0.10.1')
   assert.match(readme, /配置档案/)
   assert.match(readme, /CC Switch/)
   assert.match(readme, /Claude 登录态/)
@@ -30,7 +30,20 @@ test('0.10.0 release package and user documentation agree', async () => {
   assert.doesNotMatch(changelog, /\uFFFD/)
   assert.match(readme, /Skills 管理/)
   assert.match(readme, /GitLab/)
-  assert.match(changelog, /## \[0\.10\.0\] - 2026-08-12/)
+  assert.match(changelog, /## \[0\.10\.1\] - 2026-08-12/)
+  for (const anchor of [
+    'summary-workspace-recovery',
+    'summary-cache-quota',
+    'summary-cache-partial-hit',
+    'summary-direct-one-call',
+    'summary-map-concurrency',
+    'summary-theme-executive',
+    'summary-theme-engineering',
+    'summary-theme-timeline',
+    'summary-theme-dashboard',
+    'summary-theme-print',
+    'summary-ai-custom-export'
+  ]) assert.match(acceptance, new RegExp(`\\b${anchor}\\b`))
   assert.match(readme, /精确趋势从升级到 0\.10\.0 后开始/)
   assert.match(readme, /升级前累计总量.*单独/)
   assert.match(readme, /自动总结.*默认关闭.*AI CLI/s)

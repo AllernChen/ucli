@@ -186,3 +186,36 @@
 - [ ] 在测试会话中加入 prompt-injection 文本与假密钥，确认模型没有遵循证据中的指令，报告、日志和导出均不泄漏假密钥原文。
 - [ ] 在 Claude Code 内单独运行 `/insights`，确认它仍是 Claude Code 的交互式原生报告，而不是 UCLI 0.10.0 的跨 CLI 总结引擎。
 - [ ] 准备一个已经含 OpenCode compact/native digest 的测试会话，确认 UCLI 可复用现有摘要；同时确认 UCLI 没有修改原生会话或生成新的 compact。
+
+## 10. 0.10.1 总结性能、工作区与主题验收
+
+本节使用专门的非敏感测试数据。除“AI Custom”项目外，主题验收必须断网执行且不得启动任何 AI CLI。需要 AI 的生成项目由验收人员明确确认费用后手工执行，自动化测试只使用 fake runner。
+
+| 锚点 | 人工检查 | 预期结果 |
+| --- | --- | --- |
+| `summary-workspace-recovery` | 使用 pre-0.10.1 数据库升级并打开既有报告；并在并行 Map 中取消、重启后重试 | 旧报告可读；启动顺序为工作区恢复、缓存校验/清理、旧任务中断、调度补偿；已完成缓存条目不重复执行 |
+| `summary-direct-one-call` | 生成一个证据完整的小型日报，记录冷启动耗时和性能指标 | 策略为 direct，计划调用与实际 AI 调用均为 1 |
+| `summary-cache-partial-hit` | 生成多项目报告后原样重生成，再仅修改一个项目重生成；分别记录热缓存耗时 | 完全重复时 AI 调用为 0；单项目变化时未变化项目命中缓存，只重跑受影响 Map 和下游 final |
+| `summary-cache-quota` | 先产生超过新配额的缓存，再把配额降低到当前占用以下 | 新自动任务前按 LRU 清理到配额内；报告、用量账本、设置和完成工作区不被删除 |
+| `summary-map-concurrency` | 设置并发度为 2，生成至少三个独立 Map 的报告，并在执行中取消一次 | 同时最多运行 2 个 Map，第三个等待；取消后不启动新 Map，重试可复用已经完成的缓存条目 |
+| `summary-theme-executive` | 离线导出 Executive | 不启动 AI 进程；呈现管理摘要结构，标题导航完整 |
+| `summary-theme-engineering` | 离线导出 Engineering | 不启动 AI 进程；呈现工程报告结构，标题导航完整 |
+| `summary-theme-timeline` | 离线导出 Timeline | 不启动 AI 进程；呈现时间线结构，标题导航完整 |
+| `summary-theme-dashboard` | 离线导出 Dashboard | 不启动 AI 进程；呈现仪表盘结构，使用量卡片只包含可信数值 |
+| `summary-theme-print` | 离线导出 Print | 不启动 AI 进程；呈现适合打印的结构和固定样式 |
+| `summary-ai-custom-export` | 选择 AI Custom，确认界面明确提示速度较慢且产生 AI 用量，再导出 | 仅在确认后启动一次 AI；输出经过安全验证，不接受不安全 HTML |
+
+### 10.1 完整人工矩阵
+
+- [ ] 升级 pre-0.10.1 数据库，打开一个已有报告，确认迁移保留报告、设置及用量数据。
+- [ ] 生成小型日报，确认 direct 策略只产生 1 次 AI 调用，并记录冷启动耗时。
+- [ ] 生成多项目报告，再原样重生成，确认热缓存命中且不产生新的 AI 调用。
+- [ ] 只修改其中一个项目，确认其他项目的 Map 缓存继续复用。
+- [ ] 在并行 Map 中取消任务，重启并重试，确认完成的缓存条目不会重跑，工作区不会残留 running 状态。
+- [ ] 将缓存配额降低到当前占用以下，确认在新的自动任务前完成 LRU 清理。
+- [ ] 完成报告后检查工作区：输入证据已经删除，保留的 output 与 manifest 合计不超过 5 MiB。
+- [ ] 断网导出 Executive、Engineering、Timeline、Dashboard、Print 五个内置主题，确认 AI 进程启动次数为 0。
+- [ ] 导出 AI Custom，确认界面明确标注 AI 使用与潜在费用，生成结果通过本地安全验证。
+- [ ] 检查所有 HTML：无 `script`、远程 URL、事件处理属性或用户 CSS；标题与导航存在，报告正文内容未被本地主题渲染器改写。
+- [ ] 检查旧版 light 映射到 Executive、dark 映射到 Engineering、custom 映射到 AI Custom，取消导出不会启动生成或打开保存对话框后的写入流程。
+- [ ] 检查设置默认值：缓存配额 1 GiB、失败工作区保留 7 天、Map 并发度 2；“清理缓存”不会删除报告，“同时清理失败工作区”只删除 failed/interrupted 工作区。
