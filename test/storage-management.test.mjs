@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -116,6 +116,43 @@ test('restart cleanup refuses to replace an invalid existing marker', async t =>
   )
   assert.deepEqual(JSON.parse(await readFile(markerPath, 'utf8')), {
     version: 1, categories: ['../browser-cache']
+  })
+})
+
+test('concurrent restart scheduling preserves every category in stable catalog order', async t => {
+  const { roots, markerPath } = await fixture(t)
+  const service = createStorageManagementService({
+    scanner: scannerFor(), roots,
+    summaryCache: { clear: async () => ({ removed: 0, bytes: 0 }) },
+    summaryWorkspaces: { clearDerived: async () => ({ removed: 0, bytes: 0 }) },
+    logger: { truncate: async () => {} }
+  })
+  await Promise.all([
+    service.clear({ categoryId: 'update-downloads' }),
+    service.clear({ categoryId: 'browser-cache' }),
+    service.clear({ categoryId: 'skill-staging' })
+  ])
+  assert.deepEqual(JSON.parse(await readFile(markerPath, 'utf8')), {
+    version: 1,
+    categories: ['browser-cache', 'skill-staging', 'update-downloads']
+  })
+})
+
+test('a failed restart marker operation does not poison later scheduling', async t => {
+  const { roots, markerPath } = await fixture(t)
+  await writeFile(markerPath, '{invalid')
+  const service = createStorageManagementService({
+    scanner: scannerFor(), roots,
+    summaryCache: { clear: async () => ({ removed: 0, bytes: 0 }) },
+    summaryWorkspaces: { clearDerived: async () => ({ removed: 0, bytes: 0 }) },
+    logger: { truncate: async () => {} }
+  })
+  await assert.rejects(service.clear({ categoryId: 'browser-cache' }), error =>
+    error?.code === 'STORAGE_CLEANUP_MARKER_INVALID')
+  await rm(markerPath)
+  await service.clear({ categoryId: 'skill-staging' })
+  assert.deepEqual(JSON.parse(await readFile(markerPath, 'utf8')), {
+    version: 1, categories: ['skill-staging']
   })
 })
 

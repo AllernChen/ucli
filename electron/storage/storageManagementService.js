@@ -94,6 +94,19 @@ export function createStorageManagementService({
   }
   const markerPath = markerPathFor(roots)
   let revision = 0
+  let markerQueue = Promise.resolve()
+
+  function scheduleRestart(categoryId) {
+    const operation = markerQueue.then(async () => {
+      const pending = await readPending(markerPath)
+      const categories = STORAGE_CATEGORY_IDS.filter(id =>
+        RESTART.has(id) && (id === categoryId || pending.includes(id)))
+      if (!pending.includes(categoryId)) await writePending(markerPath, categories)
+      return { categoryId, pendingRestart: true }
+    })
+    markerQueue = operation.catch(() => {})
+    return operation
+  }
 
   async function getUsage() {
     const [scanned, pendingRestart] = await Promise.all([
@@ -141,9 +154,7 @@ export function createStorageManagementService({
     validateCategoryId(categoryId)
     if (PROTECTED.has(categoryId)) throw storageError('STORAGE_CATEGORY_PROTECTED')
     if (RESTART.has(categoryId)) {
-      const pending = await readPending(markerPath)
-      if (!pending.includes(categoryId)) await writePending(markerPath, [...pending, categoryId])
-      return { categoryId, pendingRestart: true }
+      return scheduleRestart(categoryId)
     }
 
     const before = await remainingBytes(categoryId)

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, parse } from 'node:path'
@@ -57,12 +57,13 @@ test('a failed target retains only its category ID for the next start', async t 
   const result = await runScheduledStorageCleanup({
     markerPath,
     roots,
-    removeTarget: async target => {
-      if (target === roots.browserCache) throw Object.assign(new Error('locked'), { code: 'EPERM' })
+    removeTarget: async (target, { originalTarget }) => {
+      if (originalTarget === roots.browserCache) throw Object.assign(new Error('locked'), { code: 'EPERM' })
       await rm(target, { recursive: true, force: true })
     }
   })
   assert.deepEqual(result, { removed: ['skill-staging'], failed: ['browser-cache'] })
+  assert.equal(existsSync(roots.browserCache), true)
   assert.deepEqual(JSON.parse(await readFile(markerPath, 'utf8')), {
     version: 1, categories: ['browser-cache']
   })
@@ -164,6 +165,79 @@ test('a symlinked configured parent fails closed before deleting descendants', a
     error => error?.code === 'STORAGE_CLEANUP_TARGET_UNSAFE'
   )
   assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'keep')
+})
+
+test('target replacement after preflight never deletes the junction destination', async t => {
+  const { root, roots, markerPath } = await fixture(t)
+  const outside = join(root, 'outside-after-preflight')
+  await mkdir(outside)
+  await writeFile(join(outside, 'keep.txt'), 'keep')
+  await mkdir(roots.skillStaging, { recursive: true })
+  await writeFile(join(roots.skillStaging, 'owned.txt'), 'owned')
+  await schedule(markerPath, ['skill-staging'])
+
+  const result = await runScheduledStorageCleanup({
+    markerPath,
+    roots,
+    beforeRemove: async ({ target }) => {
+      await rm(target, { recursive: true, force: true })
+      await symlink(outside, target, process.platform === 'win32' ? 'junction' : 'dir')
+    }
+  })
+  assert.deepEqual(result, { removed: [], failed: ['skill-staging'] })
+  assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'keep')
+})
+
+test('sync target replacement after preflight never deletes the junction destination', async t => {
+  const { root, roots, markerPath } = await fixture(t)
+  const outside = join(root, 'outside-sync-after-preflight')
+  await mkdir(outside)
+  await writeFile(join(outside, 'keep.txt'), 'keep')
+  await mkdir(roots.skillStaging, { recursive: true })
+  await schedule(markerPath, ['skill-staging'])
+
+  const result = runScheduledStorageCleanupSync({
+    markerPath,
+    roots,
+    beforeRemove: ({ target }) => {
+      rmSync(target, { recursive: true, force: true })
+      symlinkSync(outside, target, process.platform === 'win32' ? 'junction' : 'dir')
+    }
+  })
+  assert.deepEqual(result, { removed: [], failed: ['skill-staging'] })
+  assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'keep')
+})
+
+test('parent replacement after preflight fails closed in async and sync cleanup', async t => {
+  for (const sync of [false, true]) {
+    const { root, roots, markerPath } = await fixture(t)
+    const outside = join(root, `outside-parent-${sync ? 'sync' : 'async'}`)
+    await mkdir(outside)
+    await writeFile(join(outside, 'keep.txt'), 'keep')
+    await mkdir(roots.skillStaging, { recursive: true })
+    await schedule(markerPath, ['skill-staging'])
+
+    let result
+    if (sync) {
+      result = runScheduledStorageCleanupSync({
+        markerPath, roots,
+        beforeRemove: () => {
+          rmSync(roots.installedSkills, { recursive: true, force: true })
+          symlinkSync(outside, roots.installedSkills, process.platform === 'win32' ? 'junction' : 'dir')
+        }
+      })
+    } else {
+      result = await runScheduledStorageCleanup({
+        markerPath, roots,
+        beforeRemove: async () => {
+          await rm(roots.installedSkills, { recursive: true, force: true })
+          await symlink(outside, roots.installedSkills, process.platform === 'win32' ? 'junction' : 'dir')
+        }
+      })
+    }
+    assert.deepEqual(result, { removed: [], failed: ['skill-staging'] })
+    assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'keep')
+  }
 })
 
 test('sync startup wrapper completes cleanup before returning', async t => {
