@@ -37,6 +37,11 @@ const api = {
   checkForUpdates: () => ipcRenderer.invoke('update:check'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
+  onUpdateState: (handler) => {
+    const wrapped = (_event, payload) => handler(payload)
+    ipcRenderer.on('update:state', wrapped)
+    return () => ipcRenderer.removeListener('update:state', wrapped)
+  },
   getDiagnostics: () => ipcRenderer.invoke('diagnostics:get'),
   exportDiagnostics: () => ipcRenderer.invoke('diagnostics:export'),
   getCodexRuntime: () => ipcRenderer.invoke('codex:runtime:get'),

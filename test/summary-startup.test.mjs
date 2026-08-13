@@ -149,6 +149,16 @@ test('orchestrator stops summary catch-up before gateway and database shutdown',
   assert.ok(gatewayStop > compactWorkspaces && databaseFlush > gatewayStop)
 })
 
+test('main stops update timers before asynchronous application shutdown', () => {
+  const source = readFileSync(new URL('../electron/main.js', import.meta.url), 'utf8')
+  const shutdown = source.indexOf("app.on('before-quit'")
+  const stopUpdates = source.indexOf('updateService?.stop()', shutdown)
+  const stopOrchestrator = source.indexOf('await orchestrator?.shutdown()', shutdown)
+
+  assert.ok(shutdown >= 0 && stopUpdates > shutdown)
+  assert.ok(stopOrchestrator > stopUpdates)
+})
+
 test('summary operational logs expose only bounded lifecycle metadata', () => {
   const report = {
     id: 'report-1',

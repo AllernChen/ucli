@@ -17,6 +17,7 @@ export const ipc = {
   checkForUpdates: () => u.checkForUpdates(),
   downloadUpdate: () => u.downloadUpdate(),
   installUpdate: () => u.installUpdate(),
+  onUpdateState: (handler) => u.onUpdateState(handler),
   getDiagnostics: () => u.getDiagnostics(),
   exportDiagnostics: () => u.exportDiagnostics(),
   getCodexRuntime: () => u.getCodexRuntime(),

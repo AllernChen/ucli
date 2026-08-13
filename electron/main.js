@@ -190,6 +190,8 @@ function createWindow() {
 
 function fallbackUpdateState() {
   return {
+    revision: 0,
+    checkedAt: 0,
     status: 'unsupported',
     currentVersion: app.getVersion(),
     availableVersion: null,
@@ -233,7 +235,7 @@ app.whenReady().then(async () => {
     onStateChange: (state) => mainWindow?.webContents.send('update:state', state)
   })
   registerUpdateIpc()
-  updateService.start(3000)
+  updateService.start()
   orchestrator.setMainWindow(mainWindow)
   const recoveryInfo = orchestrator.getPersistenceRecovery()
   if (recoveryInfo) {
@@ -262,6 +264,7 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   if (shutdownPromise) return
   shutdownPromise = (async () => {
+    updateService?.stop()
     try { saveWindowState() }
     catch (error) { console.error('Window state save failed:', error) }
     try { await orchestrator?.shutdown() }
