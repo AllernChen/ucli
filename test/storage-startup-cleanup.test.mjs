@@ -1,0 +1,375 @@
+import assert from 'node:assert/strict'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join, parse } from 'node:path'
+import test from 'node:test'
+
+import {
+  runScheduledStorageCleanup,
+  runScheduledStorageCleanupSync
+} from '../electron/storage/startupCleanup.js'
+
+async function fixture(t) {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-startup-cleanup-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const roots = {
+    userData: join(root, 'user-data'),
+    baseCache: join(root, 'cache-base'),
+    browserCacheParent: join(root, 'temp', 'ucli'),
+    browserCache: join(root, 'temp', 'ucli', 'electron-session-data'),
+    installedSkills: join(root, 'user-data', 'skills'),
+    skillStaging: join(root, 'user-data', 'skills', '.source-staging'),
+    updateDownloads: join(root, 'cache-base', 'ucli-updater')
+  }
+  const markerPath = join(roots.userData, 'storage-cleanup.json')
+  await mkdir(roots.userData, { recursive: true })
+  return { root, roots, markerPath }
+}
+
+async function schedule(markerPath, categories) {
+  await writeFile(markerPath, JSON.stringify({ version: 1, categories }))
+}
+
+test('scheduled cleanup removes exact trusted targets and deletes a completed marker', async t => {
+  const { roots, markerPath } = await fixture(t)
+  for (const target of [roots.browserCache, roots.skillStaging, roots.updateDownloads]) {
+    await mkdir(target, { recursive: true })
+    await writeFile(join(target, 'owned.bin'), 'owned')
+  }
+  await schedule(markerPath, ['browser-cache', 'skill-staging', 'update-downloads'])
+
+  assert.deepEqual(await runScheduledStorageCleanup({ markerPath, roots }), {
+    removed: ['browser-cache', 'skill-staging', 'update-downloads'], failed: []
+  })
+  assert.equal(existsSync(markerPath), false)
+  for (const target of [roots.browserCache, roots.skillStaging, roots.updateDownloads]) {
+    assert.equal(existsSync(target), false)
+  }
+})
+
+test('a failed target retains only its category ID for the next start', async t => {
+  const { roots, markerPath } = await fixture(t)
+  await mkdir(roots.browserCache, { recursive: true })
+  await mkdir(roots.skillStaging, { recursive: true })
+  await schedule(markerPath, ['browser-cache', 'skill-staging'])
+
+  const result = await runScheduledStorageCleanup({
+    markerPath,
+    roots,
+    removeTarget: async (target, { originalTarget }) => {
+      if (originalTarget === roots.browserCache) throw Object.assign(new Error('locked'), { code: 'EPERM' })
+      await rm(target, { recursive: true, force: true })
+    }
+  })
+  assert.deepEqual(result, { removed: ['skill-staging'], failed: ['browser-cache'] })
+  assert.equal(existsSync(roots.browserCache), true)
+  assert.deepEqual(JSON.parse(await readFile(markerPath, 'utf8')), {
+    version: 1, categories: ['browser-cache']
+  })
+})
+
+test('unknown, duplicated, extra-field, and path-shaped marker values are rejected', async t => {
+  const { roots, markerPath } = await fixture(t)
+  const invalidMarkers = [
+    { version: 1, categories: ['unknown'] },
+    { version: 1, categories: ['../browser-cache'] },
+    { version: 1, categories: ['C:\\cache'] },
+    { version: 1, categories: ['browser-cache', 'browser-cache'] },
+    { version: 1, categories: ['browser-cache'], path: roots.browserCache }
+  ]
+  for (const marker of invalidMarkers) {
+    await writeFile(markerPath, JSON.stringify(marker))
+    await assert.rejects(
+      runScheduledStorageCleanup({ markerPath, roots }),
+      error => error?.code === 'STORAGE_CLEANUP_MARKER_INVALID'
+    )
+    assert.equal(existsSync(markerPath), true)
+  }
+})
+
+test('marker path must be the exact trusted user-data marker and cannot be a symlink', async t => {
+  const { root, roots, markerPath } = await fixture(t)
+  const outsideMarker = join(root, 'outside-marker.json')
+  await schedule(outsideMarker, ['browser-cache'])
+  await assert.rejects(
+    runScheduledStorageCleanup({ markerPath: outsideMarker, roots }),
+    error => error?.code === 'STORAGE_CLEANUP_MARKER_UNSAFE'
+  )
+  assert.equal(existsSync(outsideMarker), true)
+
+  const linkedMarker = join(root, 'linked-marker.json')
+  await schedule(linkedMarker, ['browser-cache'])
+  try {
+    await symlink(linkedMarker, markerPath, 'file')
+  } catch (error) {
+    if (process.platform === 'win32' && error?.code === 'EPERM') return t.skip('symlink creation unavailable')
+    throw error
+  }
+  await assert.rejects(
+    runScheduledStorageCleanup({ markerPath, roots }),
+    error => error?.code === 'STORAGE_CLEANUP_MARKER_UNSAFE'
+  )
+  assert.equal(existsSync(linkedMarker), true)
+})
+
+test('unsafe root, sibling substitution, and symlink targets fail closed', async t => {
+  const { root, roots, markerPath } = await fixture(t)
+  await schedule(markerPath, ['skill-staging'])
+  await assert.rejects(
+    runScheduledStorageCleanup({ markerPath, roots: { ...roots, skillStaging: parse(root).root } }),
+    error => error?.code === 'STORAGE_CLEANUP_TARGET_UNSAFE'
+  )
+  await assert.rejects(
+    runScheduledStorageCleanup({ markerPath, roots: { ...roots, skillStaging: join(dirname(roots.installedSkills), 'skills-sibling') } }),
+    error => error?.code === 'STORAGE_CLEANUP_TARGET_UNSAFE'
+  )
+  await assert.rejects(
+    runScheduledStorageCleanup({ markerPath, roots: { ...roots, skillStaging: join(roots.installedSkills, 'unexpected-child') } }),
+    error => error?.code === 'STORAGE_CLEANUP_TARGET_UNSAFE'
+  )
+
+  const outside = join(root, 'outside')
+  await mkdir(outside)
+  await writeFile(join(outside, 'keep.txt'), 'keep')
+  await mkdir(dirname(roots.skillStaging), { recursive: true })
+  try {
+    await symlink(outside, roots.skillStaging, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if (process.platform === 'win32' && error?.code === 'EPERM') return t.skip('junction creation unavailable')
+    throw error
+  }
+  await assert.rejects(
+    runScheduledStorageCleanup({ markerPath, roots }),
+    error => error?.code === 'STORAGE_CLEANUP_TARGET_UNSAFE'
+  )
+  assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'keep')
+})
+
+test('a symlinked configured parent fails closed before deleting descendants', async t => {
+  const { root, roots, markerPath } = await fixture(t)
+  const outside = join(root, 'outside-parent')
+  await mkdir(outside)
+  await writeFile(join(outside, 'keep.txt'), 'keep')
+  await rm(roots.installedSkills, { recursive: true, force: true })
+  await mkdir(dirname(roots.installedSkills), { recursive: true })
+  try {
+    await symlink(outside, roots.installedSkills, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if (process.platform === 'win32' && error?.code === 'EPERM') return t.skip('junction creation unavailable')
+    throw error
+  }
+  await schedule(markerPath, ['skill-staging'])
+  await assert.rejects(
+    runScheduledStorageCleanup({ markerPath, roots }),
+    error => error?.code === 'STORAGE_CLEANUP_TARGET_UNSAFE'
+  )
+  assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'keep')
+})
+
+test('target replacement after preflight never deletes the junction destination', async t => {
+  const { root, roots, markerPath } = await fixture(t)
+  const outside = join(root, 'outside-after-preflight')
+  await mkdir(outside)
+  await writeFile(join(outside, 'keep.txt'), 'keep')
+  await mkdir(roots.skillStaging, { recursive: true })
+  await writeFile(join(roots.skillStaging, 'owned.txt'), 'owned')
+  await schedule(markerPath, ['skill-staging'])
+
+  const result = await runScheduledStorageCleanup({
+    markerPath,
+    roots,
+    beforeRemove: async ({ target }) => {
+      await rm(target, { recursive: true, force: true })
+      await symlink(outside, target, process.platform === 'win32' ? 'junction' : 'dir')
+    }
+  })
+  assert.deepEqual(result, { removed: [], failed: ['skill-staging'] })
+  assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'keep')
+})
+
+test('sync target replacement after preflight never deletes the junction destination', async t => {
+  const { root, roots, markerPath } = await fixture(t)
+  const outside = join(root, 'outside-sync-after-preflight')
+  await mkdir(outside)
+  await writeFile(join(outside, 'keep.txt'), 'keep')
+  await mkdir(roots.skillStaging, { recursive: true })
+  await schedule(markerPath, ['skill-staging'])
+
+  const result = runScheduledStorageCleanupSync({
+    markerPath,
+    roots,
+    beforeRemove: ({ target }) => {
+      rmSync(target, { recursive: true, force: true })
+      symlinkSync(outside, target, process.platform === 'win32' ? 'junction' : 'dir')
+    }
+  })
+  assert.deepEqual(result, { removed: [], failed: ['skill-staging'] })
+  assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'keep')
+})
+
+test('parent replacement after preflight fails closed in async and sync cleanup', async t => {
+  for (const sync of [false, true]) {
+    const { root, roots, markerPath } = await fixture(t)
+    const outside = join(root, `outside-parent-${sync ? 'sync' : 'async'}`)
+    await mkdir(outside)
+    await writeFile(join(outside, 'keep.txt'), 'keep')
+    await mkdir(roots.skillStaging, { recursive: true })
+    await schedule(markerPath, ['skill-staging'])
+
+    let result
+    if (sync) {
+      result = runScheduledStorageCleanupSync({
+        markerPath, roots,
+        beforeRemove: () => {
+          rmSync(roots.installedSkills, { recursive: true, force: true })
+          symlinkSync(outside, roots.installedSkills, process.platform === 'win32' ? 'junction' : 'dir')
+        }
+      })
+    } else {
+      result = await runScheduledStorageCleanup({
+        markerPath, roots,
+        beforeRemove: async () => {
+          await rm(roots.installedSkills, { recursive: true, force: true })
+          await symlink(outside, roots.installedSkills, process.platform === 'win32' ? 'junction' : 'dir')
+        }
+      })
+    }
+    assert.deepEqual(result, { removed: [], failed: ['skill-staging'] })
+    assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'keep')
+  }
+})
+
+test('ordinary target replacement after preflight preserves both original and replacement data', async t => {
+  for (const sync of [false, true]) {
+    const { roots, markerPath } = await fixture(t)
+    const original = `${roots.skillStaging}-original`
+    await mkdir(roots.skillStaging, { recursive: true })
+    await writeFile(join(roots.skillStaging, 'original.txt'), 'original')
+    await schedule(markerPath, ['skill-staging'])
+    const replace = () => {
+      renameSync(roots.skillStaging, original)
+      mkdirSync(roots.skillStaging)
+      writeFileSync(join(roots.skillStaging, 'replacement.txt'), 'replacement')
+    }
+    const result = sync
+      ? runScheduledStorageCleanupSync({ markerPath, roots, beforeRemove: replace })
+      : await runScheduledStorageCleanup({ markerPath, roots, beforeRemove: async () => replace() })
+    assert.deepEqual(result, { removed: [], failed: ['skill-staging'] })
+    assert.equal(readFileSync(join(original, 'original.txt'), 'utf8'), 'original')
+    assert.equal(readFileSync(join(roots.skillStaging, 'replacement.txt'), 'utf8'), 'replacement')
+  }
+})
+
+test('ordinary parent replacement after preflight preserves both parent trees', async t => {
+  for (const sync of [false, true]) {
+    const { roots, markerPath } = await fixture(t)
+    const originalParent = `${roots.installedSkills}-original`
+    await mkdir(roots.skillStaging, { recursive: true })
+    await writeFile(join(roots.skillStaging, 'original.txt'), 'original')
+    await schedule(markerPath, ['skill-staging'])
+    const replace = () => {
+      renameSync(roots.installedSkills, originalParent)
+      mkdirSync(roots.skillStaging, { recursive: true })
+      writeFileSync(join(roots.skillStaging, 'replacement.txt'), 'replacement')
+    }
+    const result = sync
+      ? runScheduledStorageCleanupSync({ markerPath, roots, beforeRemove: replace })
+      : await runScheduledStorageCleanup({ markerPath, roots, beforeRemove: async () => replace() })
+    assert.deepEqual(result, { removed: [], failed: ['skill-staging'] })
+    assert.equal(readFileSync(join(originalParent, '.source-staging', 'original.txt'), 'utf8'), 'original')
+    assert.equal(readFileSync(join(roots.skillStaging, 'replacement.txt'), 'utf8'), 'replacement')
+  }
+})
+
+test('failed quarantine deletion stays tracked and is restored before a later retry', async t => {
+  const { roots, markerPath } = await fixture(t)
+  const quarantine = join(roots.installedSkills, '.ucli-cleanup-skill-staging')
+  await mkdir(roots.skillStaging, { recursive: true })
+  await writeFile(join(roots.skillStaging, 'original.txt'), 'original')
+  await schedule(markerPath, ['skill-staging'])
+
+  const first = await runScheduledStorageCleanup({
+    markerPath, roots,
+    removeTarget: async (_target, { originalTarget }) => {
+      await mkdir(originalTarget)
+      await writeFile(join(originalTarget, 'replacement.txt'), 'replacement')
+      throw Object.assign(new Error('locked'), { code: 'EPERM' })
+    }
+  })
+  assert.deepEqual(first, { removed: [], failed: ['skill-staging'] })
+  assert.equal(await readFile(join(quarantine, 'original.txt'), 'utf8'), 'original')
+  assert.equal(await readFile(join(roots.skillStaging, 'replacement.txt'), 'utf8'), 'replacement')
+  assert.deepEqual(JSON.parse(await readFile(markerPath, 'utf8')), {
+    version: 1, categories: ['skill-staging']
+  })
+  assert.deepEqual((await readdir(roots.installedSkills)).filter(name => name.startsWith('.ucli-cleanup-')), [
+    '.ucli-cleanup-skill-staging'
+  ])
+
+  assert.deepEqual(await runScheduledStorageCleanup({ markerPath, roots }), {
+    removed: [], failed: ['skill-staging']
+  })
+  assert.equal(await readFile(join(quarantine, 'original.txt'), 'utf8'), 'original')
+  await rm(roots.skillStaging, { recursive: true, force: true })
+  assert.deepEqual(await runScheduledStorageCleanup({ markerPath, roots }), {
+    removed: [], failed: ['skill-staging']
+  })
+  assert.equal(existsSync(quarantine), false)
+  assert.equal(await readFile(join(roots.skillStaging, 'original.txt'), 'utf8'), 'original')
+  assert.equal(existsSync(markerPath), true)
+})
+
+test('sync cleanup restores a deterministic quarantine and retains its marker before retry', async t => {
+  const { roots, markerPath } = await fixture(t)
+  const quarantine = join(roots.installedSkills, '.ucli-cleanup-skill-staging')
+  await mkdir(roots.skillStaging, { recursive: true })
+  await writeFile(join(roots.skillStaging, 'original.txt'), 'original')
+  await schedule(markerPath, ['skill-staging'])
+  const first = runScheduledStorageCleanupSync({
+    markerPath, roots,
+    removeTarget: (_target, { originalTarget }) => {
+      mkdirSync(originalTarget)
+      writeFileSync(join(originalTarget, 'replacement.txt'), 'replacement')
+      throw Object.assign(new Error('locked'), { code: 'EPERM' })
+    }
+  })
+  assert.deepEqual(first, { removed: [], failed: ['skill-staging'] })
+  assert.equal(readFileSync(join(quarantine, 'original.txt'), 'utf8'), 'original')
+  assert.equal(readFileSync(join(roots.skillStaging, 'replacement.txt'), 'utf8'), 'replacement')
+  assert.deepEqual(runScheduledStorageCleanupSync({ markerPath, roots }), {
+    removed: [], failed: ['skill-staging']
+  })
+  rmSync(roots.skillStaging, { recursive: true, force: true })
+  assert.deepEqual(runScheduledStorageCleanupSync({ markerPath, roots }), {
+    removed: [], failed: ['skill-staging']
+  })
+  assert.equal(readFileSync(join(roots.skillStaging, 'original.txt'), 'utf8'), 'original')
+  assert.equal(existsSync(quarantine), false)
+  assert.equal(existsSync(markerPath), true)
+})
+
+test('sync startup wrapper completes cleanup before returning', async t => {
+  const { roots, markerPath } = await fixture(t)
+  await mkdir(roots.browserCache, { recursive: true })
+  await schedule(markerPath, ['browser-cache'])
+  assert.deepEqual(runScheduledStorageCleanupSync({ markerPath, roots }), {
+    removed: ['browser-cache'], failed: []
+  })
+  assert.equal(existsSync(roots.browserCache), false)
+  assert.equal(existsSync(markerPath), false)
+})
+
+test('main runs trusted cleanup before recreating browser cache, Skills, and updater startup', () => {
+  const source = readFileSync(new URL('../electron/main.js', import.meta.url), 'utf8')
+  const resolveRoots = source.indexOf('resolveUcliStorageRoots({')
+  const cleanup = source.indexOf('runScheduledStorageCleanupSync({', resolveRoots)
+  const sessionMkdir = source.indexOf('mkdirSync(sessionDataPath', cleanup)
+  const orchestrator = source.indexOf('createOrchestrator()', sessionMkdir)
+  const updater = source.indexOf('createUpdateService({', orchestrator)
+
+  assert.ok(resolveRoots >= 0 && cleanup > resolveRoots)
+  assert.ok(sessionMkdir > cleanup)
+  assert.ok(orchestrator > sessionMkdir)
+  assert.ok(updater > orchestrator)
+})

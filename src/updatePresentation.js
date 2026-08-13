@@ -18,6 +18,14 @@ export function visibleReleaseNotes(value = '') {
   return String(value).replace(/<[^>]*>/g, '').trim().slice(0, 4000)
 }
 
+export function updateFooterLabel(status, availableVersion = '') {
+  if (status === 'available') return availableVersion ? `发现 v${availableVersion}` : '发现新版本'
+  if (status === 'downloading') return '正在下载更新'
+  if (status === 'downloaded') return '更新已就绪'
+  if (status === 'installing') return '正在启动安装'
+  return ''
+}
+
 function formatBytes(value) {
   if (!Number.isFinite(value) || value < 0) return ''
   return `${(value / (1024 * 1024)).toFixed(1)} MB`

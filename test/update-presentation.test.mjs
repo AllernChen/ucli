@@ -21,6 +21,14 @@ test('release notes stay plain text and bounded', () => {
   assert.equal(updatePresentation.visibleReleaseNotes('x'.repeat(5000)).length, 4000)
 })
 
+test('footer labels expose only actionable update states', () => {
+  assert.equal(updatePresentation.updateFooterLabel('available', '0.10.2'), '发现 v0.10.2')
+  assert.equal(updatePresentation.updateFooterLabel('downloading', '0.10.2'), '正在下载更新')
+  assert.equal(updatePresentation.updateFooterLabel('downloaded', '0.10.2'), '更新已就绪')
+  assert.equal(updatePresentation.updateFooterLabel('unsupported', '0.10.2'), '')
+  assert.equal(updatePresentation.updateFooterLabel('error', '0.10.2'), '')
+})
+
 test('download progress has a readable percentage and transfer detail', () => {
   assert.equal(typeof updatePresentation.updateProgressText, 'function')
   assert.equal(updatePresentation.updateProgressText({
@@ -32,19 +40,19 @@ test('download progress has a readable percentage and transfer detail', () => {
   }), '已下载 42%（10.0 MB / 24.0 MB，2.0 MB/s）')
 })
 
-test('settings renders download progress and explains the installation handoff', () => {
-  const source = readFileSync(new URL('../src/views/Settings.vue', import.meta.url), 'utf8')
+test('shared settings panel renders download progress and explains the installation handoff', () => {
+  const source = readFileSync(new URL('../src/components/settings/SoftwareUpdatePanel.vue', import.meta.url), 'utf8')
 
-  assert.match(source, /<a-progress[^>]*:percent="updateState\.progressPercent \?\? 0"/)
-  assert.match(source, /{{ updateProgressText\(updateState\) }}/)
-  assert.match(source, /v-if="updateState\?\.status === 'installing'"/)
+  assert.match(source, /<a-progress[^>]*:percent="updates\.progressPercent \?\? 0"/)
+  assert.match(source, /{{ updateProgressText\(updates\) }}/)
+  assert.match(source, /v-if="updates\.status === 'installing'"/)
 })
 
 test('settings derives update button loading from the explicit update phase', () => {
-  const source = readFileSync(new URL('../src/views/Settings.vue', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/components/settings/SoftwareUpdatePanel.vue', import.meta.url), 'utf8')
 
   assert.doesNotMatch(source, /updateBusy/)
-  assert.match(source, /:loading="updateState\?\.status === 'checking'"/)
-  assert.match(source, /:loading="updateState\?\.status === 'downloading'"/)
-  assert.match(source, /:loading="updateState\?\.status === 'installing'"/)
+  assert.match(source, /:loading="updates\.status === 'checking'"/)
+  assert.match(source, /:loading="updates\.status === 'downloading'"/)
+  assert.match(source, /:loading="updates\.status === 'installing'"/)
 })

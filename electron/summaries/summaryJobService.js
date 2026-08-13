@@ -25,12 +25,30 @@ function sourceHash(evidence) {
   return `sha256:${hash.digest('hex')}`
 }
 
+function jsonArtifact(value) {
+  return `${JSON.stringify(value, null, 2)}\n`
+}
+
+function evidenceArtifacts(evidence) {
+  const projects = new Map()
+  for (const block of evidence?.blocks || []) {
+    const projectKey = createHash('sha256').update(String(block?.projectPath || '')).digest('hex')
+    if (!projects.has(projectKey)) projects.set(projectKey, [])
+    projects.get(projectKey).push({ text: String(block?.text || '') })
+  }
+  return [...projects.entries()].sort(([left], [right]) => left.localeCompare(right))
+    .map(([projectKey, blocks], index) => ({
+      path: `input/project-${projectKey}-${String(index + 1).padStart(4, '0')}.json`,
+      content: jsonArtifact({ blocks })
+    }))
+}
+
 function terminal(status) {
   return ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(status)
 }
 
 function safePipelineProgress(event) {
-  const phase = ['collecting', 'mapping', 'reducing', 'rendering'].includes(event?.phase)
+  const phase = ['cache-check', 'collecting', 'mapping', 'reducing', 'rendering'].includes(event?.phase)
     ? event.phase
     : null
   if (!phase) return null
@@ -39,11 +57,28 @@ function safePipelineProgress(event) {
   return { phase, completed: Math.min(current, total), total }
 }
 
+function safeGenerationMetrics(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const safe = {}
+  if (['direct', 'map-reduce'].includes(value.strategy)) safe.strategy = value.strategy
+  for (const field of ['plannedCalls', 'aiCalls', 'cacheHits']) {
+    if (Number.isInteger(value[field])) safe[field] = Math.max(0, Math.min(1000, value[field]))
+  }
+  if (Number.isFinite(value.durationMs)) {
+    safe.durationMs = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(value.durationMs)))
+  }
+  if (Number.isInteger(value.mapConcurrency)) {
+    safe.mapConcurrency = Math.max(1, Math.min(3, value.mapConcurrency))
+  }
+  return Object.keys(safe).length === 6 ? safe : {}
+}
+
 export function createSummaryJobService({
   repository,
   evidenceCollector,
   snapshotUsage,
   pipeline,
+  workspaceService = null,
   listSessions = () => [],
   defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 } = {}) {
@@ -52,10 +87,11 @@ export function createSummaryJobService({
   if (typeof snapshotUsage !== 'function') throw new TypeError('snapshotUsage is required')
   if (!pipeline?.run) throw new TypeError('pipeline.run is required')
 
-  repository.interruptStale()
   const listeners = new Set()
   const jobs = new Map()
   let queue = Promise.resolve()
+  let shuttingDown = false
+  let shutdownPromise = null
 
   const publish = (report, progress = null) => {
     for (const listener of listeners) {
@@ -78,7 +114,15 @@ export function createSummaryJobService({
     return result
   }
 
-  const failJob = (job, error) => {
+  const settleWorkspaceUpdates = job => job.workspaceUpdates.catch(() => {})
+  const failJob = async (job, error) => {
+    if (job.workspace) {
+      await settleWorkspaceUpdates(job)
+      await workspaceService.fail(
+        job.reportId,
+        job.cancelled ? 'SUMMARY_CANCELLED' : safeErrorCode(error)
+      ).catch(() => {})
+    }
     if (job.cancelled) {
       const current = repository.get(job.reportId)
       if (current?.status === 'cancelled') return finish(job, current)
@@ -99,6 +143,7 @@ export function createSummaryJobService({
       executorId: request.executorId,
       profileId: request.profileId,
       model: request.model,
+      promptVersion: request.promptVersion || 'summary-v1',
       evidence: context.evidence,
       usage: context.usageSnapshot,
       period: {
@@ -110,9 +155,17 @@ export function createSummaryJobService({
       confirmed,
       confirmedCallLimit,
       signal: job.controller.signal,
+      workspaceDirectory: job.workspace?.workDirectory,
       onProgress(event) {
         const progress = safePipelineProgress(event)
-        if (progress) publish(repository.get(job.reportId), progress)
+        if (progress) {
+          publish(repository.get(job.reportId), progress)
+          if (job.workspace) {
+            job.workspaceUpdates = job.workspaceUpdates
+              .then(() => workspaceService.markStage(job.reportId, progress.phase, progress))
+              .catch(() => {})
+          }
+        }
       }
     })
     if (job.cancelled) {
@@ -133,10 +186,15 @@ export function createSummaryJobService({
       usageSnapshot: context.usageSnapshot,
       coverage: context.evidence.coverage || {},
       generationUsage: result.generationUsage || {},
+      generationMetrics: safeGenerationMetrics(result.generationMetrics),
       generationCostUsd: result.generationUsage?.costUsd ?? null,
       sourceHash: context.sourceHash,
       errorText: null
     }, { notify: false })
+    if (job.workspace) {
+      await settleWorkspaceUpdates(job)
+      await workspaceService.complete(job.reportId, { markdown: result.markdown })
+    }
     const current = await repository.setCurrent(job.reportId)
     publish(current)
     return finish(job, current)
@@ -147,6 +205,7 @@ export function createSummaryJobService({
     update(job.reportId, { status: 'running', errorText: null })
     try {
       const request = job.request
+      if (workspaceService) job.workspace = await workspaceService.create(job.reportId)
       const evidence = await evidenceCollector.collect({
         sessions: await listSessions(),
         start: request.start,
@@ -159,6 +218,17 @@ export function createSummaryJobService({
         coverage: evidence.coverage || {},
         sourceHash: hash
       }, { notify: false })
+      if (job.workspace) {
+        await workspaceService.writeArtifact(job.reportId, 'input/period.json', jsonArtifact({
+          periodType: request.periodType,
+          start: new Date(request.start).toISOString(),
+          endExclusive: new Date(request.endExclusive).toISOString(),
+          timezone: request.timezone
+        }))
+        for (const artifact of evidenceArtifacts(evidence)) {
+          await workspaceService.writeArtifact(job.reportId, artifact.path, artifact.content)
+        }
+      }
       const usageSnapshot = await snapshotUsage({
         periodType: request.periodType,
         start: request.start,
@@ -167,8 +237,14 @@ export function createSummaryJobService({
       })
       if (job.cancelled) throw Object.assign(new Error('cancelled'), { code: 'SUMMARY_CANCELLED' })
       update(job.reportId, { usageSnapshot }, { notify: false })
+      if (job.workspace) {
+        await workspaceService.writeArtifact(
+          job.reportId, 'input/usage.json', jsonArtifact(usageSnapshot)
+        )
+      }
       job.context = { evidence, usageSnapshot, sourceHash: hash }
       if (!evidence.blocks?.length) {
+        if (job.workspace) await workspaceService.complete(job.reportId)
         return finish(job, update(job.reportId, {
           status: 'skipped_empty',
           errorText: 'SUMMARY_EMPTY_EVIDENCE'
@@ -177,6 +253,7 @@ export function createSummaryJobService({
       if (request.generatedBy === 'automatic') {
         const duplicate = repository.findCompletedBySource(request, hash, job.reportId)
         if (duplicate) {
+          if (job.workspace) await workspaceService.complete(job.reportId)
           return finish(job, update(job.reportId, {
             status: 'skipped_empty',
             errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${duplicate.id}`
@@ -199,8 +276,38 @@ export function createSummaryJobService({
     }
   }
 
+  const shutdown = () => {
+    if (shutdownPromise) return shutdownPromise
+    shuttingDown = true
+    const active = [...jobs.values()]
+    for (const job of active) {
+      const report = repository.get(job.reportId)
+      if (!report || terminal(report.status)) continue
+      job.cancelled = true
+      job.controller.abort()
+      const cancelled = update(job.reportId, {
+        status: 'cancelled',
+        errorText: 'SUMMARY_CANCELLED'
+      })
+      if (['queued', 'awaiting_confirmation'].includes(report.status)) finish(job, cancelled)
+    }
+    shutdownPromise = Promise.allSettled(active.map(async job => {
+      await job.done.promise
+      if (job.workspace) {
+        await settleWorkspaceUpdates(job)
+        await workspaceService.fail(job.reportId, 'SUMMARY_CANCELLED').catch(() => {})
+      }
+    })).then(() => undefined)
+    return shutdownPromise
+  }
+
   return {
     generate(input) {
+      if (shuttingDown) {
+        throw Object.assign(new Error('Summary service is shutting down'), {
+          code: 'SUMMARY_SERVICE_SHUTTING_DOWN'
+        })
+      }
       const request = { ...input, timezone: input.timezone || defaultTimezone }
       const queued = repository.createQueued(request)
       const job = {
@@ -210,6 +317,8 @@ export function createSummaryJobService({
         cancelled: false,
         context: null,
         confirmationCallLimit: null,
+        workspace: null,
+        workspaceUpdates: Promise.resolve(),
         done: deferred()
       }
       jobs.set(job.reportId, job)
@@ -259,10 +368,16 @@ export function createSummaryJobService({
         : null
     },
 
+    isActive(reportId) {
+      return jobs.has(reportId)
+    },
+
     subscribe(listener) {
       if (typeof listener !== 'function') throw new TypeError('listener is required')
       listeners.add(listener)
       return () => listeners.delete(listener)
-    }
+    },
+
+    shutdown
   }
 }

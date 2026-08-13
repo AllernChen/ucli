@@ -1,61 +1,62 @@
-import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import test from 'node:test'
 
 function loadPreloadApi() {
   const source = readFileSync(new URL('../electron/preload.js', import.meta.url), 'utf8')
     .replace("import { contextBridge, ipcRenderer } from 'electron'", '')
   const calls = []
+  const listeners = new Map()
   let api = null
   new Function('contextBridge', 'ipcRenderer', source)(
     { exposeInMainWorld: (_name, value) => { api = value } },
-    { invoke: (channel) => { calls.push(channel); return Promise.resolve(channel) }, on: () => {}, removeListener: () => {} }
+    {
+      invoke: channel => { calls.push(channel); return Promise.resolve(channel) },
+      on: (channel, listener) => listeners.set(channel, listener),
+      removeListener: (channel, listener) => {
+        if (listeners.get(channel) === listener) listeners.delete(channel)
+      }
+    }
   )
-  return { api, calls }
+  return { api, calls, listeners }
 }
 
-function loadRendererIpc() {
+function loadRendererIpc(ucli) {
   const source = readFileSync(new URL('../src/ipc.js', import.meta.url), 'utf8')
     .replace('export const ipc =', 'const ipc =')
     .replace('export default ipc', '')
-  const calls = []
-  const ipc = new Function('window', `${source}\nreturn ipc`)({
-    ucli: {
-      getUpdateState: () => { calls.push('get'); return Promise.resolve('get') },
-      checkForUpdates: () => { calls.push('check'); return Promise.resolve('check') },
-      downloadUpdate: () => { calls.push('download'); return Promise.resolve('download') },
-      installUpdate: () => { calls.push('install'); return Promise.resolve('install') }
-    }
-  })
-  return { ipc, calls }
+  return new Function('window', `${source}\nreturn ipc`)({ ucli })
 }
 
-test('preload update methods invoke only named main-process update channels', async () => {
-  const { api, calls } = loadPreloadApi()
+test('preload exposes named update calls and a removable update-state subscription', async () => {
+  const { api, calls, listeners } = loadPreloadApi()
+  const snapshots = []
+  const unsubscribe = api.onUpdateState(snapshot => snapshots.push(snapshot))
 
-  assert.equal(typeof api.getUpdateState, 'function')
-  assert.equal(typeof api.checkForUpdates, 'function')
-  assert.equal(typeof api.downloadUpdate, 'function')
-  assert.equal(typeof api.installUpdate, 'function')
+  listeners.get('update:state')({}, { revision: 2, status: 'available' })
   await api.getUpdateState()
   await api.checkForUpdates()
   await api.downloadUpdate()
   await api.installUpdate()
+  unsubscribe()
 
+  assert.deepEqual(snapshots, [{ revision: 2, status: 'available' }])
+  assert.equal(listeners.has('update:state'), false)
   assert.deepEqual(calls, ['update:get-state', 'update:check', 'update:download', 'update:install'])
 })
 
-test('renderer IPC delegates update calls to the preload bridge', async () => {
-  const { ipc, calls } = loadRendererIpc()
+test('renderer IPC delegates the named update subscription without generic channels', () => {
+  const calls = []
+  const unsubscribe = () => {}
+  const ipc = loadRendererIpc({
+    getUpdateState: () => 'get',
+    checkForUpdates: () => 'check',
+    downloadUpdate: () => 'download',
+    installUpdate: () => 'install',
+    onUpdateState: handler => { calls.push(handler); return unsubscribe }
+  })
+  const handler = () => {}
 
-  assert.equal(typeof ipc.getUpdateState, 'function')
-  assert.equal(typeof ipc.checkForUpdates, 'function')
-  assert.equal(typeof ipc.downloadUpdate, 'function')
-  assert.equal(typeof ipc.installUpdate, 'function')
-  await ipc.getUpdateState()
-  await ipc.checkForUpdates()
-  await ipc.downloadUpdate()
-  await ipc.installUpdate()
-
-  assert.deepEqual(calls, ['get', 'check', 'download', 'install'])
+  assert.equal(ipc.onUpdateState(handler), unsubscribe)
+  assert.deepEqual(calls, [handler])
 })

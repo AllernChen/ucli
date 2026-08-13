@@ -303,6 +303,48 @@ test('Claude runner uses print JSON schema mode, a resolved profile, and an isol
   }
 })
 
+test('Claude uses only an explicitly validated persistent work directory and deletes only isolated HOME', async () => {
+  const fake = createFakeExecutable()
+  const root = mkdtempSync(join(tmpdir(), 'ucli-persistent-workspace-'))
+  const work = join(root, 'work')
+  mkdirSync(work)
+  try {
+    const runner = createClaudeRunner({
+      resolveExecutable: executableResolver(fake, 'claude', { ANTHROPIC_API_KEY: 'workspace-key' }),
+      validateWorkspaceDirectory: candidate => candidate === work
+    })
+    const result = await runner.run({
+      prompt: 'persistent workspace', schema: SUMMARY_SCHEMA,
+      workspaceDirectory: work, timeoutMs: 5000, maxOutputBytes: 8192
+    })
+    assert.equal(result.value.cwd, work)
+    assert.deepEqual(result.value.entries, [])
+    assert.ok(result.value.env.HOME)
+    assert.equal(result.value.env.HOME.startsWith(root), false)
+    assert.equal(existsSync(result.value.env.HOME), false)
+    assert.equal(existsSync(work), true)
+
+    await assert.rejects(
+      runner.run({
+        prompt: 'forged', schema: SUMMARY_SCHEMA,
+        workspaceDirectory: join(root, 'forged'), timeoutMs: 5000, maxOutputBytes: 8192
+      }),
+      error => error?.code === 'SUMMARY_WORKSPACE_DIRECTORY_INVALID'
+    )
+    const rejectingRunner = createClaudeRunner({
+      validateWorkspaceDirectory() { throw new Error('validator detail') }
+    })
+    await assert.rejects(
+      rejectingRunner.run({ prompt: 'forged', schema: SUMMARY_SCHEMA, workspaceDirectory: work }),
+      error => error?.code === 'SUMMARY_WORKSPACE_DIRECTORY_INVALID' &&
+        !error.message.includes('validator detail')
+    )
+  } finally {
+    fake.cleanup()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('Claude text mode returns stdout directly without JSON schema arguments', async () => {
   let invocation
   const runner = createClaudeRunner({
@@ -450,6 +492,30 @@ test('OpenCode denies every tool and runs pure with isolated config and allowlis
     assert.equal(existsSync(result.value.cwd), false)
   } finally {
     fake.cleanup()
+  }
+})
+
+test('OpenCode runs in a validated persistent work directory without exposing its isolated HOME', async () => {
+  const fake = createFakeExecutable()
+  const root = mkdtempSync(join(tmpdir(), 'ucli-opencode-workspace-'))
+  const work = join(root, 'work')
+  mkdirSync(work)
+  try {
+    const result = await createOpenCodeRunner({
+      adapterId: 'opencode',
+      resolveExecutable: executableResolver(fake, 'opencode', { OPENAI_API_KEY: 'workspace-key' }),
+      validateWorkspaceDirectory: candidate => candidate === work
+    }).run({
+      prompt: 'persistent workspace', schema: SUMMARY_SCHEMA,
+      workspaceDirectory: work, timeoutMs: 5000, maxOutputBytes: 8192
+    })
+    assert.equal(result.value.cwd, work)
+    assert.equal(result.value.env.HOME.startsWith(root), false)
+    assert.equal(existsSync(result.value.env.HOME), false)
+    assert.equal(existsSync(work), true)
+  } finally {
+    fake.cleanup()
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

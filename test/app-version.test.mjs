@@ -9,10 +9,10 @@ const profileCenterSource = readFileSync(new URL('../src/views/ProfileCenter.vue
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const packageLock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'))
 
-test('release package metadata is consistently versioned as 0.10.0', () => {
-  assert.equal(packageJson.version, '0.10.0')
-  assert.equal(packageLock.version, '0.10.0')
-  assert.equal(packageLock.packages[''].version, '0.10.0')
+test('release package metadata is consistently versioned as 0.10.2', () => {
+  assert.equal(packageJson.version, '0.10.2')
+  assert.equal(packageLock.version, '0.10.2')
+  assert.equal(packageLock.packages[''].version, '0.10.2')
 })
 
 test('sidebar version is injected from the package version during renderer build', () => {
@@ -22,7 +22,9 @@ test('sidebar version is injected from the package version during renderer build
     JSON.stringify(packageJson.version)
   )
   assert.match(appSource, /const appVersion = __UCLI_VERSION__/)
-  assert.match(appSource, /\{\{ appVersion \}\}/)
+  assert.match(appSource, /:app-version="appVersion"/)
+  const footerSource = readFileSync(new URL('../src/components/updates/UpdateSiderFooter.vue', import.meta.url), 'utf8')
+  assert.match(footerSource, /v\{\{ appVersion \}\}/)
   assert.doesNotMatch(appSource, /v0\.3\.1/)
 })
 

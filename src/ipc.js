@@ -17,6 +17,7 @@ export const ipc = {
   checkForUpdates: () => u.checkForUpdates(),
   downloadUpdate: () => u.downloadUpdate(),
   installUpdate: () => u.installUpdate(),
+  onUpdateState: (handler) => u.onUpdateState(handler),
   getDiagnostics: () => u.getDiagnostics(),
   exportDiagnostics: () => u.exportDiagnostics(),
   getCodexRuntime: () => u.getCodexRuntime(),
@@ -84,6 +85,9 @@ export const ipc = {
   // settings
   getSettings: () => u.getSettings(),
   updateSettings: (s) => u.updateSettings(s),
+  // application storage
+  getStorageUsage: () => u.getStorageUsage(),
+  clearStorageCategory: (categoryId) => u.clearStorageCategory(categoryId),
   // work summaries
   getSummarySettings: () => u.getSummarySettings(),
   setSummarySettings: (value) => u.setSummarySettings(value),
@@ -96,6 +100,8 @@ export const ipc = {
   deleteSummaryReport: (reportId) => u.deleteSummaryReport(reportId),
   exportSummaryMarkdown: (value) => u.exportSummaryMarkdown(value),
   exportSummaryHtml: (value) => u.exportSummaryHtml(value),
+  getSummaryCacheStats: () => u.getSummaryCacheStats(),
+  clearSummaryCache: (value) => u.clearSummaryCache(value),
   onSummaryProgress: (handler) => u.onSummaryProgress(handler),
   // communication Gateway
   getGatewayState: () => u.getGatewayState(),

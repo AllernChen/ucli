@@ -251,3 +251,53 @@ test('stop cancels and waits for automatic jobs before shutdown can flush', asyn
   await stopping
   assert.equal(stopped, true)
 })
+
+test('daily maintenance removes expired workspaces before cache LRU and does not hang timers', async () => {
+  const events = []
+  let interval
+  const scheduler = createSummaryScheduler({
+    getSettings: () => enabledSettings({ autoEnabled: false }),
+    listReports: () => [],
+    generate: () => ({}),
+    maintain: async () => {
+      events.push('workspace-expired')
+      events.push('cache-lru')
+      return { failedWorkspacesRemoved: 2, cacheEntriesRemoved: 3, cacheBytes: 64 }
+    },
+    now: () => NOW,
+    timeZone: 'UTC',
+    setIntervalFn: (callback, delay) => { interval = { callback, delay }; return 42 },
+    clearIntervalFn: () => {}
+  })
+  await scheduler.start()
+  assert.equal(interval.delay, 15 * 60 * 1000)
+  assert.deepEqual(events, ['workspace-expired', 'cache-lru'])
+  await scheduler.tick()
+  assert.deepEqual(events, ['workspace-expired', 'cache-lru'])
+  await scheduler.stop()
+})
+
+test('maintenance runs before automatic generation and failures do not block catch-up', async () => {
+  const events = []
+  const failures = []
+  const scheduler = createSummaryScheduler({
+    getSettings: () => enabledSettings({
+      autoPeriods: { day: true, week: false, month: false, quarter: false, year: false }
+    }),
+    listReports: () => [],
+    generate: () => { events.push('generate'); return {} },
+    maintain: async () => {
+      events.push('maintain')
+      throw Object.assign(new Error('prompt C:\\private'), { code: 'SUMMARY_CACHE_PRUNE_FAILED' })
+    },
+    onMaintenanceError: event => failures.push(event),
+    now: () => NOW,
+    timeZone: 'UTC',
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {}
+  })
+  await scheduler.start()
+  assert.deepEqual(events, ['maintain', 'generate'])
+  assert.deepEqual(failures, [{ phase: 'daily-maintenance', code: 'SUMMARY_CACHE_PRUNE_FAILED' }])
+  assert.doesNotMatch(JSON.stringify(failures), /prompt|private/i)
+})

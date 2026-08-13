@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
-const JSON_FIELDS = ['usageSnapshot', 'coverage', 'generationUsage']
+const JSON_FIELDS = ['usageSnapshot', 'coverage', 'generationUsage', 'generationMetrics']
 const STATUSES = new Set([
   'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted',
   'awaiting_confirmation', 'skipped_empty'
@@ -9,7 +9,7 @@ const GENERATED_BY = new Set(['manual', 'automatic'])
 const PERIOD_TYPES = new Set(['day', 'week', 'month', 'quarter', 'year'])
 const PATCH_FIELDS = new Set([
   'status', 'markdown', 'executorId', 'profileId', 'model', 'usageSnapshot', 'coverage',
-  'generationUsage', 'generationCostUsd', 'promptVersion', 'sourceHash', 'generatedBy',
+  'generationUsage', 'generationMetrics', 'generationCostUsd', 'promptVersion', 'sourceHash', 'generatedBy',
   'errorText', 'updatedAt', 'partial'
 ])
 
@@ -50,6 +50,37 @@ function jsonObject(value, field) {
   }
 }
 
+const METRIC_FIELDS = new Set([
+  'strategy', 'plannedCalls', 'aiCalls', 'cacheHits', 'durationMs', 'mapConcurrency'
+])
+
+function generationMetrics(value, { allowEmpty = false } = {}) {
+  let metrics
+  try { metrics = jsonObject(value, 'generationMetrics') } catch {
+    throw repositoryError('INVALID_SUMMARY_GENERATION_METRICS', 'Invalid summary generation metrics')
+  }
+  if (allowEmpty && Object.keys(metrics).length === 0) return metrics
+  if (Object.keys(metrics).length !== METRIC_FIELDS.size ||
+    Object.keys(metrics).some(key => !METRIC_FIELDS.has(key)) ||
+    !['direct', 'map-reduce'].includes(metrics.strategy)) {
+    throw repositoryError('INVALID_SUMMARY_GENERATION_METRICS', 'Invalid summary generation metrics')
+  }
+  for (const field of ['plannedCalls', 'aiCalls', 'cacheHits']) {
+    if (!Number.isInteger(metrics[field]) || metrics[field] < 0 || metrics[field] > 1000) {
+      throw repositoryError('INVALID_SUMMARY_GENERATION_METRICS', 'Invalid summary generation metrics')
+    }
+  }
+  if (!Number.isSafeInteger(metrics.durationMs) || metrics.durationMs < 0 ||
+    !Number.isInteger(metrics.mapConcurrency) || metrics.mapConcurrency < 1 || metrics.mapConcurrency > 3) {
+    throw repositoryError('INVALID_SUMMARY_GENERATION_METRICS', 'Invalid summary generation metrics')
+  }
+  return metrics
+}
+
+function persistedGenerationMetrics(value) {
+  try { return generationMetrics(value, { allowEmpty: true }) } catch { return {} }
+}
+
 function normalizeReport(report) {
   if (!report) return null
   if (!STATUSES.has(report.status) || !GENERATED_BY.has(report.generatedBy) ||
@@ -57,7 +88,11 @@ function normalizeReport(report) {
     throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report record')
   }
   const normalized = { ...report }
-  for (const field of JSON_FIELDS) normalized[field] = jsonObject(report[field] ?? {}, field)
+  for (const field of JSON_FIELDS) {
+    normalized[field] = field === 'generationMetrics'
+      ? persistedGenerationMetrics(report[field] ?? {})
+      : jsonObject(report[field] ?? {}, field)
+  }
   return normalized
 }
 
@@ -111,6 +146,7 @@ export function createReportRepository({
         usageSnapshot: {},
         coverage: {},
         generationUsage: {},
+        generationMetrics: {},
         generationCostUsd: null,
         promptVersion: input.promptVersion || 'summary-v1',
         sourceHash: null,
@@ -145,7 +181,9 @@ export function createReportRepository({
         throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report origin')
       }
       for (const field of JSON_FIELDS) {
-        if (safe[field] !== undefined) safe[field] = jsonObject(safe[field], field)
+        if (safe[field] !== undefined) safe[field] = field === 'generationMetrics'
+          ? generationMetrics(safe[field], { allowEmpty: true })
+          : jsonObject(safe[field], field)
       }
       return normalizeReport(db.updateSummaryReport(reportId, safe))
     },

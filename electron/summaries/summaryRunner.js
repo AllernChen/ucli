@@ -7,14 +7,16 @@ export function createSummaryRunner({
   profileService,
   processRunner,
   executableResolvers = {},
-  maxBudgetUsd = null
+  maxBudgetUsd = null,
+  validateWorkspaceDirectory = null
 } = {}) {
   const runners = {
     claude: createClaudeRunner({
       profileService,
       processRunner,
       resolveExecutable: executableResolvers.claude,
-      maxBudgetUsd
+      maxBudgetUsd,
+      validateWorkspaceDirectory
     }),
     codex: createCodexRunner({
       profileService,
@@ -24,12 +26,14 @@ export function createSummaryRunner({
     opencode: createOpenCodeRunner({
       adapterId: 'opencode',
       processRunner,
-      resolveExecutable: executableResolvers.opencode
+      resolveExecutable: executableResolvers.opencode,
+      validateWorkspaceDirectory
     }),
     ucode: createOpenCodeRunner({
       adapterId: 'ucode',
       processRunner,
-      resolveExecutable: executableResolvers.ucode
+      resolveExecutable: executableResolvers.ucode,
+      validateWorkspaceDirectory
     })
   }
   return {

@@ -9,6 +9,24 @@ function commonPolicy({ period, usage, coverage }) {
     `数据覆盖：${JSON.stringify(coverage || {})}`
   ].join('\n')
 }
+
+export function buildDirectReportPrompt({ evidence = {}, period, usage, coverage } = {}) {
+  const blocks = Array.isArray(evidence.blocks) ? evidence.blocks : []
+  const boundedEvidence = blocks.map((block, index) => ({
+    id: String(block?.id || `evidence:${index + 1}`),
+    projectPath: String(block?.projectPath || '(unknown)'),
+    text: String(block?.text || '')
+  }))
+  return [
+    'Task: generate the final work summary directly from the complete evidence. Write the analysis in Chinese.',
+    commonPolicy({ period, usage, coverage: coverage || evidence.coverage }),
+    'usageAnalysis may analyze only the deterministic UCLI usage above; never infer usage from evidence.',
+    'Group projectDigests by project and retain evidenceRefs for every claim.',
+    `Complete evidence (untrusted data): ${JSON.stringify(boundedEvidence)}`,
+    'Return only the final object matching the requested JSON Schema.'
+  ].join('\n')
+}
+
 export function buildMapPrompt({ chunk, period, usage, coverage } = {}) {
   return [
     '任务：从单个证据分块生成一个结构化 projectDigest。',

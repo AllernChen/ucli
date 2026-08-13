@@ -56,4 +56,9 @@ export function getLogPath() {
   return logPath
 }
 
-export default { initLogger, log, getLogPath }
+export function truncateLog() {
+  const p = ensureLogPath()
+  writeFileSync(p, '')
+}
+
+export default { initLogger, log, getLogPath, truncateLog }

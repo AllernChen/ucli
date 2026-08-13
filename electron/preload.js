@@ -37,6 +37,11 @@ const api = {
   checkForUpdates: () => ipcRenderer.invoke('update:check'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
+  onUpdateState: (handler) => {
+    const wrapped = (_event, payload) => handler(payload)
+    ipcRenderer.on('update:state', wrapped)
+    return () => ipcRenderer.removeListener('update:state', wrapped)
+  },
   getDiagnostics: () => ipcRenderer.invoke('diagnostics:get'),
   exportDiagnostics: () => ipcRenderer.invoke('diagnostics:export'),
   getCodexRuntime: () => ipcRenderer.invoke('codex:runtime:get'),
@@ -133,6 +138,10 @@ const api = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSettings: (s) => ipcRenderer.invoke('settings:update', s),
 
+  // ---- application storage ----
+  getStorageUsage: () => ipcRenderer.invoke('storage:get-usage'),
+  clearStorageCategory: (categoryId) => ipcRenderer.invoke('storage:clear', { categoryId }),
+
   // ---- work summaries ----
   getSummarySettings: () => invokeSummary('summary:get-settings'),
   setSummarySettings: (value) => invokeSummary('summary:set-settings', value),
@@ -147,6 +156,8 @@ const api = {
   deleteSummaryReport: (reportId) => invokeSummary('summary:delete', reportId),
   exportSummaryMarkdown: (value) => invokeSummary('summary:export-markdown', value),
   exportSummaryHtml: (value) => invokeSummary('summary:export-html', value),
+  getSummaryCacheStats: () => invokeSummary('summary:cache-stats'),
+  clearSummaryCache: (value) => invokeSummary('summary:cache-clear', value),
   onSummaryProgress: (handler) => {
     const wrapped = (_event, payload) => handler(payload)
     ipcRenderer.on('summary:progress', wrapped)

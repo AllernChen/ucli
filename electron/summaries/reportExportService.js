@@ -1,8 +1,10 @@
 import { writeFile } from 'node:fs/promises'
 
 import { sanitizeSummaryHtml } from './htmlSafety.js'
+import { SUMMARY_THEME_IDS } from './summaryThemeCatalog.js'
+import { renderSummaryTheme } from './summaryThemeRenderer.js'
 
-const STYLE_FIELDS = new Set(['mode', 'requirement'])
+const THEME_IDS = new Set(SUMMARY_THEME_IDS)
 const CADENCE_LABELS = Object.freeze({
   day: '日报', week: '周报', month: '月报', quarter: '季报', year: '年报'
 })
@@ -21,22 +23,31 @@ function requireReport(repository, reportId) {
 }
 
 function validateStyle(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) ||
-    Object.keys(value).some(key => !STYLE_FIELDS.has(key)) ||
-    !['light', 'dark', 'custom'].includes(value.mode)) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw exportError('INVALID_SUMMARY_EXPORT_STYLE', 'Invalid HTML export style')
   }
-  if (value.mode === 'custom') {
+  const keys = Object.keys(value)
+  if (value.mode === 'light' || value.mode === 'dark') {
+    if (keys.length !== 1) throw exportError('INVALID_SUMMARY_EXPORT_STYLE', 'Invalid HTML export style')
+    return { mode: 'theme', themeId: value.mode === 'light' ? 'executive' : 'engineering' }
+  }
+  if (value.mode === 'theme') {
+    if (keys.length !== 2 || !keys.includes('themeId') || !THEME_IDS.has(value.themeId)) {
+      throw exportError('INVALID_SUMMARY_EXPORT_STYLE', 'Invalid HTML export style')
+    }
+    return { mode: 'theme', themeId: value.themeId }
+  }
+  if (value.mode === 'custom' || value.mode === 'ai-custom') {
+    if (keys.length !== 2 || !keys.includes('requirement')) {
+      throw exportError('INVALID_SUMMARY_EXPORT_STYLE', 'Invalid custom HTML style')
+    }
     if (typeof value.requirement !== 'string' || !value.requirement.trim() ||
       value.requirement.length > 1000 || value.requirement.includes('\0')) {
       throw exportError('INVALID_SUMMARY_EXPORT_STYLE', 'Invalid custom HTML style')
     }
-    return { mode: 'custom', requirement: value.requirement.trim() }
+    return { mode: 'ai-custom', requirement: value.requirement.trim() }
   }
-  if (value.requirement !== undefined) {
-    throw exportError('INVALID_SUMMARY_EXPORT_STYLE', 'Preset styles cannot include a custom requirement')
-  }
-  return { mode: value.mode }
+  throw exportError('INVALID_SUMMARY_EXPORT_STYLE', 'Invalid HTML export style')
 }
 
 function localDate(timestamp, timeZone) {
@@ -152,7 +163,18 @@ export function createReportExportService({
       const style = validateStyle(input.style)
       const selection = runnerSelection(report, input)
       const filePath = await chooseDestination(report, 'html')
-      if (!filePath) return { canceled: true }
+      const generation = style.mode === 'theme' ? 'local' : 'ai'
+      if (!filePath) return { canceled: true, generation }
+      if (style.mode === 'theme') {
+        const html = renderSummaryTheme({
+          themeId: style.themeId,
+          markdown: report.markdown,
+          report,
+          usageSnapshot: report.usageSnapshot || {}
+        })
+        await writeUtf8(filePath, html)
+        return { canceled: false, filePath, generation }
+      }
       const run = prompt => runner.run({
         ...selection,
         prompt,
@@ -185,7 +207,7 @@ export function createReportExportService({
         })
       }
       await writeUtf8(filePath, cleaned.html)
-      return { canceled: false, filePath }
+      return { canceled: false, filePath, generation }
     }
   }
 }

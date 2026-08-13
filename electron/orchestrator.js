@@ -1,7 +1,8 @@
 import { app, ipcMain, dialog, shell, Notification, safeStorage } from 'electron'
 import { join } from 'path'
+import { homedir } from 'os'
 import { readFileSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { openAllowedExternalUrl } from './externalLinks.js'
 import { PermissionEngine } from './permission/engine.js'
 import { startHookServer } from './permission/hookServer.js'
@@ -11,7 +12,7 @@ import { DEFAULT_RULESET, upgradeDefaultRuleset } from './permission/defaultRule
 import { createAdapterMap } from './adapterRegistry.js'
 import { TIER } from './adapters/cliAdapter.js'
 import { openDb, getDb } from './persistence/db.js'
-import { initLogger, log } from './logger.js'
+import { initLogger, log, truncateLog } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
 import { createSessionDiagnosticsService, registerSessionDiagnosticsIpc } from './sessionDiagnosticsService.js'
@@ -49,13 +50,17 @@ import { createReportRepository } from './summaries/reportRepository.js'
 import { createReportExportService } from './summaries/reportExportService.js'
 import { createSummaryJobService } from './summaries/summaryJobService.js'
 import { createSummaryRunner } from './summaries/summaryRunner.js'
+import { createSummaryCacheService } from './summaries/summaryCacheService.js'
+import { resolveSummaryStorageRoot, resolveSummaryChild } from './summaries/summaryStoragePaths.js'
+import { createSummaryWorkspaceService } from './summaries/summaryWorkspaceService.js'
+import { runSummaryMaintenance, runSummaryStartupLifecycle, safeStartupFailure } from './startupLifecycle.js'
+import { SUMMARY_THEME_IDS } from './summaries/summaryThemeCatalog.js'
 import {
   createSummaryOperationalLogEntry,
   safeSummaryErrorCode
 } from './summaries/operationalLog.js'
 import {
   DEFAULT_SUMMARY_SETTINGS,
-  createLiveSummaryPipeline,
   createSummaryScheduler,
   normalizeSummarySettings,
   profileAvailableForSummary,
@@ -63,6 +68,9 @@ import {
   updateSummarySettings
 } from './summaries/summaryScheduler.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
+import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
+import { scanStorageCategories } from './storage/storageScanner.js'
+import { createStorageManagementService } from './storage/storageManagementService.js'
 import { GatewayManager } from './gateway/manager.js'
 import { createGatewayPort } from './gateway/orchestratorPort.js'
 import { SessionSignalBus } from './gateway/sessionSignalBus.js'
@@ -87,8 +95,10 @@ const DEFAULT_SETTINGS = {
 
 const SUMMARY_SETTINGS_FIELDS = new Set([
   'autoEnabled', 'autoPeriods', 'defaultExecutorId', 'defaultProfileId',
-  'defaultModel', 'firstEnableDisclosureAcceptedAt', 'automaticCallLimit'
+  'defaultModel', 'firstEnableDisclosureAcceptedAt', 'automaticCallLimit',
+  'cacheEnabled', 'cacheMaxBytes', 'failedWorkspaceRetentionDays', 'mapConcurrency'
 ])
+const SUMMARY_CACHE_CLEAR_FIELDS = new Set(['includeFailedWorkspaces'])
 const SUMMARY_REPORT_FILTER_FIELDS = new Set([
   'periodType', 'status', 'generatedBy', 'timezone', 'periodStart',
   'periodEndExclusive', 'isCurrent'
@@ -99,7 +109,8 @@ const SUMMARY_GENERATE_FIELDS = new Set([
 ])
 const SUMMARY_CONFIRM_FIELDS = new Set(['reportId', 'confirm', 'confirmationCallLimit'])
 const SUMMARY_EXPORT_FIELDS = new Set(['reportId', 'style', 'executorId', 'profileId', 'model'])
-const SUMMARY_STYLE_FIELDS = new Set(['mode', 'requirement'])
+const SUMMARY_STYLE_FIELDS = new Set(['mode', 'themeId', 'requirement'])
+const SUMMARY_HTML_THEME_IDS = new Set(SUMMARY_THEME_IDS)
 const SUMMARY_PERIODS = new Set(['day', 'week', 'month', 'quarter', 'year'])
 const SUMMARY_EXECUTORS = new Set(['claude', 'codex', 'opencode', 'ucode'])
 const SUMMARY_ERROR_MESSAGES = Object.freeze({
@@ -119,6 +130,85 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   SUMMARY_PROFILE_UNAVAILABLE: 'Select an available default AI CLI profile',
   SUMMARY_DISCLOSURE_REQUIRED: 'Automatic summaries require disclosure acceptance'
 })
+
+const STORAGE_CATEGORY_ID_SET = new Set(STORAGE_CATEGORY_IDS)
+const STORAGE_STATUSES = new Set(['ready', 'partial', 'unavailable', 'busy', 'scheduled'])
+const STORAGE_CLEAR_MODES = new Set(['none', 'immediate', 'restart'])
+
+function invalidStorageRequest() {
+  return Object.assign(new Error('Invalid storage request'), { code: 'INVALID_STORAGE_REQUEST' })
+}
+
+function storageSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0
+}
+
+export function validateStorageClear(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    Object.keys(value).length !== 1 || typeof value.categoryId !== 'string' ||
+    !STORAGE_CATEGORY_ID_SET.has(value.categoryId)) throw invalidStorageRequest()
+  return { categoryId: value.categoryId }
+}
+
+function safeStorageCategory(value = {}) {
+  return {
+    id: STORAGE_CATEGORY_ID_SET.has(value.id) ? value.id : '',
+    bytes: storageSafeInteger(value.bytes),
+    itemCount: storageSafeInteger(value.itemCount),
+    reclaimableBytes: storageSafeInteger(value.reclaimableBytes),
+    status: STORAGE_STATUSES.has(value.status) ? value.status : 'unavailable',
+    clearMode: STORAGE_CLEAR_MODES.has(value.clearMode) ? value.clearMode : 'none'
+  }
+}
+
+function safeStorageSnapshot(value = {}) {
+  return {
+    revision: storageSafeInteger(value.revision),
+    scannedAt: storageSafeInteger(value.scannedAt),
+    totalBytes: storageSafeInteger(value.totalBytes),
+    reclaimableBytes: storageSafeInteger(value.reclaimableBytes),
+    pendingRestart: Array.isArray(value.pendingRestart)
+      ? value.pendingRestart.filter(id => STORAGE_CATEGORY_ID_SET.has(id))
+      : [],
+    categories: Array.isArray(value.categories) ? value.categories.map(safeStorageCategory) : []
+  }
+}
+
+function safeStorageClearResult(value = {}) {
+  return {
+    categoryId: STORAGE_CATEGORY_ID_SET.has(value.categoryId) ? value.categoryId : '',
+    pendingRestart: value.pendingRestart === true,
+    removed: storageSafeInteger(value.removed),
+    bytes: storageSafeInteger(value.bytes),
+    remainingBytes: storageSafeInteger(value.remainingBytes),
+    partial: value.partial === true
+  }
+}
+
+function storageOperationError(error) {
+  if (error?.code === 'INVALID_STORAGE_REQUEST' ||
+    error?.code === 'STORAGE_CATEGORY_PROTECTED' ||
+    error?.code === 'STORAGE_CATEGORY_UNKNOWN') return error
+  return Object.assign(new Error('Storage operation failed'), { code: 'STORAGE_OPERATION_FAILED' })
+}
+
+export function registerStorageIpc({ ipcMain, service }) {
+  ipcMain.handle('storage:get-usage', async (_event, ...args) => {
+    try {
+      if (args.length !== 0) throw invalidStorageRequest()
+      return safeStorageSnapshot(await service.getUsage())
+    } catch (error) {
+      throw storageOperationError(error)
+    }
+  })
+  ipcMain.handle('storage:clear', async (_event, value) => {
+    try {
+      return safeStorageClearResult(await service.clear(validateStorageClear(value)))
+    } catch (error) {
+      throw storageOperationError(error)
+    }
+  })
+}
 
 function splitSettingsPatch(value = {}) {
   const appSettings = {}
@@ -178,6 +268,23 @@ function validateSummarySettings(value) {
     (!Number.isInteger(result.automaticCallLimit) || result.automaticCallLimit < 1 || result.automaticCallLimit > 100)) {
     throw invalidSummaryIpc()
   }
+  if (result.cacheEnabled !== undefined && typeof result.cacheEnabled !== 'boolean') {
+    throw invalidSummaryIpc()
+  }
+  if (result.cacheMaxBytes !== undefined && ![
+    268435456, 536870912, 1073741824, 2147483648, 5368709120
+  ].includes(result.cacheMaxBytes)) throw invalidSummaryIpc()
+  if (result.failedWorkspaceRetentionDays !== undefined &&
+    ![1, 3, 7, 14, 30].includes(result.failedWorkspaceRetentionDays)) throw invalidSummaryIpc()
+  if (result.mapConcurrency !== undefined && ![1, 2, 3].includes(result.mapConcurrency)) {
+    throw invalidSummaryIpc()
+  }
+  return result
+}
+
+function validateSummaryCacheClear(value) {
+  const result = { ...summaryObject(value, SUMMARY_CACHE_CLEAR_FIELDS) }
+  if (typeof result.includeFailedWorkspaces !== 'boolean') throw invalidSummaryIpc()
   return result
 }
 
@@ -232,11 +339,18 @@ function validateSummaryExport(value, { html = false } = {}) {
   const result = { ...summaryObject(value, fields), reportId: validateSummaryId(value.reportId) }
   if (html) {
     const style = { ...summaryObject(result.style, SUMMARY_STYLE_FIELDS) }
-    if (!['light', 'dark', 'custom'].includes(style.mode)) throw invalidSummaryIpc()
-    if (style.mode === 'custom') {
+    const styleKeys = Object.keys(style)
+    if (style.mode === 'theme') {
+      if (styleKeys.length !== 2 || !styleKeys.includes('themeId') || !SUMMARY_HTML_THEME_IDS.has(style.themeId)) {
+        throw invalidSummaryIpc()
+      }
+    } else if (style.mode === 'custom' || style.mode === 'ai-custom') {
+      if (styleKeys.length !== 2 || !styleKeys.includes('requirement')) throw invalidSummaryIpc()
       if (typeof style.requirement !== 'string' || !style.requirement.trim() ||
         style.requirement.length > 1000 || style.requirement.includes('\0')) throw invalidSummaryIpc()
-    } else if (style.requirement !== undefined) {
+    } else if (style.mode === 'light' || style.mode === 'dark') {
+      if (styleKeys.length !== 1) throw invalidSummaryIpc()
+    } else {
       throw invalidSummaryIpc()
     }
     if (result.executorId !== undefined && result.executorId !== null && !SUMMARY_EXECUTORS.has(result.executorId)) {
@@ -320,7 +434,25 @@ function safeSummaryEnvelope(operation) {
   }
 }
 
-function summaryProgressPayload(report, confirmationCallLimit = null, pipelineProgress = null) {
+function storageCounter(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0
+}
+
+export function normalizeSummaryStorageStats(value = {}) {
+  const cacheBytes = storageCounter(value.cacheBytes)
+  const workspaceBytes = storageCounter(value.workspaceBytes)
+  return {
+    totalBytes: Math.min(Number.MAX_SAFE_INTEGER, cacheBytes + workspaceBytes),
+    quotaBytes: storageCounter(value.quotaBytes),
+    cacheBytes,
+    workspaceBytes,
+    entries: storageCounter(value.entries),
+    failedWorkspaces: storageCounter(value.failedWorkspaces),
+    lastPrunedAt: storageCounter(value.lastPrunedAt) || null
+  }
+}
+
+export function summaryProgressPayload(report, confirmationCallLimit = null, pipelineProgress = null) {
   const phaseByStatus = {
     queued: 'queued', running: 'collecting', awaiting_confirmation: 'awaiting_confirmation',
     completed: 'completed', failed: 'failed', cancelled: 'cancelled',
@@ -337,7 +469,7 @@ function summaryProgressPayload(report, confirmationCallLimit = null, pipelinePr
   const terminal = ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(report?.status)
   if (pipelineProgress) {
     const progressText = {
-      collecting: '正在收集材料', mapping: '正在分析材料',
+      'cache-check': '正在检查缓存', collecting: '正在收集材料', mapping: '正在分析材料',
       reducing: '正在汇总项目', rendering: '正在生成报告'
     }
     return {
@@ -370,6 +502,29 @@ export function registerSummaryIpc({ ipcMain, service }) {
   ipcMain.handle('summary:delete', safeSummaryEnvelope((_event, value) => service.deleteReport(validateSummaryId(value))))
   ipcMain.handle('summary:export-markdown', safeSummaryEnvelope((_event, value) => service.exportMarkdown(validateSummaryExport(value))))
   ipcMain.handle('summary:export-html', safeSummaryEnvelope((_event, value) => service.exportHtml(validateSummaryExport(value, { html: true }))))
+  ipcMain.handle('summary:cache-stats', safeSummaryEnvelope((_event, ...args) => {
+    if (args.length > 0) throw invalidSummaryIpc()
+    return service.getCacheStats()
+  }))
+  ipcMain.handle('summary:cache-clear', safeSummaryEnvelope((_event, value) =>
+    service.clearCache(validateSummaryCacheClear(value))))
+}
+
+export async function deleteSummaryReportAndWorkspace(reportId, {
+  repository, jobService, workspaceService, onEvent = () => {}
+}) {
+  const result = await repository.delete(reportId)
+  if (!jobService?.isActive(reportId)) {
+    try {
+      await workspaceService?.remove(reportId)
+    } catch (error) {
+      const typed = error?.code
+        ? safeStartupFailure('workspace-delete', error)
+        : { phase: 'workspace-delete', code: 'SUMMARY_WORKSPACE_DELETE_FAILED' }
+      try { onEvent(typed) } catch { /* logging isolation */ }
+    }
+  }
+  return result
 }
 
 function summaryUsageGranularity(periodType) {
@@ -475,8 +630,38 @@ export function createOrchestrator() {
   let summaryRepository = null
   let summaryJobService = null
   let summaryScheduler = null
+  let summaryStorageMaintenance = null
   let summaryExportService = null
+  let summaryWorkspaceService = null
+  let summaryCacheService = null
+  let storageService = null
+  let summaryCacheLastPrunedAt = null
   let persistenceRecovery = null
+  const storageRoots = resolveUcliStorageRoots({
+    platform: process.platform,
+    env: process.env,
+    homeDirectory: app.getPath('home'),
+    userDataPath: app.getPath('userData'),
+    sessionDataPath: app.getPath('sessionData')
+  })
+  if (storageRoots) {
+    storageService = createStorageManagementService({
+      scanner: scanStorageCategories,
+      roots: storageRoots,
+      summaryCache: {
+        clear: (...args) => summaryCacheService?.clear(...args) || Promise.reject(
+          Object.assign(new Error(), { code: 'STORAGE_SERVICE_UNAVAILABLE' })
+        )
+      },
+      summaryWorkspaces: {
+        clearDerived: (...args) => summaryWorkspaceService?.clearDerived(...args) || Promise.reject(
+          Object.assign(new Error(), { code: 'STORAGE_SERVICE_UNAVAILABLE' })
+        )
+      },
+      isWorkspaceProtected: reportId => summaryJobService?.isActive(reportId) === true,
+      logger: { truncate: () => truncateLog() }
+    })
+  }
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
   const approvalNotifications = new Map()
@@ -572,7 +757,44 @@ export function createOrchestrator() {
   async function initSummaryAutomation(db) {
     summarySettings = db.getSummarySettings()
     summaryRepository = createReportRepository({ db })
-    const runner = createSummaryRunner({ profileService })
+    const summaryRoot = resolveSummaryStorageRoot({
+      platform: process.platform,
+      env: process.env,
+      homeDirectory: homedir()
+    })
+    const normalizedWorkspace = candidate => process.platform === 'win32'
+      ? candidate.toLowerCase()
+      : candidate
+    const validateWorkspaceDirectory = candidate => {
+      const parent = join(candidate, '..')
+      const reportId = parent.split(/[\\/]/).at(-1)
+      try {
+        return normalizedWorkspace(candidate) === normalizedWorkspace(
+          join(resolveSummaryChild(summaryRoot, 'workspaces', reportId), 'work')
+        )
+      } catch {
+        return false
+      }
+    }
+    const workspaceForSettings = () => createSummaryWorkspaceService({
+      root: summaryRoot,
+      failedRetentionMs: summarySettings.failedWorkspaceRetentionDays * 24 * 60 * 60 * 1000
+    })
+    summaryWorkspaceService = Object.fromEntries(
+      ['create', 'writeArtifact', 'markStage', 'complete', 'fail', 'recover', 'remove', 'usage', 'clearFailed', 'clearDerived', 'pruneExpired', 'pruneOrphans', 'pruneCompleted']
+        .map(method => [method, (...args) => workspaceForSettings()[method](...args)])
+    )
+    const cacheForSettings = () => createSummaryCacheService({
+      root: summaryRoot,
+      repository: db,
+      quotaBytes: summarySettings.cacheMaxBytes
+    })
+    const cache = Object.fromEntries(
+      ['get', 'put', 'evict', 'prune', 'stats', 'clear', 'verify']
+        .map(method => [method, (...args) => cacheForSettings()[method](...args)])
+    )
+    summaryCacheService = cache
+    const runner = createSummaryRunner({ profileService, validateWorkspaceDirectory })
     summaryExportService = createReportExportService({
       repository: summaryRepository,
       runner,
@@ -580,11 +802,27 @@ export function createOrchestrator() {
         ? dialog.showSaveDialog(mainWindow, options)
         : dialog.showSaveDialog(options)
     })
-    const pipeline = createLiveSummaryPipeline({
-      runner,
-      getSettings: () => summarySettings,
-      createPipeline: createSummaryPipeline
-    })
+    const pipeline = {
+      run(options) {
+        const profile = options.profileId
+          ? profileService?.listProfiles({ adapterId: options.executorId })
+            .find(candidate => candidate.id === options.profileId)
+          : null
+        const profileFingerprint = `sha256:${createHash('sha256').update(JSON.stringify({
+          executorId: options.executorId || null,
+          profileId: options.profileId || null,
+          runtimeRevision: profile?.updatedAt || profile?.runtimeRevision || null
+        })).digest('hex')}`
+        return createSummaryPipeline({
+          runner,
+          automaticCallLimit: summarySettings.automaticCallLimit,
+          cache: summarySettings.cacheEnabled ? cache : null,
+          promptVersion: options.promptVersion || 'summary-v1',
+          profileFingerprint,
+          mapConcurrency: summarySettings.mapConcurrency
+        }).run(options)
+      }
+    }
     summaryJobService = createSummaryJobService({
       repository: summaryRepository,
       evidenceCollector: createEvidenceCollector({ historyService }),
@@ -596,6 +834,7 @@ export function createOrchestrator() {
           timeZone: timezone
         }),
       pipeline,
+      workspaceService: summaryWorkspaceService,
       listSessions,
       defaultTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
     })
@@ -614,13 +853,58 @@ export function createOrchestrator() {
       }
     })
     scheduleFlush()
+    summaryStorageMaintenance = async () => {
+      const result = await runSummaryMaintenance({
+        quotaBytes: summarySettings.cacheMaxBytes,
+        pruneExpiredWorkspaces: () => summaryWorkspaceService.pruneExpired(),
+        pruneOrphanWorkspaces: () => summaryWorkspaceService.pruneOrphans({
+          isProtected: reportId => summaryJobService.isActive(reportId),
+          isRetained: reportId => Boolean(summaryRepository.get(reportId))
+        }),
+        getWorkspaceUsage: () => summaryWorkspaceService.usage(),
+        pruneCache: maxBytes => summaryCacheService.prune(maxBytes),
+        getCacheUsage: () => summaryCacheService.stats(),
+        pruneCompletedWorkspaces: maxBytes => summaryWorkspaceService.pruneCompleted({
+          maxBytes,
+          isProtected: reportId => summaryJobService.isActive(reportId)
+        }),
+        onEvent: event => log('summary-maintenance', event)
+      })
+      summaryCacheLastPrunedAt = Date.now()
+      log('summary-maintenance', {
+        phase: 'daily-maintenance',
+        failedWorkspacesRemoved: result.workspaces?.removed || 0,
+        workspaceBytesRemoved: result.workspaces?.bytes || 0,
+        orphanWorkspacesChecked: result.orphans?.checked || 0,
+        orphanWorkspacesRemoved: result.orphans?.removed || 0,
+        orphanBytesRemoved: result.orphans?.bytes || 0,
+        cacheEntriesRemoved: result.cache?.removed || 0,
+        cacheBytes: result.cache?.bytes || 0,
+        completedWorkspacesRemoved: result.completed?.removed || 0,
+        totalBytes: result.total?.bytes || 0,
+        overQuotaBytes: result.total?.overQuotaBytes || 0
+      })
+      return result
+    }
     summaryScheduler = createSummaryScheduler({
       getSettings: () => summarySettings,
       listReports: filters => summaryRepository.list(filters),
       generate: request => summaryJobService.generate(request),
-      cancel: reportId => summaryJobService.cancel(reportId)
+      cancel: reportId => summaryJobService.cancel(reportId),
+      maintain: () => summaryStorageMaintenance(),
+      onMaintenanceError: event => log('summary-maintenance', event)
     })
-    await summaryScheduler.start()
+    await runSummaryStartupLifecycle({
+      recoverWorkspaces: () => summaryWorkspaceService.recover(),
+      maintainCache: async () => {
+        const verified = summarySettings.cacheEnabled ? await cache.verify() : null
+        const maintained = await summaryStorageMaintenance()
+        return { verified, maintained }
+      },
+      interruptStaleJobs: () => summaryRepository.interruptStale(),
+      startScheduler: () => summaryScheduler.start(),
+      onEvent: event => log('summary-startup', event)
+    })
   }
 
   function applyCodexProviderPolicy(session, { imported = false } = {}) {
@@ -2118,11 +2402,12 @@ export function createOrchestrator() {
   }
 
   async function saveSummarySettingsPatch(summary) {
-    const candidate = normalizeSummarySettings({
+    const previousCacheMaxBytes = summarySettings.cacheMaxBytes
+    const candidate = {
       ...summarySettings,
       ...summary,
       autoPeriods: { ...summarySettings.autoPeriods, ...(summary.autoPeriods || {}) }
-    })
+    }
     const db = getDb()
     const automationAvailable = Boolean(db && summaryScheduler)
     const availableExecutors = candidate.autoEnabled && automationAvailable
@@ -2131,14 +2416,23 @@ export function createOrchestrator() {
     const availableProfiles = candidate.autoEnabled && automationAvailable && candidate.defaultExecutorId
       ? profileService?.listProfiles({ adapterId: candidate.defaultExecutorId }) || []
       : []
-    summarySettings = updateSummarySettings(summarySettings, summary, {
-      availableExecutors,
-      availableProfiles,
-      automationAvailable
-    })
+    summarySettings = {
+      ...updateSummarySettings(summarySettings, summary, {
+        availableExecutors,
+        availableProfiles,
+        automationAvailable
+      }),
+      cacheEnabled: candidate.cacheEnabled,
+      cacheMaxBytes: candidate.cacheMaxBytes,
+      failedWorkspaceRetentionDays: candidate.failedWorkspaceRetentionDays,
+      mapConcurrency: candidate.mapConcurrency
+    }
     if (db) {
       db.setSummarySettings(summarySettings)
       scheduleFlush()
+    }
+    if (summarySettings.cacheMaxBytes < previousCacheMaxBytes) {
+      await summaryStorageMaintenance?.()
     }
     await summaryScheduler?.tick()
     return summarySettings
@@ -2155,6 +2449,7 @@ export function createOrchestrator() {
       getClaudeRuntime: () => readClaudeRuntimeSnapshot({ env: process.env })
     })
     if (skillsService) registerSkillsIpc({ ipcMain, service: skillsService })
+    if (storageService) registerStorageIpc({ ipcMain, service: storageService })
     registerSummaryIpc({
       ipcMain,
       service: {
@@ -2206,7 +2501,12 @@ export function createOrchestrator() {
         },
         async deleteReport(reportId) {
           if (!summaryRepository) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
-          const result = await summaryRepository.delete(reportId)
+          const result = await deleteSummaryReportAndWorkspace(reportId, {
+            repository: summaryRepository,
+            jobService: summaryJobService,
+            workspaceService: summaryWorkspaceService,
+            onEvent: event => log('summary-maintenance', event)
+          })
           scheduleFlush()
           return result
         },
@@ -2220,6 +2520,37 @@ export function createOrchestrator() {
             log('summary-html-export-failed', safeSummaryErrorCode(error?.code, 'SUMMARY_HTML_EXPORT_FAILED'))
             throw error
           })
+        },
+        async getCacheStats() {
+          if (!summaryCacheService || !summaryWorkspaceService) {
+            throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          }
+          const [cacheStats, workspaceStats] = await Promise.all([
+            summaryCacheService.stats(),
+            summaryWorkspaceService.usage({ includeFailedWorkspaces: true })
+          ])
+          return normalizeSummaryStorageStats({
+            quotaBytes: cacheStats.quotaBytes,
+            cacheBytes: cacheStats.bytes,
+            workspaceBytes: workspaceStats.bytes,
+            entries: cacheStats.entries,
+            failedWorkspaces: workspaceStats.failedWorkspaces,
+            lastPrunedAt: summaryCacheLastPrunedAt
+          })
+        },
+        async clearCache({ includeFailedWorkspaces }) {
+          if (!summaryCacheService || !summaryWorkspaceService) {
+            throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          }
+          const cacheResult = await summaryCacheService.clear()
+          const workspaceResult = includeFailedWorkspaces
+            ? await summaryWorkspaceService.clearFailed()
+            : { removed: 0 }
+          summaryCacheLastPrunedAt = Date.now()
+          return {
+            cacheEntriesRemoved: cacheResult.removed,
+            failedWorkspacesRemoved: workspaceResult.removed
+          }
         }
       }
     })
@@ -2610,6 +2941,8 @@ export function createOrchestrator() {
       codexConfigWatcher = null
       await summaryScheduler?.stop()
       summaryScheduler = null
+      await summaryJobService?.shutdown()
+      await summaryWorkspaceService?.recover()
       for (const notification of approvalNotifications.values()) notification.close()
       approvalNotifications.clear()
       for (const notification of completionNotifications) notification.close()

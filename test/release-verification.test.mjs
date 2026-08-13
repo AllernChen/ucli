@@ -12,14 +12,14 @@ function verifyReleaseArtifacts({ rootDir }) {
   return verifyReleaseArtifactsForPlatform({ rootDir, platform: 'win32', arch: 'x64' })
 }
 
-test('0.10.0 release package and user documentation agree', async () => {
+test('0.10.2 release package and acceptance documentation agree', async () => {
   const [packageSource, readme, changelog, acceptance] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../README.md', import.meta.url), 'utf8'),
     readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8'),
     readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8')
   ])
-  assert.equal(JSON.parse(packageSource).version, '0.10.0')
+  assert.equal(JSON.parse(packageSource).version, '0.10.2')
   assert.match(readme, /配置档案/)
   assert.match(readme, /CC Switch/)
   assert.match(readme, /Claude 登录态/)
@@ -30,7 +30,45 @@ test('0.10.0 release package and user documentation agree', async () => {
   assert.doesNotMatch(changelog, /\uFFFD/)
   assert.match(readme, /Skills 管理/)
   assert.match(readme, /GitLab/)
-  assert.match(changelog, /## \[0\.10\.0\] - 2026-08-12/)
+  assert.match(changelog, /## \[0\.10\.2\] - 2026-08-13/)
+  for (const anchor of [
+    'settings-section-navigation',
+    'settings-section-deep-link',
+    'storage-inventory-no-provider-paths',
+    'storage-protected-data',
+    'storage-immediate-cleanup',
+    'storage-restart-cleanup',
+    'storage-partial-failure',
+    'update-footer-available',
+    'update-footer-download-progress',
+    'update-footer-downloaded',
+    'update-portable-unsupported'
+  ]) assert.match(acceptance, new RegExp(`\\b${anchor}\\b`))
+  for (const manualCheck of [
+    /0\.10\.1.*设置.*报告.*会话.*档案.*Skills.*用量.*缓存/s,
+    /鼠标.*键盘.*\?section=storage.*900/s,
+    /外部 Provider.*项目路径.*受保护.*不可清理/s,
+    /活动中的总结工作区.*保留.*非活动.*派生数据.*删除/s,
+    /浏览器.*Skills.*更新器.*下次启动.*受保护/s,
+    /不可读.*锁定.*partial.*partial-success.*零.*完全成功/s,
+    /0\.10\.2.*较新测试版本.*侧栏.*不自动下载/s,
+    /相同百分比.*侧栏.*设置.*导航.*重新加载/s,
+    /重启并安装.*安装器/s,
+    /便携版.*开发版.*更新器网络.*下载操作/s
+  ]) assert.match(acceptance, manualCheck)
+  for (const anchor of [
+    'summary-workspace-recovery',
+    'summary-cache-quota',
+    'summary-cache-partial-hit',
+    'summary-direct-one-call',
+    'summary-map-concurrency',
+    'summary-theme-executive',
+    'summary-theme-engineering',
+    'summary-theme-timeline',
+    'summary-theme-dashboard',
+    'summary-theme-print',
+    'summary-ai-custom-export'
+  ]) assert.match(acceptance, new RegExp(`\\b${anchor}\\b`))
   assert.match(readme, /精确趋势从升级到 0\.10\.0 后开始/)
   assert.match(readme, /升级前累计总量.*单独/)
   assert.match(readme, /自动总结.*默认关闭.*AI CLI/s)

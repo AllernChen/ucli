@@ -205,6 +205,27 @@ test('renderer settings expose automatic cadence, default CLI/profile/model, and
   assert.match(view, /手动生成时仍可逐次选择/)
 })
 
+test('renderer cache settings expose only bounded cache policy controls', () => {
+  const store = readFileSync(new URL('../src/stores/settings.js', import.meta.url), 'utf8')
+  const view = readFileSync(new URL('../src/views/Settings.vue', import.meta.url), 'utf8')
+  const component = readFileSync(
+    new URL('../src/components/settings/SummaryCacheSettings.vue', import.meta.url), 'utf8'
+  )
+  assert.deepEqual(parseSfc(component, { filename: 'SummaryCacheSettings.vue' }).errors, [])
+  for (const field of [
+    'cacheEnabled', 'cacheMaxBytes', 'failedWorkspaceRetentionDays', 'mapConcurrency'
+  ]) {
+    assert.match(store, new RegExp(field))
+    assert.match(component, new RegExp(field))
+  }
+  for (const bytes of [268435456, 536870912, 1073741824, 2147483648, 5368709120]) {
+    assert.match(component, new RegExp(String(bytes)))
+  }
+  assert.doesNotMatch(component, /getSummaryCacheStats|clearSummaryCache/)
+  assert.doesNotMatch(component, /Modal\.confirm|formatBytes/)
+  assert.match(view, /SummaryCacheSettings/)
+})
+
 test('orchestrator merges summary settings compatibly and owns scheduler startup and shutdown', () => {
   const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
   assert.match(source, /createSummaryScheduler/)
@@ -214,4 +235,45 @@ test('orchestrator merges summary settings compatibly and owns scheduler startup
   assert.match(source, /summaryScheduler\?\.stop\(\)/)
   assert.match(source, /summaryJobService\.subscribe\(\(report, pipelineProgress\) => \{[\s\S]*?scheduleFlush\(\)[\s\S]*?summary:progress/)
   assert.match(source, /updateSummarySettings/)
+  assert.match(source, /cacheEnabled:\s*candidate\.cacheEnabled/)
+  assert.match(source, /cacheMaxBytes:\s*candidate\.cacheMaxBytes/)
+  assert.match(source, /failedWorkspaceRetentionDays:\s*candidate\.failedWorkspaceRetentionDays/)
+  assert.match(source, /mapConcurrency:\s*candidate\.mapConcurrency/)
+})
+
+test('lowering the cache quota prunes before automatic scheduler work', () => {
+  const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+  const save = source.indexOf('async function saveSummarySettingsPatch')
+  const quotaChanged = source.indexOf('cacheMaxBytes', save)
+  const maintain = source.indexOf('await summaryStorageMaintenance?.()', quotaChanged)
+  const tick = source.indexOf('await summaryScheduler?.tick()', maintain)
+  assert.ok(save >= 0 && quotaChanged > save && maintain > quotaChanged && tick > maintain)
+  const quotaGuard = source.lastIndexOf('if (summarySettings.', maintain)
+  assert.match(source.slice(quotaGuard, maintain), /if \(summarySettings\.cacheMaxBytes < previousCacheMaxBytes\)/)
+})
+
+test('startup applies the shared workspace quota even when result caching is disabled', () => {
+  const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+  const startup = source.indexOf('maintainCache: async () =>')
+  const interrupt = source.indexOf('interruptStaleJobs:', startup)
+  const block = source.slice(startup, interrupt)
+  assert.match(block, /summaryStorageMaintenance\(\)/)
+  assert.doesNotMatch(block, /if \(!summarySettings\.cacheEnabled\) return/)
+})
+
+test('shared quota maintenance counts retained cache files even when cache reuse is disabled', () => {
+  const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+  const maintenance = source.indexOf('summaryStorageMaintenance = async () =>')
+  const scheduler = source.indexOf('summaryScheduler = createSummaryScheduler', maintenance)
+  const block = source.slice(maintenance, scheduler)
+  assert.match(block, /pruneCache:\s*maxBytes => summaryCacheService\.prune\(maxBytes\)/)
+  assert.match(block, /getCacheUsage:\s*\(\) => summaryCacheService\.stats\(\)/)
+  assert.doesNotMatch(block, /cacheEnabled/)
+})
+
+test('orchestrator retains failed-workspace cleanup on the dynamic workspace facade', () => {
+  const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+  const facade = source.indexOf('summaryWorkspaceService = Object.fromEntries')
+  const cacheFactory = source.indexOf('const cacheForSettings', facade)
+  assert.match(source.slice(facade, cacheFactory), /['"]clearFailed['"]/)
 })

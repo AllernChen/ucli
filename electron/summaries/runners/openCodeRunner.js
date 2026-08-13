@@ -51,7 +51,8 @@ export function createOpenCodeRunner({
   resolveExecutable,
   processRunner = runProcess,
   baseEnv = process.env,
-  platform = process.platform
+  platform = process.platform,
+  validateWorkspaceDirectory = null
 } = {}) {
   if (!['opencode', 'ucode'].includes(adapterId)) {
     throw runnerError('SUMMARY_RUNNER_UNSUPPORTED_EXECUTOR', `Unsupported executor: ${adapterId}`)
@@ -68,10 +69,10 @@ export function createOpenCodeRunner({
       if (options.profileId) {
         throw runnerError('SUMMARY_RUNNER_PROFILE_UNSUPPORTED', `${adapterId} does not support AI CLI profiles`)
       }
-      return withIsolatedWorkingDirectory(async (artifactDirectory) => {
-        const workingDirectory = join(artifactDirectory, 'work')
+      return withIsolatedWorkingDirectory(async (artifactDirectory, persistentWorkDirectory) => {
+        const workingDirectory = persistentWorkDirectory || join(artifactDirectory, 'work')
         const isolatedHome = join(artifactDirectory, 'home')
-        await mkdir(workingDirectory)
+        if (!persistentWorkDirectory) await mkdir(workingDirectory)
         const launch = resolver() || {}
         const args = [
           ...(launch.prefixArgs || []),
@@ -143,6 +144,9 @@ export function createOpenCodeRunner({
             eventCount: events.length
           }
         })
+      }, {
+        workingDirectory: options.workspaceDirectory || null,
+        validateWorkingDirectory: validateWorkspaceDirectory
       })
     }
   }

@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto'
 
+import { mapBounded } from './boundedExecutor.js'
+import { cacheKeyForInvocation } from './summaryCacheService.js'
 import {
+  buildDirectReportPrompt,
   buildFinalReducePrompt,
   buildMapPrompt,
   buildProjectReducePrompt
@@ -156,6 +159,35 @@ function mapReserveTokens({ blocks = [], period, usage, coverage }) {
   }), projectDigestSchema)
 }
 
+export function planSummaryExecution({
+  evidence = {}, period, usage = {}, contextWindow, forceMapReduce = false
+} = {}) {
+  const targetTokens = inputTargetTokens(contextWindow)
+  const directPrompt = buildDirectReportPrompt({
+    evidence, period, usage, coverage: evidence.coverage
+  })
+  if (!forceMapReduce && promptTokens(directPrompt, finalReportSchema) <= targetTokens) {
+    return { strategy: 'direct', chunks: [], plannedCalls: 1 }
+  }
+  const chunks = planEvidenceChunks({
+    blocks: evidence.blocks,
+    contextWindow,
+    reservedTokens: mapReserveTokens({
+      blocks: evidence.blocks || [], period, usage, coverage: evidence.coverage
+    })
+  })
+  const chunksPerProject = new Map()
+  for (const chunk of chunks) {
+    chunksPerProject.set(chunk.projectPath, (chunksPerProject.get(chunk.projectPath) || 0) + 1)
+  }
+  const projectReduceCalls = [...chunksPerProject.values()].filter(count => count > 1).length
+  return {
+    strategy: 'map-reduce',
+    chunks,
+    plannedCalls: chunks.length + projectReduceCalls + 1
+  }
+}
+
 function fragmentReductionItem(item, fits) {
   const source = JSON.stringify(item)
   const fragments = []
@@ -210,20 +242,34 @@ function promptAwareBatches(items, buildPrompt, schema, targetTokens) {
 export function createSummaryPipeline({
   runner,
   contextWindow,
-  automaticCallLimit = 20
+  automaticCallLimit = 20,
+  now = Date.now,
+  cache = null,
+  promptVersion = 'summary-v1',
+  profileFingerprint = 'profile:none',
+  mapConcurrency = 2
 } = {}) {
   if (!runner || typeof runner.run !== 'function') throw new TypeError('runner.run is required')
+  if (!Number.isInteger(mapConcurrency) || mapConcurrency < 1 || mapConcurrency > 3) {
+    throw runnerError(
+      'SUMMARY_MAP_CONCURRENCY_INVALID',
+      'Map concurrency must be between 1 and 3'
+    )
+  }
   const callLimit = Number.isFinite(automaticCallLimit) && automaticCallLimit > 0
     ? Math.min(20, Math.floor(automaticCallLimit))
     : 20
   return {
-    estimate({ evidence } = {}) {
-      const chunks = planEvidenceChunks({ blocks: evidence?.blocks, contextWindow })
+    estimate(options = {}) {
+      const plan = planSummaryExecution({ ...options, contextWindow })
+      const chunks = plan.chunks
       const projects = new Set(chunks.map((chunk) => chunk.projectPath)).size
       return {
+        strategy: plan.strategy,
         chunks: chunks.length,
         projects,
-        estimatedCalls: chunks.length * 2 + Math.max(projects, 1)
+        plannedCalls: plan.plannedCalls,
+        estimatedCalls: plan.plannedCalls
       }
     },
 
@@ -232,17 +278,15 @@ export function createSummaryPipeline({
         evidence = {}, period, usage = {}, signal, onProgress,
         mode = 'automatic', confirmed = false
       } = options
+      const startedAt = now()
       abortIfNeeded(signal)
       onProgress?.({ phase: 'collecting' })
-      const chunks = planEvidenceChunks({
-        blocks: evidence.blocks,
-        contextWindow,
-        reservedTokens: mapReserveTokens({
-          blocks: evidence.blocks || [], period, usage, coverage: evidence.coverage
-        })
+      const plan = planSummaryExecution({
+        evidence, period, usage, contextWindow,
+        forceMapReduce: options.forceMapReduce === true
       })
-      const projectCount = new Set(chunks.map((chunk) => chunk.projectPath)).size
-      const estimatedCalls = chunks.length * 2 + Math.max(projectCount, 1)
+      const chunks = plan.chunks
+      const estimatedCalls = plan.plannedCalls
       const reduceTargetTokens = inputTargetTokens(contextWindow)
       if (estimatedCalls > callLimit) {
         if (mode === 'manual' && !confirmed) {
@@ -263,13 +307,15 @@ export function createSummaryPipeline({
       }
 
       let callCount = 0
+      let cacheHits = 0
       const confirmedCallLimit = Number.isFinite(options.confirmedCallLimit) &&
         options.confirmedCallLimit >= estimatedCalls
         ? Math.floor(options.confirmedCallLimit)
         : estimatedCalls
       const manualCallLimit = confirmed ? confirmedCallLimit : callLimit
       const generationUsage = { inputTokens: 0, outputTokens: 0, costUsd: null }
-      const invoke = async ({ prompt, schema }) => {
+      let cacheCheckReported = false
+      const invoke = async ({ stage, prompt, schema }) => {
         abortIfNeeded(signal)
         const requiredTokens = promptTokens(prompt, schema)
         if (requiredTokens > reduceTargetTokens) {
@@ -277,6 +323,34 @@ export function createSummaryPipeline({
             requiredTokens,
             targetTokens: reduceTargetTokens
           })
+        }
+        const key = cache
+          ? cacheKeyForInvocation({
+              stage,
+              prompt,
+              schema,
+              executorId: options.executorId ?? '',
+              profileFingerprint,
+              model: options.model ?? '',
+              promptVersion
+            })
+          : null
+        if (key) {
+          if (!cacheCheckReported) {
+            cacheCheckReported = true
+            onProgress?.({ phase: 'cache-check' })
+          }
+          let cached = null
+          try { cached = await cache.get(key) } catch { /* cache is an optional optimization */ }
+          if (cached !== null && cached !== undefined) {
+            try {
+              validateStructuredOutput(cached, schema)
+              cacheHits += 1
+              return cached
+            } catch {
+              try { await cache.evict?.(key) } catch { /* best effort */ }
+            }
+          }
         }
         if (callCount >= (mode === 'manual' ? manualCallLimit : callLimit)) {
           if (mode === 'manual') {
@@ -295,6 +369,7 @@ export function createSummaryPipeline({
             estimatedCalls, callLimit
           })
         }
+        callCount += 1
         const result = await runner.run({
           executorId: options.executorId,
           prompt,
@@ -303,29 +378,69 @@ export function createSummaryPipeline({
           model: options.model,
           timeoutMs: options.timeoutMs,
           maxOutputBytes: options.maxOutputBytes,
+          workspaceDirectory: options.workspaceDirectory,
           signal
         })
-        callCount += 1
         abortIfNeeded(signal)
         validateStructuredOutput(result?.value, schema)
         addUsage(generationUsage, result?.usage)
+        if (key) {
+          try {
+            await cache.put({ key, kind: stage === 'direct' ? 'final' : stage, value: result.value })
+          } catch { /* a successful AI result must survive cache I/O failure */ }
+        }
         return result.value
       }
 
-      const mappedByProject = new Map()
-      for (let index = 0; index < chunks.length; index += 1) {
-        const chunk = chunks[index]
-        onProgress?.({ phase: 'mapping', current: index + 1, total: chunks.length })
+      if (plan.strategy === 'direct') {
         const value = await invoke({
+          stage: 'direct',
+          prompt: buildDirectReportPrompt({
+            evidence, period, usage, coverage: evidence.coverage
+          }),
+          schema: finalReportSchema
+        })
+        onProgress?.({ phase: 'rendering' })
+        return {
+          value,
+          markdown: renderSummaryMarkdown(value),
+          estimatedCalls,
+          callCount,
+          generationUsage,
+          generationMetrics: {
+            strategy: plan.strategy,
+            plannedCalls: plan.plannedCalls,
+            aiCalls: callCount,
+            cacheHits,
+            durationMs: Math.max(0, now() - startedAt),
+            mapConcurrency
+          }
+        }
+      }
+
+      const mappedValues = await mapBounded(chunks, mapConcurrency, async chunk => {
+        return invoke({
+          stage: 'map',
           prompt: buildMapPrompt({ chunk, period, usage, coverage: evidence.coverage }),
           schema: projectDigestSchema
         })
+      }, {
+        signal,
+        onSettled({ settled, total }) {
+          onProgress?.({ phase: 'mapping', current: settled, total })
+        }
+      })
+      const mappedByProject = new Map()
+      for (let index = 0; index < chunks.length; index += 1) {
+        const chunk = chunks[index]
+        const value = mappedValues[index]
         if (!mappedByProject.has(chunk.projectPath)) mappedByProject.set(chunk.projectPath, [])
         mappedByProject.get(chunk.projectPath).push(value)
       }
 
       onProgress?.({ phase: 'reducing' })
       const reduceProject = async (projectPath, digests, depth = 0) => {
+        if (digests.length === 1) return digests[0]
         const buildPrompt = inputs => buildProjectReducePrompt({
           projectPath, digests: inputs, period, usage, coverage: evidence.coverage
         })
@@ -335,6 +450,7 @@ export function createSummaryPipeline({
         const partials = []
         for (const batch of batches) {
           partials.push(await invoke({
+            stage: 'project',
             prompt: buildPrompt(batch),
             schema: projectDigestSchema
           }))
@@ -357,6 +473,7 @@ export function createSummaryPipeline({
         const partials = []
         for (const batch of batches) {
           partials.push(await invoke({
+            stage: 'final',
             prompt: buildPrompt(batch),
             schema: finalReportSchema
           }))
@@ -374,7 +491,15 @@ export function createSummaryPipeline({
         markdown: renderSummaryMarkdown(value),
         estimatedCalls,
         callCount,
-        generationUsage
+        generationUsage,
+        generationMetrics: {
+          strategy: plan.strategy,
+          plannedCalls: plan.plannedCalls,
+          aiCalls: callCount,
+          cacheHits,
+          durationMs: Math.max(0, now() - startedAt),
+          mapConcurrency
+        }
       }
     }
   }

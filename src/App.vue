@@ -46,9 +46,11 @@
         </a-menu-item>
       </a-menu>
       <div :class="['sider-footer', { collapsed: navCollapsed }]">
-        <a-badge v-if="navCollapsed && waitingCount > 0" :count="waitingCount" />
-        <a-tag v-else-if="waitingCount > 0" color="orange">待确认 {{ waitingCount }}</a-tag>
-        <span v-if="!navCollapsed" class="version">v{{ appVersion }}</span>
+        <div class="approval-indicator">
+          <a-badge v-if="navCollapsed && waitingCount > 0" :count="waitingCount" />
+          <a-tag v-else-if="waitingCount > 0" color="orange">待确认 {{ waitingCount }}</a-tag>
+        </div>
+        <UpdateSiderFooter :collapsed="navCollapsed" :app-version="appVersion" />
       </div>
     </a-layout-sider>
     <a-layout class="main-layout">
@@ -92,12 +94,15 @@ import {
   MenuUnfoldOutlined
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from './stores/sessions.js'
+import { useUpdatesStore } from './stores/updates.js'
+import UpdateSiderFooter from './components/updates/UpdateSiderFooter.vue'
 import { ipc } from './ipc.js'
 import ucliLogo from '../resources/icons/ucli.png'
 
 const route = useRoute()
 const router = useRouter()
 const sessions = useSessionsStore()
+const updates = useUpdatesStore()
 const navCollapsed = ref(false)
 watch(navCollapsed, (v) => sessions.setNavCollapsed(v))
 const appVersion = __UCLI_VERSION__
@@ -126,6 +131,7 @@ function onMenuClick({ key }) {
 
 let stopSessionFocus = null
 onMounted(async () => {
+  void updates.initialize()
   // Load persisted workbench state to decide initial route
   await sessions.init()
   await sessions.loadWorkbench()
@@ -140,7 +146,10 @@ onMounted(async () => {
     router.push('/session')
   })
 })
-onBeforeUnmount(() => stopSessionFocus?.())
+onBeforeUnmount(() => {
+  stopSessionFocus?.()
+  updates.dispose()
+})
 </script>
 
 <style scoped>
@@ -149,11 +158,12 @@ onBeforeUnmount(() => stopSessionFocus?.())
   padding: 10px 16px;
   border-top: 1px solid #f0f0f0;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
 }
-.sider-footer.collapsed { justify-content: center; padding: 10px 0; }
-.version { font-size: 11px; color: #bfbfbf; }
+.sider-footer.collapsed { align-items: center; padding: 10px 0; }
+.approval-indicator { display: flex; justify-content: flex-start; }
 .logo img { width: 30px; height: 30px; object-fit: contain; margin-right: 8px; }
 .logo.collapsed img { margin-right: 0; }
 .header-main { display: flex; align-items: center; gap: 8px; }

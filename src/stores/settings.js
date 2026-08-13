@@ -18,6 +18,10 @@ export const useSettingsStore = defineStore('settings', {
     defaultModel: null,
     firstEnableDisclosureAcceptedAt: null,
     automaticCallLimit: 20,
+    cacheEnabled: true,
+    cacheMaxBytes: 1073741824,
+    failedWorkspaceRetentionDays: 7,
+    mapConcurrency: 2,
     loaded: false
   }),
   actions: {

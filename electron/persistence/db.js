@@ -438,6 +438,7 @@ class Db {
         usage_snapshot_json   TEXT NOT NULL DEFAULT '{}',
         coverage_json         TEXT NOT NULL DEFAULT '{}',
         generation_usage_json TEXT NOT NULL DEFAULT '{}',
+        generation_metrics_json TEXT NOT NULL DEFAULT '{}',
         generation_cost_usd   REAL,
         prompt_version        TEXT,
         source_hash           TEXT,
@@ -451,6 +452,10 @@ class Db {
         CHECK (is_current = 0 OR status = 'completed')
       )
     `)
+    const summaryReportColumns = rows(this.sql.exec('PRAGMA table_info(summary_reports)'))
+    if (!summaryReportColumns.some((column) => column.name === 'generation_metrics_json')) {
+      this.sql.run("ALTER TABLE summary_reports ADD COLUMN generation_metrics_json TEXT NOT NULL DEFAULT '{}'")
+    }
     this.sql.run(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_summary_reports_current
       ON summary_reports(period_type, period_start, period_end_exclusive, timezone)
@@ -461,6 +466,17 @@ class Db {
         id            INTEGER PRIMARY KEY CHECK (id = 1),
         settings_json TEXT NOT NULL DEFAULT '{}',
         updated_at    INTEGER NOT NULL
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS summary_cache_entries (
+        cache_key       TEXT PRIMARY KEY,
+        kind            TEXT NOT NULL CHECK(kind IN ('map', 'project', 'final')),
+        relative_path   TEXT NOT NULL,
+        size_bytes      INTEGER NOT NULL CHECK(size_bytes >= 0),
+        created_at      INTEGER NOT NULL,
+        last_accessed_at INTEGER NOT NULL,
+        expires_at      INTEGER
       )
     `)
     if (initializeUsageLedger) this.initializeUsageLedgerAfterLegacyImport()
@@ -897,16 +913,17 @@ class Db {
       `INSERT INTO summary_reports (
          id, period_type, period_start, period_end_exclusive, timezone, partial,
          version, status, markdown, executor_id, profile_id, model,
-         usage_snapshot_json, coverage_json, generation_usage_json,
+         usage_snapshot_json, coverage_json, generation_usage_json, generation_metrics_json,
          generation_cost_usd, prompt_version, source_hash, is_current,
          generated_by, error_text, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         report.id, report.periodType, report.periodStart, report.periodEndExclusive,
         report.timezone, report.partial ? 1 : 0, report.version, report.status,
         report.markdown ?? null, report.executorId || null, report.profileId || null,
         report.model || null, stringifyJsonObject(report.usageSnapshot),
         stringifyJsonObject(report.coverage), stringifyJsonObject(report.generationUsage),
+        stringifyJsonObject(report.generationMetrics),
         report.generationCostUsd ?? null, report.promptVersion || null,
         report.sourceHash || null, report.isCurrent ? 1 : 0, report.generatedBy,
         report.errorText ?? null, createdAt, updatedAt
@@ -940,7 +957,8 @@ class Db {
     for (const [field, column] of [
       ['usageSnapshot', 'usage_snapshot_json'],
       ['coverage', 'coverage_json'],
-      ['generationUsage', 'generation_usage_json']
+      ['generationUsage', 'generation_usage_json'],
+      ['generationMetrics', 'generation_metrics_json']
     ]) {
       if (fields[field] === undefined) continue
       sets.push(`${column} = ?`)
@@ -1074,6 +1092,7 @@ class Db {
   }
 
   setSummarySettings(settings = {}) {
+    assertSummarySettingsPatch(settings)
     const current = this.getSummarySettings()
     const merged = normalizeSummarySettings({
       ...current,
@@ -1094,6 +1113,68 @@ class Db {
       [JSON.stringify(merged), Date.now()]
     )
     return merged
+  }
+
+  // ---- summary cache metadata ----
+  getSummaryCacheEntry(key) {
+    assertSummaryCacheKey(key)
+    return rows(this.sql.exec(
+      'SELECT * FROM summary_cache_entries WHERE cache_key = ?',
+      [key]
+    )).map(rowToSummaryCacheEntry)[0] || null
+  }
+
+  upsertSummaryCacheEntry(entry) {
+    assertSummaryCacheEntry(entry)
+    this.sql.run(
+      `INSERT INTO summary_cache_entries (
+         cache_key, kind, relative_path, size_bytes, created_at, last_accessed_at, expires_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(cache_key) DO UPDATE SET
+         kind = excluded.kind,
+         relative_path = excluded.relative_path,
+         size_bytes = excluded.size_bytes,
+         created_at = excluded.created_at,
+         last_accessed_at = excluded.last_accessed_at,
+         expires_at = excluded.expires_at`,
+      [
+        entry.key, entry.kind, entry.relativePath, entry.sizeBytes, entry.createdAt,
+        entry.lastAccessedAt, entry.expiresAt ?? null
+      ]
+    )
+    return this.getSummaryCacheEntry(entry.key)
+  }
+
+  touchSummaryCacheEntry(key, at) {
+    assertSummaryCacheKey(key)
+    assertSummaryCacheTimestamp(at)
+    this.sql.run(
+      'UPDATE summary_cache_entries SET last_accessed_at = ? WHERE cache_key = ?',
+      [at, key]
+    )
+    return this.getSummaryCacheEntry(key)
+  }
+
+  listSummaryCacheEntries() {
+    return rows(this.sql.exec(
+      'SELECT * FROM summary_cache_entries ORDER BY created_at, cache_key'
+    )).map(rowToSummaryCacheEntry)
+  }
+
+  deleteSummaryCacheEntries(keys) {
+    if (!Array.isArray(keys)) throw summaryCacheValidationError()
+    for (const key of keys) assertSummaryCacheKey(key)
+    if (keys.length === 0) return 0
+    const unique = [...new Set(keys)]
+    const existing = unique.reduce(
+      (count, key) => count + (this.getSummaryCacheEntry(key) ? 1 : 0),
+      0
+    )
+    this.sql.run(
+      `DELETE FROM summary_cache_entries WHERE cache_key IN (${unique.map(() => '?').join(', ')})`,
+      unique
+    )
+    return existing
   }
 
   // ---- rules ----
@@ -1874,7 +1955,81 @@ function normalizeSummarySettings(value = {}) {
     automaticCallLimit: Number.isInteger(value.automaticCallLimit) &&
       value.automaticCallLimit >= 1 && value.automaticCallLimit <= 100
       ? value.automaticCallLimit
-      : 20
+      : 20,
+    cacheEnabled: typeof value.cacheEnabled === 'boolean' ? value.cacheEnabled : true,
+    cacheMaxBytes: Number.isSafeInteger(value.cacheMaxBytes) &&
+      value.cacheMaxBytes >= 256 * 1024 * 1024 && value.cacheMaxBytes <= 5 * 1024 * 1024 * 1024
+      ? value.cacheMaxBytes
+      : 1_073_741_824,
+    failedWorkspaceRetentionDays: Number.isInteger(value.failedWorkspaceRetentionDays) &&
+      value.failedWorkspaceRetentionDays >= 1 && value.failedWorkspaceRetentionDays <= 30
+      ? value.failedWorkspaceRetentionDays
+      : 7,
+    mapConcurrency: Number.isInteger(value.mapConcurrency) &&
+      value.mapConcurrency >= 1 && value.mapConcurrency <= 3
+      ? value.mapConcurrency
+      : 2
+  }
+}
+
+function assertSummarySettingsPatch(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return
+  if (value.cacheEnabled !== undefined && typeof value.cacheEnabled !== 'boolean') {
+    throw summaryValidationError('INVALID_SUMMARY_CACHE_ENABLED', 'Invalid summary cache setting')
+  }
+  if (value.cacheMaxBytes !== undefined && (
+    !Number.isSafeInteger(value.cacheMaxBytes) ||
+    value.cacheMaxBytes < 256 * 1024 * 1024 ||
+    value.cacheMaxBytes > 5 * 1024 * 1024 * 1024
+  )) {
+    throw summaryValidationError('INVALID_SUMMARY_CACHE_LIMIT', 'Invalid summary cache limit')
+  }
+  if (value.failedWorkspaceRetentionDays !== undefined && (
+    !Number.isInteger(value.failedWorkspaceRetentionDays) ||
+    value.failedWorkspaceRetentionDays < 1 ||
+    value.failedWorkspaceRetentionDays > 30
+  )) {
+    throw summaryValidationError(
+      'INVALID_SUMMARY_WORKSPACE_RETENTION',
+      'Invalid failed workspace retention'
+    )
+  }
+  if (value.mapConcurrency !== undefined && (
+    !Number.isInteger(value.mapConcurrency) || value.mapConcurrency < 1 || value.mapConcurrency > 3
+  )) {
+    throw summaryValidationError('INVALID_SUMMARY_MAP_CONCURRENCY', 'Invalid summary map concurrency')
+  }
+}
+
+const SUMMARY_CACHE_KEY = /^sha256:[a-f0-9]{64}$/
+const SUMMARY_CACHE_KINDS = new Set(['map', 'project', 'final'])
+
+function summaryCacheValidationError() {
+  return summaryValidationError('INVALID_SUMMARY_CACHE_ENTRY', 'Invalid summary cache entry')
+}
+
+function assertSummaryCacheKey(key) {
+  if (!SUMMARY_CACHE_KEY.test(String(key || ''))) throw summaryCacheValidationError()
+}
+
+function assertSummaryCacheTimestamp(value) {
+  if (!Number.isSafeInteger(value) || value < 0) throw summaryCacheValidationError()
+}
+
+function assertSummaryCacheEntry(entry) {
+  assertSummaryCacheKey(entry?.key)
+  if (!SUMMARY_CACHE_KINDS.has(entry?.kind)) throw summaryCacheValidationError()
+  const hex = entry.key.slice('sha256:'.length)
+  if (entry.relativePath !== `${entry.kind}/${hex.slice(0, 2)}/${hex}.json`) {
+    throw summaryCacheValidationError()
+  }
+  if (!Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0) {
+    throw summaryCacheValidationError()
+  }
+  assertSummaryCacheTimestamp(entry.createdAt)
+  assertSummaryCacheTimestamp(entry.lastAccessedAt)
+  if (entry.expiresAt !== null && entry.expiresAt !== undefined) {
+    assertSummaryCacheTimestamp(entry.expiresAt)
   }
 }
 
@@ -1958,6 +2113,7 @@ function rowToSummaryReport(row) {
     usageSnapshot: parseJsonObject(row.usage_snapshot_json),
     coverage: parseJsonObject(row.coverage_json),
     generationUsage: parseJsonObject(row.generation_usage_json),
+    generationMetrics: parseJsonObject(row.generation_metrics_json),
     generationCostUsd: row.generation_cost_usd ?? null,
     promptVersion: row.prompt_version || null,
     sourceHash: row.source_hash || null,
@@ -1966,6 +2122,18 @@ function rowToSummaryReport(row) {
     errorText: row.error_text ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  }
+}
+
+function rowToSummaryCacheEntry(row) {
+  return {
+    key: row.cache_key,
+    kind: row.kind,
+    relativePath: row.relative_path,
+    sizeBytes: row.size_bytes,
+    createdAt: row.created_at,
+    lastAccessedAt: row.last_accessed_at,
+    expiresAt: row.expires_at ?? null
   }
 }
 

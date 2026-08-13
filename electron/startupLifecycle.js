@@ -20,6 +20,93 @@ async function continueAfterFailure(phase, operation, onError) {
   }
 }
 
+export async function runSummaryStartupLifecycle({
+  recoverWorkspaces = () => {}, maintainCache = () => {},
+  interruptStaleJobs = () => {}, startScheduler = () => {}, onEvent = () => {}
+} = {}) {
+  for (const [phase, operation] of [
+    ['workspace-recovery', recoverWorkspaces],
+    ['cache-maintenance', maintainCache],
+    ['stale-job-interruption', interruptStaleJobs],
+    ['scheduler-catch-up', startScheduler]
+  ]) await continueAfterFailure(phase, operation, onEvent)
+}
+
+function safeMaintenanceResult(value) {
+  return {
+    removed: Number.isSafeInteger(value?.removed) && value.removed >= 0 ? value.removed : 0,
+    bytes: Number.isSafeInteger(value?.bytes) && value.bytes >= 0 ? value.bytes : 0
+  }
+}
+
+function safeOrphanResult(value) {
+  return {
+    checked: Number.isSafeInteger(value?.checked) && value.checked >= 0 ? value.checked : 0,
+    ...safeMaintenanceResult(value)
+  }
+}
+
+export async function runSummaryMaintenance({
+  quotaBytes,
+  pruneExpiredWorkspaces = () => ({}),
+  pruneOrphanWorkspaces = () => ({}),
+  getWorkspaceUsage = () => ({ bytes: 0 }),
+  pruneCache = () => ({}),
+  getCacheUsage = () => ({ bytes: 0 }),
+  pruneCompletedWorkspaces = () => ({}),
+  onEvent = () => {}
+} = {}) {
+  if (Number.isSafeInteger(quotaBytes) && quotaBytes >= 0) {
+    const result = { workspaces: null, orphans: null, cache: null, completed: null, total: null }
+    try { result.workspaces = safeMaintenanceResult(await pruneExpiredWorkspaces()) } catch (error) {
+      try { onEvent(safeStartupFailure('workspace-prune', error)) } catch { /* logging isolation */ }
+    }
+    try { result.orphans = safeOrphanResult(await pruneOrphanWorkspaces()) } catch (error) {
+      try { onEvent(safeStartupFailure('orphan-workspace-prune', error)) } catch { /* logging isolation */ }
+    }
+    let workspaceBytes = 0
+    try { workspaceBytes = safeMaintenanceResult(await getWorkspaceUsage()).bytes } catch (error) {
+      try { onEvent(safeStartupFailure('workspace-usage', error)) } catch { /* logging isolation */ }
+    }
+    try {
+      result.cache = safeMaintenanceResult(await pruneCache(Math.max(0, quotaBytes - workspaceBytes)))
+    } catch (error) {
+      try { onEvent(safeStartupFailure('cache-prune', error)) } catch { /* logging isolation */ }
+    }
+    let cacheBytes = 0
+    try { cacheBytes = safeMaintenanceResult(await getCacheUsage()).bytes } catch (error) {
+      try { onEvent(safeStartupFailure('cache-usage', error)) } catch { /* logging isolation */ }
+    }
+    try {
+      result.completed = safeMaintenanceResult(await pruneCompletedWorkspaces(
+        Math.max(0, quotaBytes - cacheBytes)
+      ))
+      workspaceBytes = result.completed.bytes
+    } catch (error) {
+      try { onEvent(safeStartupFailure('completed-workspace-prune', error)) } catch { /* logging isolation */ }
+    }
+    const totalBytes = Math.min(Number.MAX_SAFE_INTEGER, workspaceBytes + cacheBytes)
+    result.total = {
+      bytes: totalBytes,
+      quotaBytes,
+      overQuotaBytes: Math.max(0, totalBytes - quotaBytes)
+    }
+    return result
+  }
+  const result = { workspaces: null, cache: null }
+  for (const [phase, key, operation] of [
+    ['workspace-prune', 'workspaces', pruneExpiredWorkspaces],
+    ['cache-prune', 'cache', pruneCache]
+  ]) {
+    try {
+      result[key] = safeMaintenanceResult(await operation())
+    } catch (error) {
+      try { onEvent(safeStartupFailure(phase, error)) } catch { /* logging cannot block maintenance */ }
+    }
+  }
+  return result
+}
+
 export async function startMainWindowLifecycle({
   orchestrator,
   beforeWindow = () => {},

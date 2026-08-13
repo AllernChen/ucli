@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
 import { createReportRepository } from '../electron/summaries/reportRepository.js'
 import { createSummaryJobService } from '../electron/summaries/summaryJobService.js'
+import { createSummaryWorkspaceService } from '../electron/summaries/summaryWorkspaceService.js'
 
 class MemoryDb {
   constructor() {
@@ -76,6 +80,7 @@ test('report repository assigns monotonic versions per logical key and validates
   assert.deepEqual(first.usageSnapshot, {})
   assert.deepEqual(first.coverage, {})
   assert.deepEqual(first.generationUsage, {})
+  assert.deepEqual(first.generationMetrics, {})
 
   db.rows[0].coverage = '{"sessionsIncluded":2}'
   assert.deepEqual(repository.get(first.id).coverage, { sessionsIncluded: 2 })
@@ -84,6 +89,7 @@ test('report repository assigns monotonic versions per logical key and validates
     () => repository.get(first.id),
     error => error.code === 'INVALID_SUMMARY_REPORT_JSON'
   )
+  db.rows[0].generationUsage = {}
   assert.throws(
     () => repository.update(second.id, { usageSnapshot: [] }),
     error => error.code === 'INVALID_SUMMARY_REPORT_JSON'
@@ -106,6 +112,32 @@ test('report repository assigns monotonic versions per logical key and validates
       sources: { transcript: 4, note: 1, nativeDigest: 0 }
     }
   }))
+  assert.deepEqual(repository.update(second.id, {
+    generationMetrics: {
+      strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0,
+      durationMs: 25, mapConcurrency: 2
+    }
+  }).generationMetrics, {
+    strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0,
+    durationMs: 25, mapConcurrency: 2
+  })
+  for (const generationMetrics of [
+    { strategy: 'batch', plannedCalls: 1, aiCalls: 1, cacheHits: 0, durationMs: 1, mapConcurrency: 2 },
+    { strategy: 'direct', plannedCalls: -1, aiCalls: 1, cacheHits: 0, durationMs: 1, mapConcurrency: 2 },
+    { strategy: 'direct', plannedCalls: 1, aiCalls: 1001, cacheHits: 0, durationMs: 1, mapConcurrency: 2 },
+    { strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0, durationMs: -1, mapConcurrency: 2 },
+    { strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0, durationMs: 1, mapConcurrency: 4 },
+    { strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0, durationMs: 1, mapConcurrency: 2, prompt: 'secret' }
+  ]) {
+    assert.throws(
+      () => repository.update(second.id, { generationMetrics }),
+      error => error.code === 'INVALID_SUMMARY_GENERATION_METRICS'
+    )
+  }
+  assert.throws(
+    () => repository.update(second.id, { generationMetrics: [] }),
+    error => error.code === 'INVALID_SUMMARY_GENERATION_METRICS'
+  )
   assert.throws(
     () => repository.update(second.id, { coverage: { sources: { transcript: 'raw transcript' } } }),
     error => error.code === 'SUMMARY_SENSITIVE_JSON_FORBIDDEN'
@@ -114,6 +146,10 @@ test('report repository assigns monotonic versions per logical key and validates
     () => repository.update(second.id, { status: 'done' }),
     error => error.code === 'INVALID_SUMMARY_REPORT'
   )
+  db.rows[0].generationMetrics = {
+    strategy: 'direct', aiCalls: 1, prompt: 'legacy unsafe detail'
+  }
+  assert.deepEqual(repository.get(first.id).generationMetrics, {})
   assert.equal(db.getSummaryReport(second.id).status, 'queued')
 })
 
@@ -138,9 +174,100 @@ function pipelineResult(markdown = '## 摘要\n完成') {
   return {
     value: { executiveSummary: '完成' },
     markdown,
-    generationUsage: { inputTokens: 10, outputTokens: 2, costUsd: null }
+    generationUsage: { inputTokens: 10, outputTokens: 2, costUsd: null },
+    generationMetrics: {
+      strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0,
+      durationMs: 25, mapConcurrency: 2
+    }
   }
 }
+
+test('successful jobs use an opaque persistent workspace then compact it to output and metrics', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-workspace-'))
+  const pipelineCalls = []
+  try {
+    const workspaceService = createSummaryWorkspaceService({ root })
+    const { service, repository } = createHarness({
+      workspaceService,
+      evidenceCollector: {
+        async collect() {
+          return {
+            blocks: [
+              { id: 'evidence:1', projectPath: 'C:\\secret-project\\alpha', text: 'implemented cache' },
+              { id: 'evidence:2', projectPath: 'D:\\secret-project\\beta', text: 'fixed tests' }
+            ],
+            coverage: { sessionsIncluded: 2 }
+          }
+        }
+      },
+      pipeline: {
+        async run(options) {
+          pipelineCalls.push(options)
+          assert.equal(readdirSync(options.workspaceDirectory).length, 0)
+          return pipelineResult('workspace summary')
+        }
+      }
+    })
+
+    const job = service.generate(request())
+    const report = await job.completion
+    const workspace = join(root, 'workspaces', job.reportId)
+    const manifest = JSON.parse(readFileSync(join(workspace, 'manifest.json'), 'utf8'))
+
+    assert.equal(pipelineCalls[0].workspaceDirectory, join(workspace, 'work'))
+    assert.equal(report.generationMetrics.aiCalls, 1)
+    assert.equal(manifest.status, 'completed')
+    assert.deepEqual(manifest.artifacts.map(item => item.path), ['output/summary.md'])
+    assert.equal(readFileSync(join(workspace, 'output', 'summary.md'), 'utf8'), 'workspace summary')
+    assert.equal(existsSync(join(workspace, 'input')), false)
+    assert.equal(existsSync(join(workspace, 'work')), false)
+    assert.doesNotMatch(JSON.stringify(manifest), /secret-project|alpha|beta/)
+    assert.equal(repository.get(job.reportId).generationMetrics.strategy, 'direct')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('failed jobs retain bounded redacted inputs with a seven day expiry', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-failure-'))
+  const now = Date.parse('2026-08-12T00:00:00.000Z')
+  try {
+    const workspaceService = createSummaryWorkspaceService({ root, now: () => now })
+    const { service } = createHarness({
+      workspaceService,
+      evidenceCollector: {
+        async collect() {
+          return {
+            blocks: [{ id: 'raw-session-id', projectPath: 'C:\\clients\\top-secret', text: 'safe work note' }],
+            coverage: { sessionsIncluded: 1 }
+          }
+        }
+      },
+      pipeline: { async run() { throw Object.assign(new Error('credential leak'), { code: 'SUMMARY_PROVIDER_FAILED' }) } }
+    })
+    const job = service.generate(request())
+    await job.completion
+    const workspace = join(root, 'workspaces', job.reportId)
+    const manifest = JSON.parse(readFileSync(join(workspace, 'manifest.json'), 'utf8'))
+    const inputNames = readdirSync(join(workspace, 'input')).sort()
+    const inputText = inputNames.map(name => readFileSync(join(workspace, 'input', name), 'utf8')).join('\n')
+
+    assert.equal(manifest.status, 'failed')
+    assert.equal(manifest.errorCode, 'SUMMARY_PROVIDER_FAILED')
+    assert.equal(manifest.expiresAt, '2026-08-19T00:00:00.000Z')
+    assert.equal(inputNames.includes('period.json'), true)
+    assert.equal(inputNames.includes('usage.json'), true)
+    assert.match(
+      inputNames.find(name => name.startsWith('project-')),
+      /^project-[a-f0-9]{64}-0001\.json$/
+    )
+    assert.doesNotMatch(JSON.stringify(manifest), /clients|top-secret|credential/)
+    assert.doesNotMatch(inputText, /C:\\\\clients|top-secret|raw-session-id/)
+    assert.match(inputText, /safe work note/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 function createHarness(overrides = {}) {
   const db = new MemoryDb()
@@ -194,6 +321,7 @@ test('pipeline progress is forwarded ephemerally without changing persisted repo
   const { service, repository } = createHarness({
     pipeline: {
       async run({ onProgress }) {
+        onProgress({ phase: 'cache-check', cacheKey: 'must not escape' })
         onProgress({ phase: 'mapping', current: 2, total: 4, evidence: 'must not escape' })
         onProgress({ phase: 'reducing' })
         return pipelineResult()
@@ -207,10 +335,30 @@ test('pipeline progress is forwarded ephemerally without changing persisted repo
   const job = service.generate(request())
   await job.completion
   assert.deepEqual(events, [
+    { reportId: job.reportId, phase: 'cache-check', completed: 0, total: 1 },
     { reportId: job.reportId, phase: 'mapping', completed: 2, total: 4 },
     { reportId: job.reportId, phase: 'reducing', completed: 0, total: 1 }
   ])
   assert.equal('progress' in repository.get(job.reportId), false)
+})
+
+test('completed jobs persist only bounded generation metrics that survive repository restart', async () => {
+  const unsafeMetrics = {
+    strategy: 'map-reduce', plannedCalls: 4, aiCalls: 2, cacheHits: 5,
+    durationMs: 38000, mapConcurrency: 3,
+    prompt: 'raw prompt', cacheKey: 'sha256:secret', path: 'C:\\private', providerOutput: 'secret'
+  }
+  const { service, repository, db } = createHarness({
+    pipeline: { async run() { return { ...pipelineResult(), generationMetrics: unsafeMetrics } } }
+  })
+  const job = service.generate(request())
+  await job.completion
+  const restarted = createReportRepository({ db })
+  assert.deepEqual(restarted.get(job.reportId).generationMetrics, {
+    strategy: 'map-reduce', plannedCalls: 4, aiCalls: 2, cacheHits: 5,
+    durationMs: 38000, mapConcurrency: 3
+  })
+  assert.doesNotMatch(JSON.stringify(restarted.get(job.reportId)), /raw prompt|sha256:secret|private|providerOutput/)
 })
 
 async function waitFor(predicate) {
@@ -282,7 +430,7 @@ test('cancellation wins while usage snapshot is resolving on an empty report', a
   assert.equal(report.isCurrent, false)
 })
 
-test('service startup marks stale queued, running, and awaiting reports interrupted', () => {
+test('repository startup recovery marks stale queued, running, and awaiting reports interrupted', () => {
   const db = new MemoryDb()
   let id = 0
   const repository = createReportRepository({ db, idFactory: () => `stale-${++id}` })
@@ -292,12 +440,7 @@ test('service startup marks stale queued, running, and awaiting reports interrup
   const awaiting = repository.createQueued(request())
   repository.update(awaiting.id, { status: 'awaiting_confirmation' })
 
-  createSummaryJobService({
-    repository,
-    evidenceCollector: { async collect() { return evidence() } },
-    snapshotUsage: async () => ({}),
-    pipeline: { async run() { return pipelineResult() } }
-  })
+  repository.interruptStale()
 
   assert.equal(repository.get(queued.id).status, 'interrupted')
   assert.equal(repository.get(running.id).status, 'interrupted')
@@ -489,4 +632,76 @@ test('job order is queued persistence, evidence coverage, usage snapshot, pipeli
   const job = service.generate(request())
   await job.completion
   assert.deepEqual(order, ['queued', 'collect', 'usage', 'pipeline', 'current'])
+})
+
+test('shutdown is idempotent, rejects new jobs, cancels active work, and drains its workspace', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-shutdown-'))
+  let pipelineStarted
+  const started = new Promise(resolve => { pipelineStarted = resolve })
+  try {
+    const workspaceService = createSummaryWorkspaceService({ root })
+    const { service, repository } = createHarness({
+      workspaceService,
+      pipeline: {
+        run({ signal }) {
+          pipelineStarted()
+          return new Promise((resolve, reject) => signal.addEventListener('abort', () => {
+            reject(Object.assign(new Error('cancelled'), { code: 'SUMMARY_RUNNER_ABORTED' }))
+          }, { once: true }))
+        }
+      }
+    })
+    const job = service.generate(request())
+    await started
+    const first = service.shutdown()
+    const second = service.shutdown()
+    assert.equal(first, second)
+    await first
+    assert.equal(repository.get(job.reportId).status, 'cancelled')
+    const manifest = JSON.parse(readFileSync(
+      join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
+    ))
+    assert.notEqual(manifest.status, 'running')
+    assert.throws(
+      () => service.generate(request()),
+      error => error.code === 'SUMMARY_SERVICE_SHUTTING_DOWN'
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('shutdown compacts an awaiting-confirmation workspace instead of leaving it running', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-shutdown-awaiting-'))
+  try {
+    const workspaceService = createSummaryWorkspaceService({ root })
+    const { service, repository } = createHarness({
+      workspaceService,
+      pipeline: { async run() {
+        return { requiresConfirmation: true, estimatedCalls: 24, confirmationCallLimit: 24 }
+      } }
+    })
+    const job = service.generate(request())
+    await waitFor(() => repository.get(job.reportId).status === 'awaiting_confirmation')
+    await service.shutdown()
+    const manifest = JSON.parse(readFileSync(
+      join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
+    ))
+    assert.equal(repository.get(job.reportId).status, 'cancelled')
+    assert.equal(manifest.status, 'failed')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('isActive protects queued work only until the job reaches a terminal state', async () => {
+  const { service, repository } = createHarness({
+    pipeline: { run: async () => pipelineResult('done') }
+  })
+  const job = service.generate(request())
+  assert.equal(service.isActive(job.reportId), true)
+  await job.completion
+  assert.equal(repository.get(job.reportId).status, 'completed')
+  assert.equal(service.isActive(job.reportId), false)
+  assert.equal(service.isActive('missing'), false)
 })

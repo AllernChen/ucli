@@ -16,6 +16,9 @@ import {
 } from './externalLinks.js'
 import { createUpdateService } from './updateService.js'
 import { safeStartupFailure, startMainWindowLifecycle } from './startupLifecycle.js'
+import { resolveUcliStorageRoots } from './storage/storageCatalog.js'
+import { runScheduledStorageCleanupSync } from './storage/startupCleanup.js'
+import { runPrimaryInstanceGate } from './primaryInstanceGate.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -32,16 +35,6 @@ if (!app.isPackaged) {
   app.setPath('userData', devUserDataPath)
 }
 
-// Chromium writes cache data under sessionData. On Windows the default
-// Electron cache can be left with ACLs/locks that make the next launch fail
-// with "Unable to move the cache: Access denied". Keep durable UCLI data in
-// userData, but isolate disposable browser cache under the writable temp path.
-const sessionDataPath = join(app.getPath('temp'), 'ucli', app.isPackaged ? 'electron-session-data' : 'electron-session-data-dev')
-mkdirSync(sessionDataPath, { recursive: true })
-app.setPath('sessionData', sessionDataPath)
-app.commandLine.appendSwitch('disk-cache-dir', join(sessionDataPath, 'Cache'))
-if (process.platform === 'win32') app.setAppUserModelId('com.ucli.app')
-
 /** @type {BrowserWindow | null} */
 let mainWindow = null
 let tray = null
@@ -50,6 +43,39 @@ let isQuitting = false
 let quitReady = false
 let shutdownPromise = null
 let updateService = null
+
+runPrimaryInstanceGate({
+  acquireLock: () => app.requestSingleInstanceLock(),
+  quit: () => app.quit(),
+  bootstrap: bootstrapPrimaryInstance,
+  onSecondInstance: () => app.on('second-instance', () => showMainWindow())
+})
+
+function bootstrapPrimaryInstance() {
+// Chromium writes cache data under sessionData. On Windows the default
+// Electron cache can be left with ACLs/locks that make the next launch fail
+// with "Unable to move the cache: Access denied". Keep durable UCLI data in
+// userData, but isolate disposable browser cache under the writable temp path.
+const sessionDataPath = join(app.getPath('temp'), 'ucli', app.isPackaged ? 'electron-session-data' : 'electron-session-data-dev')
+const storageRoots = resolveUcliStorageRoots({
+  platform: process.platform,
+  env: process.env,
+  homeDirectory: app.getPath('home'),
+  userDataPath: app.getPath('userData'),
+  sessionDataPath
+})
+try {
+  runScheduledStorageCleanupSync({
+    markerPath: join(storageRoots.userData, 'storage-cleanup.json'),
+    roots: { ...storageRoots, browserCacheParent: dirname(sessionDataPath) }
+  })
+} catch (error) {
+  console.error('UCLI storage cleanup failed:', error?.code || 'STORAGE_CLEANUP_FAILED')
+}
+mkdirSync(sessionDataPath, { recursive: true })
+app.setPath('sessionData', sessionDataPath)
+app.commandLine.appendSwitch('disk-cache-dir', join(sessionDataPath, 'Cache'))
+if (process.platform === 'win32') app.setAppUserModelId('com.ucli.app')
 
 function iconPath(filename) {
   const root = app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources')
@@ -164,6 +190,8 @@ function createWindow() {
 
 function fallbackUpdateState() {
   return {
+    revision: 0,
+    checkedAt: 0,
     status: 'unsupported',
     currentVersion: app.getVersion(),
     availableVersion: null,
@@ -207,7 +235,7 @@ app.whenReady().then(async () => {
     onStateChange: (state) => mainWindow?.webContents.send('update:state', state)
   })
   registerUpdateIpc()
-  updateService.start(3000)
+  updateService.start()
   orchestrator.setMainWindow(mainWindow)
   const recoveryInfo = orchestrator.getPersistenceRecovery()
   if (recoveryInfo) {
@@ -228,13 +256,6 @@ app.whenReady().then(async () => {
 })
 
 // Single-instance lock — second launches focus the existing window.
-const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) {
-  app.quit()
-} else {
-  app.on('second-instance', () => {
-    showMainWindow()
-  })
 }
 
 app.on('before-quit', (event) => {
@@ -243,6 +264,7 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   if (shutdownPromise) return
   shutdownPromise = (async () => {
+    updateService?.stop()
     try { saveWindowState() }
     catch (error) { console.error('Window state save failed:', error) }
     try { await orchestrator?.shutdown() }
