@@ -68,6 +68,24 @@ function exactDescendant(parent, target) {
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
 }
 
+function quarantineFor(categoryId, parent) {
+  return path.join(parent, `.ucli-cleanup-${categoryId}`)
+}
+
+function sameIdentity(left, right) {
+  return left && right && left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+}
+
+async function identityFor(target) {
+  const stats = await lstat(target, { bigint: true })
+  return { dev: stats.dev, ino: stats.ino, mode: stats.mode }
+}
+
+function identityForSync(target) {
+  const stats = lstatSync(target, { bigint: true })
+  return { dev: stats.dev, ino: stats.ino, mode: stats.mode }
+}
+
 function targetFor(categoryId, roots) {
   const config = CATEGORY_TARGETS[categoryId]
   const target = roots?.[config.target]
@@ -131,7 +149,32 @@ async function prepareTarget(categoryId, roots) {
   const parent = roots[CATEGORY_TARGETS[categoryId].parent]
   await rejectConfiguredLinks(parent, target)
   const parentRealpath = await realpath(parent)
-  return { target, parent: path.resolve(parent), parentRealpath: path.resolve(parentRealpath) }
+  const parentIdentity = await identityFor(parent)
+  const quarantine = quarantineFor(categoryId, path.resolve(parent))
+  let quarantineIdentity = null
+  try {
+    await rejectLink(quarantine)
+    quarantineIdentity = await identityFor(quarantine)
+  } catch (error) { if (error?.code !== 'ENOENT') throw error }
+  if (quarantineIdentity) {
+    try { await lstat(target); return { pendingQuarantine: true } } catch (error) { if (error?.code !== 'ENOENT') throw error }
+    await rename(quarantine, target)
+    if (!sameIdentity(await identityFor(target), quarantineIdentity) ||
+      !sameIdentity(await identityFor(parent), parentIdentity) ||
+      path.resolve(await realpath(parent)) !== path.resolve(parentRealpath)) {
+      throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
+    }
+    return { pendingQuarantine: true }
+  }
+  let targetIdentity = null
+  try { targetIdentity = await identityFor(target) } catch (error) { if (error?.code !== 'ENOENT') throw error }
+  return {
+    target,
+    parent: path.resolve(parent),
+    parentRealpath: path.resolve(parentRealpath),
+    parentIdentity,
+    targetIdentity
+  }
 }
 
 function prepareTargetSync(categoryId, roots) {
@@ -139,7 +182,32 @@ function prepareTargetSync(categoryId, roots) {
   const parent = roots[CATEGORY_TARGETS[categoryId].parent]
   rejectConfiguredLinksSync(parent, target)
   const parentRealpath = realpathSync(parent)
-  return { target, parent: path.resolve(parent), parentRealpath: path.resolve(parentRealpath) }
+  const parentIdentity = identityForSync(parent)
+  const quarantine = quarantineFor(categoryId, path.resolve(parent))
+  let quarantineIdentity = null
+  try {
+    rejectLinkSync(quarantine)
+    quarantineIdentity = identityForSync(quarantine)
+  } catch (error) { if (error?.code !== 'ENOENT') throw error }
+  if (quarantineIdentity) {
+    if (existsSync(target)) return { pendingQuarantine: true }
+    renameSync(quarantine, target)
+    if (!sameIdentity(identityForSync(target), quarantineIdentity) ||
+      !sameIdentity(identityForSync(parent), parentIdentity) ||
+      path.resolve(realpathSync(parent)) !== path.resolve(parentRealpath)) {
+      throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
+    }
+    return { pendingQuarantine: true }
+  }
+  let targetIdentity = null
+  try { targetIdentity = identityForSync(target) } catch (error) { if (error?.code !== 'ENOENT') throw error }
+  return {
+    target,
+    parent: path.resolve(parent),
+    parentRealpath: path.resolve(parentRealpath),
+    parentIdentity,
+    targetIdentity
+  }
 }
 
 async function restoreQuarantine(quarantine, target) {
@@ -159,18 +227,27 @@ function restoreQuarantineSync(quarantine, target) {
 }
 
 async function quarantineAndRemove(entry, { categoryId, beforeRemove, removeTarget }) {
-  const { target, parent, parentRealpath } = entry
+  const { target, parent, parentRealpath, parentIdentity, targetIdentity } = entry
   await beforeRemove?.({ categoryId, target, parent })
   await rejectConfiguredLinks(parent, target)
-  if (path.resolve(await realpath(parent)) !== parentRealpath) throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
-  try { await lstat(target) } catch (error) { if (error?.code === 'ENOENT') return; throw error }
-  const quarantine = path.join(parent, `.ucli-cleanup-${randomUUID()}`)
+  if (path.resolve(await realpath(parent)) !== parentRealpath ||
+    !sameIdentity(await identityFor(parent), parentIdentity)) throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
+  let currentIdentity = null
+  try { currentIdentity = await identityFor(target) } catch (error) { if (error?.code !== 'ENOENT') throw error }
+  if (!targetIdentity && !currentIdentity) return
+  if (!sameIdentity(currentIdentity, targetIdentity)) throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
+  const quarantine = quarantineFor(categoryId, parent)
+  try { await lstat(quarantine); throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE') } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
   await rename(target, quarantine)
   try {
     await rejectPathChain(parent)
     await rejectLink(quarantine)
     const quarantineRealpath = path.resolve(await realpath(quarantine))
     if (path.resolve(await realpath(parent)) !== parentRealpath ||
+      !sameIdentity(await identityFor(parent), parentIdentity) ||
+      !sameIdentity(await identityFor(quarantine), targetIdentity) ||
       path.dirname(quarantineRealpath) !== parentRealpath ||
       path.basename(quarantineRealpath) !== path.basename(quarantine)) {
       throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
@@ -191,19 +268,26 @@ async function quarantineAndRemove(entry, { categoryId, beforeRemove, removeTarg
   }
 }
 
-function quarantineAndRemoveSync(entry, { categoryId, beforeRemove }) {
-  const { target, parent, parentRealpath } = entry
+function quarantineAndRemoveSync(entry, { categoryId, beforeRemove, removeTarget }) {
+  const { target, parent, parentRealpath, parentIdentity, targetIdentity } = entry
   beforeRemove?.({ categoryId, target, parent })
   rejectConfiguredLinksSync(parent, target)
-  if (path.resolve(realpathSync(parent)) !== parentRealpath) throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
-  try { lstatSync(target) } catch (error) { if (error?.code === 'ENOENT') return; throw error }
-  const quarantine = path.join(parent, `.ucli-cleanup-${randomUUID()}`)
+  if (path.resolve(realpathSync(parent)) !== parentRealpath ||
+    !sameIdentity(identityForSync(parent), parentIdentity)) throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
+  let currentIdentity = null
+  try { currentIdentity = identityForSync(target) } catch (error) { if (error?.code !== 'ENOENT') throw error }
+  if (!targetIdentity && !currentIdentity) return
+  if (!sameIdentity(currentIdentity, targetIdentity)) throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
+  const quarantine = quarantineFor(categoryId, parent)
+  if (existsSync(quarantine)) throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
   renameSync(target, quarantine)
   try {
     rejectPathChainSync(parent)
     rejectLinkSync(quarantine)
     const quarantineRealpath = path.resolve(realpathSync(quarantine))
     if (path.resolve(realpathSync(parent)) !== parentRealpath ||
+      !sameIdentity(identityForSync(parent), parentIdentity) ||
+      !sameIdentity(identityForSync(quarantine), targetIdentity) ||
       path.dirname(quarantineRealpath) !== parentRealpath ||
       path.basename(quarantineRealpath) !== path.basename(quarantine)) {
       throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
@@ -214,7 +298,8 @@ function quarantineAndRemoveSync(entry, { categoryId, beforeRemove }) {
   }
   try {
     // See the async boundary note above; Node exposes no handle-relative rmSync.
-    rmSync(quarantine, { recursive: true, force: true })
+    const removeOwned = removeTarget || (pathname => rmSync(pathname, { recursive: true, force: true }))
+    removeOwned(quarantine, { categoryId, originalTarget: target })
   } catch (error) {
     restoreQuarantineSync(quarantine, target)
     throw error
@@ -267,7 +352,9 @@ export async function runScheduledStorageCleanup({ markerPath, roots, removeTarg
   const failed = []
   for (const categoryId of categories) {
     try {
-      await quarantineAndRemove(targets.get(categoryId), { categoryId, beforeRemove, removeTarget })
+      const entry = targets.get(categoryId)
+      if (entry.pendingQuarantine) throw cleanupError('STORAGE_CLEANUP_RETRY_REQUIRED')
+      await quarantineAndRemove(entry, { categoryId, beforeRemove, removeTarget })
       removed.push(categoryId)
     } catch {
       failed.push(categoryId)
@@ -278,7 +365,7 @@ export async function runScheduledStorageCleanup({ markerPath, roots, removeTarg
   return { removed, failed }
 }
 
-export function runScheduledStorageCleanupSync({ markerPath, roots, beforeRemove } = {}) {
+export function runScheduledStorageCleanupSync({ markerPath, roots, beforeRemove, removeTarget } = {}) {
   validateMarkerPath(markerPath, roots)
   rejectMarkerLinkSync(markerPath)
   if (!existsSync(markerPath)) return { removed: [], failed: [] }
@@ -295,7 +382,9 @@ export function runScheduledStorageCleanupSync({ markerPath, roots, beforeRemove
   const failed = []
   for (const categoryId of categories) {
     try {
-      quarantineAndRemoveSync(targets.get(categoryId), { categoryId, beforeRemove })
+      const entry = targets.get(categoryId)
+      if (entry.pendingQuarantine) throw cleanupError('STORAGE_CLEANUP_RETRY_REQUIRED')
+      quarantineAndRemoveSync(entry, { categoryId, beforeRemove, removeTarget })
       removed.push(categoryId)
     } catch {
       failed.push(categoryId)
