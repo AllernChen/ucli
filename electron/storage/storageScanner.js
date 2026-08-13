@@ -30,6 +30,11 @@ function canonical(value) {
   const pathApi = pathApiFor(value)
   if (!pathApi.isAbsolute(value)) throw storageRootError()
   const resolved = pathApi.resolve(value)
+  const filesystemRoot = pathApi.parse(resolved).root
+  const isFilesystemRoot = pathApi === path.win32
+    ? resolved.toLowerCase() === filesystemRoot.toLowerCase()
+    : resolved === filesystemRoot
+  if (isFilesystemRoot) throw storageRootError()
   return {
     path: resolved,
     key: pathApi === path.win32 ? resolved.toLowerCase() : resolved,

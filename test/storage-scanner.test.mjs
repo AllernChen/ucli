@@ -114,6 +114,70 @@ test('configured storage roots fail closed when they are not absolute', () => {
   )
 })
 
+test('catalog rejects POSIX, drive, and UNC filesystem roots but accepts descendants', () => {
+  const catalogCases = [
+    {
+      platform: 'linux',
+      env: { XDG_CACHE_HOME: '/' },
+      homeDirectory: '/home/demo',
+      userDataPath: '/home/demo/.config/UCLI',
+      sessionDataPath: '/tmp/ucli/session'
+    },
+    {
+      platform: 'win32',
+      env: { LOCALAPPDATA: 'C:\\' },
+      homeDirectory: 'C:\\Users\\demo',
+      userDataPath: 'C:\\Users\\demo\\AppData\\Roaming\\UCLI',
+      sessionDataPath: 'C:\\Temp\\ucli\\session'
+    },
+    {
+      platform: 'win32',
+      env: { LOCALAPPDATA: '\\\\server\\share\\' },
+      homeDirectory: '\\\\server\\share\\Users\\demo',
+      userDataPath: '\\\\server\\share\\Users\\demo\\UCLI',
+      sessionDataPath: '\\\\server\\share\\Temp\\ucli\\session'
+    }
+  ]
+  for (const configured of catalogCases) {
+    assert.throws(
+      () => resolveUcliStorageRoots(configured),
+      error => error?.code === 'STORAGE_ROOT_UNSAFE'
+    )
+  }
+
+  assert.doesNotThrow(() => resolveUcliStorageRoots({
+    platform: 'win32',
+    env: { LOCALAPPDATA: '\\\\server\\share\\Cache' },
+    homeDirectory: '\\\\server\\share\\Users\\demo',
+    userDataPath: '\\\\server\\share\\Users\\demo\\UCLI',
+    sessionDataPath: 'C:\\Temp\\ucli\\session'
+  }))
+})
+
+test('scanner rejects POSIX, drive, and UNC filesystem roots but accepts descendants', async t => {
+  const local = await mkdtemp(path.join(tmpdir(), 'ucli-storage-root-validation-'))
+  t.after(() => rm(local, { recursive: true, force: true }))
+  await writeFile(path.join(local, 'entry'), 'x')
+  for (const unsafeRoot of ['/', 'C:\\', '\\\\server\\share\\']) {
+    await assert.rejects(
+      () => scanStorageCategories([{
+        id: 'unsafe',
+        roots: [local, unsafeRoot]
+      }], { maxEntries: 0 }),
+      error => error?.code === 'STORAGE_ROOT_UNSAFE'
+    )
+  }
+
+  const descendants = await scanStorageCategories([
+    { id: 'drive-descendant', roots: [local, { path: 'C:\\UCLI', optional: true }] },
+    { id: 'unc-descendant', roots: [local, { path: '\\\\server\\share\\UCLI', optional: true }] }
+  ], { maxEntries: 0 })
+  assert.deepEqual(descendants, [
+    { id: 'drive-descendant', bytes: 0, itemCount: 0, status: 'partial' },
+    { id: 'unc-descendant', bytes: 0, itemCount: 0, status: 'partial' }
+  ])
+})
+
 test('fixed descriptors produce non-overlapping owned categories', async t => {
   const { roots } = await fixture(t)
   await Promise.all([

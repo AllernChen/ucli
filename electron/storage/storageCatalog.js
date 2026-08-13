@@ -33,7 +33,13 @@ function requireAbsolute(value, pathApi) {
   if (typeof value !== 'string' || value.trim() === '' || !pathApi.isAbsolute(value)) {
     throw storageRootError()
   }
-  return pathApi.resolve(value)
+  const resolved = pathApi.resolve(value)
+  const filesystemRoot = pathApi.parse(resolved).root
+  const isFilesystemRoot = pathApi === path.win32
+    ? resolved.toLowerCase() === filesystemRoot.toLowerCase()
+    : resolved === filesystemRoot
+  if (isFilesystemRoot) throw storageRootError()
+  return resolved
 }
 
 function optionalRoot(pathname, extra = {}) {
