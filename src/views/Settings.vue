@@ -220,53 +220,7 @@
       </section>
 
       <section id="settings-section-updates" class="settings-section">
-    <a-card title="软件更新" class="settings-card">
-      <div class="update-toolbar">
-        <span class="muted">当前版本：v{{ updateState?.currentVersion || '—' }}</span>
-        <a-tag :color="updateState?.status === 'error' ? 'red' : updateState?.status === 'downloaded' ? 'green' : 'blue'">
-          {{ updateStatusLabel(updateState?.status) }}
-        </a-tag>
-      </div>
-      <p v-if="updateState?.availableVersion">可更新至：v{{ updateState.availableVersion }}</p>
-      <a-alert
-        v-if="updateState?.status === 'unsupported'"
-        type="info"
-        show-icon
-        message="当前版本不支持应用内更新，请从 GitHub Release 下载新版本。"
-      />
-      <pre v-if="updateState?.releaseNotes" class="release-notes">{{ visibleReleaseNotes(updateState.releaseNotes) }}</pre>
-      <div v-if="updateState?.status === 'downloading'" class="update-progress">
-        <a-progress :percent="updateState.progressPercent ?? 0" status="active" />
-        <span class="muted">{{ updateProgressText(updateState) }}</span>
-      </div>
-      <a-alert
-        v-if="updateState?.status === 'installing'"
-        type="info"
-        show-icon
-        message="即将重启并启动安装程序，安装进度将在系统安装窗口中显示。"
-      />
-      <a-space>
-        <a-button
-          :loading="updateState?.status === 'checking'"
-          :disabled="updateState?.status === 'downloading' || updateState?.status === 'installing'"
-          @click="checkForUpdates"
-        >检查更新</a-button>
-        <a-button
-          v-if="['available', 'downloading'].includes(updateState?.status)"
-          type="primary"
-          :loading="updateState?.status === 'downloading'"
-          :disabled="updateState?.status === 'downloading'"
-          @click="downloadUpdate"
-        >{{ updateState?.status === 'downloading' ? '正在下载更新' : '下载更新' }}</a-button>
-        <a-button
-          v-if="['downloaded', 'installing'].includes(updateState?.status)"
-          type="primary"
-          :loading="updateState?.status === 'installing'"
-          :disabled="updateState?.status === 'installing'"
-          @click="installUpdate"
-        >{{ updateState?.status === 'installing' ? '正在启动安装程序' : '重启并安装' }}</a-button>
-      </a-space>
-    </a-card>
+        <SoftwareUpdatePanel />
       </section>
 
       <section id="settings-section-support" class="settings-section">
@@ -314,11 +268,11 @@ import GatewayConfigDrawer from '../components/gateway/GatewayConfigDrawer.vue'
 import StorageManagementPanel from '../components/settings/StorageManagementPanel.vue'
 import SummaryCacheSettings from '../components/settings/SummaryCacheSettings.vue'
 import SettingsSectionNav from '../components/settings/SettingsSectionNav.vue'
+import SoftwareUpdatePanel from '../components/settings/SoftwareUpdatePanel.vue'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { normalizeSettingsSection } from '../settingsSections.js'
 import { formatCliDiagnosticSummary, persistenceStatusLabel, profileDiagnosticSummary } from '../diagnosticsPresentation.js'
-import { updateProgressText, updateStatusLabel, visibleReleaseNotes } from '../updatePresentation.js'
 import {
   gatewayPhaseLabel,
   gatewayTargetLabel,
@@ -357,8 +311,6 @@ const diagnostics = ref(null)
 const diagnosticsLoading = ref(false)
 const diagnosticsExporting = ref(false)
 const profileRechecking = ref(false)
-const updateState = ref(null)
-let stopUpdateListener = null
 const codexRuntime = ref(null)
 let stopCodexRuntimeListener = null
 let sectionObserver = null
@@ -408,9 +360,8 @@ const summaryModelOptions = computed(() => {
 })
 
 onMounted(async () => {
-  stopUpdateListener = ipc.on('update:state', (state) => { updateState.value = state })
   stopCodexRuntimeListener = ipc.onCodexRuntime((snapshot) => { codexRuntime.value = snapshot })
-  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadSummaryProfiles(), loadDiagnostics(), loadUpdateState(), loadCodexRuntime()])
+  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadSummaryProfiles(), loadDiagnostics(), loadCodexRuntime()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
   observeSections()
@@ -418,7 +369,6 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  stopUpdateListener?.()
   stopCodexRuntimeListener?.()
   sectionObserver?.disconnect()
 })
@@ -522,39 +472,6 @@ async function loadDiagnostics() {
     message.error('读取诊断信息失败：' + (e?.message || e))
   } finally {
     diagnosticsLoading.value = false
-  }
-}
-
-async function loadUpdateState() {
-  try {
-    updateState.value = await ipc.getUpdateState()
-  } catch {
-    message.error('读取更新状态失败')
-  }
-}
-
-async function runUpdateAction(action, fallbackMessage) {
-  try {
-    updateState.value = await action()
-  } catch {
-    message.error(fallbackMessage)
-  }
-}
-
-function checkForUpdates() {
-  return runUpdateAction(() => ipc.checkForUpdates(), '检查更新失败')
-}
-
-function downloadUpdate() {
-  return runUpdateAction(() => ipc.downloadUpdate(), '下载更新失败')
-}
-
-async function installUpdate() {
-  try {
-    const started = await ipc.installUpdate()
-    if (!started) message.error('更新尚未准备就绪')
-  } catch {
-    message.error('启动安装失败')
   }
 }
 
@@ -766,10 +683,6 @@ async function resetBinding(id) {
 .cli-path { color: #8c8c8c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cli-error { color: #bfbfbf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diagnostics-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-.update-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-.update-progress { margin: 12px 0; }
-.update-progress .muted { display: block; margin-top: 6px; font-size: 12px; }
-.release-notes { margin: 12px 0; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
 .result-command, :global(.confirm-command) { font-family: 'Cascadia Code', Consolas, monospace; }
 .result-command { margin-bottom: 6px; color: #262626; }
 .result-output { margin: 0; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; }

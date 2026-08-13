@@ -22,7 +22,9 @@ test('sidebar version is injected from the package version during renderer build
     JSON.stringify(packageJson.version)
   )
   assert.match(appSource, /const appVersion = __UCLI_VERSION__/)
-  assert.match(appSource, /\{\{ appVersion \}\}/)
+  assert.match(appSource, /:app-version="appVersion"/)
+  const footerSource = readFileSync(new URL('../src/components/updates/UpdateSiderFooter.vue', import.meta.url), 'utf8')
+  assert.match(footerSource, /v\{\{ appVersion \}\}/)
   assert.doesNotMatch(appSource, /v0\.3\.1/)
 })
 
