@@ -1,5 +1,57 @@
 <template>
   <div class="settings">
+    <SettingsSectionNav
+      :model-value="activeSection"
+      @update:model-value="selectSection"
+    />
+    <main class="settings-content">
+      <section id="settings-section-general" class="settings-section">
+        <a-card title="默认设置" class="settings-card">
+          <a-form layout="vertical">
+            <a-form-item label="默认 CLI">
+              <a-select v-model:value="local.defaultAdapter">
+                <a-select-option v-for="a in adapters" :key="a.id" :value="a.id">{{ a.icon }} {{ a.displayName }}</a-select-option>
+              </a-select>
+            </a-form-item>
+            <a-form-item label="默认权限模式">
+              <a-radio-group v-model:value="local.defaultTier">
+                <a-radio value="always-agree">一直同意</a-radio>
+                <a-radio value="safety-rules">安全规则</a-radio>
+                <a-radio value="ask-everything">逐次确认</a-radio>
+              </a-radio-group>
+            </a-form-item>
+            <a-form-item label="默认工作目录">
+              <a-input-group compact>
+                <a-input v-model:value="local.defaultCwd" style="width: calc(100% - 80px)" />
+                <a-button style="width: 80px" @click="pickDir">浏览</a-button>
+              </a-input-group>
+            </a-form-item>
+            <a-form-item label="Codex 配置目录">
+              <a-input-group compact>
+                <a-input v-model:value="local.codexConfigDir" placeholder="留空时使用 CODEX_HOME 或 ~/.codex" style="width: calc(100% - 80px)" />
+                <a-button style="width: 80px" @click="pickCodexConfigDir">浏览</a-button>
+              </a-input-group>
+              <div class="muted">切换后仅影响后续启动或重新启动的 Codex 会话。</div>
+            </a-form-item>
+            <a-form-item label="Codex 当前 Provider">
+              <a-space v-if="codexRuntime">
+                <a-tag color="blue">{{ codexRuntime.currentProvider }}</a-tag>
+                <span class="muted">可用：{{ codexRuntime.availableProviders.join('、') }}</span>
+              </a-space>
+              <span v-else class="muted">正在读取配置状态…</span>
+            </a-form-item>
+            <a-form-item label="语言">
+              <a-select v-model:value="local.language" style="width: 200px">
+                <a-select-option value="zh-CN">简体中文</a-select-option>
+                <a-select-option value="en">English</a-select-option>
+              </a-select>
+            </a-form-item>
+            <a-button type="primary" @click="save">保存设置</a-button>
+          </a-form>
+        </a-card>
+      </section>
+
+      <section id="settings-section-gateway" class="settings-section">
     <a-card title="通信 Gateway" class="settings-card">
       <div class="gateway-summary">
         <a-descriptions size="small" :column="1">
@@ -19,7 +71,9 @@
         <a-button ref="gatewayTrigger" type="primary" @click="openGatewayDrawer">配置</a-button>
       </div>
     </a-card>
+      </section>
 
+      <section id="settings-section-cli" class="settings-section">
     <a-card title="CLI 管理" class="settings-card">
       <div class="cli-toolbar">
         <span class="muted">检测本机 PATH 中的 AI CLI。安装或升级前会显示并确认完整命令。</span>
@@ -69,51 +123,9 @@
         </template>
       </a-alert>
     </a-card>
+      </section>
 
-    <a-card title="默认设置" class="settings-card">
-      <a-form layout="vertical">
-        <a-form-item label="默认 CLI">
-          <a-select v-model:value="local.defaultAdapter">
-            <a-select-option v-for="a in adapters" :key="a.id" :value="a.id">{{ a.icon }} {{ a.displayName }}</a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-form-item label="默认权限模式">
-          <a-radio-group v-model:value="local.defaultTier">
-            <a-radio value="always-agree">一直同意</a-radio>
-            <a-radio value="safety-rules">安全规则</a-radio>
-            <a-radio value="ask-everything">逐次确认</a-radio>
-          </a-radio-group>
-        </a-form-item>
-        <a-form-item label="默认工作目录">
-          <a-input-group compact>
-            <a-input v-model:value="local.defaultCwd" style="width: calc(100% - 80px)" />
-            <a-button style="width: 80px" @click="pickDir">浏览</a-button>
-          </a-input-group>
-        </a-form-item>
-        <a-form-item label="Codex 配置目录">
-          <a-input-group compact>
-            <a-input v-model:value="local.codexConfigDir" placeholder="留空时使用 CODEX_HOME 或 ~/.codex" style="width: calc(100% - 80px)" />
-            <a-button style="width: 80px" @click="pickCodexConfigDir">浏览</a-button>
-          </a-input-group>
-          <div class="muted">切换后仅影响后续启动或重新启动的 Codex 会话。</div>
-        </a-form-item>
-        <a-form-item label="Codex 当前 Provider">
-          <a-space v-if="codexRuntime">
-            <a-tag color="blue">{{ codexRuntime.currentProvider }}</a-tag>
-            <span class="muted">可用：{{ codexRuntime.availableProviders.join('、') }}</span>
-          </a-space>
-          <span v-else class="muted">正在读取配置状态…</span>
-        </a-form-item>
-        <a-form-item label="语言">
-          <a-select v-model:value="local.language" style="width: 200px">
-            <a-select-option value="zh-CN">简体中文</a-select-option>
-            <a-select-option value="en">English</a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-button type="primary" @click="save">保存设置</a-button>
-      </a-form>
-    </a-card>
-
+      <section id="settings-section-summaries" class="settings-section">
     <a-card title="自动工作总结" class="settings-card">
       <a-form layout="vertical">
         <a-form-item label="启用自动总结">
@@ -173,9 +185,13 @@
         <a-button type="primary" style="margin-top: 12px" @click="save">保存自动总结设置</a-button>
       </a-form>
     </a-card>
+      </section>
 
-    <SummaryCacheSettings :settings="local" />
+      <section id="settings-section-storage" class="settings-section">
+        <SummaryCacheSettings :settings="local" />
+      </section>
 
+      <section id="settings-section-shortcuts" class="settings-section">
     <a-card title="快捷键" class="settings-card">
       <a-list :data-source="bindingsList" item-layout="horizontal">
         <template #renderItem="{ item }">
@@ -200,7 +216,9 @@
         <a-button v-if="capturedKeys" size="small" @click="clearCapture" style="margin-top:8px;">清除快捷键</a-button>
       </a-modal>
     </a-card>
+      </section>
 
+      <section id="settings-section-updates" class="settings-section">
     <a-card title="软件更新" class="settings-card">
       <div class="update-toolbar">
         <span class="muted">当前版本：v{{ updateState?.currentVersion || '—' }}</span>
@@ -248,7 +266,9 @@
         >{{ updateState?.status === 'installing' ? '正在启动安装程序' : '重启并安装' }}</a-button>
       </a-space>
     </a-card>
+      </section>
 
+      <section id="settings-section-support" class="settings-section">
     <a-card title="支持诊断" class="settings-card">
       <div class="diagnostics-toolbar">
         <span class="muted">仅包含版本、CLI 可用性与本地数据状态，不包含对话内容或路径。</span>
@@ -266,11 +286,15 @@
         <a-descriptions-item v-if="diagnostics.aiCliProfiles" label="配置档案">{{ diagnosticProfileSummary }}</a-descriptions-item>
       </a-descriptions>
     </a-card>
+      </section>
 
+      <section id="settings-section-about" class="settings-section">
     <a-card title="关于" class="settings-card">
       <p>UCLI — 多 CLI 编排工作台</p>
       <p class="muted">集成 Claude Code、Codex、OpenCode 与 U-Code 的卡片式编排 GUI，提供三档权限管控与使用统计。</p>
     </a-card>
+      </section>
+    </main>
     <GatewayConfigDrawer
       v-model:open="gatewayDrawerOpen"
       @closed="onGatewayDrawerClosed"
@@ -287,8 +311,10 @@ import { useSessionsStore } from '../stores/sessions.js'
 import { useGatewayStore } from '../stores/gateway.js'
 import GatewayConfigDrawer from '../components/gateway/GatewayConfigDrawer.vue'
 import SummaryCacheSettings from '../components/settings/SummaryCacheSettings.vue'
+import SettingsSectionNav from '../components/settings/SettingsSectionNav.vue'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
+import { normalizeSettingsSection } from '../settingsSections.js'
 import { formatCliDiagnosticSummary, persistenceStatusLabel, profileDiagnosticSummary } from '../diagnosticsPresentation.js'
 import { updateProgressText, updateStatusLabel, visibleReleaseNotes } from '../updatePresentation.js'
 import {
@@ -304,6 +330,7 @@ const route = useRoute()
 const router = useRouter()
 const gatewayDrawerOpen = ref(false)
 const gatewayTrigger = ref(null)
+const activeSection = ref(normalizeSettingsSection(route.query.section))
 const adapters = ref([])
 const local = ref({
   defaultAdapter: 'claude', defaultTier: 'safety-rules', defaultCwd: '', codexConfigDir: '', language: 'zh-CN',
@@ -332,6 +359,8 @@ const updateState = ref(null)
 let stopUpdateListener = null
 const codexRuntime = ref(null)
 let stopCodexRuntimeListener = null
+let sectionObserver = null
+let programmaticSection = null
 const lastCliOutput = computed(() => {
   const result = lastCliResult.value
   if (!result) return ''
@@ -382,11 +411,14 @@ onMounted(async () => {
   await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadSummaryProfiles(), loadDiagnostics(), loadUpdateState(), loadCodexRuntime()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
+  observeSections()
+  await scrollToSection(activeSection.value, false)
 })
 
 onUnmounted(() => {
   stopUpdateListener?.()
   stopCodexRuntimeListener?.()
+  sectionObserver?.disconnect()
 })
 
 watch(
@@ -394,6 +426,60 @@ watch(
   (panel) => { gatewayDrawerOpen.value = panel === 'gateway' },
   { immediate: true }
 )
+
+watch(
+  () => route.query.section,
+  async (value) => {
+    const section = normalizeSettingsSection(value)
+    if (value !== section) {
+      await replaceSectionQuery(section)
+    }
+    if (activeSection.value !== section) {
+      activeSection.value = section
+      await scrollToSection(section)
+    }
+  },
+  { immediate: true }
+)
+
+function replaceSectionQuery(section) {
+  return router.replace({ name: 'settings', query: { ...route.query, section } })
+}
+
+async function selectSection(section) {
+  const normalized = normalizeSettingsSection(section)
+  if (normalized === activeSection.value && route.query.section === normalized) return
+  activeSection.value = normalized
+  await replaceSectionQuery(normalized)
+  await scrollToSection(normalized)
+}
+
+async function scrollToSection(section) {
+  programmaticSection = section
+  await nextTick()
+  document.getElementById(`settings-section-${section}`)?.scrollIntoView({ block: 'start' })
+}
+
+function observeSections() {
+  if (typeof IntersectionObserver === 'undefined') return
+  sectionObserver = new IntersectionObserver((entries) => {
+    if (programmaticSection) {
+      const targetId = `settings-section-${programmaticSection}`
+      if (entries.some(entry => entry.isIntersecting && entry.target.id === targetId)) {
+        programmaticSection = null
+      }
+      return
+    }
+    const visible = entries
+      .filter(entry => entry.isIntersecting)
+      .sort((left, right) => left.boundingClientRect.top - right.boundingClientRect.top)[0]
+    const section = normalizeSettingsSection(visible?.target?.id?.replace('settings-section-', ''))
+    if (!visible || section === activeSection.value) return
+    activeSection.value = section
+    replaceSectionQuery(section)
+  }, { rootMargin: '0px 0px -65% 0px', threshold: [0, 0.01] })
+  document.querySelectorAll('.settings-section').forEach(section => sectionObserver.observe(section))
+}
 
 function openGatewayDrawer() {
   router.push({ name: 'settings', query: { ...route.query, panel: 'gateway' } })
@@ -662,7 +748,14 @@ async function resetBinding(id) {
 </script>
 
 <style scoped>
-.settings { max-width: 820px; }
+.settings {
+  display: grid;
+  grid-template-columns: 184px minmax(0, 1fr);
+  gap: 20px;
+  max-width: 1040px;
+}
+.settings-content { min-width: 0; }
+.settings-section { scroll-margin-top: 14px; }
 .settings-card { margin-bottom: 14px; }
 .gateway-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .muted { color: #8c8c8c; }
@@ -685,4 +778,11 @@ async function resetBinding(id) {
   display: flex; align-items: center; justify-content: center; color: #595959;
 }
 .capture-box:focus { border-color: #1677ff; background: #fff; }
+
+@media (max-width: 899px) {
+  .settings {
+    display: block;
+    max-width: 820px;
+  }
+}
 </style>
