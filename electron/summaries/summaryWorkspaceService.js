@@ -267,6 +267,30 @@ export function createSummaryWorkspaceService({
     return { removed }
   }
 
+  async function clearDerived({ isProtected = () => false } = {}) {
+    if (typeof isProtected !== 'function') {
+      throw workspaceError('SUMMARY_WORKSPACE_PROTECTION_CHECK_INVALID')
+    }
+    let removed = 0
+    let bytes = 0
+    for (const reportId of await listWorkspaceIds()) {
+      try {
+        const manifest = await readManifest(workspacePath(root, reportId))
+        if (!['completed', 'failed', 'interrupted'].includes(manifest?.status)) continue
+        if (await isProtected(reportId) !== false) continue
+        const retainedBytes = Number.isSafeInteger(manifest.bytes) && manifest.bytes >= 0
+          ? manifest.bytes
+          : 0
+        await remove(reportId)
+        removed += 1
+        bytes = Math.min(Number.MAX_SAFE_INTEGER, bytes + retainedBytes)
+      } catch {
+        // Protection lookup, corrupt state, unsafe entries, and I/O failures retain data.
+      }
+    }
+    return { removed, bytes }
+  }
+
   async function pruneExpired() {
     let removed = 0
     let bytes = 0
@@ -357,6 +381,6 @@ export function createSummaryWorkspaceService({
 
   return {
     create, writeArtifact, markStage, complete, fail, recover, remove, usage,
-    clearFailed, pruneExpired, pruneOrphans, pruneCompleted
+    clearFailed, clearDerived, pruneExpired, pruneOrphans, pruneCompleted
   }
 }

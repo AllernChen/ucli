@@ -16,6 +16,8 @@ import {
 } from './externalLinks.js'
 import { createUpdateService } from './updateService.js'
 import { safeStartupFailure, startMainWindowLifecycle } from './startupLifecycle.js'
+import { resolveUcliStorageRoots } from './storage/storageCatalog.js'
+import { runScheduledStorageCleanupSync } from './storage/startupCleanup.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -37,6 +39,21 @@ if (!app.isPackaged) {
 // with "Unable to move the cache: Access denied". Keep durable UCLI data in
 // userData, but isolate disposable browser cache under the writable temp path.
 const sessionDataPath = join(app.getPath('temp'), 'ucli', app.isPackaged ? 'electron-session-data' : 'electron-session-data-dev')
+const storageRoots = resolveUcliStorageRoots({
+  platform: process.platform,
+  env: process.env,
+  homeDirectory: app.getPath('home'),
+  userDataPath: app.getPath('userData'),
+  sessionDataPath
+})
+try {
+  runScheduledStorageCleanupSync({
+    markerPath: join(storageRoots.userData, 'storage-cleanup.json'),
+    roots: { ...storageRoots, browserCacheParent: dirname(sessionDataPath) }
+  })
+} catch (error) {
+  console.error('UCLI storage cleanup failed:', error?.code || 'STORAGE_CLEANUP_FAILED')
+}
 mkdirSync(sessionDataPath, { recursive: true })
 app.setPath('sessionData', sessionDataPath)
 app.commandLine.appendSwitch('disk-cache-dir', join(sessionDataPath, 'Cache'))

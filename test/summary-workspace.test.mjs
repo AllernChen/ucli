@@ -206,6 +206,31 @@ test('clearFailed removes only failed and interrupted workspaces and skips malfo
   assert.equal(existsSync(join(root, 'workspaces')), true)
 })
 
+test('clearDerived removes inactive derived workspaces and protects running and active reports', async t => {
+  const { service } = await withWorkspace(t)
+  const completed = await service.create('report-completed-clear')
+  await service.complete(completed.id, { markdown: '1234' })
+  const failed = await service.create('report-failed-derived-clear')
+  await service.writeArtifact(failed.id, 'input/evidence.txt', '12')
+  await service.fail(failed.id, 'SUMMARY_FAILED')
+  const interrupted = await service.create('report-interrupted-derived-clear')
+  await service.writeArtifact(interrupted.id, 'input/evidence.txt', '123')
+  await service.recover()
+  const running = await service.create('report-running-derived-keep')
+  const active = await service.create('report-active-derived-keep')
+  await service.complete(active.id, { markdown: 'keep' })
+
+  assert.deepEqual(await service.clearDerived({
+    isProtected: reportId => reportId === active.id
+  }), { removed: 3, bytes: 9 })
+  for (const workspace of [completed, failed, interrupted]) {
+    assert.equal(existsSync(workspace.path), false)
+  }
+  for (const workspace of [running, active]) {
+    assert.equal(existsSync(workspace.path), true)
+  }
+})
+
 test('pruneExpired removes only expired failed workspaces and reports bounded bytes', async t => {
   let currentTime = Date.parse('2026-08-12T00:00:00.000Z')
   const { service } = await withWorkspace(t, { now: () => currentTime, failedRetentionMs: 1000 })
