@@ -63,6 +63,13 @@ export function createUpdateService({
       revision: Math.min(MAX_SAFE, state.revision + 1)
     }
     onStateChange(snapshot())
+    if (started) {
+      if (PERIODIC_STATUSES.has(state.status)) {
+        if (initialTimer == null && periodicTimer == null && checkPromise == null) schedulePeriodic()
+      } else {
+        clearTimer('periodic')
+      }
+    }
     return snapshot()
   }
 
@@ -93,7 +100,7 @@ export function createUpdateService({
     if (!started || !PERIODIC_STATUSES.has(state.status)) return
     periodicTimer = schedule(async () => {
       periodicTimer = null
-      await check()
+      if (PERIODIC_STATUSES.has(state.status)) await check()
       schedulePeriodic()
     }, intervalMs)
   }
@@ -152,6 +159,9 @@ export function createUpdateService({
 
   function check() {
     if (!supported) return Promise.resolve(snapshot())
+    if (['downloading', 'downloaded', 'installing'].includes(state.status)) {
+      return Promise.resolve(snapshot())
+    }
     if (checkPromise) return checkPromise
     emit({
       status: 'checking',

@@ -157,6 +157,80 @@ test('downloaded and installing states do not schedule a periodic check', async 
   assert.equal([...timers.timers.values()].some(timer => timer.delay === 20), false)
 })
 
+test('an already scheduled periodic callback rechecks state before using the network', async () => {
+  const updater = new FakeUpdater()
+  updater.checkForUpdates = async () => {
+    updater.checkCalls += 1
+    updater.emit('update-not-available')
+  }
+  const timers = createTimers()
+  const { service } = createInstalledService(updater, timers)
+  service.start({ initialDelayMs: 0, intervalMs: 20 })
+  await timers.take(0)()
+  assert.equal(updater.checkCalls, 1)
+
+  const scheduled = timers.take(20)
+  updater.emit('update-downloaded', { version: '0.10.2' })
+  await scheduled()
+
+  assert.equal(updater.checkCalls, 1)
+  assert.equal(service.getState().status, 'downloaded')
+})
+
+test('entering a noneligible state cancels a pending periodic timer', async () => {
+  const updater = new FakeUpdater()
+  updater.checkForUpdates = async () => {
+    updater.checkCalls += 1
+    updater.emit('update-not-available')
+  }
+  const timers = createTimers()
+  const { service } = createInstalledService(updater, timers)
+  service.start({ initialDelayMs: 0, intervalMs: 20 })
+  await timers.take(0)()
+  assert.equal([...timers.timers.values()].some(timer => timer.delay === 20), true)
+
+  updater.emit('update-available', { version: '0.10.2' })
+
+  assert.equal([...timers.timers.values()].some(timer => timer.delay === 20), false)
+})
+
+test('an eligible error transition schedules a new periodic retry', async () => {
+  const updater = new FakeUpdater()
+  updater.checkForUpdates = async () => {
+    updater.checkCalls += 1
+    updater.emit('update-available', { version: '0.10.2' })
+  }
+  const timers = createTimers()
+  const { service } = createInstalledService(updater, timers)
+  service.start({ initialDelayMs: 0, intervalMs: 20 })
+  await timers.take(0)()
+  assert.equal(timers.timers.size, 0)
+
+  updater.emit('error', new Error('private network detail'))
+
+  assert.deepEqual([...timers.timers.values()].map(timer => timer.delay), [20])
+})
+
+test('manual checks do not use the network or replace active update states', async () => {
+  for (const status of ['downloading', 'downloaded', 'installing']) {
+    const updater = new FakeUpdater()
+    const { service } = createInstalledService(updater)
+    await service.check()
+    if (status === 'downloading') await service.download()
+    else {
+      updater.emit('update-downloaded', { version: '0.10.2' })
+      if (status === 'installing') service.install()
+    }
+    const calls = updater.checkCalls
+    const before = service.getState()
+
+    const after = await service.check()
+
+    assert.equal(updater.checkCalls, calls, status)
+    assert.deepEqual(after, before, status)
+  }
+})
+
 test('stop cancels initial, periodic, and install timers', async () => {
   const updater = new FakeUpdater()
   updater.checkForUpdates = async () => {
