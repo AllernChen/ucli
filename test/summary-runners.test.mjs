@@ -236,7 +236,11 @@ function executableResolver(fake, adapterId, extraEnv = {}) {
   return () => ({
     file: fake.file,
     prefixArgs: fake.prefixArgs,
-    env: { ...process.env, FAKE_ADAPTER: adapterId, ...extraEnv }
+    // Deliberately do not spread process.env — the fake runs under
+    // process.execPath and the test must not inherit the host's real provider
+    // credentials (e.g. ANTHROPIC_AUTH_TOKEN), which would defeat endpoint
+    // stripping assertions.
+    env: { FAKE_ADAPTER: adapterId, ...extraEnv }
   })
 }
 
@@ -450,6 +454,7 @@ test('OpenCode denies every tool and runs pure with isolated config and allowlis
   try {
     const runner = createOpenCodeRunner({
       adapterId: 'opencode',
+      baseEnv: { PATH: process.env.PATH || '' },
       resolveExecutable: executableResolver(fake, 'opencode', {
         OPENAI_API_KEY: 'allowed-openai-auth',
         OPENAI_BASE_URL: 'https://paired-openai.example',
