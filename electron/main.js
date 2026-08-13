@@ -18,6 +18,7 @@ import { createUpdateService } from './updateService.js'
 import { safeStartupFailure, startMainWindowLifecycle } from './startupLifecycle.js'
 import { resolveUcliStorageRoots } from './storage/storageCatalog.js'
 import { runScheduledStorageCleanupSync } from './storage/startupCleanup.js'
+import { runPrimaryInstanceGate } from './primaryInstanceGate.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -34,6 +35,23 @@ if (!app.isPackaged) {
   app.setPath('userData', devUserDataPath)
 }
 
+/** @type {BrowserWindow | null} */
+let mainWindow = null
+let tray = null
+let orchestrator = null
+let isQuitting = false
+let quitReady = false
+let shutdownPromise = null
+let updateService = null
+
+runPrimaryInstanceGate({
+  acquireLock: () => app.requestSingleInstanceLock(),
+  quit: () => app.quit(),
+  bootstrap: bootstrapPrimaryInstance,
+  onSecondInstance: () => app.on('second-instance', () => showMainWindow())
+})
+
+function bootstrapPrimaryInstance() {
 // Chromium writes cache data under sessionData. On Windows the default
 // Electron cache can be left with ACLs/locks that make the next launch fail
 // with "Unable to move the cache: Access denied". Keep durable UCLI data in
@@ -58,15 +76,6 @@ mkdirSync(sessionDataPath, { recursive: true })
 app.setPath('sessionData', sessionDataPath)
 app.commandLine.appendSwitch('disk-cache-dir', join(sessionDataPath, 'Cache'))
 if (process.platform === 'win32') app.setAppUserModelId('com.ucli.app')
-
-/** @type {BrowserWindow | null} */
-let mainWindow = null
-let tray = null
-let orchestrator = null
-let isQuitting = false
-let quitReady = false
-let shutdownPromise = null
-let updateService = null
 
 function iconPath(filename) {
   const root = app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources')
@@ -245,13 +254,6 @@ app.whenReady().then(async () => {
 })
 
 // Single-instance lock — second launches focus the existing window.
-const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) {
-  app.quit()
-} else {
-  app.on('second-instance', () => {
-    showMainWindow()
-  })
 }
 
 app.on('before-quit', (event) => {
