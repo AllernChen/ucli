@@ -182,7 +182,13 @@ export function createUpdateService({
       }
       emit({ checkedAt: safeInteger(now()) })
       return snapshot()
-    })().finally(() => { checkPromise = null })
+    })().finally(() => {
+      checkPromise = null
+      if (started) {
+        if (PERIODIC_STATUSES.has(state.status)) schedulePeriodic()
+        else clearTimer('periodic')
+      }
+    })
     return checkPromise
   }
 

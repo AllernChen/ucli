@@ -26,14 +26,25 @@ test('expanded footer keeps version and provides explicit available, progress, a
   assert.match(footer, /<a-progress[\s\S]*:percent="updates\.progressPercent \?\? 0"/)
   assert.match(footer, /v-if="updates\.status === 'downloaded'"/)
   assert.match(footer, /updates\.install\(\)/)
+  assert.match(footer, /updates\.status === 'error'/)
+  assert.match(footer, /updateStatusLabel\(updates\.status\)/)
 })
 
 test('collapsed footer has an accessible detail trigger without downloading on popover open', () => {
   assert.match(footer, /collapsed/)
-  assert.match(footer, /aria-label="查看软件更新"/)
+  assert.match(footer, /:aria-label="collapsedLabel"/)
+  assert.match(footer, /appVersion[\s\S]*updateFooterLabel/)
+  assert.match(footer, /progressPercent/)
   assert.match(footer, /settings[\s\S]*section:\s*'updates'/)
+  assert.match(footer, /\.\.\.router\.currentRoute\.value\.query[\s\S]*section:\s*'updates'/)
   assert.doesNotMatch(footer, /@openChange="updates\.download|@update:open="updates\.download/)
   assert.doesNotMatch(footer, /onMounted\([\s\S]*updates\.download/)
+})
+
+test('collapsed popover explains installing and error states without unsafe actions', () => {
+  assert.match(footer, /updates\.status === 'installing'[\s\S]{0,200}updateStatusLabel/)
+  assert.match(footer, /updates\.status === 'error'[\s\S]{0,200}updateStatusLabel/)
+  assert.doesNotMatch(footer, /updates\.status === 'error'[\s\S]{0,300}updates\.(download|install)\(\)/)
 })
 
 test('unsupported and error states never render as an available update action', () => {

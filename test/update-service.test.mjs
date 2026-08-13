@@ -211,6 +211,25 @@ test('an eligible error transition schedules a new periodic retry', async () => 
   assert.deepEqual([...timers.timers.values()].map(timer => timer.delay), [20])
 })
 
+test('a manual eligible check restores the periodic timer after the request settles', async () => {
+  const updater = new FakeUpdater()
+  updater.checkForUpdates = async () => {
+    updater.checkCalls += 1
+    await Promise.resolve()
+    updater.emit('update-not-available')
+  }
+  const timers = createTimers()
+  const { service } = createInstalledService(updater, timers)
+  service.start({ initialDelayMs: 0, intervalMs: 20 })
+  await timers.take(0)()
+  assert.deepEqual([...timers.timers.values()].map(timer => timer.delay), [20])
+
+  await service.check()
+
+  assert.equal(updater.checkCalls, 2)
+  assert.deepEqual([...timers.timers.values()].map(timer => timer.delay), [20])
+})
+
 test('manual checks do not use the network or replace active update states', async () => {
   for (const status of ['downloading', 'downloaded', 'installing']) {
     const updater = new FakeUpdater()
