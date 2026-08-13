@@ -133,6 +133,10 @@ const api = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSettings: (s) => ipcRenderer.invoke('settings:update', s),
 
+  // ---- application storage ----
+  getStorageUsage: () => ipcRenderer.invoke('storage:get-usage'),
+  clearStorageCategory: (categoryId) => ipcRenderer.invoke('storage:clear', { categoryId }),
+
   // ---- work summaries ----
   getSummarySettings: () => invokeSummary('summary:get-settings'),
   setSummarySettings: (value) => invokeSummary('summary:set-settings', value),

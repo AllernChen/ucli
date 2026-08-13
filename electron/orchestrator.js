@@ -12,7 +12,7 @@ import { DEFAULT_RULESET, upgradeDefaultRuleset } from './permission/defaultRule
 import { createAdapterMap } from './adapterRegistry.js'
 import { TIER } from './adapters/cliAdapter.js'
 import { openDb, getDb } from './persistence/db.js'
-import { initLogger, log } from './logger.js'
+import { initLogger, log, truncateLog } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
 import { createSessionDiagnosticsService, registerSessionDiagnosticsIpc } from './sessionDiagnosticsService.js'
@@ -68,6 +68,9 @@ import {
   updateSummarySettings
 } from './summaries/summaryScheduler.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
+import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
+import { scanStorageCategories } from './storage/storageScanner.js'
+import { createStorageManagementService } from './storage/storageManagementService.js'
 import { GatewayManager } from './gateway/manager.js'
 import { createGatewayPort } from './gateway/orchestratorPort.js'
 import { SessionSignalBus } from './gateway/sessionSignalBus.js'
@@ -127,6 +130,85 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   SUMMARY_PROFILE_UNAVAILABLE: 'Select an available default AI CLI profile',
   SUMMARY_DISCLOSURE_REQUIRED: 'Automatic summaries require disclosure acceptance'
 })
+
+const STORAGE_CATEGORY_ID_SET = new Set(STORAGE_CATEGORY_IDS)
+const STORAGE_STATUSES = new Set(['ready', 'partial', 'unavailable', 'busy', 'scheduled'])
+const STORAGE_CLEAR_MODES = new Set(['none', 'immediate', 'restart'])
+
+function invalidStorageRequest() {
+  return Object.assign(new Error('Invalid storage request'), { code: 'INVALID_STORAGE_REQUEST' })
+}
+
+function storageSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0
+}
+
+export function validateStorageClear(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    Object.keys(value).length !== 1 || typeof value.categoryId !== 'string' ||
+    !STORAGE_CATEGORY_ID_SET.has(value.categoryId)) throw invalidStorageRequest()
+  return { categoryId: value.categoryId }
+}
+
+function safeStorageCategory(value = {}) {
+  return {
+    id: STORAGE_CATEGORY_ID_SET.has(value.id) ? value.id : '',
+    bytes: storageSafeInteger(value.bytes),
+    itemCount: storageSafeInteger(value.itemCount),
+    reclaimableBytes: storageSafeInteger(value.reclaimableBytes),
+    status: STORAGE_STATUSES.has(value.status) ? value.status : 'unavailable',
+    clearMode: STORAGE_CLEAR_MODES.has(value.clearMode) ? value.clearMode : 'none'
+  }
+}
+
+function safeStorageSnapshot(value = {}) {
+  return {
+    revision: storageSafeInteger(value.revision),
+    scannedAt: storageSafeInteger(value.scannedAt),
+    totalBytes: storageSafeInteger(value.totalBytes),
+    reclaimableBytes: storageSafeInteger(value.reclaimableBytes),
+    pendingRestart: Array.isArray(value.pendingRestart)
+      ? value.pendingRestart.filter(id => STORAGE_CATEGORY_ID_SET.has(id))
+      : [],
+    categories: Array.isArray(value.categories) ? value.categories.map(safeStorageCategory) : []
+  }
+}
+
+function safeStorageClearResult(value = {}) {
+  return {
+    categoryId: STORAGE_CATEGORY_ID_SET.has(value.categoryId) ? value.categoryId : '',
+    pendingRestart: value.pendingRestart === true,
+    removed: storageSafeInteger(value.removed),
+    bytes: storageSafeInteger(value.bytes),
+    remainingBytes: storageSafeInteger(value.remainingBytes),
+    partial: value.partial === true
+  }
+}
+
+function storageOperationError(error) {
+  if (error?.code === 'INVALID_STORAGE_REQUEST' ||
+    error?.code === 'STORAGE_CATEGORY_PROTECTED' ||
+    error?.code === 'STORAGE_CATEGORY_UNKNOWN') return error
+  return Object.assign(new Error('Storage operation failed'), { code: 'STORAGE_OPERATION_FAILED' })
+}
+
+export function registerStorageIpc({ ipcMain, service }) {
+  ipcMain.handle('storage:get-usage', async (_event, ...args) => {
+    try {
+      if (args.length !== 0) throw invalidStorageRequest()
+      return safeStorageSnapshot(await service.getUsage())
+    } catch (error) {
+      throw storageOperationError(error)
+    }
+  })
+  ipcMain.handle('storage:clear', async (_event, value) => {
+    try {
+      return safeStorageClearResult(await service.clear(validateStorageClear(value)))
+    } catch (error) {
+      throw storageOperationError(error)
+    }
+  })
+}
 
 function splitSettingsPatch(value = {}) {
   const appSettings = {}
@@ -552,8 +634,34 @@ export function createOrchestrator() {
   let summaryExportService = null
   let summaryWorkspaceService = null
   let summaryCacheService = null
+  let storageService = null
   let summaryCacheLastPrunedAt = null
   let persistenceRecovery = null
+  const storageRoots = resolveUcliStorageRoots({
+    platform: process.platform,
+    env: process.env,
+    homeDirectory: app.getPath('home'),
+    userDataPath: app.getPath('userData'),
+    sessionDataPath: app.getPath('sessionData')
+  })
+  if (storageRoots) {
+    storageService = createStorageManagementService({
+      scanner: scanStorageCategories,
+      roots: storageRoots,
+      summaryCache: {
+        clear: (...args) => summaryCacheService?.clear(...args) || Promise.reject(
+          Object.assign(new Error(), { code: 'STORAGE_SERVICE_UNAVAILABLE' })
+        )
+      },
+      summaryWorkspaces: {
+        clearDerived: (...args) => summaryWorkspaceService?.clearDerived(...args) || Promise.reject(
+          Object.assign(new Error(), { code: 'STORAGE_SERVICE_UNAVAILABLE' })
+        )
+      },
+      isWorkspaceProtected: reportId => summaryJobService?.isActive(reportId) === true,
+      logger: { truncate: () => truncateLog() }
+    })
+  }
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
   const approvalNotifications = new Map()
@@ -673,7 +781,7 @@ export function createOrchestrator() {
       failedRetentionMs: summarySettings.failedWorkspaceRetentionDays * 24 * 60 * 60 * 1000
     })
     summaryWorkspaceService = Object.fromEntries(
-      ['create', 'writeArtifact', 'markStage', 'complete', 'fail', 'recover', 'remove', 'usage', 'clearFailed', 'pruneExpired', 'pruneOrphans', 'pruneCompleted']
+      ['create', 'writeArtifact', 'markStage', 'complete', 'fail', 'recover', 'remove', 'usage', 'clearFailed', 'clearDerived', 'pruneExpired', 'pruneOrphans', 'pruneCompleted']
         .map(method => [method, (...args) => workspaceForSettings()[method](...args)])
     )
     const cacheForSettings = () => createSummaryCacheService({
@@ -2341,6 +2449,7 @@ export function createOrchestrator() {
       getClaudeRuntime: () => readClaudeRuntimeSnapshot({ env: process.env })
     })
     if (skillsService) registerSkillsIpc({ ipcMain, service: skillsService })
+    if (storageService) registerStorageIpc({ ipcMain, service: storageService })
     registerSummaryIpc({
       ipcMain,
       service: {

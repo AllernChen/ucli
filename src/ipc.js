@@ -84,6 +84,9 @@ export const ipc = {
   // settings
   getSettings: () => u.getSettings(),
   updateSettings: (s) => u.updateSettings(s),
+  // application storage
+  getStorageUsage: () => u.getStorageUsage(),
+  clearStorageCategory: (categoryId) => u.clearStorageCategory(categoryId),
   // work summaries
   getSummarySettings: () => u.getSummarySettings(),
   setSummarySettings: (value) => u.setSummarySettings(value),

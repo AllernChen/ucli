@@ -188,6 +188,7 @@
       </section>
 
       <section id="settings-section-storage" class="settings-section">
+        <StorageManagementPanel />
         <SummaryCacheSettings :settings="local" />
       </section>
 
@@ -310,6 +311,7 @@ import { useSettingsStore } from '../stores/settings.js'
 import { useSessionsStore } from '../stores/sessions.js'
 import { useGatewayStore } from '../stores/gateway.js'
 import GatewayConfigDrawer from '../components/gateway/GatewayConfigDrawer.vue'
+import StorageManagementPanel from '../components/settings/StorageManagementPanel.vue'
 import SummaryCacheSettings from '../components/settings/SummaryCacheSettings.vue'
 import SettingsSectionNav from '../components/settings/SettingsSectionNav.vue'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'

@@ -205,7 +205,7 @@ test('renderer settings expose automatic cadence, default CLI/profile/model, and
   assert.match(view, /手动生成时仍可逐次选择/)
 })
 
-test('renderer cache settings expose bounded choices, safe storage actions, and stale-safe state', () => {
+test('renderer cache settings expose only bounded cache policy controls', () => {
   const store = readFileSync(new URL('../src/stores/settings.js', import.meta.url), 'utf8')
   const view = readFileSync(new URL('../src/views/Settings.vue', import.meta.url), 'utf8')
   const component = readFileSync(
@@ -221,12 +221,8 @@ test('renderer cache settings expose bounded choices, safe storage actions, and 
   for (const bytes of [268435456, 536870912, 1073741824, 2147483648, 5368709120]) {
     assert.match(component, new RegExp(String(bytes)))
   }
-  assert.match(component, /getSummaryCacheStats/)
-  assert.match(component, /clearSummaryCache/)
-  assert.match(component, /Modal\.confirm/)
-  assert.match(component, /formatBytes/)
-  assert.match(component, /loading/)
-  assert.match(component, /error/)
+  assert.doesNotMatch(component, /getSummaryCacheStats|clearSummaryCache/)
+  assert.doesNotMatch(component, /Modal\.confirm|formatBytes/)
   assert.match(view, /SummaryCacheSettings/)
 })
 
