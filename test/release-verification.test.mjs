@@ -12,14 +12,14 @@ function verifyReleaseArtifacts({ rootDir }) {
   return verifyReleaseArtifactsForPlatform({ rootDir, platform: 'win32', arch: 'x64' })
 }
 
-test('0.10.2 release package and acceptance documentation agree', async () => {
+test('0.11.0 release package and acceptance documentation agree', async () => {
   const [packageSource, readme, changelog, acceptance] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../README.md', import.meta.url), 'utf8'),
     readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8'),
     readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8')
   ])
-  assert.equal(JSON.parse(packageSource).version, '0.10.2')
+  assert.equal(JSON.parse(packageSource).version, '0.11.0')
   assert.match(readme, /配置档案/)
   assert.match(readme, /CC Switch/)
   assert.match(readme, /Claude 登录态/)
@@ -30,7 +30,7 @@ test('0.10.2 release package and acceptance documentation agree', async () => {
   assert.doesNotMatch(changelog, /\uFFFD/)
   assert.match(readme, /Skills 管理/)
   assert.match(readme, /GitLab/)
-  assert.match(changelog, /## \[0\.10\.2\] - 2026-08-13/)
+  assert.match(changelog, /## \[0\.11\.0\] - 2026-08-14/)
   for (const anchor of [
     'settings-section-navigation',
     'settings-section-deep-link',
@@ -90,6 +90,49 @@ test('0.10.2 release package and acceptance documentation agree', async () => {
   assert.match(acceptance, /复制报告 Markdown.*导出 Markdown/s)
   assert.match(acceptance, /light、dark 和 custom 三种 AI HTML/)
   assert.match(acceptance, /prompt-injection 文本与假密钥/)
+})
+
+test('0.11.0 documents the DSH dual-plane contract and native-platform acceptance gates', async () => {
+  const [readme, context, protocol, acceptance, changelog] = await Promise.all([
+    readFile(new URL('../README.md', import.meta.url), 'utf8'),
+    readFile(new URL('../CONTEXT.md', import.meta.url), 'utf8'),
+    readFile(new URL('../docs/protocol-reference.md', import.meta.url), 'utf8'),
+    readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8'),
+    readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
+  ])
+
+  for (const source of [readme, context, protocol, acceptance, changelog]) {
+    assert.doesNotMatch(source, /\uFFFD/)
+  }
+  assert.match(readme, /DeepSeek Harness/)
+  assert.match(readme, /0\.1\.0-rc\.6/)
+  assert.match(readme, /ucli-dsh-bridge-0\.11\.0\.tgz/)
+  assert.match(readme, /不捆绑.*TUI|TUI.*不.*捆绑/s)
+  assert.match(readme, /Web.*权限.*历史.*统计.*原生/s)
+  assert.match(context, /终端平面.*控制平面|控制平面.*终端平面/s)
+  assert.match(context, /单一所有者/)
+  assert.match(protocol, /4-byte.*big-endian|4 字节.*大端/s)
+  assert.match(protocol, /1 MiB/)
+  assert.match(protocol, /hello-ack/)
+  assert.match(protocol, /endpoint.*token.*不.*持久化|token.*endpoint.*不.*持久化/s)
+  assert.match(protocol, /permission\.decide/)
+  assert.match(protocol, /DSH_BRIDGE_HANDSHAKE_TIMEOUT/)
+  assert.match(protocol, /DSH_WEB_GATEWAY_UNSUPPORTED/)
+  for (const anchor of [
+    'dsh-runtime-version',
+    'dsh-profile-rollback',
+    'dsh-tui-permission-single-owner',
+    'dsh-tui-root-subagent-code-mode',
+    'dsh-two-session-isolation',
+    'dsh-web-loopback-isolation',
+    'dsh-web-native-ownership',
+    'dsh-security-no-secret-persistence',
+    'dsh-windows-native-acceptance',
+    'dsh-macos-native-acceptance'
+  ]) assert.match(acceptance, new RegExp(`\\b${anchor}\\b`))
+  assert.match(changelog, /DeepSeek Harness/)
+  assert.match(changelog, /TUI.*Web/s)
+  assert.match(changelog, /0\.1\.0-rc\.6/)
 })
 
 test('Gateway release acceptance documents every required Feishu prerequisite', async () => {
@@ -262,6 +305,20 @@ test('release verification rejects a build configuration without the portable ta
   await assert.rejects(
     () => verifyReleaseArtifacts({ rootDir: fixture.rootDir }),
     /electron-builder\.yml does not configure the portable target/
+  )
+})
+
+test('release verification rejects packaging resources through both files and extraResources', async (t) => {
+  const fixture = await createReleaseFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  await writeFile(
+    path.join(fixture.rootDir, 'electron-builder.yml'),
+    'productName: UCLI\nfiles:\n  - out/**/*\n  - resources/**/*\nextraResources:\n  - from: resources/\n    to: resources/\nwin:\n  target:\n    - nsis\n    - portable\nnsis:\n  artifactName: ${productName}-Setup-${version}-${arch}.${ext}\nportable:\n  artifactName: ${productName}-Portable-${version}-${arch}.${ext}\n'
+  )
+
+  await assert.rejects(
+    () => verifyReleaseArtifacts({ rootDir: fixture.rootDir }),
+    /electron-builder\.yml duplicates resources through files and extraResources/
   )
 })
 

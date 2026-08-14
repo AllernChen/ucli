@@ -156,14 +156,14 @@ test('packaging creates the deterministic four-file tgz without runtime copies o
   assert.deepEqual(await readFile(artifact), firstBytes)
 })
 
-test('root lifecycle scripts package the bridge and the existing builder resource rules include it', async () => {
+test('root lifecycle scripts package the bridge through exactly one builder resource mapping', async () => {
   const manifest = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
   assert.equal(manifest.scripts['package:dsh-bridge'], 'node scripts/package-dsh-bridge.mjs')
   for (const lifecycle of ['predev', 'prebuild', 'predist', 'predist:win', 'predist:mac']) {
     assert.equal(manifest.scripts[lifecycle], 'npm run package:dsh-bridge')
   }
   const builder = await readFile(path.join(root, 'electron-builder.yml'), 'utf8')
-  assert.match(builder, /^\s*- resources\/\*\*\/\*\s*$/mu)
+  assert.doesNotMatch(builder, /^\s*- resources\/\*\*\/\*\s*$/mu)
   assert.match(builder, /^\s*- from: resources\/\s*$/mu)
 })
 

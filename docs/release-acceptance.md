@@ -250,3 +250,44 @@
 - [ ] 明确下载测试更新，确认相同百分比同时显示在侧栏和设置页，且导航与重新加载后保持一致。
 - [ ] 下载完成后确认显示“重启并安装”；只有明确点击时才把控制权交给安装器。
 - [ ] 启动便携版与开发版，确认不发起更新器网络请求，并且侧栏和设置页不提供下载操作。
+
+## 12. 0.11.0 DeepSeek Harness 验收
+
+本节必须在隔离的测试 DSH_HOME、非敏感项目与专用 profile 中执行。自动化测试使用 fake runtime/socket/PTY，不调用真实 provider，不写用户 profile。Windows 与 macOS 必须分别在原生平台完成；一个平台的结果不能替代另一个平台。
+
+| 锚点 | 人工检查 | 预期结果 |
+| --- | --- | --- |
+| `dsh-runtime-version` | 分别测试未安装、版本不可读、非 `0.1.0-rc.6` 和精确 `0.1.0-rc.6` | 前三者以稳定错误阻止 TUI/Web；精确版本可继续。界面不显示 DSH_HOME 或可执行文件路径 |
+| `dsh-profile-rollback` | 对四个 profile 元数据文件记录 bytes/mode/原缺失状态，启用 bridge 时强制 pnpm 失败 | 仅 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml` 恢复；不删除 node_modules、插件、凭据或会话；回滚失败明确报告且保留私有备份 |
+| `dsh-tui-permission-single-owner` | 分别触发 downstream allow/deny/ask、高风险命令与 `sandbox_permissions` | 每个工具最多出现一次 UCLI 提示；deny/超时/断桥不执行；workspace-write 保持固定，更宽 sandbox 直接拒绝，DSH 原生 UI 不二次询问 |
+| `dsh-tui-root-subagent-code-mode` | root、continuable subagent、普通 subagent 与 Code Mode 并发叶子分别调用工具 | 每个实际叶子都经 `tools/pre-execute`，native session 映射不串线，相同 callId 不跨 agent 复用 |
+| `dsh-two-session-isolation` | 同时运行两张 TUI 卡，分别输入、resize、审批、完成与恢复 | 两个 PTY、endpoint、token、request map、native session ID 和清理生命周期完全独立 |
+| `dsh-web-loopback-isolation` | 同时启动两张 Web 卡并检查监听地址、URL 与 iframe | 使用不同 `127.0.0.1` 动态端口；不绑定 LAN、`0.0.0.0`、`::`；iframe 仅加载对应 exact loopback URL |
+| `dsh-web-native-ownership` | 在 Web 中执行权限、查看历史与统计，并检查 UCLI 卡片/详情/Gateway | 权限、历史、统计只在 DSH 原生界面；UCLI 不挂载 xterm/history/approval/usage/Gateway，不把 native stats 记入账本 |
+| `dsh-security-no-secret-persistence` | 启动、恢复、断桥、失败安装、停止、删除并检查日志/DB/IPC/诊断 | 不出现 endpoint、token、Web URL（退出后）、provider 凭据、prompt、transcript、tool input/result 或原始 stdout/stderr |
+| `dsh-windows-native-acceptance` | 在 Windows x64 原生安装包验证 named pipe、PTY、Web、stop/restart/delete/quit | UCLI 主动清理使用进程树终止；无被拥有的子进程或 pipe 留存。记录 Windows 版本、DSH 版本、包 SHA-256 与结果 |
+| `dsh-macos-native-acceptance` | 在 macOS 原生包验证 Unix socket 权限、symlink 拒绝、PTY、Web 与退出清理 | 临时目录 `0700`、socket `0600`，endpoint containment 成立；无子进程/socket 留存。记录 macOS/架构、DSH 版本、包 SHA-256 与结果 |
+
+### 12.1 TUI、Gateway 与恢复
+
+- [ ] 确认设置页只检测精确兼容 runtime，不自动安装 DSH，也不声称或下载 deepseek-harness 仓库中不存在的 TUI。
+- [ ] 使用用户已有的兼容 TUI profile；确认 bridge 未安装、版本不兼容和已兼容三个状态彼此独立，操作完成后重新枚举。
+- [ ] 检查实际 argv：新建为 `dsh --profile <profile>`，恢复追加 `--resume <nativeSessionId>`；cwd 固定为卡片工作目录，未使用 shell command string。
+- [ ] 全屏交互、中文输入、复制粘贴、resize 与终端字节均正常；终端 ANSI 不会进入 transcript、最终回复或 Gateway。
+- [ ] assistant committed、tool call/result、usage、attention、turn completion 映射一次且归属正确；恢复后统计在历史基线上累计，不回退或重复。
+- [ ] Gateway 只接受 live、已认证且已有 native session ID 的 TUI。桥断开前后分别测试普通任务、队列、decision、interrupt、snapshot 与 reconnect；旧 generation 不得落卡、保存 route 或复活 token。
+- [ ] 停止、重启、恢复、移除和退出均等待 bridge 与 PTY 清理确认；清理失败卡片保持 non-accepting 且保留所有权，可重试，不报告假离线。
+
+### 12.2 Web、CSP 与生命周期
+
+- [ ] 检查实际 argv 精确为 `dsh web --host 127.0.0.1 --port 0`，环境不含任何 `UCLI_DSH_BRIDGE_*`。
+- [ ] readiness 只接受 stdout 完整行 `dsh web: http://127.0.0.1:<port>`；测试 ANSI、空白、路径、query、fragment、userinfo、非法端口、超过 16 KiB 和 60 秒超时均失败关闭。
+- [ ] 检查 CSP 只允许 `frame-src http://127.0.0.1:*`，不增加 loopback `connect-src`、`unsafe-eval` 或 webview；iframe 采用最小 sandbox 与 `no-referrer`。
+- [ ] Web stop/restart/remove/quit 先停用界面和 IPC，再确认整棵被拥有进程树退出；清理失败不复用 controller 或报告成功。
+
+### 12.3 产物与回归
+
+- [ ] `npm test`、`npm run build`、`npm run verify:release` 均通过，无 failed/cancelled；平台条件 skip 必须由对应原生平台验收覆盖。
+- [ ] Windows 与 macOS 安装包各只含一个 `resources/deepseek-harness/ucli-dsh-bridge-0.11.0.tgz`；tgz 仅含 `package.json`、`cordis.patch.yml`、`framing.js`、`index.js`，无 bridge 源码目录、凭据或 TUI。
+- [ ] 回归 Claude Code、Codex、OpenCode 与 U-Code 的 create/attach/input/resize/stop/restart、权限、历史、统计、总结、Skills 与 Gateway。
+- [ ] 检查 `git status --short`、`git diff --check` 和产物清单；不得包含临时 DSH profile、上游 clone、测试 token、endpoint 或未归属文件。

@@ -1508,13 +1508,20 @@ test('malformed semantic fields fail closed before onEvent', async () => {
       sessionId: 'session-1', profileName: 'tui-local', onEvent: (event) => events.push(event)
     })
     const socket = await authenticate(server)
-    let didClose = false
-    const closed = once(socket, 'close').then(() => { didClose = true })
+    const closed = once(socket, 'close')
     socket.write(encodeBridgeFrame(frame))
-    await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 50))])
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`${frame.type} did not close the bridge`)),
+        1_000
+      )
+      closed.then(() => {
+        clearTimeout(timer)
+        resolve()
+      }, reject)
+    })
     try {
       assert.deepEqual(events, [], frame.type)
-      assert.equal(didClose, true, `${frame.type} did not close the bridge`)
     } finally {
       socket.destroy()
       await server.close()

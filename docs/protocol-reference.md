@@ -123,6 +123,43 @@ npm 安装生成的 `opencode.cmd` 在 `cmd.exe` + ConPTY 链路中会无输出�
 ## 统一适配器事件（归一化）
 `init` `message`(partial/final) `reasoning` `tool_call` `tool_result` `command_output` `file_diff` `token_usage`(cumulative) `turn_complete` `error` `exit`。适配器把上述原生消息翻译成这套形状，UI 渲染器只认这套。
 
+## DeepSeek Harness bridge protocol v1
+
+### 双平面边界
+
+DeepSeek Harness TUI 保持两个互不混用的数据平面：
+
+```text
+DSH TUI ── PTY bytes ──> xterm
+   │
+   └── authenticated semantic bridge ──> UCLI main ──> permissions / stats / Gateway
+```
+
+PTY 字节只用于绘制、键盘输入和 resize，不解析 ANSI，也不生成 transcript。控制平面只接受已认证、通过 exact schema 的语义事件与 RPC；assistant final 只来自 `assistant-committed`，终端文本、reasoning 和 tool 输出不会被当作最终回复。
+
+### 传输、认证与握手
+
+- 每帧为 `4-byte big-endian`（4 字节大端）无符号长度加 UTF-8 JSON object；body 上限为 `1 MiB`。非法 UTF-8、非 object JSON、超长帧或分片尾部越界立即 fail-closed。
+- Windows 使用每会话随机 named pipe；macOS 使用私有临时目录中的 Unix socket，并验证 realpath、owner、`0700` 目录与 `0600` socket。每次会话拥有独立 endpoint、32-byte 随机 token、请求表与进程树。
+- 首帧必须是 exact `hello`，包含 protocol `1`、bridge `0.11.0`、profile、surface `tui`、token 与精确 capability 集合。主进程用 constant-time token 比较，并在 10 秒内返回 `hello-ack`；超时、重复客户端、字段不符或后续再次 hello 都会关闭连接。
+- endpoint 与 token 仅通过 `UCLI_DSH_BRIDGE_ENDPOINT`、`UCLI_DSH_BRIDGE_TOKEN`、`UCLI_DSH_BRIDGE_PROTOCOL` 注入被拥有的 DSH 进程。endpoint 与 token 不持久化，不进入数据库、日志、错误详情、renderer IPC、Gateway 或语义 payload，并在退出后清除引用。
+
+### 语义事件与 RPC
+
+bridge 只投影 allowlist 事件：session ready/disposed、agent status、assistant committed、tool request/result、usage、attention 与 turn complete。所有事件绑定同一个安全 native session ID；首个 ID 持久化，后续不一致会以 `DSH_NATIVE_SESSION_MISMATCH` 关闭桥。
+
+主进程到插件的 RPC allowlist 为 `turn.send`、`turn.interrupt`、`agent.snapshot`、`snapshot.plan`、`snapshot.result`。snapshot result 返回 `{turnId, markdown}` 并严格与请求 turn 绑定，防止上一轮结果被重放。插件到主进程使用 `permission.decide`；cancel、timeout、disconnect、重复或迟到 request ID 均按 connection generation fail-closed。双向各最多 64 个 pending request。
+
+权限只有一个所有者：bridge listener 先保留 DSH downstream deny，再把 downstream ask 或 UCLI policy 归并成一次 UCLI 决策；不返回 DSH 原生 ask。root、continuable subagent、普通 subagent 与 Code Mode 动态叶子分别检查。bridged profile 的 sandbox 持久固定为 `workspace-write`，请求更宽 `sandbox_permissions` 直接拒绝。
+
+### Profile、Web 与稳定失败
+
+UCLI 只兼容 `@deepseek-ai/dsh@0.1.0-rc.6`。bridge 启用操作只修改 profile 的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml`；失败时按“原存在/原缺失”恢复这四项，不删除 `node_modules`、用户插件、凭据或 native session。UCLI 不捆绑 TUI。
+
+Web 以固定 argv `dsh web --host 127.0.0.1 --port 0` 启动，不加载 bridge 环境。只接受 stdout 的 exact `http://127.0.0.1:<port>` readiness 行；16 KiB 启动输出预算和 60 秒超时均 fail-closed。Web 权限、历史、统计归 DSH native 所有，Gateway 返回 `DSH_WEB_GATEWAY_UNSUPPORTED`。
+
+公开稳定错误包括：`DSH_NOT_INSTALLED`、`DSH_VERSION_UNREADABLE`、`DSH_VERSION_UNSUPPORTED`、`DSH_PROFILE_INVALID`、`DSH_PROFILE_NOT_READY`、`DSH_BRIDGE_NOT_INSTALLED`、`DSH_BRIDGE_VERSION_UNSUPPORTED`、`DSH_BRIDGE_INSTALL_FAILED`、`DSH_BRIDGE_ROLLBACK_FAILED`、`DSH_BRIDGE_HANDSHAKE_TIMEOUT`、`DSH_BRIDGE_AUTH_FAILED`、`DSH_BRIDGE_PROTOCOL_UNSUPPORTED`、`DSH_BRIDGE_FRAME_INVALID`、`DSH_BRIDGE_FRAME_TOO_LARGE`、`DSH_BRIDGE_DUPLICATE_CLIENT`、`DSH_BRIDGE_DISCONNECTED`、`DSH_ROOT_AGENT_NOT_FOUND`、`DSH_ROOT_AGENT_AMBIGUOUS`、`DSH_NATIVE_SESSION_MISMATCH`、`DSH_WEB_START_TIMEOUT`、`DSH_WEB_READY_URL_INVALID` 与 `DSH_WEB_GATEWAY_UNSUPPORTED`。错误详情不得附带 endpoint、token、路径、stdout/stderr 或 provider 数据。
+
 ## 通信 Gateway 协议
 
 ### 架构与边界
