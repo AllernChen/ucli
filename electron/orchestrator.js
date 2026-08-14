@@ -19,6 +19,8 @@ import {
 import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log, truncateLog } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
+import { runResolvedProcess } from './adapters/deepSeekHarnessRuntime.js'
+import { createDshProfileManager, registerDshProfileIpc } from './adapters/dshProfileManager.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
 import { createSessionDiagnosticsService, registerSessionDiagnosticsIpc } from './sessionDiagnosticsService.js'
 import { annotateImportedSessions, isSafeNativeSessionId, isSafeProviderName, listClaudeTranscriptFiles, resolveCodexResumeProvider, resolveCodexTranscriptSessionInHome } from './sessionDiscovery.js'
@@ -640,6 +642,7 @@ export function createOrchestrator() {
   let summaryWorkspaceService = null
   let summaryCacheService = null
   let storageService = null
+  let dshProfileManager = null
   let summaryCacheLastPrunedAt = null
   let persistenceRecovery = null
   const storageRoots = resolveUcliStorageRoots({
@@ -2459,6 +2462,25 @@ export function createOrchestrator() {
   }
 
   // ---- IPC registration ----
+  function getDshProfileManager() {
+    if (dshProfileManager) return dshProfileManager
+    const resourcesRoot = app.isPackaged
+      ? join(process.resourcesPath, 'resources')
+      : join(app.getAppPath(), 'resources')
+    dshProfileManager = createDshProfileManager({
+      env: process.env,
+      homeDirectory: app.getPath('home'),
+      tempDirectory: join(app.getPath('temp'), 'ucli-dsh-profile-transactions'),
+      bridgeArtifactPath: join(
+        resourcesRoot,
+        'deepseek-harness',
+        'ucli-dsh-bridge-0.11.0.tgz'
+      ),
+      execute: runResolvedProcess
+    })
+    return dshProfileManager
+  }
+
   function registerIpc() {
     registerGatewayIpc({ ipcMain, manager: gatewayManager })
     registerAiCliProfileIpc({
@@ -2579,6 +2601,7 @@ export function createOrchestrator() {
     )
     ipcMain.handle('cli-tools:list', () => inspectCliTools())
     ipcMain.handle('cli-tools:run', (_e, id, action) => runCliToolAction(id, action))
+    registerDshProfileIpc({ ipcMain, manager: getDshProfileManager() })
     ipcMain.handle('diagnostics:get', () => diagnostics.getReport())
     ipcMain.handle('diagnostics:export', () => diagnostics.exportReport())
     ipcMain.handle('codex:runtime:get', () =>

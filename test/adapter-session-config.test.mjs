@@ -84,8 +84,15 @@ test('DSH session config rejects unsafe or unsupported profile names', () => {
     '.',
     '..',
     'node_modules',
+    'NODE_MODULES',
     'path/name',
-    'path\\name'
+    'path\\name',
+    'CON',
+    'com1.txt',
+    'bad:name',
+    'bad*name',
+    'trailing.',
+    'trailing '
   ]
 
   for (const profileName of invalidNames) {

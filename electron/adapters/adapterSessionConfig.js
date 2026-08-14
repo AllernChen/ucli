@@ -1,5 +1,21 @@
 const DSH_SURFACES = new Set(['tui', 'web'])
 const INVALID_PROFILE_NAMES = new Set(['.', '..', 'node_modules'])
+const WINDOWS_DEVICE_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/iu
+
+export function validateDshProfileName(profileName) {
+  if (
+    typeof profileName !== 'string' ||
+    profileName.length === 0 ||
+    profileName.length > 128 ||
+    /[\u0000-\u001f\u007f-\u009f/\\<>:"|?*]/u.test(profileName) ||
+    INVALID_PROFILE_NAMES.has(profileName.toLowerCase()) ||
+    WINDOWS_DEVICE_NAME.test(profileName) ||
+    /[. ]$/u.test(profileName)
+  ) {
+    throw new TypeError('Invalid DSH profile name')
+  }
+  return profileName
+}
 
 export function normalizeSessionConfig(descriptor, input) {
   const normalized = descriptor.normalizeSessionConfig?.(input) ?? {}
@@ -23,16 +39,5 @@ export function normalizeDshSessionConfig(input) {
     return { surfacePreference }
   }
 
-  const profileName = input?.profileName
-  if (
-    typeof profileName !== 'string' ||
-    profileName.length === 0 ||
-    profileName.length > 128 ||
-    /[\u0000-\u001f\u007f-\u009f/\\]/u.test(profileName) ||
-    INVALID_PROFILE_NAMES.has(profileName)
-  ) {
-    throw new TypeError('Invalid DSH profile name')
-  }
-
-  return { profileName, surfacePreference }
+  return { profileName: validateDshProfileName(input?.profileName), surfacePreference }
 }

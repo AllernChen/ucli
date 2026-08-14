@@ -11,13 +11,16 @@ const npmBin = process.platform === 'win32' ? npmPrefix : path.join(npmPrefix, '
 
 test('CLI catalog exposes only fixed install and upgrade commands', () => {
   const tools = listCliToolDefinitions()
-  assert.deepEqual(tools.map((tool) => tool.id), ['claude', 'codex', 'opencode', 'ucode'])
+  assert.deepEqual(tools.map((tool) => tool.id), ['claude', 'codex', 'opencode', 'ucode', 'deepseek-harness'])
   assert.equal(tools[0].installCommand, 'npm install -g @anthropic-ai/claude-code')
   assert.equal(tools[1].installCommand, 'npm install -g @openai/codex')
   assert.equal(tools[2].installCommand, 'npm install -g opencode-ai')
   assert.equal(tools[2].upgradeCommand, 'npm install -g opencode-ai')
   assert.equal(tools[3].installCommand, 'npm install -g @allenchen77/ucode-cli')
   assert.equal(tools[3].upgradeCommand, 'npm install -g @allenchen77/ucode-cli')
+  assert.equal(tools[4].executable, 'dsh')
+  assert.equal(tools[4].installCommand, 'npm install -g @deepseek-ai/dsh@0.1.0-rc.6')
+  assert.equal(tools[4].upgradeCommand, 'npm install -g @deepseek-ai/dsh@0.1.0-rc.6')
 })
 
 test('CLI catalog keeps installation separate from safe summary execution', () => {
@@ -31,8 +34,53 @@ test('CLI catalog keeps installation separate from safe summary execution', () =
     { id: 'claude', safeForSummary: true, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'summary-authentication-unverified' },
     { id: 'codex', safeForSummary: false, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'no-guaranteed-no-tools-mode' },
     { id: 'opencode', safeForSummary: true, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'summary-authentication-unverified' },
-    { id: 'ucode', safeForSummary: false, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'no-guaranteed-no-tools-mode' }
+    { id: 'ucode', safeForSummary: false, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'no-guaranteed-no-tools-mode' },
+    { id: 'deepseek-harness', safeForSummary: false, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'unsupported-executor' }
   ])
+})
+
+test('DeepSeek Harness inventory exposes compatibility without resolved runtime paths', async () => {
+  const status = await inspectCliTool('deepseek-harness', undefined, {
+    dshRuntimeInspector: async () => ({
+      installed: true,
+      compatible: true,
+      version: '0.1.0-rc.6',
+      reason: '',
+      launch: { file: 'C:\\sensitive\\absolute\\dsh', prefixArgs: [] }
+    })
+  })
+  assert.equal(status.installed, true)
+  assert.equal(status.compatible, true)
+  assert.equal(status.version, '0.1.0-rc.6')
+  assert.equal(status.path, '')
+  assert.equal(JSON.stringify(status).includes('sensitive'), false)
+})
+
+test('DeepSeek Harness install action returns no raw process output or resolved home', async () => {
+  const result = await runCliToolAction(
+    'deepseek-harness',
+    'install',
+    async () => ({
+      code: 1,
+      stdout: 'C:\\Users\\private\\.dsh',
+      stderr: 'registry-token=must-not-leak'
+    }),
+    {
+      dshRuntimeInspector: async () => ({
+        installed: false,
+        compatible: false,
+        version: '',
+        reason: 'not-installed',
+        launch: null
+      })
+    }
+  )
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 1)
+  assert.equal('stdout' in result, false)
+  assert.equal('stderr' in result, false)
+  assert.equal(JSON.stringify(result).includes('must-not-leak'), false)
+  assert.equal(JSON.stringify(result).includes('.dsh'), false)
 })
 
 function installedRunner(version = '1.0.0') {
