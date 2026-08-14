@@ -66,7 +66,7 @@ export class BaseAdapter extends EventEmitter {
       : action === 'deny'
         ? 'deny'
         : null
-    if (verdict && this.engine?.respondApproval(decisionId, verdict)) {
+    if (verdict && this.engine?.respondApproval(this.session.id, decisionId, verdict)) {
       return { accepted: true }
     }
     return { accepted: false, reason: 'unsupported' }

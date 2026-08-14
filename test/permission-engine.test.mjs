@@ -35,8 +35,80 @@ test('a requested permission stays pending until an explicit response', async (t
 
   assert.equal(engine.pendingCount(), 1)
   assert.deepEqual(resolved, [])
-  assert.equal(engine.respondApproval(requests[0].requestId, 'allow'), true)
+  assert.equal(engine.respondApproval('s1', requests[0].requestId, 'allow'), true)
   assert.equal((await decision).verdict, 'allow')
+})
+
+test('a throwing approval-request observer settles the decision fail-closed', async () => {
+  let request
+  const engine = new PermissionEngine({
+    onApprovalRequest(value) {
+      request = value
+      throw new Error('observer failed')
+    },
+    onDecision() {}
+  })
+  engine.setSession('s1', {
+    tier: TIER.ASK_EVERYTHING, rulesetId: 'test', ruleset: {}
+  })
+
+  const decision = engine.decide('s1', { tool: 'Bash', input: { command: 'npm test' } })
+  const result = await Promise.race([
+    decision,
+    new Promise((resolve) => setImmediate(() => resolve({ verdict: 'pending' })))
+  ])
+  assert.equal(result.verdict, 'deny')
+  assert.equal(result.classification, 'unavailable')
+  assert.equal(engine.pendingCount(), 0)
+  assert.equal(engine.respondApproval('s1', request.requestId, 'allow'), false)
+})
+
+test('a throwing approval-resolved observer cannot block session removal settlement', async () => {
+  const requests = []
+  const engine = new PermissionEngine({
+    onApprovalRequest: (request) => requests.push(request),
+    onApprovalResolved() { throw new Error('observer failed') },
+    onDecision() {}
+  })
+  engine.setSession('s1', {
+    tier: TIER.ASK_EVERYTHING, rulesetId: 'test', ruleset: {}
+  })
+  const decision = engine.decide('s1', { tool: 'Bash', input: { command: 'npm test' } })
+  await Promise.resolve()
+
+  assert.doesNotThrow(() => engine.removeSession('s1'))
+  assert.equal((await decision).verdict, 'deny')
+  assert.equal(engine.pendingCount(), 0)
+  assert.equal(engine.respondApproval('s1', requests[0].requestId, 'allow'), false)
+})
+
+test('a throwing approval-resolved observer cannot escape response or abort settlement', async () => {
+  for (const action of ['respond', 'abort']) {
+    const requests = []
+    const controller = new AbortController()
+    const engine = new PermissionEngine({
+      onApprovalRequest: (request) => requests.push(request),
+      onApprovalResolved() { throw new Error('observer failed') },
+      onDecision() {}
+    })
+    engine.setSession('s1', {
+      tier: TIER.ASK_EVERYTHING, rulesetId: 'test', ruleset: {}
+    })
+    const decision = engine.decide('s1', {
+      tool: 'Bash', input: { command: 'npm test' }, signal: controller.signal
+    })
+    await Promise.resolve()
+
+    if (action === 'respond') {
+      assert.doesNotThrow(() => {
+        assert.equal(engine.respondApproval('s1', requests[0].requestId, 'allow'), true)
+      })
+    } else {
+      assert.doesNotThrow(() => controller.abort())
+    }
+    assert.equal((await decision).verdict, action === 'respond' ? 'allow' : 'deny')
+    assert.equal(engine.pendingCount(), 0)
+  }
 })
 
 test('the hard blacklist denies in every permission tier', async () => {
@@ -79,7 +151,7 @@ test('ask-everything waits for an explicit response', async () => {
   await Promise.resolve()
   assert.equal(engine.pendingCount(), 1)
   assert.equal(requests.length, 1)
-  assert.equal(engine.respondApproval(requests[0].requestId, 'deny'), true)
+  assert.equal(engine.respondApproval('s1', requests[0].requestId, 'deny'), true)
 
   const result = await decision
   assert.equal(result.verdict, 'deny')
@@ -113,7 +185,7 @@ test('safety-rules asks for high-risk matches', async () => {
   await Promise.resolve()
   assert.equal(requests.length, 1)
   assert.equal(requests[0].classification, 'high-risk')
-  assert.equal(engine.respondApproval(requests[0].requestId, 'allow'), true)
+  assert.equal(engine.respondApproval('s1', requests[0].requestId, 'allow'), true)
   assert.equal((await decision).verdict, 'allow')
 })
 
@@ -151,8 +223,8 @@ test('an approval response is accepted only once', async () => {
 
   await Promise.resolve()
   const requestId = requests[0].requestId
-  assert.equal(engine.respondApproval(requestId, 'allow'), true)
-  assert.equal(engine.respondApproval(requestId, 'deny'), false)
+  assert.equal(engine.respondApproval('s1', requestId, 'allow'), true)
+  assert.equal(engine.respondApproval('s1', requestId, 'deny'), false)
   assert.equal((await decision).verdict, 'allow')
   assert.equal(resolved.length, 1)
   assert.equal(resolved[0].verdict, 'allow')

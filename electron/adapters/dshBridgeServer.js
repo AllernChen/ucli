@@ -40,7 +40,6 @@ const HELLO_KEYS = Object.freeze([
 const REQUEST_METHODS = new Set([
   'turn.send',
   'turn.interrupt',
-  'permission.respond',
   'snapshot.plan',
   'snapshot.result'
 ])
@@ -392,6 +391,51 @@ function validateResponse(frame) {
     typeof frame.error.message === 'string'
 }
 
+function validatePermissionRequest(frame) {
+  if (
+    !exactKeys(frame, ['method', 'params', 'requestId', 'type']) ||
+    frame.type !== 'request' || frame.method !== 'permission.decide' ||
+    !SAFE_REQUEST_ID.test(frame.requestId || '') ||
+    !exactRequiredOptionalKeys(
+      frame.params,
+      ['actor', 'call', 'tool', 'input', 'approvalRequired'],
+      ['cwd']
+    )
+  ) return false
+  const { actor, call, tool, input, cwd, approvalRequired } = frame.params
+  return exactKeys(actor, ['agentId', 'nativeSessionId', 'subagent']) &&
+    SAFE_SEMANTIC_ID.test(actor.nativeSessionId || '') &&
+    SAFE_SEMANTIC_ID.test(actor.agentId || '') && typeof actor.subagent === 'boolean' &&
+    exactKeys(call, ['callId', 'nested', 'rootCallId']) &&
+    SAFE_SEMANTIC_ID.test(call.callId || '') && SAFE_SEMANTIC_ID.test(call.rootCallId || '') &&
+    typeof call.nested === 'boolean' &&
+    exactKeys(tool, ['name']) && boundedSemanticName(tool.name) &&
+    isPlainBridgeObject(input) && boundedJson(input, MAX_EVENT_FIELD_BYTES) &&
+    typeof approvalRequired === 'boolean' &&
+    (cwd === undefined || boundedUtf8(cwd, 4_096, { allowNewlines: false }))
+}
+
+function validatePermissionDecision(value) {
+  if (!exactRequiredOptionalKeys(value, ['kind'], ['reason'])) return false
+  if (value.kind !== 'allow' && value.kind !== 'deny') return false
+  return value.reason === undefined || boundedUtf8(value.reason, 4_096)
+}
+
+function validateOutboundRequestParams(method, params) {
+  if (method === 'turn.send') {
+    return exactKeys(params, ['nativeSessionId', 'text']) &&
+      SAFE_SEMANTIC_ID.test(params.nativeSessionId || '') &&
+      boundedUtf8(params.text, MAX_EVENT_FIELD_BYTES) && params.text.length > 0
+  }
+  if (method === 'turn.interrupt') {
+    return exactKeys(params, ['nativeSessionId']) && SAFE_SEMANTIC_ID.test(params.nativeSessionId || '')
+  }
+  if (method === 'snapshot.plan' || method === 'snapshot.result') {
+    return exactKeys(params, ['nativeSessionId']) && SAFE_SEMANTIC_ID.test(params.nativeSessionId || '')
+  }
+  return false
+}
+
 function sanitizeRemoteError(error) {
   const code = SAFE_REMOTE_ERROR_CODE.test(error.code)
     ? error.code
@@ -463,7 +507,8 @@ export async function createDshBridgeServer({
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
   handshakeTimeoutMs = DSH_BRIDGE_HANDSHAKE_TIMEOUT_MS,
-  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  onPermissionRequest
 } = {}) {
   if (typeof sessionId !== 'string' || sessionId.length === 0) throw new TypeError('sessionId is required')
   const normalizedProfile = normalizeDshSessionConfig({ profileName, surfacePreference: 'tui' }).profileName
@@ -483,6 +528,9 @@ export async function createDshBridgeServer({
   const sensitiveValues = Object.freeze([token, descriptor.endpoint])
   const hello = deferred()
   const pendingRequests = new Map()
+  const inboundPermissionRequests = new Map()
+  const seenInboundPermissionIds = new Set()
+  const seenInboundPermissionQueue = []
   let socket = null
   let authState = 'awaiting'
   let closed = false
@@ -513,6 +561,12 @@ export async function createDshBridgeServer({
     }
     pendingRequests.clear()
   }
+  const abortInboundPermissions = () => {
+    for (const pending of inboundPermissionRequests.values()) pending.controller.abort()
+    inboundPermissionRequests.clear()
+    seenInboundPermissionIds.clear()
+    seenInboundPermissionQueue.length = 0
+  }
   const failConnection = (error) => {
     authState = 'failed'
     clearTimeoutFn(handshakeTimer)
@@ -520,6 +574,7 @@ export async function createDshBridgeServer({
     rejectPending(error.code === 'DSH_BRIDGE_SERVER_ERROR'
       ? error
       : bridgeError('DSH_BRIDGE_DISCONNECTED', 'DSH bridge disconnected'))
+    abortInboundPermissions()
     socket?.destroy()
   }
 
@@ -581,6 +636,67 @@ export async function createDshBridgeServer({
         throw bridgeError('DSH_BRIDGE_FRAME_INVALID', 'Credential-bearing DSH bridge frame rejected')
       }
 
+      if (frame.type === 'cancel') {
+        if (!exactKeys(frame, ['requestId', 'type']) || !SAFE_REQUEST_ID.test(frame.requestId || '')) {
+          throw bridgeError('DSH_BRIDGE_REQUEST_INVALID', 'Invalid DSH bridge request cancellation')
+        }
+        const pending = inboundPermissionRequests.get(frame.requestId)
+        if (!pending) {
+          throw bridgeError('DSH_BRIDGE_REQUEST_INVALID', 'Unknown DSH bridge request cancellation')
+        }
+        inboundPermissionRequests.delete(frame.requestId)
+        pending.controller.abort()
+        return
+      }
+
+      if (frame.type === 'request') {
+        if (!validatePermissionRequest(frame)) {
+          throw bridgeError('DSH_BRIDGE_REQUEST_INVALID', 'Invalid DSH bridge permission request')
+        }
+        if (
+          seenInboundPermissionIds.has(frame.requestId) ||
+          inboundPermissionRequests.has(frame.requestId) ||
+          inboundPermissionRequests.size >= DSH_BRIDGE_MAX_PENDING_REQUESTS
+        ) {
+          throw bridgeError('DSH_BRIDGE_REQUEST_LIMIT', 'Too many pending DSH bridge permission requests')
+        }
+        seenInboundPermissionIds.add(frame.requestId)
+        seenInboundPermissionQueue.push(frame.requestId)
+        if (seenInboundPermissionQueue.length > 1_024) {
+          seenInboundPermissionIds.delete(seenInboundPermissionQueue.shift())
+        }
+        const controller = new AbortController()
+        inboundPermissionRequests.set(frame.requestId, { controller })
+        const request = Object.freeze({
+          sessionId,
+          ...frame.params,
+          signal: controller.signal
+        })
+        Promise.resolve()
+          .then(() => typeof onPermissionRequest === 'function'
+            ? onPermissionRequest(request)
+            : { kind: 'deny', reason: 'UCLI permission handler unavailable' })
+          .then((decision) => validatePermissionDecision(decision)
+            ? decision
+            : { kind: 'deny', reason: 'UCLI permission handler unavailable' })
+          .catch(() => ({ kind: 'deny', reason: 'UCLI permission handler unavailable' }))
+          .then((decision) => {
+            if (!inboundPermissionRequests.delete(frame.requestId) || controller.signal.aborted) return
+            if (authState !== 'authenticated' || candidate.destroyed) return
+            const safeDecision = containsCredential(decision, sensitiveValues)
+              ? { kind: 'deny', reason: 'UCLI permission handler unavailable' }
+              : decision
+            try {
+              candidate.write(encodeBridgeFrame({
+                type: 'response', requestId: frame.requestId, result: safeDecision
+              }), (error) => { if (error) failConnection(bridgeError('DSH_BRIDGE_DISCONNECTED')) })
+            } catch {
+              failConnection(bridgeError('DSH_BRIDGE_DISCONNECTED'))
+            }
+          })
+        return
+      }
+
       if (!validateSemanticEvent(frame)) {
         throw bridgeError('DSH_BRIDGE_EVENT_INVALID', 'Invalid DSH bridge semantic event')
       }
@@ -606,6 +722,7 @@ export async function createDshBridgeServer({
         rejectHello(bridgeError('DSH_BRIDGE_DISCONNECTED', 'DSH bridge disconnected before hello'))
       }
       rejectPending(bridgeError('DSH_BRIDGE_DISCONNECTED', 'DSH bridge disconnected'))
+      abortInboundPermissions()
     })
   }
 
@@ -679,6 +796,7 @@ export async function createDshBridgeServer({
       clearTimeoutFn(handshakeTimer)
       rejectHello(bridgeError('DSH_BRIDGE_CLOSED', 'DSH bridge server closed'))
       rejectPending(bridgeError('DSH_BRIDGE_DISCONNECTED', 'DSH bridge disconnected'))
+      abortInboundPermissions()
       const activeSocket = socket
       socket = null
       activeSocket?.destroy()
@@ -719,6 +837,12 @@ export async function createDshBridgeServer({
     if (!isPlainBridgeObject(params)) {
       return Promise.reject(bridgeError('DSH_BRIDGE_REQUEST_INVALID', 'Invalid DSH bridge request params'))
     }
+    if (!validateOutboundRequestParams(method, params)) {
+      return Promise.reject(bridgeError('DSH_BRIDGE_REQUEST_INVALID', 'Invalid DSH bridge request params'))
+    }
+    if (containsCredential(params, sensitiveValues)) {
+      return Promise.reject(bridgeError('DSH_BRIDGE_REQUEST_INVALID', 'Invalid DSH bridge request params'))
+    }
     if (pendingRequests.size >= DSH_BRIDGE_MAX_PENDING_REQUESTS) {
       return Promise.reject(bridgeError('DSH_BRIDGE_REQUEST_LIMIT', 'Too many pending DSH bridge requests'))
     }
@@ -738,6 +862,9 @@ export async function createDshBridgeServer({
     const promise = new Promise((resolve, reject) => {
       const timer = setTimeoutFn(() => {
         if (!pendingRequests.delete(requestId)) return
+        if (authState === 'authenticated' && socket && !socket.destroyed && !closed) {
+          try { socket.write(encodeBridgeFrame({ type: 'cancel', requestId })) } catch { /* timed out locally */ }
+        }
         reject(bridgeError('DSH_BRIDGE_REQUEST_TIMEOUT', 'DSH bridge request timed out'))
       }, requestTimeoutMs)
       pendingRequests.set(requestId, { resolve, reject, timer })

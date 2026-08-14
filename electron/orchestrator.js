@@ -2727,7 +2727,7 @@ export function createOrchestrator() {
         { action: verdict === 'allow' ? 'allow_once' : 'deny' }
       )
       if (gatewayResult?.accepted) return true
-      return engine.respondApproval(requestId, verdict)
+      return engine.respondApproval(sessionId, requestId, verdict)
     })
     ipcMain.handle('session:interrupt', (_e, sessionId) => {
       const e = sessions.get(sessionId)
@@ -2774,6 +2774,7 @@ export function createOrchestrator() {
     ipcMain.handle('session:stop', (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (e) {
+        engine.removeSession(sessionId)
         gatewaySignals.publish({
           type: 'session_stopped',
           sessionId,
@@ -2797,6 +2798,7 @@ export function createOrchestrator() {
     ipcMain.handle('session:delete', (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (e) {
+        engine.removeSession(sessionId)
         gatewaySignals.publish({
           type: 'session_stopped',
           sessionId,
@@ -2970,6 +2972,7 @@ export function createOrchestrator() {
       await gatewayManager?.shutdown()
       const db = getDb()
       for (const [id, entry] of sessions) {
+        engine.removeSession(id)
         if (entry.adapter) {
           try { await Promise.resolve(entry.adapter.dispose()) }
           catch (error) { console.error(`Failed to dispose session ${id}:`, error) }

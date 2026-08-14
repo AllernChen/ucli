@@ -545,7 +545,7 @@ test('response must be exact, match a live request, and choose exactly one of re
     t.after(() => server.close())
     const socket = await authenticate(server)
     const inbox = createFrameInbox(socket)
-    const pending = server.request('snapshot.plan', {})
+    const pending = server.request('snapshot.plan', { nativeSessionId: 'native-1' })
     const pendingRejected = assert.rejects(pending, (error) => error.code === 'DSH_BRIDGE_DISCONNECTED')
     const request = await inbox.next()
     const closed = once(socket, 'close')
@@ -563,7 +563,7 @@ test('remote response errors have bounded control-free codes and messages', asyn
   const socket = await authenticate(server)
   t.after(() => closeSocket(socket))
   const inbox = createFrameInbox(socket)
-  const pending = server.request('snapshot.result', {})
+  const pending = server.request('snapshot.result', { nativeSessionId: 'native-1' })
   const request = await inbox.next()
   socket.write(encodeBridgeFrame({
     type: 'response',
@@ -590,7 +590,7 @@ test('remote error text cannot expose endpoint, token, or API key markers', asyn
   const socket = await authenticate(server)
   t.after(() => closeSocket(socket))
   const inbox = createFrameInbox(socket)
-  const pending = server.request('snapshot.result', {})
+  const pending = server.request('snapshot.result', { nativeSessionId: 'native-1' })
   const request = await inbox.next()
   socket.write(encodeBridgeFrame({
     type: 'response',
@@ -618,7 +618,7 @@ test('successful response results cannot return the handshake token', async (t) 
   t.after(() => server.close())
   const socket = await authenticate(server)
   const inbox = createFrameInbox(socket)
-  const pending = server.request('snapshot.result', {})
+  const pending = server.request('snapshot.result', { nativeSessionId: 'native-1' })
   const rejected = assert.rejects(pending, (error) => error.code === 'DSH_BRIDGE_DISCONNECTED')
   const request = await inbox.next()
   socket.write(encodeBridgeFrame({
@@ -661,7 +661,7 @@ test('Windows pipe endpoint cannot escape through semantic events or successful 
     }
 
     const inbox = createFrameInbox(socket)
-    const pending = server.request('snapshot.result', {})
+    const pending = server.request('snapshot.result', { nativeSessionId: 'native-1' })
     const rejected = assert.rejects(pending, (error) => error.code === 'DSH_BRIDGE_DISCONNECTED')
     const request = await inbox.next()
     socket.write(encodeBridgeFrame({
@@ -674,7 +674,7 @@ test('Windows pipe endpoint cannot escape through semantic events or successful 
   }
 })
 
-test('request accepts only five v1 methods and enforces the pending request limit', async (t) => {
+test('request accepts only four main-to-plugin v1 methods and enforces the pending request limit', async (t) => {
   const server = await createDshBridgeServer({
     sessionId: 'session-1', profileName: 'tui-local', onEvent() {}
   })
@@ -688,10 +688,10 @@ test('request accepts only five v1 methods and enforces the pending request limi
 
   const pending = []
   for (let index = 0; index < DSH_BRIDGE_MAX_PENDING_REQUESTS; index += 1) {
-    pending.push(server.request('snapshot.plan', { index }))
+    pending.push(server.request('snapshot.plan', { nativeSessionId: 'native-1' }))
   }
   await assert.rejects(
-    server.request('snapshot.plan', { overflow: true }),
+    server.request('snapshot.plan', { nativeSessionId: 'native-1' }),
     (error) => error.code === 'DSH_BRIDGE_REQUEST_LIMIT'
   )
   const rejected = pending.map((promise) => assert.rejects(
@@ -700,6 +700,215 @@ test('request accepts only five v1 methods and enforces the pending request limi
   ))
   socket.destroy()
   await Promise.all(rejected)
+})
+
+test('authenticated plugin-to-main permission RPC is exact, session-bound, and returns one decision', async (t) => {
+  const requests = []
+  const server = await createDshBridgeServer({
+    sessionId: 'session-1', profileName: 'tui-local', onEvent() {},
+    async onPermissionRequest(request) {
+      requests.push(request)
+      return { kind: 'allow' }
+    }
+  })
+  t.after(() => server.close())
+  const socket = await authenticate(server)
+  t.after(() => closeSocket(socket))
+  const inbox = createFrameInbox(socket)
+  socket.write(encodeBridgeFrame({
+    type: 'request', requestId: 'plugin-rpc:1', method: 'permission.decide',
+    params: {
+      actor: { nativeSessionId: 'native-1', agentId: 'agent-1', subagent: true },
+      call: { callId: 'call-1', rootCallId: 'root-call', nested: true },
+      tool: { name: 'write_file' }, input: { path: 'README.md' }, cwd: 'C:\\workspace',
+      approvalRequired: false
+    }
+  }))
+  assert.deepEqual(await inbox.next(), {
+    type: 'response', requestId: 'plugin-rpc:1', result: { kind: 'allow' }
+  })
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].sessionId, 'session-1')
+  assert.equal(requests[0].signal instanceof AbortSignal, true)
+  assert.deepEqual({ ...requests[0], signal: undefined }, {
+    sessionId: 'session-1',
+    actor: { nativeSessionId: 'native-1', agentId: 'agent-1', subagent: true },
+    call: { callId: 'call-1', rootCallId: 'root-call', nested: true },
+    tool: { name: 'write_file' }, input: { path: 'README.md' }, cwd: 'C:\\workspace',
+    approvalRequired: false,
+    signal: undefined
+  })
+})
+
+test('permission RPC cancel aborts its callback and ignores a late decision', async (t) => {
+  let request
+  let resolveDecision
+  const server = await createDshBridgeServer({
+    sessionId: 'session-1', profileName: 'tui-local', onEvent() {},
+    onPermissionRequest(value) {
+      request = value
+      return new Promise((resolve) => { resolveDecision = resolve })
+    }
+  })
+  t.after(() => server.close())
+  const socket = await authenticate(server)
+  t.after(() => closeSocket(socket))
+  const inbox = createFrameInbox(socket)
+  socket.write(encodeBridgeFrame({
+    type: 'request', requestId: 'plugin-rpc:1', method: 'permission.decide',
+    params: {
+      actor: { nativeSessionId: 'native-1', agentId: 'agent-1', subagent: false },
+      call: { callId: 'call-1', rootCallId: 'call-1', nested: false },
+      tool: { name: 'bash' }, input: { command: 'npm test' },
+      approvalRequired: false
+    }
+  }))
+  const deadline = Date.now() + 1_000
+  while (!request && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5))
+  socket.write(encodeBridgeFrame({ type: 'cancel', requestId: 'plugin-rpc:1' }))
+  const abortDeadline = Date.now() + 1_000
+  while (!request.signal.aborted && Date.now() < abortDeadline) await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(request.signal.aborted, true)
+  resolveDecision({ kind: 'allow' })
+  socket.write(encodeBridgeFrame({ type: 'agent-status', nativeSessionId: 'native-1', status: 'idle' }))
+  await assert.rejects(inbox.next(), /timed out waiting/, 'late permission response must be ignored')
+  assert.equal(socket.destroyed, false)
+
+  const closed = once(socket, 'close')
+  socket.write(encodeBridgeFrame({
+    type: 'request', requestId: 'plugin-rpc:1', method: 'permission.decide',
+    params: {
+      actor: { nativeSessionId: 'native-1', agentId: 'agent-1', subagent: false },
+      call: { callId: 'call-2', rootCallId: 'call-2', nested: false },
+      tool: { name: 'bash' }, input: { command: 'npm test' }, approvalRequired: false
+    }
+  }))
+  await closed
+})
+
+test('unknown and already-settled inbound cancels fail closed', async (t) => {
+  for (const settled of [false, true]) {
+    const server = await createDshBridgeServer({
+      sessionId: 'session-1', profileName: 'tui-local', onEvent() {},
+      onPermissionRequest: () => ({ kind: 'deny' })
+    })
+    t.after(() => server.close())
+    const socket = await authenticate(server)
+    const inbox = createFrameInbox(socket)
+    const requestId = settled ? 'settled-id' : 'unknown-id'
+    if (settled) {
+      socket.write(encodeBridgeFrame({
+        type: 'request', requestId, method: 'permission.decide',
+        params: {
+          actor: { nativeSessionId: 'native-1', agentId: 'agent-1', subagent: false },
+          call: { callId: 'call-1', rootCallId: 'call-1', nested: false },
+          tool: { name: 'bash' }, input: { command: 'npm test' }, approvalRequired: false
+        }
+      }))
+      await inbox.next()
+    }
+    const closed = once(socket, 'close')
+    socket.write(encodeBridgeFrame({ type: 'cancel', requestId }))
+    await Promise.race([closed, new Promise((_, reject) => setTimeout(
+      () => reject(new Error('invalid inbound cancel did not close the bridge')), 1_000
+    ))])
+    await server.close()
+  }
+})
+
+test('disconnect aborts all inbound permission callbacks and the 65th request fails closed', async (t) => {
+  const signals = []
+  const server = await createDshBridgeServer({
+    sessionId: 'session-1', profileName: 'tui-local', onEvent() {},
+    onPermissionRequest({ signal }) {
+      signals.push(signal)
+      return new Promise((resolve) => {
+        if (signal.aborted) resolve({ kind: 'deny' })
+        else signal.addEventListener('abort', () => resolve({ kind: 'deny' }), { once: true })
+      })
+    }
+  })
+  t.after(() => server.close())
+  const socket = await authenticate(server)
+  const closed = once(socket, 'close')
+  for (let index = 0; index <= DSH_BRIDGE_MAX_PENDING_REQUESTS; index += 1) {
+    socket.write(encodeBridgeFrame({
+      type: 'request', requestId: `plugin-rpc:${index + 1}`, method: 'permission.decide',
+      params: {
+        actor: { nativeSessionId: 'native-1', agentId: 'agent-1', subagent: false },
+        call: { callId: `call-${index}`, rootCallId: `call-${index}`, nested: false },
+        tool: { name: 'bash' }, input: { command: 'npm test' }, approvalRequired: false
+      }
+    }))
+  }
+  await Promise.race([closed, new Promise((_, reject) => setTimeout(
+    () => reject(new Error('inbound permission limit did not close the bridge')), 1_000
+  ))])
+  assert.equal(signals.length, DSH_BRIDGE_MAX_PENDING_REQUESTS)
+  assert.equal(signals.every((signal) => signal.aborted), true)
+})
+
+test('an active permission request id cannot be replayed after bounded tombstone eviction', async (t) => {
+  let activeCalls = 0
+  const server = await createDshBridgeServer({
+    sessionId: 'session-1', profileName: 'tui-local', onEvent() {},
+    onPermissionRequest(request) {
+      if (request.call.callId === 'active-call') {
+        activeCalls += 1
+        return new Promise(() => {})
+      }
+      return { kind: 'deny' }
+    }
+  })
+  t.after(() => server.close())
+  const socket = await authenticate(server)
+  const inbox = createFrameInbox(socket)
+  const permissionFrame = (requestId, callId) => ({
+    type: 'request', requestId, method: 'permission.decide',
+    params: {
+      actor: { nativeSessionId: 'native-1', agentId: 'agent-1', subagent: false },
+      call: { callId, rootCallId: callId, nested: false },
+      tool: { name: 'bash' }, input: { command: 'npm test' }, approvalRequired: false
+    }
+  })
+  socket.write(encodeBridgeFrame(permissionFrame('active-id', 'active-call')))
+  while (activeCalls === 0) await new Promise((resolve) => setImmediate(resolve))
+  for (let index = 0; index < 1_024; index += 1) {
+    const requestId = `completed-${index}`
+    socket.write(encodeBridgeFrame(permissionFrame(requestId, `call-${index}`)))
+    assert.equal((await inbox.next()).requestId, requestId)
+  }
+
+  const closed = once(socket, 'close')
+  socket.write(encodeBridgeFrame(permissionFrame('active-id', 'active-call')))
+  await Promise.race([closed, new Promise((_, reject) => setTimeout(
+    () => reject(new Error('active permission replay did not close the bridge')), 1_000
+  ))])
+  assert.equal(activeCalls, 1)
+})
+
+test('turn control requests validate exact v1 params before writing', async (t) => {
+  const server = await createDshBridgeServer({
+    sessionId: 'session-1', profileName: 'tui-local', onEvent() {}, requestTimeoutMs: 10
+  })
+  t.after(() => server.close())
+  const socket = await authenticate(server)
+  t.after(() => closeSocket(socket))
+
+  for (const [method, params] of [
+    ['turn.send', { nativeSessionId: 'native-1', text: '' }],
+    ['turn.send', { nativeSessionId: 'native-1', text: 'ok', extra: true }],
+    ['turn.send', { nativeSessionId: 'native-1', text: `leaked ${server.token}` }],
+    ['turn.send', { nativeSessionId: 'native-1', text: `leaked ${server.endpoint}` }],
+    ['turn.interrupt', { nativeSessionId: 'native-1', extra: true }],
+    ['snapshot.plan', {}],
+    ['snapshot.result', { nativeSessionId: 'native-1', extra: true }]
+  ]) {
+    await assert.rejects(
+      server.request(method, params),
+      (error) => error.code === 'DSH_BRIDGE_REQUEST_INVALID'
+    )
+  }
 })
 
 test('a response for an expired request is treated as forged and closes the bridge', async (t) => {
@@ -723,7 +932,7 @@ test('a response for an expired request is treated as forged and closes the brid
   t.after(() => server.close())
   const socket = await authenticate(server)
   const inbox = createFrameInbox(socket)
-  const pending = server.request('snapshot.plan', {})
+  const pending = server.request('snapshot.plan', { nativeSessionId: 'native-1' })
   const request = await inbox.next()
   requestTimer()
   await assert.rejects(pending, (error) => error.code === 'DSH_BRIDGE_REQUEST_TIMEOUT')
@@ -752,11 +961,14 @@ test('request rejects with a stable timeout error using the injected timer', asy
   t.after(() => server.close())
   const socket = await authenticate(server)
   t.after(() => closeSocket(socket))
+  const inbox = createFrameInbox(socket)
 
-  const pending = server.request('snapshot.result', {})
+  const pending = server.request('snapshot.result', { nativeSessionId: 'native-1' })
+  const request = await inbox.next()
   scheduled()
 
   await assert.rejects(pending, (error) => error.code === 'DSH_BRIDGE_REQUEST_TIMEOUT')
+  assert.deepEqual(await inbox.next(), { type: 'cancel', requestId: request.requestId })
 })
 
 test('disconnect rejects every pending request immediately', async (t) => {
@@ -768,8 +980,8 @@ test('disconnect rejects every pending request immediately', async (t) => {
   t.after(() => server.close())
   const socket = await authenticate(server)
 
-  const first = server.request('snapshot.plan', {})
-  const second = server.request('snapshot.result', {})
+  const first = server.request('snapshot.plan', { nativeSessionId: 'native-1' })
+  const second = server.request('snapshot.result', { nativeSessionId: 'native-1' })
   const firstRejected = assert.rejects(first, (error) => error.code === 'DSH_BRIDGE_DISCONNECTED')
   const secondRejected = assert.rejects(second, (error) => error.code === 'DSH_BRIDGE_DISCONNECTED')
   socket.destroy()
@@ -791,7 +1003,7 @@ test('a persistent server error handler rejects hello and pending work without a
   })
   t.after(() => server.close())
   const socket = await authenticate(server)
-  const pending = server.request('snapshot.plan', {})
+  const pending = server.request('snapshot.plan', { nativeSessionId: 'native-1' })
   const pendingRejected = assert.rejects(pending, (error) => error.code === 'DSH_BRIDGE_SERVER_ERROR')
   const closed = once(socket, 'close')
 
@@ -1088,7 +1300,7 @@ test('concurrent close calls share one promise and suppress ignored pending reje
     }
   })
   const socket = await authenticate(server)
-  server.request('snapshot.plan', {})
+  server.request('snapshot.plan', { nativeSessionId: 'native-1' })
   const clientClosed = once(socket, 'close')
 
   const first = server.close()

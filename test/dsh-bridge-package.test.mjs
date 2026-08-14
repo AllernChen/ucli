@@ -49,6 +49,7 @@ test('bridge package manifest uses host-resolved exact rc6 peers and a Cordis bu
     '@deepseek-ai/cordis': '4.0.1',
     '@deepseek-ai/dsh-agent': '0.1.0-rc.6',
     '@deepseek-ai/dsh-llm': '0.1.0-rc.6',
+    '@deepseek-ai/dsh-sandbox-policy': '0.1.0-rc.6',
     '@deepseek-ai/dsh-session': '0.1.0-rc.6',
     '@deepseek-ai/dsh-tools': '0.1.0-rc.6'
   })
@@ -66,6 +67,7 @@ test('a clean rc6 hoisted profile adds the bridge without a second runtime closu
     '@deepseek-ai/cordis': '4.0.1',
     '@deepseek-ai/dsh-agent': '0.1.0-rc.6',
     '@deepseek-ai/dsh-llm': '0.1.0-rc.6',
+    '@deepseek-ai/dsh-sandbox-policy': '0.1.0-rc.6',
     '@deepseek-ai/dsh-session': '0.1.0-rc.6',
     '@deepseek-ai/dsh-tools': '0.1.0-rc.6'
   }

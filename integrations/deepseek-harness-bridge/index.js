@@ -21,7 +21,15 @@ export const DSH_BRIDGE_CAPABILITIES = Object.freeze({
   resultSnapshot: true
 })
 
-export const internals = { createConnection, setTimeout, clearTimeout }
+export const internals = {
+  createConnection,
+  setTimeout,
+  clearTimeout,
+  loadCreateUserMessage: () => import('@deepseek-ai/dsh-llm/message')
+    .then((module) => module.createUserMessage),
+  loadSandboxPolicy: () => import('@deepseek-ai/dsh-sandbox-policy')
+    .then(({ effectiveSandboxMode, setSandboxMode }) => ({ effectiveSandboxMode, setSandboxMode }))
+}
 
 const PROTOCOL_VERSION = 1
 const BRIDGE_VERSION = '0.11.0'
@@ -377,25 +385,80 @@ export function apply(ctx, config = {}) {
 
   ctx.effect(() => {
     let socket
-    let state = 'connecting'
+    let state = 'initializing'
     let stopped = false
     let helloTimer = null
+    let permissionSequence = 0
+    let controlEpoch = 0
+    let createUserMessagePromise
+    let sandboxPolicy
     const subscriptions = []
+    const permissionSubscriptions = []
     const rootIds = new Set()
+    const pendingPermissions = new Map()
+    const liveCallIds = new Set()
+    const cancelledPermissionIds = new Set()
+    const cancelledPermissionQueue = []
+    const pendingControls = new Map()
+    const seenControlIds = new Set()
+    const seenControlQueue = []
+    const sandboxPinning = new Set()
+    const planSnapshots = new Map()
+    const resultSnapshots = new Map()
 
     const cleanupSubscriptions = () => {
       for (const dispose of subscriptions.splice(0).reverse()) {
         try { dispose() } catch { /* disposal remains fail-closed */ }
       }
     }
+    const cleanupPermissionSubscriptions = () => {
+      for (const dispose of permissionSubscriptions.splice(0).reverse()) {
+        try { dispose() } catch { /* disposal remains fail-closed */ }
+      }
+    }
+    const settlePermission = (requestId, decision) => {
+      const pending = pendingPermissions.get(requestId)
+      if (!pending) return false
+      pendingPermissions.delete(requestId)
+      internals.clearTimeout(pending.timer)
+      pending.signal?.removeEventListener('abort', pending.abort)
+      pending.resolve(decision)
+      return true
+    }
+    const sendCancel = (requestId) => {
+      if (state !== 'active' || !socket || socket.destroyed) return
+      try { socket.write(encodeBridgeFrame({ type: 'cancel', requestId })) } catch { /* already denied */ }
+    }
+    const rememberCancelledPermission = (requestId) => {
+      cancelledPermissionIds.add(requestId)
+      cancelledPermissionQueue.push(requestId)
+      if (cancelledPermissionQueue.length > 1_024) {
+        cancelledPermissionIds.delete(cancelledPermissionQueue.shift())
+      }
+    }
     const stop = () => {
       if (stopped) return
       stopped = true
+      controlEpoch += 1
       state = 'closed'
       if (helloTimer !== null) {
         internals.clearTimeout(helloTimer)
         helloTimer = null
       }
+      for (const requestId of [...pendingPermissions.keys()]) {
+        settlePermission(requestId, {
+          kind: 'deny', reason: 'UCLI permission bridge disconnected'
+        })
+      }
+      liveCallIds.clear()
+      cancelledPermissionIds.clear()
+      cancelledPermissionQueue.length = 0
+      for (const pending of pendingControls.values()) pending.controller.abort()
+      pendingControls.clear()
+      seenControlIds.clear()
+      seenControlQueue.length = 0
+      planSnapshots.clear()
+      resultSnapshots.clear()
       cleanupSubscriptions()
       socket?.removeAllListeners()
       socket?.destroy()
@@ -403,20 +466,255 @@ export function apply(ctx, config = {}) {
     }
     const send = (frame) => {
       if (state !== 'active' || !socket || socket.destroyed) throw new Error('bridge inactive')
+      if (frame.type === 'plan-snapshot') planSnapshots.set(frame.nativeSessionId, frame.markdown)
+      if (frame.type === 'result-snapshot') resultSnapshots.set(frame.nativeSessionId, frame.markdown)
       socket.write(encodeSemanticFrame(frame), (error) => {
         if (error) stop()
       })
     }
+    const sendControlResponse = (frame) => {
+      if (state !== 'active' || !socket || socket.destroyed) return
+      try {
+        socket.write(encodeBridgeFrame(frame), (error) => { if (error) stop() })
+      } catch {
+        stop()
+      }
+    }
     const projector = createProjector(send)
     const rootSessionId = (agent) => String(agent?.session?.id ?? agent?.id ?? '')
+    const isContinuation = (agent) => agent?.session?.header?.origin === 'subagent'
+    const semanticRoots = () => ctx.agents.roots().filter((agent) => !isContinuation(agent))
     const rememberRoot = (agent) => {
       rootIds.add(rootSessionId(agent))
       projector.ready(agent)
     }
-    const currentlyRoot = (agent) => ctx.agents.roots()
+    const currentlyRoot = (agent) => semanticRoots()
       .some((root) => root === agent || root.id === agent?.id)
+    const lookupAgent = (id) => ctx.agents.get?.(id) ?? ctx.agents.list()
+      .find((agent) => agent?.id === id || agent?.session?.id === id)
+    const semanticRootFor = (agent) => {
+      if (!agent) throw new Error('agent unavailable')
+      let current = agent
+      const seen = new Set()
+      for (let depth = 0; depth < 32; depth += 1) {
+        const id = rootSessionId(current)
+        if (!id || seen.has(id)) throw new Error('agent lineage invalid')
+        if (current?.id !== current?.session?.id || lookupAgent(current.id) !== current) {
+          throw new Error('agent identity invalid')
+        }
+        seen.add(id)
+        if (isContinuation(current)) {
+          const parentId = current.session?.header?.parentSession
+          if (typeof parentId !== 'string' || parentId.length === 0) throw new Error('agent lineage unavailable')
+          current = lookupAgent(parentId)
+          if (!current) throw new Error('agent lineage unavailable')
+          continue
+        }
+        const roots = semanticRoots().filter((root) => root === current || root.id === current.id)
+        if (roots.length === 1) return roots[0]
+        const owners = ctx.agents.list().filter((candidate) => (
+          candidate !== current && ctx.agents.isOwnedBy?.(current.id, candidate)
+        ))
+        if (owners.length !== 1) throw new Error('agent lineage ambiguous')
+        current = owners[0]
+      }
+      throw new Error('agent lineage too deep')
+    }
+    const pinSandbox = (agent) => {
+      if (!sandboxPolicy || !agent?.session) throw new Error('sandbox policy unavailable')
+      const sessionId = rootSessionId(agent)
+      if (!sessionId || sandboxPinning.has(sessionId)) return
+      if (sandboxPolicy.effectiveSandboxMode(agent.session.events ?? []) === 'workspace-write') return
+      sandboxPinning.add(sessionId)
+      try { sandboxPolicy.setSandboxMode(agent.session, 'workspace-write') }
+      finally { sandboxPinning.delete(sessionId) }
+    }
     const guard = (listener) => (...args) => {
       try { listener(...args) } catch { stop() }
+    }
+    const normalizeExecutionInput = (value) => {
+      if (isPlainBridgeObject(value)) return jsonSize(value)
+      let raw
+      try { raw = JSON.stringify(value) } catch { raw = undefined }
+      if (typeof raw !== 'string') throw new Error('invalid tool input')
+      return jsonSize({ raw: truncateUtf8(raw, MAX_INPUT) })
+    }
+    const requestPermission = (params, signal) => {
+      if (state !== 'active' || !socket || socket.destroyed) {
+        return Promise.resolve({ kind: 'deny', reason: 'UCLI permission bridge disconnected' })
+      }
+      permissionSequence += 1
+      const requestId = `plugin-rpc:${permissionSequence}`
+      return new Promise((resolve) => {
+        const finish = (decision) => settlePermission(requestId, decision)
+        const abort = () => {
+          if (!finish({ kind: 'deny', reason: 'UCLI permission request cancelled' })) return
+          rememberCancelledPermission(requestId)
+          sendCancel(requestId)
+        }
+        const timer = internals.setTimeout(() => {
+          if (!finish({ kind: 'deny', reason: 'UCLI permission request timed out' })) return
+          rememberCancelledPermission(requestId)
+          sendCancel(requestId)
+        }, 30_000)
+        pendingPermissions.set(requestId, { resolve, timer, signal, abort })
+        if (signal?.aborted) {
+          abort()
+          return
+        }
+        signal?.addEventListener('abort', abort, { once: true })
+        try {
+          socket.write(encodeBridgeFrame({
+            type: 'request', requestId, method: 'permission.decide', params
+          }), (error) => {
+            if (error && finish({ kind: 'deny', reason: 'UCLI permission bridge disconnected' })) stop()
+          })
+        } catch {
+          finish({ kind: 'deny', reason: 'UCLI permission bridge disconnected' })
+          stop()
+        }
+      })
+    }
+    const permissionGate = async function (exec, next) {
+      if (state !== 'active' || stopped || !socket || socket.destroyed) {
+        return { kind: 'deny', reason: 'UCLI permission bridge disconnected' }
+      }
+      let downstream
+      try { downstream = await next() } catch {
+        return { kind: 'deny', reason: 'DSH permission policy unavailable' }
+      }
+      if (downstream?.kind === 'deny') return downstream
+      if (downstream?.kind !== 'allow' && downstream?.kind !== 'ask') {
+        return { kind: 'deny', reason: 'DSH permission policy unavailable' }
+      }
+      const input = normalizeExecutionInput(exec?.arguments)
+      if (Object.hasOwn(input, 'sandbox_permissions')) {
+        return { kind: 'deny', reason: 'DSH sandbox escalation is not allowed by UCLI' }
+      }
+      const callId = safeString(String(exec?.callId ?? ''), 256, SAFE_ID)
+      const rootCallId = safeString(String(exec?.rootCallId ?? exec?.callId ?? ''), 256, SAFE_ID)
+      const toolName = safeName(exec?.name)
+      if (!callId || !rootCallId || !toolName) return { kind: 'deny', reason: 'Invalid DSH tool execution' }
+      if (toolName === 'run_code' && exec?.parent === undefined) {
+        return downstream.kind === 'allow'
+          ? { kind: 'allow' }
+          : { kind: 'deny', reason: 'Code Mode wrapper approval is not delegated' }
+      }
+      const actorId = safeString(String(exec?.agent?.id ?? ''), 256, SAFE_ID)
+      if (!actorId) return { kind: 'deny', reason: 'Invalid DSH tool actor' }
+      const liveCallKey = `${actorId}:${callId}`
+      if (liveCallIds.has(liveCallKey)) return { kind: 'deny', reason: 'Duplicate DSH tool call identity' }
+      liveCallIds.add(liveCallKey)
+      try {
+        const root = semanticRootFor(exec?.agent)
+        const frame = {
+          actor: {
+            nativeSessionId: nativeSessionId(root.session?.id),
+            agentId: nativeSessionId(exec.agent?.id ?? exec.agent?.session?.id),
+            subagent: exec.agent !== root
+          },
+          call: { callId, rootCallId, nested: exec?.parent !== undefined },
+          tool: { name: toolName },
+          input,
+          approvalRequired: downstream.kind === 'ask'
+        }
+        const cwd = sessionCwd(root.session)
+        if (cwd !== undefined) frame.cwd = cwd
+        const decision = await requestPermission(frame, exec?.signal)
+        if (decision.kind === 'allow') return { kind: 'allow' }
+        return { kind: 'deny', reason: decision.reason || 'Denied by UCLI' }
+      } catch {
+        return { kind: 'deny', reason: 'UCLI permission actor unavailable' }
+      } finally {
+        liveCallIds.delete(liveCallKey)
+      }
+    }
+    const approvalAnswerer = async function (_request, _next) {
+      return 'rejected'
+    }
+    const controlRoots = (nativeId) => semanticRoots()
+      .filter((agent) => (
+        rootSessionId(agent) === nativeId && agent?.id === agent?.session?.id
+      ))
+    const exactControlParams = (params, keys) => exactKeys(params, keys)
+    const handleControlRequest = async (frame, epoch, signal) => {
+      if (
+        !exactKeys(frame, ['method', 'params', 'requestId', 'type']) ||
+        frame.type !== 'request' || !SAFE_ID.test(frame.requestId || '') ||
+        !isPlainBridgeObject(frame.params)
+      ) {
+        stop()
+        return
+      }
+      const fail = (code) => sendControlResponse({
+        type: 'response', requestId: frame.requestId,
+        error: { code, message: 'DSH bridge control failed' }
+      })
+      try {
+        if (stopped || state !== 'active' || epoch !== controlEpoch || signal.aborted) return
+        if (frame.method === 'turn.send') {
+          if (
+            !exactControlParams(frame.params, ['nativeSessionId', 'text']) ||
+            !SAFE_ID.test(frame.params.nativeSessionId || '') ||
+            safeString(frame.params.text, MAX_EVENT_FIELD_BYTES) === undefined
+          ) return fail('DSH_BRIDGE_REQUEST_INVALID')
+          const roots = controlRoots(frame.params.nativeSessionId)
+          if (roots.length === 0) return fail('DSH_ROOT_AGENT_NOT_FOUND')
+          if (roots.length > 1) return fail('DSH_ROOT_AGENT_AMBIGUOUS')
+          if (!createUserMessagePromise) {
+            createUserMessagePromise = Promise.resolve().then(() => internals.loadCreateUserMessage())
+          }
+          let createUserMessage
+          try { createUserMessage = await createUserMessagePromise } catch {
+            return fail('DSH_BRIDGE_RUNTIME_UNAVAILABLE')
+          }
+          if (stopped || state !== 'active' || epoch !== controlEpoch || signal.aborted) return
+          if (typeof createUserMessage !== 'function') return fail('DSH_BRIDGE_RUNTIME_UNAVAILABLE')
+          const freshRoots = controlRoots(frame.params.nativeSessionId)
+          if (freshRoots.length === 0) return fail('DSH_ROOT_AGENT_NOT_FOUND')
+          if (freshRoots.length > 1) return fail('DSH_ROOT_AGENT_AMBIGUOUS')
+          const message = createUserMessage({
+            content: [{ type: 'text', text: frame.params.text }],
+            source: { kind: 'user' }
+          })
+          if (stopped || state !== 'active' || epoch !== controlEpoch || signal.aborted) return
+          try { freshRoots[0].followup(message) } catch { return fail('DSH_TURN_SEND_FAILED') }
+          sendControlResponse({
+            type: 'response', requestId: frame.requestId, result: { accepted: true }
+          })
+          return
+        }
+        if (frame.method === 'turn.interrupt') {
+          if (
+            !exactControlParams(frame.params, ['nativeSessionId']) ||
+            !SAFE_ID.test(frame.params.nativeSessionId || '')
+          ) return fail('DSH_BRIDGE_REQUEST_INVALID')
+          const roots = controlRoots(frame.params.nativeSessionId)
+          if (roots.length === 0) return fail('DSH_ROOT_AGENT_NOT_FOUND')
+          if (roots.length > 1) return fail('DSH_ROOT_AGENT_AMBIGUOUS')
+          try { roots[0].cancel({ kind: 'user' }) } catch { return fail('DSH_TURN_INTERRUPT_FAILED') }
+          sendControlResponse({
+            type: 'response', requestId: frame.requestId, result: { accepted: true }
+          })
+          return
+        }
+        if (frame.method === 'snapshot.plan' || frame.method === 'snapshot.result') {
+          if (
+            !exactControlParams(frame.params, ['nativeSessionId']) ||
+            !SAFE_ID.test(frame.params.nativeSessionId || '')
+          ) return fail('DSH_BRIDGE_REQUEST_INVALID')
+          const snapshots = frame.method === 'snapshot.plan' ? planSnapshots : resultSnapshots
+          const markdown = snapshots.get(frame.params.nativeSessionId)
+          if (markdown === undefined) return fail('DSH_SNAPSHOT_UNAVAILABLE')
+          sendControlResponse({
+            type: 'response', requestId: frame.requestId, result: { markdown }
+          })
+          return
+        }
+        fail('DSH_BRIDGE_REQUEST_METHOD_UNSUPPORTED')
+      } catch {
+        fail('DSH_BRIDGE_REQUEST_INVALID')
+      }
     }
     const subscribe = () => {
       if (state !== 'awaiting-ack' || stopped) return
@@ -427,6 +725,7 @@ export function apply(ctx, config = {}) {
       }
       subscriptions.push(
         ctx.on('agent/created', guard((payload) => {
+          pinSandbox(payload.agent)
           if (currentlyRoot(payload.agent)) {
             rootIds.add(rootSessionId(payload.agent))
             projector.agentCreated(payload)
@@ -442,65 +741,131 @@ export function apply(ctx, config = {}) {
           if (rootIds.has(rootSessionId(payload.agent))) projector.agentError(payload)
         })),
         ctx.on('session/created', guard((session) => projector.sessionCreated(session))),
-        ctx.on('session/disposed', guard((session) => projector.sessionDisposed(session))),
+        ctx.on('session/disposed', guard((session) => {
+          projector.sessionDisposed(session)
+          planSnapshots.delete(String(session?.id))
+          resultSnapshots.delete(String(session?.id))
+        })),
         ctx.on('session/event', guard((session, event) => {
+          if (event?.type === 'sandbox/mode') {
+            const agent = lookupAgent(String(session?.id ?? ''))
+            if (!agent || agent.session !== session) throw new Error('sandbox session unavailable')
+            pinSandbox(agent)
+          }
           if (rootIds.has(String(session?.id))) projector.sessionEvent(session, event)
         }))
       )
       try {
-        for (const agent of ctx.agents.roots()) rememberRoot(agent)
+        for (const agent of ctx.agents.list()) pinSandbox(agent)
+        for (const agent of semanticRoots()) rememberRoot(agent)
       } catch {
         stop()
       }
-    }
-
-    try {
-      socket = internals.createConnection(endpoint)
-    } catch {
-      stop()
-      return stop
     }
     const decoder = new BridgeFrameDecoder((frame) => {
       try {
-        if (
-          state !== 'awaiting-ack' ||
-          !exactKeys(frame, ['type', 'protocolVersion']) ||
-          frame.type !== 'hello-ack' ||
-          frame.protocolVersion !== PROTOCOL_VERSION
-        ) {
+        if (state === 'awaiting-ack') {
+          if (
+            !exactKeys(frame, ['type', 'protocolVersion']) ||
+            frame.type !== 'hello-ack' || frame.protocolVersion !== PROTOCOL_VERSION
+          ) return stop()
+          subscribe()
+          return
+        }
+        if (state !== 'active') return stop()
+        if (frame.type === 'response') {
+          if (
+            !exactKeys(frame, ['requestId', 'result', 'type']) ||
+            !isPlainBridgeObject(frame.result) ||
+            !exactKeys(frame.result, frame.result.reason === undefined ? ['kind'] : ['kind', 'reason']) ||
+            !['allow', 'deny'].includes(frame.result.kind) ||
+            (frame.result.reason !== undefined && safeString(frame.result.reason, 4_096) === undefined)
+          ) return stop()
+          if (settlePermission(frame.requestId, frame.result)) return
+          if (cancelledPermissionIds.delete(frame.requestId)) return
           stop()
           return
         }
-        subscribe()
+        if (frame.type === 'cancel') {
+          if (!exactKeys(frame, ['requestId', 'type']) || !SAFE_ID.test(frame.requestId || '')) {
+            return stop()
+          }
+          const pending = pendingControls.get(frame.requestId)
+          if (!pending) {
+            if (seenControlIds.has(frame.requestId)) return
+            return stop()
+          }
+          pendingControls.delete(frame.requestId)
+          pending.controller.abort()
+          return
+        }
+        if (frame.type === 'request') {
+          if (
+            !SAFE_ID.test(frame.requestId || '') || seenControlIds.has(frame.requestId) ||
+            pendingControls.has(frame.requestId) ||
+            pendingControls.size >= 64
+          ) return stop()
+          seenControlIds.add(frame.requestId)
+          seenControlQueue.push(frame.requestId)
+          if (seenControlQueue.length > 1_024) {
+            seenControlIds.delete(seenControlQueue.shift())
+          }
+          const epoch = controlEpoch
+          const controller = new AbortController()
+          const pending = { controller, epoch }
+          pendingControls.set(frame.requestId, pending)
+          void handleControlRequest(frame, epoch, controller.signal).finally(() => {
+            if (pendingControls.get(frame.requestId) === pending) pendingControls.delete(frame.requestId)
+          })
+          return
+        }
+        stop()
       } catch {
         stop()
       }
     })
-    socket.once('connect', () => {
+    const connect = () => {
       if (stopped) return
-      state = 'awaiting-ack'
-      helloTimer = internals.setTimeout(stop, 10_000)
-      try {
-        socket.write(encodeBridgeFrame({
-          type: 'hello',
-          protocolVersion: PROTOCOL_VERSION,
-          token,
-          bridgeVersion: BRIDGE_VERSION,
-          profileName,
-          surface: 'tui',
-          capabilities: DSH_BRIDGE_CAPABILITIES
-        }), (error) => {
-          if (error) stop()
-        })
-      } catch {
-        stop()
-      }
-    })
-    socket.on('data', (chunk) => {
-      try { decoder.push(chunk) } catch { stop() }
-    })
-    socket.once('error', stop)
-    socket.once('close', stop)
-    return stop
+      state = 'connecting'
+      try { socket = internals.createConnection(endpoint) } catch { return stop() }
+      socket.once('connect', () => {
+        if (stopped) return
+        state = 'awaiting-ack'
+        helloTimer = internals.setTimeout(stop, 10_000)
+        try {
+          socket.write(encodeBridgeFrame({
+            type: 'hello', protocolVersion: PROTOCOL_VERSION, token,
+            bridgeVersion: BRIDGE_VERSION, profileName, surface: 'tui',
+            capabilities: DSH_BRIDGE_CAPABILITIES
+          }), (error) => { if (error) stop() })
+        } catch { stop() }
+      })
+      socket.on('data', (chunk) => {
+        try { decoder.push(chunk) } catch { stop() }
+      })
+      socket.once('error', stop)
+      socket.once('close', stop)
+    }
+    permissionSubscriptions.push(
+      ctx.on('tools/pre-execute', permissionGate, { prepend: true }),
+      ctx.on('approval/request', approvalAnswerer, { prepend: true })
+    )
+    Promise.resolve()
+      .then(() => internals.loadSandboxPolicy())
+      .then((loaded) => {
+        if (stopped) return
+        if (
+          !loaded || typeof loaded.effectiveSandboxMode !== 'function' ||
+          typeof loaded.setSandboxMode !== 'function'
+        ) throw new Error('sandbox policy unavailable')
+        sandboxPolicy = loaded
+        for (const agent of ctx.agents.list()) pinSandbox(agent)
+        connect()
+      })
+      .catch(stop)
+    return () => {
+      stop()
+      cleanupPermissionSubscriptions()
+    }
   })
 }

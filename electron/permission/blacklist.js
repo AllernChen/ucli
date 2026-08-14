@@ -19,6 +19,8 @@ const COMMAND_PATTERNS = [
   /\bdel\s+\/[sS].*C:\\(Windows|Users|Program Files|System32)/i,
   /\bdel\s+\/[sS].*C:\\?\s*$/i,
   /\brmdir\s+\/s.*C:\\(Windows|Users|Program Files)/i,
+  // PowerShell recursive force removal on filesystem/system roots.
+  /\b(?:Remove-Item|ri)\b(?=[^\r\n]*(?:-Recurse|-r\b))(?=[^\r\n]*(?:-Force|-fo\b))[^\r\n]*(?:(?:\\\\\?\\)?[A-Z]:\\(?:Windows|Users|Program Files|System32)?(?:\\|\s|$)|\/(?:etc|usr|bin|sbin|boot|root|home)?(?:\/|\s|$))/i,
   // Disk formatting / filesystem creation
   /\bformat\s+[A-Z]:/i,
   /\bmkfs\b/i,
@@ -43,8 +45,28 @@ const COMMAND_PATTERNS = [
 const PATH_PATTERNS = [
   /^\/(?:etc|usr|bin|sbin|boot|proc|sys)\b/i,
   /^\/(?:root|home\/[^/]+\/\.ssh)\b/i,
-  /^[A-Z]:\\(?:Windows|System32|Program Files|Program Files \(x86\)|Users\\[^\\]+\\\.ssh)\b/i
+  /^[A-Z]:\\(?:Windows|System32|Program Files|Program Files \(x86\)|Users\\[^\\]+\\\.ssh)\b/i,
+  /^(?:\.\.[\\/])+(?:\.ssh|Windows|System32|Program Files|etc|usr|bin|sbin|boot|root|home(?:[\\/][^\\/]+[\\/]\.ssh)?)(?:[\\/]|$)/i
 ]
+
+function isDestructiveRm(command) {
+  const match = command.match(/\brm\s+([^;&|\r\n]+)/i)
+  if (!match) return false
+  const tokens = match[1].match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => (
+    ((token.startsWith('"') && token.endsWith('"')) ||
+      (token.startsWith("'") && token.endsWith("'")))
+      ? token.slice(1, -1)
+      : token
+  )) ?? []
+  const recursive = tokens.some((token) => token === '--recursive' || (/^-[^-]+$/u.test(token) && /r/iu.test(token)))
+  const force = tokens.some((token) => token === '--force' || (/^-[^-]+$/u.test(token) && /f/iu.test(token)))
+  const rootTarget = tokens.some((token) => ['/','/*', '~', '~/', '$HOME', '$HOME/'].includes(token))
+  return recursive && force && rootTarget
+}
+
+function normalizeBlacklistPath(value) {
+  return value.replace(/^\\\\\?\\/u, '')
+}
 
 /**
  * @param {{ command?: string, path?: string }} input
@@ -52,13 +74,17 @@ const PATH_PATTERNS = [
  */
 export function checkBlacklist({ command, path }) {
   if (command) {
+    if (isDestructiveRm(command)) {
+      return { hit: true, pattern: 'rm-recursive-force-system-root' }
+    }
     for (const re of COMMAND_PATTERNS) {
       if (re.test(command)) return { hit: true, pattern: re.source }
     }
   }
   if (path) {
+    const normalizedPath = normalizeBlacklistPath(path)
     for (const re of PATH_PATTERNS) {
-      if (re.test(path)) return { hit: true, pattern: re.source }
+      if (re.test(normalizedPath)) return { hit: true, pattern: re.source }
     }
   }
   return { hit: false }

@@ -2,6 +2,17 @@ import { randomUUID } from 'crypto'
 import { classify, toClassifierInput } from './classifier.js'
 import { TIER } from '../adapters/cliAdapter.js'
 
+const VALID_TIERS = new Set(Object.values(TIER))
+const VALID_VERDICTS = new Set(['allow', 'deny'])
+
+export function dshPermissionPolicyForTier(tier) {
+  if (!VALID_TIERS.has(tier)) throw new TypeError(`Unknown permission tier: ${tier}`)
+  return Object.freeze({
+    sandboxPreset: 'workspace-write',
+    nativeApproval: 'bridge-deny'
+  })
+}
+
 /**
  * The permission engine owns the per-session tier + ruleset and resolves every
  * tool-call approval. When a tier requires asking the user, it emits an
@@ -30,16 +41,19 @@ export class PermissionEngine {
 
   removeSession(sessionId) {
     this._sessions.delete(sessionId)
+    for (const [requestId, pending] of this._pending) {
+      if (pending.req.sessionId !== sessionId) continue
+      this._settlePending(requestId, 'deny', {
+        verdict: 'deny',
+        classification: pending.req.classification,
+        reason: '权限会话已取消',
+        asked: true
+      })
+    }
   }
 
   setRuleset(rulesetId, ruleset) {
     this._rulesets.set(rulesetId, ruleset)
-  }
-
-  _rulesetFor(sessionId) {
-    const s = this._sessions.get(sessionId)
-    if (!s) return {}
-    return this._rulesets.get(s.rulesetId) || {}
   }
 
   _tier(sessionId) {
@@ -53,20 +67,47 @@ export class PermissionEngine {
    */
   async decide(sessionId, call) {
     const result = await this._decide(sessionId, call)
-    this._onDecision({ sessionId, tool: call.tool, ...result })
+    this._notify(this._onDecision, { sessionId, tool: call.tool, ...result })
     return result
   }
 
+  _notify(observer, value) {
+    try {
+      observer(value)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  _settlePending(requestId, verdict, result) {
+    const pending = this._pending.get(requestId)
+    if (!pending) return false
+    this._pending.delete(requestId)
+    pending.signal?.removeEventListener('abort', pending.abort)
+    pending.resolve(result)
+    this._notify(this._onResolved, { ...pending.req, verdict })
+    return true
+  }
+
   async _decide(sessionId, call) {
-    const input = toClassifierInput(call.tool, call.input)
+    const session = this._sessions.get(sessionId)
+    const ruleset = session ? this._rulesets.get(session.rulesetId) : undefined
+    if (!session || !VALID_TIERS.has(session.tier) || !validRuleset(ruleset)) {
+      return { verdict: 'deny', classification: 'unavailable', reason: '权限会话不可用' }
+    }
+    const input = toClassifierInput(call.tool, call.input, call.cwd)
     if (call.cwd) input.cwd = call.cwd
-    const ruleset = this._rulesetFor(sessionId)
     const { classification, matched } = classify(input, ruleset)
     const tier = this._tier(sessionId)
 
     // Hard blacklist is enforced in every tier.
     if (classification === 'blacklist') {
       return { verdict: 'deny', classification, reason: '命中硬黑名单（不可绕过）', matched }
+    }
+
+    if (call.approvalRequired === true) {
+      return this._ask(sessionId, call, input, classification, matched, 'DSH 请求逐次确认')
     }
 
     if (tier === TIER.ALWAYS_AGREE) {
@@ -88,6 +129,11 @@ export class PermissionEngine {
   }
 
   _ask(sessionId, call, input, classification, matched, reason) {
+    const signal = call.signal &&
+      typeof call.signal.addEventListener === 'function' &&
+      typeof call.signal.removeEventListener === 'function'
+      ? call.signal
+      : undefined
     const requestId = randomUUID()
     const req = {
       requestId,
@@ -103,30 +149,54 @@ export class PermissionEngine {
       matched,
       reason
     }
+    if (signal?.aborted) {
+      return Promise.resolve({
+        verdict: 'deny', classification, reason: '权限请求已取消', asked: true, matched
+      })
+    }
     return new Promise((resolve) => {
-      this._pending.set(requestId, { resolve, req })
-      this._onAsk(req)
+      const abort = () => {
+        const pending = this._pending.get(requestId)
+        if (!pending) return
+        this._settlePending(requestId, 'deny', {
+          verdict: 'deny', classification, reason: '权限请求已取消', asked: true, matched
+        })
+      }
+      this._pending.set(requestId, { resolve, req, abort, signal })
+      signal?.addEventListener('abort', abort, { once: true })
+      if (!this._notify(this._onAsk, req)) {
+        this._settlePending(requestId, 'deny', {
+          verdict: 'deny', classification: 'unavailable',
+          reason: '权限审批处理器不可用', asked: true, matched
+        })
+      }
     })
   }
 
-  respondApproval(requestId, verdict) {
+  respondApproval(sessionId, requestId, verdict) {
+    if (!VALID_VERDICTS.has(verdict)) return false
     const pending = this._pending.get(requestId)
-    if (!pending) return false
-    this._pending.delete(requestId)
-    this._onResolved({ ...pending.req, verdict })
-    pending.resolve({
+    if (!pending || pending.req.sessionId !== sessionId) return false
+    return this._settlePending(requestId, verdict, {
       verdict,
       classification: pending.req.classification,
       reason: verdict === 'allow' ? '用户确认放行' : '用户拒绝',
       matched: pending.req.matched,
       asked: true
     })
-    return true
   }
 
   pendingCount() {
     return this._pending.size
   }
+}
+
+function validRuleset(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return ['deny', 'highRisk', 'allow'].every((key) => (
+    value[key] === undefined ||
+    (Array.isArray(value[key]) && value[key].every((entry) => typeof entry === 'string'))
+  ))
 }
 
 function summarize(tool, input) {

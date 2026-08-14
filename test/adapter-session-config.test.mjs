@@ -8,6 +8,7 @@ import test from 'node:test'
 import * as sessionConfig from '../electron/adapters/adapterSessionConfig.js'
 import { claudeDescriptor } from '../electron/adapters/claudeAdapter.js'
 import { getDb, openDb } from '../electron/persistence/db.js'
+import { PermissionEngine } from '../electron/permission/engine.js'
 
 const { normalizeDshSessionConfig, normalizeSessionConfig } = sessionConfig
 
@@ -188,6 +189,60 @@ test('orchestrator restore and public mapping fail safe for obsolete persisted c
   } finally {
     if (originalNormalizer === undefined) delete claudeDescriptor.normalizeSessionConfig
     else claudeDescriptor.normalizeSessionConfig = originalNormalizer
+    await orchestrator?.shutdown()
+    getDb()?.close()
+    if (previousUserData === undefined) delete process.env.UCLI_TEST_USER_DATA
+    else process.env.UCLI_TEST_USER_DATA = previousUserData
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop, delete, and shutdown remove permission sessions before lifecycle completion', async () => {
+  const electron = await import('electron')
+  const handlers = new Map()
+  electron.ipcMain.handle = (channel, handler) => handlers.set(channel, handler)
+  const root = mkdtempSync(join(tmpdir(), 'ucli-permission-lifecycle-'))
+  const userData = join(root, 'user-data')
+  mkdirSync(userData, { recursive: true })
+  const previousUserData = process.env.UCLI_TEST_USER_DATA
+  process.env.UCLI_TEST_USER_DATA = userData
+  const seed = await openDb(join(userData, 'ucli.db'))
+  for (const [index, id] of ['stop-session', 'delete-session', 'shutdown-session'].entries()) {
+    seed.insertSession({
+      id,
+      project_path: `F:\\projects\\demo-${index}`,
+      adapter_id: 'claude',
+      tier: 'safety-rules',
+      status: 'offline',
+      created_at: index + 1
+    })
+  }
+  seed.flush()
+  seed.close()
+
+  const originalRemoveSession = PermissionEngine.prototype.removeSession
+  const removed = []
+  PermissionEngine.prototype.removeSession = function (sessionId) {
+    removed.push(sessionId)
+    return originalRemoveSession.call(this, sessionId)
+  }
+  let orchestrator
+  try {
+    const orchestratorModule = await import(`../electron/orchestrator.js?permission-lifecycle=${Date.now()}`)
+    orchestrator = orchestratorModule.createOrchestrator()
+    await orchestrator.initPersistence()
+    orchestrator.registerIpc()
+
+    assert.equal(handlers.get('session:stop')({}, 'stop-session'), true)
+    assert.equal(handlers.get('session:delete')({}, 'delete-session'), true)
+    await orchestrator.shutdown()
+    orchestrator = null
+
+    assert.ok(removed.includes('stop-session'))
+    assert.ok(removed.includes('delete-session'))
+    assert.ok(removed.includes('shutdown-session'))
+  } finally {
+    PermissionEngine.prototype.removeSession = originalRemoveSession
     await orchestrator?.shutdown()
     getDb()?.close()
     if (previousUserData === undefined) delete process.env.UCLI_TEST_USER_DATA
