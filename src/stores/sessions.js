@@ -80,7 +80,9 @@ export const useSessionsStore = defineStore('sessions', {
         startedAt: config.startedAt || null,
         stats: { tokens: { input: 0, output: 0 }, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } },
         cliSessionId: config.cliSessionId || null,
-        startedAt: config.startedAt || null,
+        nativeSessionId: config.cliSessionId || null,
+        adapterConfig: config.adapterConfig || {},
+        capabilities: adapter?.capabilities || null,
         lastActivity: isImport ? ('📋 已恢复 · ' + fmtShort(config.startedAt)) : '启动中…',
         lastActivityTs: Date.now(),
         taskNote: '',
@@ -221,6 +223,8 @@ export const useSessionsStore = defineStore('sessions', {
           id: s.id, adapterId: s.adapterId, displayName,
           icon: adapter?.icon || '•', cwd: s.cwd, model: s.model, tier: s.tier, status: s.status,
           stats: s.stats, cliSessionId: s.cliSessionId || s.nativeSessionId || null,
+          nativeSessionId: s.nativeSessionId || s.cliSessionId || null,
+          adapterConfig: s.adapterConfig || {}, capabilities: s.capabilities || adapter?.capabilities || null,
           provider: s.provider || null, sourceProvider: s.sourceProvider || null,
           providerPolicy: s.providerPolicy || null, explicitProvider: s.explicitProvider || null,
           providerWarning: s.providerWarning || null, pendingProvider: s.pendingProvider || null,
@@ -242,6 +246,9 @@ export const useSessionsStore = defineStore('sessions', {
         row.status = s.status
         row.stats = s.stats
         if (s.cliSessionId) row.cliSessionId = s.cliSessionId
+        if (s.nativeSessionId) row.nativeSessionId = s.nativeSessionId
+        if (s.adapterConfig !== undefined) row.adapterConfig = s.adapterConfig
+        if (s.capabilities !== undefined) row.capabilities = s.capabilities
         if (s.lastActivity) row.lastActivity = s.lastActivity
         if (s.taskNote != null) row.taskNote = s.taskNote
         if (s.provider != null) row.provider = s.provider
@@ -274,7 +281,10 @@ export const useSessionsStore = defineStore('sessions', {
         if (evt.type === 'ready') {
           row.lastActivity = '已就绪'
         } else if (evt.type === 'init') {
-          if (evt.cliSessionId) row.cliSessionId = evt.cliSessionId
+          if (evt.cliSessionId) {
+            row.cliSessionId = evt.cliSessionId
+            row.nativeSessionId = evt.cliSessionId
+          }
         } else if (evt.type === 'exit') {
           row.lastActivity = `进程退出 (${evt.code})`
         } else if (evt.type === 'error') {

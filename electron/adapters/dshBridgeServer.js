@@ -508,7 +508,8 @@ export async function createDshBridgeServer({
   clearTimeoutFn = clearTimeout,
   handshakeTimeoutMs = DSH_BRIDGE_HANDSHAKE_TIMEOUT_MS,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-  onPermissionRequest
+  onPermissionRequest,
+  onDisconnect
 } = {}) {
   if (typeof sessionId !== 'string' || sessionId.length === 0) throw new TypeError('sessionId is required')
   const normalizedProfile = normalizeDshSessionConfig({ profileName, surfacePreference: 'tui' }).profileName
@@ -539,6 +540,8 @@ export async function createDshBridgeServer({
   let handshakeTimer = null
   let listening = false
   let startupReject = null
+  let authenticatedOnce = false
+  let disconnectNotified = false
 
   if (descriptor.socketRoot) {
     await prepareSocketRoot({ ...descriptor, tempDirectory: endpointTempDirectory }, fsPromises, getUid)
@@ -567,6 +570,14 @@ export async function createDshBridgeServer({
     seenInboundPermissionIds.clear()
     seenInboundPermissionQueue.length = 0
   }
+  const notifyDisconnect = (error) => {
+    if (closed || !authenticatedOnce || disconnectNotified) return
+    disconnectNotified = true
+    try {
+      const result = onDisconnect?.(error)
+      if (result && typeof result.catch === 'function') result.catch(() => {})
+    } catch {}
+  }
   const failConnection = (error) => {
     authState = 'failed'
     clearTimeoutFn(handshakeTimer)
@@ -575,6 +586,7 @@ export async function createDshBridgeServer({
       ? error
       : bridgeError('DSH_BRIDGE_DISCONNECTED', 'DSH bridge disconnected'))
     abortInboundPermissions()
+    notifyDisconnect(error)
     socket?.destroy()
   }
 
@@ -603,6 +615,7 @@ export async function createDshBridgeServer({
               return
             }
             authState = 'authenticated'
+            authenticatedOnce = true
             clearTimeoutFn(handshakeTimer)
             resolveHello(normalizeHello(frame))
           })
@@ -723,6 +736,7 @@ export async function createDshBridgeServer({
       }
       rejectPending(bridgeError('DSH_BRIDGE_DISCONNECTED', 'DSH bridge disconnected'))
       abortInboundPermissions()
+      notifyDisconnect(bridgeError('DSH_BRIDGE_DISCONNECTED', 'DSH bridge disconnected'))
     })
   }
 
@@ -892,6 +906,7 @@ export async function createDshBridgeServer({
     token,
     protocolVersion: DSH_BRIDGE_PROTOCOL,
     waitForHello: () => hello.promise,
+    isConnected: () => authState === 'authenticated' && Boolean(socket && !socket.destroyed) && !closed,
     request,
     close
   })

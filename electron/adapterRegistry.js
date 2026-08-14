@@ -2,12 +2,14 @@ import { claudeDescriptor } from './adapters/claudeAdapter.js'
 import { codexDescriptor } from './adapters/codexAdapter.js'
 import { openCodeDescriptor } from './adapters/openCodeAdapter.js'
 import { ucodeDescriptor } from './adapters/ucodeAdapter.js'
+import { deepSeekHarnessDescriptor } from './adapters/deepSeekHarnessAdapter.js'
 
 const ADAPTER_DESCRIPTORS = [
   claudeDescriptor,
   codexDescriptor,
   openCodeDescriptor,
-  ucodeDescriptor
+  ucodeDescriptor,
+  deepSeekHarnessDescriptor
 ]
 
 export function listAdapterDescriptors() {

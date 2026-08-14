@@ -1583,7 +1583,13 @@ export function createOrchestrator() {
         ruleset: rulesets[rulesetId],
         codexHome: adapterId === 'codex' ? getCodexHome() : null,
         profileEnvironment,
-        profileLaunch
+        profileLaunch,
+        profileManager: adapterId === 'deepseek-harness' ? getDshProfileManager() : null,
+        initialStats: {
+          tokens: { input: 0, output: 0 },
+          turns: 0,
+          completedTurns: 0
+        }
       }
     })
     const costAvailable = descriptor.costAvailable !== false
@@ -1658,6 +1664,10 @@ export function createOrchestrator() {
       case 'error':
         entry.status = 'error'
         entry.lastActivity = `错误: ${evt.message}`
+        break
+      case 'status':
+        entry.status = evt.status
+        entry.lastActivity = evt.status === 'running' ? '运行中' : '已就绪'
         break
       case 'terminal':
         send('session:terminal-output', { sessionId, data: evt.data })
@@ -2241,7 +2251,15 @@ export function createOrchestrator() {
         ruleset: rulesets[entry.session.rulesetId],
         codexHome: entry.session.adapterId === 'codex' ? getCodexHome() : null,
         profileEnvironment,
-        profileLaunch
+        profileLaunch,
+        profileManager: entry.session.adapterId === 'deepseek-harness'
+          ? getDshProfileManager()
+          : null,
+        initialStats: {
+          tokens: { ...entry.stats.tokens },
+          turns: entry.stats.turns,
+          completedTurns: entry.stats.turns
+        }
       }
     })
     entry.adapter = adapter
@@ -2251,7 +2269,9 @@ export function createOrchestrator() {
       : null
     entry._dirtyStats = null
     entry._lastCumTokens = null
-    entry._lastCompletedTurns = entry.session.cliSessionId ? null : 0
+    entry._lastCompletedTurns = entry.session.adapterId === 'deepseek-harness'
+      ? entry.stats.turns
+      : entry.session.cliSessionId ? null : 0
     entry._lastNotification = null
     entry._gatewayTurnActive = false
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
@@ -2260,7 +2280,23 @@ export function createOrchestrator() {
     if (entry.session.adapterId === 'claude') {
       armClaudeSessionLaunch(entry)
     }
-    const started = await adapter.start()
+    let started
+    try {
+      started = await adapter.start()
+    } catch (error) {
+      let disposed = false
+      try {
+        await adapter.dispose()
+        disposed = true
+      } catch (cleanupError) {
+        error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
+      }
+      if (disposed) entry.adapter = null
+      entry.status = 'error'
+      const db = getDb()
+      if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+      throw error
+    }
     if (started === false) {
       entry.status = 'error'
       entry.adapter = null
@@ -2287,7 +2323,7 @@ export function createOrchestrator() {
     const entry = sessions.get(sessionId)
     if (!entry) throw new Error('no session')
     if (entry.adapter) {
-      entry.adapter.dispose()
+      await entry.adapter.dispose()
       entry.adapter = null
       entry.status = 'offline'
       const db = getDb()
@@ -2597,7 +2633,14 @@ export function createOrchestrator() {
       }
     })
     ipcMain.handle('adapters:list', () =>
-      Array.from(adapters.values()).map((d) => ({ id: d.id, displayName: d.displayName, icon: d.icon, models: d.models }))
+      Array.from(adapters.values()).map((d) => ({
+        id: d.id,
+        displayName: d.displayName,
+        icon: d.icon,
+        models: d.models,
+        costAvailable: d.costAvailable !== false,
+        capabilities: normalizeAdapterCapabilities(d.capabilities)
+      }))
     )
     ipcMain.handle('cli-tools:list', () => inspectCliTools())
     ipcMain.handle('cli-tools:run', (_e, id, action) => runCliToolAction(id, action))
@@ -2696,7 +2739,23 @@ export function createOrchestrator() {
       if (e.session.adapterId === 'claude') {
         armClaudeSessionLaunch(e)
       }
-      const started = await e.adapter.start()
+      let started
+      try {
+        started = await e.adapter.start()
+      } catch (error) {
+        let disposed = false
+        try {
+          await e.adapter.dispose()
+          disposed = true
+        } catch (cleanupError) {
+          error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
+        }
+        if (disposed) e.adapter = null
+        e.status = 'error'
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+        throw error
+      }
       if (started === false) {
         e.status = 'error'
         const db = getDb()
@@ -2783,7 +2842,15 @@ export function createOrchestrator() {
           throw new Error('Codex configuration changed. Restart this session before resuming it.')
         }
       }
-      const result = await e.adapter.resume(cliSessionId)
+      let result
+      try {
+        result = await e.adapter.resume(cliSessionId)
+      } catch (error) {
+        e.status = 'error'
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+        throw error
+      }
       const resumedSessionId = e.session.cliSessionId || cliSessionId
       const db = getDb()
       if (db) { db.updateSession(sessionId, { native_session_id: resumedSessionId }); db.flush() }
@@ -2794,7 +2861,7 @@ export function createOrchestrator() {
     ipcMain.handle('session:set-profile', (_e, sessionId, profileId) =>
       setSessionProfile(sessionId, profileId)
     )
-    ipcMain.handle('session:stop', (_e, sessionId) => {
+    ipcMain.handle('session:stop', async (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (e) {
         engine.removeSession(sessionId)
@@ -2803,7 +2870,7 @@ export function createOrchestrator() {
           sessionId,
           occurredAt: Date.now()
         })
-        if (e.adapter) e.adapter.dispose()
+        if (e.adapter) await e.adapter.dispose()
         e.adapter = null
         e.status = 'offline'
         if (['codex', 'claude'].includes(e.session.adapterId)) {
@@ -2818,7 +2885,7 @@ export function createOrchestrator() {
       }
       return true
     })
-    ipcMain.handle('session:delete', (_e, sessionId) => {
+    ipcMain.handle('session:delete', async (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (e) {
         engine.removeSession(sessionId)
@@ -2827,7 +2894,7 @@ export function createOrchestrator() {
           sessionId,
           occurredAt: Date.now()
         })
-        if (e.adapter) e.adapter.dispose()
+        if (e.adapter) await e.adapter.dispose()
         sessions.delete(sessionId)
         historyService.invalidate(sessionId)
         const db = getDb()

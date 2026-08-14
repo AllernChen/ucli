@@ -590,7 +590,12 @@ test('orchestrator records ledger observations beside legacy cumulative stats', 
 })
 
 test('adapter startup zeroes stay visible but are marked synthetic before ledger recording', () => {
-  for (const file of ['claudeAdapter.js', 'codexAdapter.js', 'openCodeAdapter.js']) {
+  for (const file of [
+    'claudeAdapter.js',
+    'codexAdapter.js',
+    'openCodeAdapter.js',
+    'deepSeekHarnessAdapter.js'
+  ]) {
     const source = readFileSync(new URL(`../electron/adapters/${file}`, import.meta.url), 'utf8')
     assert.match(
       source,

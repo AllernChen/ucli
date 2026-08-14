@@ -240,8 +240,8 @@ test('stop, delete, and shutdown remove permission sessions before lifecycle com
     await orchestrator.initPersistence()
     orchestrator.registerIpc()
 
-    assert.equal(handlers.get('session:stop')({}, 'stop-session'), true)
-    assert.equal(handlers.get('session:delete')({}, 'delete-session'), true)
+    assert.equal(await handlers.get('session:stop')({}, 'stop-session'), true)
+    assert.equal(await handlers.get('session:delete')({}, 'delete-session'), true)
     await orchestrator.shutdown()
     orchestrator = null
 

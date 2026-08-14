@@ -233,6 +233,61 @@ test('server authenticates one client with timing-safe token comparison and exac
   })
 })
 
+test('disconnect callback fires once only for an authenticated unexpected disconnect', async (t) => {
+  const notifications = []
+  const server = await createDshBridgeServer({
+    sessionId: 'disconnect-callback',
+    profileName: 'tui-local',
+    onEvent: () => {},
+    onDisconnect(error) {
+      notifications.push(error.code)
+      return Promise.reject(new Error('observer failure must be contained'))
+    }
+  })
+  t.after(() => server.close().catch(() => {}))
+  const socket = await authenticate(server)
+  assert.equal(server.isConnected(), true)
+
+  socket.destroy()
+  await once(socket, 'close')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(server.isConnected(), false)
+  assert.deepEqual(notifications, ['DSH_BRIDGE_DISCONNECTED'])
+
+  await server.close()
+  assert.deepEqual(notifications, ['DSH_BRIDGE_DISCONNECTED'])
+})
+
+test('intentional close and pre-auth disconnect do not notify the adapter', async (t) => {
+  let authenticatedNotifications = 0
+  const authenticated = await createDshBridgeServer({
+    sessionId: 'intentional-close',
+    profileName: 'tui-local',
+    onEvent: () => {},
+    onDisconnect: () => { authenticatedNotifications += 1 }
+  })
+  const authenticatedSocket = await authenticate(authenticated)
+  await authenticated.close()
+  if (!authenticatedSocket.destroyed) await once(authenticatedSocket, 'close')
+  assert.equal(authenticatedNotifications, 0)
+
+  let preAuthNotifications = 0
+  const preAuth = await createDshBridgeServer({
+    sessionId: 'pre-auth-close',
+    profileName: 'tui-local',
+    onEvent: () => {},
+    onDisconnect: () => { preAuthNotifications += 1 }
+  })
+  t.after(() => preAuth.close().catch(() => {}))
+  preAuth.waitForHello().catch(() => {})
+  const preAuthSocket = await connect(preAuth.endpoint)
+  preAuthSocket.destroy()
+  await once(preAuthSocket, 'close')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(preAuthNotifications, 0)
+  await preAuth.close()
+})
+
 test('server rejects matching-looking tokens when timing-safe comparison rejects them', async (t) => {
   const server = await createDshBridgeServer({
     sessionId: 'session-1',
