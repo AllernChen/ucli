@@ -1313,7 +1313,9 @@ test('plan and result snapshot controls return cached semantic snapshots', async
     })
     assert.deepEqual(await host.nextFrame(), {
       type: 'response', requestId: `snapshot-${index}`,
-      result: { markdown: index === 0 ? '# Plan' : 'Result' }
+      result: index === 0
+        ? { markdown: '# Plan' }
+        : { turnId: '1', markdown: 'Result' }
     })
   }
 })

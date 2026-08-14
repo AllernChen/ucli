@@ -119,6 +119,13 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
     this._nativeSessionId = session.cliSessionId || null
     this._latestPlan = null
     this._latestResult = null
+    this._gatewayResults = new Map()
+    this._gatewayResultOrder = []
+    this._gatewayTerminalTurns = new Set()
+    this._gatewayTerminalTurnOrder = []
+    this._gatewayTerminalStatuses = new Map()
+    this._gatewayLastCompletedTurnId = null
+    this._gatewayStopped = false
     this._lastModel = session.model || null
     const initialStats = settings.initialStats || {}
     this._statsTotals = {
@@ -158,6 +165,7 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
     this._cleanupPromise = null
     this._shuttingDown = false
     const epoch = ++this._epoch
+    this._gatewayStopped = false
     try {
       const config = normalizeDshSessionConfig(this.session.adapterConfig)
       if (config.surfacePreference !== 'tui') throw codedError('DSH_TUI_REQUIRED')
@@ -286,6 +294,7 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
         this.emitEvent({ type: 'status', status: event.status })
         break
       case 'assistant-committed':
+        this._cacheGatewayResult(event.turnId, event.text)
         this.emitEvent({
           type: 'message', role: 'assistant', text: event.text, turnId: event.turnId
         })
@@ -358,22 +367,64 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
           completedTurns: this._statsTotals.completedTurns,
           model: this._lastModel
         })
+        this._emitGatewayTurnOutcome(event)
         break
       case 'attention':
         this.emitEvent({ type: 'attention', kind: event.kind, operation: event.operation })
         break
       case 'plan-snapshot':
-        this._latestPlan = event.markdown
+        this._latestPlan = { markdown: event.markdown, capturedAt: Date.now() }
         break
       case 'result-snapshot':
-        this._latestResult = event.markdown
+        if (
+          this._gatewayLastCompletedTurnId &&
+          this._gatewayResults.get(this._gatewayLastCompletedTurnId)?.markdown === event.markdown
+        ) {
+          this._gatewayResults.get(this._gatewayLastCompletedTurnId).capturedAt = Date.now()
+          this._latestResult = event.markdown
+        }
         break
     }
+  }
+
+  _cacheGatewayResult(turnId, markdown) {
+    if (typeof turnId !== 'string' || !turnId || typeof markdown !== 'string') return
+    if (!this._gatewayResults.has(turnId)) this._gatewayResultOrder.push(turnId)
+    this._gatewayResults.set(turnId, { markdown, capturedAt: Date.now() })
+    while (this._gatewayResultOrder.length > 1_024) {
+      this._gatewayResults.delete(this._gatewayResultOrder.shift())
+    }
+  }
+
+  _emitGatewayTurnOutcome(event) {
+    if (this._gatewayTerminalTurns.has(event.turnId)) return
+    this._gatewayTerminalTurns.add(event.turnId)
+    this._gatewayTerminalStatuses.set(event.turnId, event.status)
+    this._gatewayTerminalTurnOrder.push(event.turnId)
+    while (this._gatewayTerminalTurnOrder.length > 1_024) {
+      const expiredTurnId = this._gatewayTerminalTurnOrder.shift()
+      this._gatewayTerminalTurns.delete(expiredTurnId)
+      this._gatewayTerminalStatuses.delete(expiredTurnId)
+    }
+    this._gatewayLastCompletedTurnId = event.turnId
+    const type = event.status === 'completed'
+      ? 'turn_completed'
+      : event.status === 'interrupted' || event.status === 'aborted'
+        ? 'turn_interrupted'
+        : 'turn_failed'
+    this.emitGatewayEvent({ type, turnId: event.turnId })
+  }
+
+  _emitGatewayStopped() {
+    if (this._gatewayStopped) return
+    this._gatewayStopped = true
+    this.emitGatewayEvent({ type: 'session_stopped' })
   }
 
   _failClosed(code) {
     this._accepting = false
     this._state = 'stopping'
+    this._emitGatewayStopped()
     this.emitEvent({ type: 'error', code, message: code })
     this._shutdown().catch(() => {})
   }
@@ -421,6 +472,7 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
     }
     if (epoch !== this._epoch) return
     this._accepting = false
+    this._emitGatewayStopped()
     this.emitEvent({ type: 'exit', code: exitCode })
     if (!this._shuttingDown) this._shutdown({ exitedProc: proc }).catch(() => {})
   }
@@ -533,6 +585,77 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
     })
   }
 
+  get gatewayCapabilities() {
+    return { decisions: true, planSnapshot: true, resultSnapshot: true }
+  }
+
+  isGatewayLive() {
+    return Boolean(
+      this._accepting &&
+      this.bridge &&
+      isSafeNativeSessionId(this._nativeSessionId) &&
+      this.bridge.isConnected?.() === true
+    )
+  }
+
+  async getLatestPlanSnapshot(decisionId) {
+    let snapshot = this._latestPlan
+    if (!snapshot && this.isGatewayLive()) {
+      try {
+        const result = await this.bridge.request('snapshot.plan', {
+          nativeSessionId: this._nativeSessionId
+        })
+        if (this.isGatewayLive() && typeof result?.markdown === 'string') {
+          snapshot = { markdown: result.markdown, capturedAt: Date.now() }
+          this._latestPlan = snapshot
+        }
+      } catch {}
+    }
+    if (!snapshot) return null
+    return {
+      kind: 'plan_review',
+      title: 'DeepSeek Harness plan',
+      markdown: snapshot.markdown,
+      provider: 'deepseek-harness',
+      nativeSessionId: this._nativeSessionId,
+      decisionId,
+      capturedAt: snapshot.capturedAt
+    }
+  }
+
+  async getLatestResultSnapshot(turnId) {
+    let snapshot = this._gatewayResults.get(turnId)
+    if (
+      !snapshot &&
+      this._gatewayTerminalStatuses.get(turnId) === 'completed' &&
+      this.isGatewayLive()
+    ) {
+      try {
+        const result = await this.bridge.request('snapshot.result', {
+          nativeSessionId: this._nativeSessionId
+        })
+        if (
+          this.isGatewayLive() &&
+          result?.turnId === turnId &&
+          typeof result.markdown === 'string'
+        ) {
+          this._cacheGatewayResult(turnId, result.markdown)
+          snapshot = this._gatewayResults.get(turnId)
+        }
+      } catch {}
+    }
+    if (!snapshot) return null
+    return {
+      kind: 'result',
+      title: 'DeepSeek Harness result',
+      markdown: snapshot.markdown,
+      provider: 'deepseek-harness',
+      nativeSessionId: this._nativeSessionId,
+      turnId,
+      capturedAt: snapshot.capturedAt
+    }
+  }
+
   async interrupt() {
     if (!this._accepting || !this.bridge || !this._nativeSessionId) {
       throw codedError('DSH_BRIDGE_DISCONNECTED')
@@ -560,6 +683,7 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
     const previousSessionId = this.session.cliSessionId || null
     const previousNativeSessionId = this._nativeSessionId
     this._state = 'stopping'
+    this._emitGatewayStopped()
     await this._shutdown()
     this.session.cliSessionId = cliSessionId
     this._nativeSessionId = cliSessionId
@@ -567,6 +691,12 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
     this._completedTurnQueue.length = 0
     this._latestPlan = null
     this._latestResult = null
+    this._gatewayResults.clear()
+    this._gatewayResultOrder.length = 0
+    this._gatewayTerminalTurns.clear()
+    this._gatewayTerminalTurnOrder.length = 0
+    this._gatewayTerminalStatuses.clear()
+    this._gatewayLastCompletedTurnId = null
     this._startPromise = null
     this._disposed = false
     this._state = 'idle'

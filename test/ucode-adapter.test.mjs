@@ -18,7 +18,7 @@ test('adapter registry exposes U-Code with isolated compatible runtime hooks', (
   assert.equal(typeof adapterRegistry.listAdapterDescriptors, 'function')
   const descriptors = adapterRegistry.listAdapterDescriptors()
   assert.deepEqual(descriptors.map((descriptor) => descriptor.id), [
-    'claude', 'codex', 'opencode', 'ucode'
+    'claude', 'codex', 'opencode', 'ucode', 'deepseek-harness'
   ])
 
   const openCode = descriptors.find((descriptor) => descriptor.id === 'opencode')

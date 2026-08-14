@@ -79,7 +79,11 @@ import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storage
 import { scanStorageCategories } from './storage/storageScanner.js'
 import { createStorageManagementService } from './storage/storageManagementService.js'
 import { GatewayManager } from './gateway/manager.js'
-import { createGatewayPort } from './gateway/orchestratorPort.js'
+import {
+  createGatewayPort,
+  createGatewaySessionOperations,
+  describeGatewaySessionEligibility
+} from './gateway/orchestratorPort.js'
 import { SessionSignalBus } from './gateway/sessionSignalBus.js'
 import {
   advanceSessionNotification,
@@ -1655,6 +1659,7 @@ export function createOrchestrator() {
           entry.session.cliSessionId = evt.cliSessionId
           const db = getDb()
           if (db) { db.updateSession(sessionId, { native_session_id: evt.cliSessionId }); db.flush() }
+          await gatewayManager?.resyncSession(sessionId)
         }
         break
       case 'exit':
@@ -2081,13 +2086,24 @@ export function createOrchestrator() {
   function gatewaySessionView(sessionId) {
     const entry = sessions.get(sessionId)
     if (!entry) return null
-    return {
+    const view = {
       id: sessionId,
       name: entry.session.name || null,
       adapterId: entry.session.adapterId,
       provider: entry.session.provider || null,
       status: entry.status,
-      turnActive: entry._gatewayTurnActive === true
+      turnActive: entry._gatewayTurnActive === true,
+      adapterConfig: entry.session.adapterConfig || null,
+      capabilities: normalizeAdapterCapabilities(entry.session.capabilities),
+      bridgeLive: entry.session.adapterId === 'deepseek-harness'
+        ? entry.adapter?.isGatewayLive?.() === true
+        : false
+    }
+    const eligibility = describeGatewaySessionEligibility(view)
+    return {
+      ...view,
+      gatewayEligible: eligibility.eligible,
+      gatewayReason: eligibility.reason
     }
   }
 
@@ -2141,42 +2157,16 @@ export function createOrchestrator() {
       gatewayManager = createUnavailableGatewayManager()
       return gatewayManager.getState()
     }
+    const sessionOperations = createGatewaySessionOperations({
+      getEntry: sessionId => sessions.get(sessionId),
+      getSession: gatewaySessionView
+    })
     const gatewayPort = createGatewayPort({
       listSessions: () => [...sessions.keys()]
         .map(gatewaySessionView)
         .filter(Boolean),
       getSession: gatewaySessionView,
-      sendTurn: async (sessionId, text) => {
-        const entry = sessions.get(sessionId)
-        if (!entry?.adapter) {
-          return { accepted: false, reason: 'session_offline' }
-        }
-        entry.status = 'running'
-        entry._gatewayTurnActive = true
-        await entry.adapter.sendTurn(text)
-        return { accepted: true }
-      },
-      interrupt: async (sessionId) => {
-        const entry = sessions.get(sessionId)
-        if (!entry?.adapter) {
-          return { accepted: false, reason: 'session_offline' }
-        }
-        await entry.adapter.interrupt()
-        return { accepted: true }
-      },
-      respondDecision: async (sessionId, decisionId, response) => {
-        const entry = sessions.get(sessionId)
-        if (!entry?.adapter) {
-          return { accepted: false, reason: 'session_offline' }
-        }
-        return entry.adapter.respondDecision(decisionId, response)
-      },
-      getDecisionContext: (sessionId, decisionId) =>
-        sessions.get(sessionId)?.adapter?.getDecisionContext(decisionId) || null,
-      getLatestPlanSnapshot: (sessionId, decisionId) =>
-        sessions.get(sessionId)?.adapter?.getLatestPlanSnapshot(decisionId) || null,
-      getLatestResultSnapshot: (sessionId, turnId) =>
-        sessions.get(sessionId)?.adapter?.getLatestResultSnapshot(turnId) || null,
+      ...sessionOperations,
       subscribeGatewayEvents: (listener) => gatewaySignals.subscribe(listener)
     })
     gatewayManager = new GatewayManager({
@@ -2771,6 +2761,7 @@ export function createOrchestrator() {
         }
         publishProfileRuntime(sessionId, e.session)
       }
+      await gatewayManager?.resyncSession(sessionId)
       return true
     })
     ipcMain.handle('session:send-turn', (_e, sessionId, text) => {
@@ -2865,12 +2856,13 @@ export function createOrchestrator() {
       const e = sessions.get(sessionId)
       if (e) {
         engine.removeSession(sessionId)
+        const cleanup = e.adapter?.dispose()
         gatewaySignals.publish({
           type: 'session_stopped',
           sessionId,
           occurredAt: Date.now()
         })
-        if (e.adapter) await e.adapter.dispose()
+        await cleanup
         e.adapter = null
         e.status = 'offline'
         if (['codex', 'claude'].includes(e.session.adapterId)) {
@@ -2889,12 +2881,13 @@ export function createOrchestrator() {
       const e = sessions.get(sessionId)
       if (e) {
         engine.removeSession(sessionId)
+        const cleanup = e.adapter?.dispose()
         gatewaySignals.publish({
           type: 'session_stopped',
           sessionId,
           occurredAt: Date.now()
         })
-        if (e.adapter) await e.adapter.dispose()
+        await cleanup
         sessions.delete(sessionId)
         historyService.invalidate(sessionId)
         const db = getDb()

@@ -580,10 +580,35 @@ test('request writes an RPC frame and resolves its matching response', async (t)
   socket.write(encodeBridgeFrame({
     type: 'response',
     requestId: request.requestId,
-    result: { text: 'plan' }
+    result: { markdown: 'plan' }
   }))
 
-  assert.deepEqual(await pending, { text: 'plan' })
+  assert.deepEqual(await pending, { markdown: 'plan' })
+})
+
+test('snapshot result responses require an exact semantic turn binding', async (t) => {
+  for (const result of [
+    { markdown: 'old result' },
+    { turnId: 'bad\nturn', markdown: 'old result' },
+    { turnId: 'turn-1', markdown: 'result', extra: true }
+  ]) {
+    const server = await createDshBridgeServer({
+      sessionId: 'session-1', profileName: 'tui-local', onEvent() {}
+    })
+    t.after(() => server.close())
+    const socket = await authenticate(server)
+    const inbox = createFrameInbox(socket)
+    const pending = server.request('snapshot.result', { nativeSessionId: 'native-1' })
+    const rejected = assert.rejects(
+      pending,
+      error => error.code === 'DSH_BRIDGE_DISCONNECTED'
+    )
+    const request = await inbox.next()
+    socket.write(encodeBridgeFrame({
+      type: 'response', requestId: request.requestId, result
+    }))
+    await rejected
+  }
 })
 
 test('response must be exact, match a live request, and choose exactly one of result or error', async (t) => {

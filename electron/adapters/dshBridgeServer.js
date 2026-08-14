@@ -391,6 +391,22 @@ function validateResponse(frame) {
     typeof frame.error.message === 'string'
 }
 
+function validateResponseResult(method, result) {
+  if (method === 'turn.send' || method === 'turn.interrupt') {
+    return exactKeys(result, ['accepted']) && result.accepted === true
+  }
+  if (method === 'snapshot.plan') {
+    return exactKeys(result, ['markdown']) &&
+      boundedUtf8(result.markdown, MAX_EVENT_FIELD_BYTES)
+  }
+  if (method === 'snapshot.result') {
+    return exactKeys(result, ['markdown', 'turnId']) &&
+      SAFE_SEMANTIC_ID.test(result.turnId || '') &&
+      boundedUtf8(result.markdown, MAX_EVENT_FIELD_BYTES)
+  }
+  return false
+}
+
 function validatePermissionRequest(frame) {
   if (
     !exactKeys(frame, ['method', 'params', 'requestId', 'type']) ||
@@ -638,6 +654,12 @@ export async function createDshBridgeServer({
         if (!pending) {
           throw bridgeError('DSH_BRIDGE_RESPONSE_FORGED', 'Unknown DSH bridge response')
         }
+        if (
+          Object.hasOwn(frame, 'result') &&
+          !validateResponseResult(pending.method, frame.result)
+        ) {
+          throw bridgeError('DSH_BRIDGE_RESPONSE_INVALID', 'Invalid DSH bridge response result')
+        }
         pendingRequests.delete(frame.requestId)
         clearTimeoutFn(pending.timer)
         if (Object.hasOwn(frame, 'error')) pending.reject(sanitizeRemoteError(frame.error))
@@ -881,7 +903,7 @@ export async function createDshBridgeServer({
         }
         reject(bridgeError('DSH_BRIDGE_REQUEST_TIMEOUT', 'DSH bridge request timed out'))
       }, requestTimeoutMs)
-      pendingRequests.set(requestId, { resolve, reject, timer })
+      pendingRequests.set(requestId, { resolve, reject, timer, method })
       try {
         socket.write(frame, (error) => {
           if (!error) return

@@ -60,7 +60,9 @@ export class BaseAdapter extends EventEmitter {
     return null
   }
   async respondDecision(decisionId, response) {
-    const action = typeof response === 'string' ? response : response?.action
+    const action = typeof response === 'string'
+      ? response
+      : response?.action || response?.optionId
     const verdict = action === 'allow' || action === 'allow_once'
       ? 'allow'
       : action === 'deny'

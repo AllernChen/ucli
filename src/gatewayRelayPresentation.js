@@ -1,4 +1,6 @@
 const RELAY_STATES = {
+  dsh_web_unsupported: ['DSH Web 暂不支持 Gateway', '请选择已安装 UCLI bridge 的 DSH TUI 会话', 'orange'],
+  dsh_bridge_disconnected: ['DSH bridge 已断开', '重启 DSH TUI 会话并确认 UCLI bridge 已连接', 'orange'],
   off: ['未选择转发', '点击选择此会话进行 Gateway 转发', 'default'],
   switching: ['正在更新', '正在保存此会话的转发选择', 'blue'],
   paused: ['已选择，Gateway 已关闭', '开启全局 Gateway 后将开始转发', 'blue'],
@@ -13,7 +15,11 @@ export function deriveGatewayRelayControl({ session, gatewayPhase, pending }) {
   const selected = session?.relayEnabled === true
   let state
 
-  if (pending) {
+  if (session?.gatewayEligible === false) {
+    state = session.gatewayReason === 'DSH_WEB_GATEWAY_UNSUPPORTED'
+      ? 'dsh_web_unsupported'
+      : 'dsh_bridge_disconnected'
+  } else if (pending) {
     state = 'switching'
   } else if (!selected) {
     state = 'off'
@@ -42,6 +48,6 @@ export function deriveGatewayRelayControl({ session, gatewayPhase, pending }) {
     label,
     tooltip,
     tone,
-    nextEnabled: !selected
+    nextEnabled: session?.gatewayEligible !== false && !selected
   }
 }

@@ -405,6 +405,7 @@ export function apply(ctx, config = {}) {
     const sandboxPinning = new Set()
     const planSnapshots = new Map()
     const resultSnapshots = new Map()
+    const lastTerminalTurns = new Map()
 
     const cleanupSubscriptions = () => {
       for (const dispose of subscriptions.splice(0).reverse()) {
@@ -459,6 +460,7 @@ export function apply(ctx, config = {}) {
       seenControlQueue.length = 0
       planSnapshots.clear()
       resultSnapshots.clear()
+      lastTerminalTurns.clear()
       cleanupSubscriptions()
       socket?.removeAllListeners()
       socket?.destroy()
@@ -467,7 +469,13 @@ export function apply(ctx, config = {}) {
     const send = (frame) => {
       if (state !== 'active' || !socket || socket.destroyed) throw new Error('bridge inactive')
       if (frame.type === 'plan-snapshot') planSnapshots.set(frame.nativeSessionId, frame.markdown)
-      if (frame.type === 'result-snapshot') resultSnapshots.set(frame.nativeSessionId, frame.markdown)
+      if (frame.type === 'turn-complete') {
+        lastTerminalTurns.set(frame.nativeSessionId, frame.turnId)
+      }
+      if (frame.type === 'result-snapshot') {
+        const turnId = lastTerminalTurns.get(frame.nativeSessionId)
+        if (turnId) resultSnapshots.set(frame.nativeSessionId, { turnId, markdown: frame.markdown })
+      }
       socket.write(encodeSemanticFrame(frame), (error) => {
         if (error) stop()
       })
@@ -704,10 +712,13 @@ export function apply(ctx, config = {}) {
             !SAFE_ID.test(frame.params.nativeSessionId || '')
           ) return fail('DSH_BRIDGE_REQUEST_INVALID')
           const snapshots = frame.method === 'snapshot.plan' ? planSnapshots : resultSnapshots
-          const markdown = snapshots.get(frame.params.nativeSessionId)
-          if (markdown === undefined) return fail('DSH_SNAPSHOT_UNAVAILABLE')
+          const snapshot = snapshots.get(frame.params.nativeSessionId)
+          if (snapshot === undefined) return fail('DSH_SNAPSHOT_UNAVAILABLE')
           sendControlResponse({
-            type: 'response', requestId: frame.requestId, result: { markdown }
+            type: 'response', requestId: frame.requestId,
+            result: frame.method === 'snapshot.plan'
+              ? { markdown: snapshot }
+              : { turnId: snapshot.turnId, markdown: snapshot.markdown }
           })
           return
         }
@@ -745,6 +756,7 @@ export function apply(ctx, config = {}) {
           projector.sessionDisposed(session)
           planSnapshots.delete(String(session?.id))
           resultSnapshots.delete(String(session?.id))
+          lastTerminalTurns.delete(String(session?.id))
         })),
         ctx.on('session/event', guard((session, event) => {
           if (event?.type === 'sandbox/mode') {
