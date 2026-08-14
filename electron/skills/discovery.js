@@ -96,7 +96,7 @@ export function scanDeclaredSkillRoot({
         status: 'broken_link',
         origin: forcedOrigin || (installation ? 'managed' : 'external'),
         installationId: installation?.id || null,
-        visibility: buildSkillVisibility([]),
+        visibility: buildSkillVisibility([], { scopeType }),
         ...sourceMetadata,
         ...(sourceProject ? { sourceProject } : {})
       })
@@ -123,7 +123,7 @@ export function scanDeclaredSkillRoot({
         fileList: inspected.fileList,
         origin: forcedOrigin || (installation ? 'managed' : 'external'),
         installationId: installation?.id || null,
-        visibility: buildSkillVisibility([adapterId]),
+        visibility: buildSkillVisibility([adapterId], { scopeType }),
         ...sourceMetadata,
         ...(sourceProject ? { sourceProject } : {})
       })
@@ -169,7 +169,7 @@ export function scanDeclaredSkillRoot({
         status: 'invalid',
         origin: forcedOrigin || (installation ? 'managed' : 'external'),
         installationId: installation?.id || null,
-        visibility: buildSkillVisibility([]),
+        visibility: buildSkillVisibility([], { scopeType }),
         ...sourceMetadata,
         ...(sourceProject ? { sourceProject } : {})
       })

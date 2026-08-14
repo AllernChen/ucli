@@ -589,6 +589,18 @@ test('orchestrator records ledger observations beside legacy cumulative stats', 
   assert.match(source, /onApprovalResolved\(req\)[\s\S]*usageRecorder\.recordApproval\([\s\S]*approvalId:\s*req\.requestId/)
 })
 
+test('orchestrator drops native-owned stats before mutating or recording session state', () => {
+  const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+  const handler = source.match(/async function handleAdapterEvent[\s\S]*?\n  }\n/)?.[0] || ''
+  const ownershipGate = handler.indexOf("evt?.type === 'stats_update' && !sessionUsesUcliStats(entry.session)")
+
+  assert.ok(ownershipGate >= 0)
+  assert.ok(ownershipGate < handler.indexOf('entry.updatedAt ='))
+  assert.ok(ownershipGate < handler.indexOf('await usageRecorder.observe('))
+  assert.ok(ownershipGate < handler.indexOf('db.upsertStats(sessionId,'))
+  assert.ok(ownershipGate < handler.indexOf("send('session:event'"))
+})
+
 test('adapter startup zeroes stay visible but are marked synthetic before ledger recording', () => {
   for (const file of [
     'claudeAdapter.js',

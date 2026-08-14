@@ -30,7 +30,7 @@ function hasClass(node, className) {
   )
 }
 
-test('session panes keep xterm and history components mounted while toggling visibility', () => {
+test('session panes mount xterm and history only for authoritative terminal capabilities', () => {
   const elements = templateElements('../src/views/SessionDetail.vue')
   const terminal = elements.find((node) => node.tag === 'div' && hasClass(node, 'pane-terminal'))
   const history = elements.find((node) => node.tag === 'PaneHistory')
@@ -38,9 +38,9 @@ test('session panes keep xterm and history components mounted while toggling vis
   assert.ok(terminal)
   assert.ok(history)
   assert.equal(hasDirective(terminal, 'show'), true)
-  assert.equal(hasDirective(terminal, 'if'), false)
+  assert.equal(hasDirective(terminal, 'if'), true)
   assert.equal(hasDirective(history, 'show'), true)
-  assert.equal(hasDirective(history, 'if'), false)
+  assert.equal(hasDirective(history, 'if'), true)
 })
 
 test('history templates never render provider content as HTML', () => {

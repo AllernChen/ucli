@@ -54,6 +54,7 @@ import { listUCodeSkills } from './skills/ucodeDiscovery.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
 import { createUsageRecorder, normalizeAdapterStatsEvent } from './usage/usageRecorder.js'
+import { aggregateOwnedModelStats, sessionUsesUcliStats } from './usage/statsOwnership.js'
 import { assertUsageQuery } from './usage/contracts.js'
 import { createUsageQueryService } from './usage/usageQueryService.js'
 import { completedPeriod, manualPeriod } from './usage/periods.js'
@@ -1665,6 +1666,7 @@ export function createOrchestrator() {
   async function handleAdapterEvent(sessionId, evt) {
     const entry = sessions.get(sessionId)
     if (!entry) return
+    if (evt?.type === 'stats_update' && !sessionUsesUcliStats(entry.session)) return
     entry.updatedAt = evt.ts || Date.now()
     switch (evt.type) {
       case 'ready':
@@ -2995,7 +2997,7 @@ export function createOrchestrator() {
       for (const [id, e] of sessions) {
         // Persist full stats (tokens + approvals) to DB — upsertStats uses
         // absolute-value semantics, so pass the cumulative totals.
-        if (db) {
+        if (db && sessionUsesUcliStats(e.session)) {
           db.upsertStats(id, {
             inputTokens: e.stats.tokens.input,
             outputTokens: e.stats.tokens.output,
@@ -3012,14 +3014,28 @@ export function createOrchestrator() {
       // Statistics are historical records. Read removed sessions from the DB
       // as well, then overlay live in-memory entries with their latest state.
       const historical = db?.listSessions({ includeRemoved: true }) || []
-      const source = new Map(historical.map((s) => [s.id, {
-        adapterId: s.adapterId,
-        model: s.model,
-        cwd: s.cwd,
-        status: s.removedAt ? 'removed' : s.status,
-        ...s.stats
-      }]))
+      const source = new Map()
+      for (const s of historical) {
+        const descriptor = adapters.get(s.adapterId)
+        let capabilities = null
+        try {
+          const adapterConfig = normalizeSessionConfig(descriptor, s.adapterConfig)
+          capabilities = resolveAdapterCapabilities(descriptor, adapterConfig)
+        } catch {}
+        if (!sessionUsesUcliStats({ capabilities })) continue
+        source.set(s.id, {
+          adapterId: s.adapterId,
+          model: s.model,
+          cwd: s.cwd,
+          status: s.removedAt ? 'removed' : s.status,
+          ...s.stats
+        })
+      }
       for (const [id, e] of sessions) {
+        if (!sessionUsesUcliStats(e.session)) {
+          source.delete(id)
+          continue
+        }
         source.set(id, {
           adapterId: e.session.adapterId,
           model: e.session.model,
@@ -3040,7 +3056,13 @@ export function createOrchestrator() {
         for (const k of Object.keys(total.approvals)) total.approvals[k] += row.approvals[k] || 0
       }
       if (db) scheduleFlush()
-      const result = { total, perSession, modelStats: db?.getModelStats() || [] }
+      const ownedSessionIds = new Set(source.keys())
+      const modelRows = db?.listModelStatsRows() || []
+      const result = {
+        total,
+        perSession,
+        modelStats: aggregateOwnedModelStats(modelRows, ownedSessionIds)
+      }
       return result
     })
     ipcMain.handle('stats:query', createStatsQueryHandler(() => usageQueryService))

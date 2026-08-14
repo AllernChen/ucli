@@ -122,6 +122,58 @@
           <pre v-if="lastCliOutput" class="result-output">{{ lastCliOutput }}</pre>
         </template>
       </a-alert>
+      <a-divider />
+      <div class="dsh-profile-management">
+        <div class="cli-toolbar">
+          <div>
+            <strong>DeepSeek Harness 本地集成</strong>
+            <div class="muted">固定兼容 DSH 0.1.0-rc.6 · UCLI bridge 0.11.0</div>
+          </div>
+          <a-button size="small" :loading="dshProfilesLoading" @click="loadDshProfiles">刷新状态</a-button>
+        </div>
+        <a-alert
+          type="info"
+          show-icon
+          message="UCLI 不安装 TUI"
+          description="开源仓库未提供可分发的 turtle-ui；TUI 仅使用本机已有 profile，Web 是始终可选的回退界面。"
+        />
+        <a-descriptions size="small" :column="1" bordered class="dsh-statuses">
+          <a-descriptions-item label="DSH 运行时">
+            <a-tag :color="dshRuntimeReady ? 'green' : 'orange'">{{ dshRuntimeLabel }}</a-tag>
+          </a-descriptions-item>
+          <a-descriptions-item label="TUI 配置档案">
+            <a-select
+              v-model:value="selectedDshProfileName"
+              style="min-width: 240px"
+              allow-clear
+              placeholder="选择本机 profile"
+            >
+              <a-select-option
+                v-for="profile in dshProfileState.profiles"
+                :key="profile.profileName"
+                :value="profile.profileName"
+              >
+                {{ profile.profileName }}{{ profile.profileReady ? '' : '（不可用）' }}
+              </a-select-option>
+            </a-select>
+            <a-tag v-if="selectedDshProfile" :color="selectedDshProfile.profileReady ? 'green' : 'orange'">
+              {{ selectedDshProfile.profileReady ? 'profile 结构有效' : 'profile 结构无效' }}
+            </a-tag>
+          </a-descriptions-item>
+          <a-descriptions-item label="UCLI bridge">
+            <a-tag :color="selectedDshProfile?.bridgeCompatible ? 'green' : 'orange'">
+              {{ dshBridgeLabel }}
+            </a-tag>
+            <a-button
+              v-if="canModifyDshBridge"
+              size="small"
+              type="primary"
+              :loading="dshBridgeRunning"
+              @click="enableSelectedDshBridge"
+            >{{ selectedDshProfile.bridgeInstalled ? '更新 UCLI 集成' : '启用 UCLI 集成' }}</a-button>
+          </a-descriptions-item>
+        </a-descriptions>
+      </div>
     </a-card>
       </section>
 
@@ -312,9 +364,14 @@ const diagnosticsLoading = ref(false)
 const diagnosticsExporting = ref(false)
 const profileRechecking = ref(false)
 const codexRuntime = ref(null)
+const dshProfileState = ref({ runtime: {}, profiles: [] })
+const selectedDshProfileName = ref('')
+const dshProfilesLoading = ref(false)
+const dshBridgeRunning = ref(false)
 let stopCodexRuntimeListener = null
 let sectionObserver = null
 let programmaticSection = null
+let dshProfilesRequest = 0
 const lastCliOutput = computed(() => {
   const result = lastCliResult.value
   if (!result) return ''
@@ -358,10 +415,36 @@ const summaryModelOptions = computed(() => {
   const adapter = adapters.value.find(item => item.id === local.value.defaultExecutorId)
   return Array.isArray(adapter?.models) ? adapter.models.map(item => typeof item === 'string' ? item : item.id).filter(Boolean) : []
 })
+const selectedDshProfile = computed(() => dshProfileState.value.profiles
+  .find((profile) => profile.profileName === selectedDshProfileName.value) || null)
+const dshRuntimeReady = computed(() =>
+  dshProfileState.value.runtime?.installed === true && dshProfileState.value.runtime?.compatible === true
+)
+const dshRuntimeLabel = computed(() => {
+  const runtime = dshProfileState.value.runtime || {}
+  if (!runtime.installed) return '未检测到 DSH'
+  if (!runtime.compatible) return `版本不兼容${runtime.version ? `（${runtime.version}）` : ''}`
+  return `已兼容${runtime.version ? `（${runtime.version}）` : ''}`
+})
+const dshBridgeLabel = computed(() => {
+  const profile = selectedDshProfile.value
+  if (!profile) return '请选择 profile'
+  if (!profile.profileReady) return 'profile 不可用'
+  if (profile.bridgeCompatible) return `已兼容${profile.bridgeVersion ? `（${profile.bridgeVersion}）` : ''}`
+  if (profile.bridgeInstalled) return '需要更新'
+  return '未启用'
+})
+const canModifyDshBridge = computed(() =>
+  !dshProfilesLoading.value &&
+  !dshBridgeRunning.value &&
+  dshRuntimeReady.value &&
+  selectedDshProfile.value?.profileReady === true &&
+  selectedDshProfile.value?.bridgeCompatible !== true
+)
 
 onMounted(async () => {
   stopCodexRuntimeListener = ipc.onCodexRuntime((snapshot) => { codexRuntime.value = snapshot })
-  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadSummaryProfiles(), loadDiagnostics(), loadCodexRuntime()])
+  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadDshProfiles(), loadSummaryProfiles(), loadDiagnostics(), loadCodexRuntime()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
   observeSections()
@@ -462,6 +545,60 @@ async function loadSummaryProfiles() {
   } catch {
     summaryProfiles.value = []
   }
+}
+
+async function loadDshProfiles() {
+  const request = ++dshProfilesRequest
+  dshProfilesLoading.value = true
+  try {
+    const state = await ipc.listDshProfiles()
+    if (request !== dshProfilesRequest) return null
+    dshProfileState.value = {
+      runtime: state?.runtime || {},
+      profiles: Array.isArray(state?.profiles) ? state.profiles : []
+    }
+    if (!dshProfileState.value.profiles.some(profile => profile.profileName === selectedDshProfileName.value)) {
+      selectedDshProfileName.value = ''
+    }
+    return state
+  } catch (error) {
+    if (request !== dshProfilesRequest) return null
+    dshProfileState.value = { runtime: {}, profiles: [] }
+    message.error(dshStableErrorLabel(error?.code, '读取 DeepSeek Harness profile 状态失败'))
+    return null
+  } finally {
+    if (request === dshProfilesRequest) dshProfilesLoading.value = false
+  }
+}
+
+async function enableSelectedDshBridge() {
+  if (!canModifyDshBridge.value || dshBridgeRunning.value) return
+  dshBridgeRunning.value = true
+  try {
+    const result = await ipc.enableDshBridge(selectedDshProfile.value.profileName)
+    if (!result?.ok) throw Object.assign(new Error(result?.errorCode || 'DSH bridge 操作失败'), { code: result?.errorCode })
+    message.success('UCLI 集成已就绪')
+    await loadDshProfiles()
+  } catch (error) {
+    message.error(dshStableErrorLabel(error?.code, 'UCLI 集成操作失败'))
+  } finally {
+    dshBridgeRunning.value = false
+  }
+}
+
+function dshStableErrorLabel(code, fallback) {
+  const labels = {
+    DSH_NOT_INSTALLED: '未检测到 DeepSeek Harness',
+    DSH_VERSION_UNREADABLE: '无法读取 DeepSeek Harness 版本',
+    DSH_VERSION_UNSUPPORTED: 'DeepSeek Harness 版本不兼容',
+    DSH_PROFILE_NOT_FOUND: '所选 profile 不存在',
+    DSH_PROFILE_INVALID: '所选 profile 结构无效',
+    DSH_PROFILE_NOT_READY: '所选 profile 结构无效',
+    DSH_BRIDGE_VERSION_UNSUPPORTED: 'UCLI 集成版本不兼容',
+    DSH_BRIDGE_INSTALL_FAILED: 'UCLI 集成操作失败',
+    DSH_BRIDGE_ROLLBACK_FAILED: 'UCLI 集成回滚失败'
+  }
+  return labels[code] || fallback
 }
 
 async function loadDiagnostics() {

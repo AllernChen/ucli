@@ -27,11 +27,12 @@
           <a-descriptions-item label="UCLI 会话 ID">
             <a-typography-text copyable>{{ session.id }}</a-typography-text>
           </a-descriptions-item>
-          <a-descriptions-item label="CLI 会话 ID">
+          <a-descriptions-item v-if="capabilities.ucliHistory" label="CLI 会话 ID">
             <a-typography-text v-if="session.cliSessionId" copyable>{{ session.cliSessionId }}</a-typography-text>
             <span v-else>—</span>
           </a-descriptions-item>
-          <a-descriptions-item label="权限模式">{{ tierLabel }}</a-descriptions-item>
+          <a-descriptions-item v-if="capabilities.ucliPermission" label="权限模式">{{ tierLabel }}</a-descriptions-item>
+          <a-descriptions-item v-else-if="capabilities.web" label="控制权">DSH 原生</a-descriptions-item>
           <a-descriptions-item label="模型">{{ session.actualModel || session.model || '—' }}</a-descriptions-item>
         </a-descriptions>
 
@@ -50,6 +51,14 @@
 
       <section class="config-section" aria-labelledby="runtime-config-heading">
         <h3 id="runtime-config-heading">运行配置</h3>
+        <a-alert
+          v-if="capabilities.web"
+          type="info"
+          show-icon
+          message="DSH 原生控制"
+          description="权限、历史、统计与审批均由 DSH 原生界面管理。"
+          class="runtime-alert"
+        />
         <a-form layout="vertical">
           <a-form-item v-if="view.profileCapable" label="配置档案">
             <a-select
@@ -115,7 +124,7 @@
 
       <section class="config-section" aria-labelledby="collaboration-heading">
         <h3 id="collaboration-heading">协作与诊断</h3>
-        <div class="control-row">
+        <div v-if="capabilities.gateway" class="control-row">
           <div>
             <div class="control-title">远程转发</div>
             <div class="control-help">控制该会话是否通过已配置的 Gateway 转发。</div>
@@ -156,6 +165,7 @@ import { message } from 'ant-design-vue'
 import { ipc } from '../ipc.js'
 import { profileRuntimeNotice } from '../profilePresentation.js'
 import { deriveSessionConfigState } from '../sessionConfigPresentation.js'
+import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
 import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import { useSessionsStore } from '../stores/sessions.js'
 import GatewayRelayToggle from './gateway/GatewayRelayToggle.vue'
@@ -171,6 +181,7 @@ const sessions = useSessionsStore()
 const aiProfiles = useAiCliProfilesStore()
 const session = computed(() => sessions.byId(props.sessionId) || null)
 const view = computed(() => deriveSessionConfigState(session.value || {}))
+const capabilities = computed(() => deriveSessionCapabilityState(session.value || {}))
 const adapter = computed(() => sessions.adapters.find((item) => item.id === session.value?.adapterId) || null)
 const profilesForSession = computed(() => aiProfiles.profiles.filter((profile) => profile.adapterId === session.value?.adapterId))
 

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
-import { buildSkillVisibility, planSkillProjections, resolveSkillRoot, SKILL_ADAPTERS } from './adapters.js'
+import { buildSkillVisibility, listSkillPresentationAdapters, planSkillProjections, resolveSkillRoot, SKILL_ADAPTERS } from './adapters.js'
 import { sanitiseGitHubSource, sanitiseSkillError } from './contracts.js'
 import { createSkillDiscovery } from './discovery.js'
 import { copySkillDirectoryAtomic, diffSkillDirectories, inspectSkillDirectory, removeManagedSkillDirectory } from './fileOps.js'
@@ -124,16 +124,16 @@ export function createSkillsService({
   }
 
   function inspectInstallation(item) {
-    if (!item.enabled) return { ...item, status: 'disabled', visibility: buildSkillVisibility([]) }
-    if (!existsSync(item.targetPath)) return { ...item, status: 'missing', visibility: buildSkillVisibility([]) }
+    if (!item.enabled) return { ...item, status: 'disabled', visibility: buildSkillVisibility([], { scopeType: item.scopeType }) }
+    if (!existsSync(item.targetPath)) return { ...item, status: 'missing', visibility: buildSkillVisibility([], { scopeType: item.scopeType }) }
     try {
       const inspection = inspectSkillDirectory(item.targetPath)
       const status = inspection.contentSha256 === item.deployedSha256
         ? (item.status === 'update_available' ? 'update_available' : 'ready')
         : 'drifted'
-      return { ...item, status, visibility: buildSkillVisibility([item.targetAdapterId]) }
+      return { ...item, status, visibility: buildSkillVisibility([item.targetAdapterId], { scopeType: item.scopeType }) }
     } catch {
-      return { ...item, status: 'invalid', visibility: buildSkillVisibility([]) }
+      return { ...item, status: 'invalid', visibility: buildSkillVisibility([], { scopeType: item.scopeType }) }
     }
   }
 
@@ -158,7 +158,18 @@ export function createSkillsService({
           ? 'OpenCode requires a lowercase hyphenated skill name'
           : null
       }])),
-      visibility: buildSkillVisibility(visibleProjections)
+      visibility: (() => {
+        const visibility = buildSkillVisibility(visibleProjections)
+        const projectCodexVisible = installations.some((item) =>
+          item.scopeType === 'project' && item.targetAdapterId === 'codex' &&
+          item.enabled && !['missing', 'invalid'].includes(item.status))
+        visibility['deepseek-harness'] = {
+          visible: projectCodexVisible,
+          direct: false,
+          inheritedFrom: projectCodexVisible ? ['codex'] : []
+        }
+        return visibility
+      })()
     }
   }
 
@@ -907,7 +918,7 @@ export function createSkillsService({
   function getAffectedSessions(installationIds = []) {
     const selected = installationIds.map((id) => db.getSkillInstallation(id)).filter(Boolean)
     return listSessions().filter((session) => selected.some((item) => {
-      const visibility = buildSkillVisibility([item.targetAdapterId])
+      const visibility = buildSkillVisibility([item.targetAdapterId], { scopeType: item.scopeType })
       if (!visibility[session.adapterId]?.visible) return false
       if (item.scopeType === 'user') return true
       return normalizedPath(session.cwd || session.projectPath) === normalizedPath(item.scopeKey)
@@ -963,7 +974,7 @@ export function createSkillsService({
       const discovered = discover(projectPath)
       const conflicts = discovered.filter((item) => item.status === 'conflict').length
       return {
-        adapters: Object.values(SKILL_ADAPTERS).map(({ id, displayName }) => ({ id, displayName })),
+        adapters: listSkillPresentationAdapters(),
         projects: db.listProjects(),
         packages,
         discovered,

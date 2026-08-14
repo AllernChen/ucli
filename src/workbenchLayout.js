@@ -1,3 +1,25 @@
+import { deriveSessionCapabilityState } from './sessionMaintenancePresentation.js'
+
+export function createPaneAssignmentGuard() {
+  const epochs = new Map()
+  return {
+    begin(paneIndex, sessionId) {
+      const epoch = (epochs.get(paneIndex) || 0) + 1
+      epochs.set(paneIndex, epoch)
+      return { paneIndex, sessionId, epoch }
+    },
+    invalidate(paneIndex) {
+      epochs.set(paneIndex, (epochs.get(paneIndex) || 0) + 1)
+    },
+    isCurrent(token, panes) {
+      return Boolean(
+        token && epochs.get(token.paneIndex) === token.epoch &&
+        panes?.[token.paneIndex]?.sessionId === token.sessionId
+      )
+    }
+  }
+}
+
 export function reconcileSessionPanes(currentPanes, count, resolveSessionId = () => null) {
   const panes = []
   for (let i = 0; i < count; i++) {
@@ -13,9 +35,33 @@ export function reconcileSessionPanes(currentPanes, count, resolveSessionId = ()
   }
 }
 
+export async function activatePaneSession(session, paneIndex, {
+  restartSession,
+  startSession = async () => {},
+  attachSession
+}) {
+  if (!session) return false
+  const capabilities = deriveSessionCapabilityState(session)
+  if (!capabilities.known) return false
+  if (session.status === 'offline') {
+    await restartSession(session.id, paneIndex)
+    return true
+  }
+  if (session.status === 'starting') {
+    await startSession(session.id, paneIndex)
+    return true
+  }
+  if (capabilities.terminal) {
+    await attachSession(session.id, paneIndex)
+    return true
+  }
+  return false
+}
+
 export async function restoreAssignedPaneSessions(panes, {
   getSession,
   restartSession,
+  startSession,
   attachSession,
   onError = () => {}
 }) {
@@ -23,11 +69,11 @@ export async function restoreAssignedPaneSessions(panes, {
     const session = getSession(pane.sessionId)
     if (!session) continue
     try {
-      if (session.status === 'offline') {
-        await restartSession(pane.sessionId, pane.paneIndex)
-      } else {
-        await attachSession(pane.sessionId, pane.paneIndex)
-      }
+      await activatePaneSession(session, pane.paneIndex, {
+        restartSession,
+        startSession: startSession || attachSession,
+        attachSession
+      })
     } catch (error) {
       onError(error, pane)
     }

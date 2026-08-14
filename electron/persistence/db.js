@@ -675,6 +675,12 @@ class Db {
     return rows(r)
   }
 
+  listModelStatsRows() {
+    return rows(this.sql.exec(
+      'SELECT session_id, model, input_tokens, output_tokens, cost_usd, cost_available FROM model_stats'
+    ))
+  }
+
   getModelStatsForSession(sessionId) {
     const r = this.sql.exec(
       'SELECT model, input_tokens, output_tokens, cost_usd, cost_available FROM model_stats WHERE session_id=?', [sessionId]

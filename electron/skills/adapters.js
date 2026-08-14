@@ -32,6 +32,20 @@ export const SKILL_ADAPTERS = Object.freeze({
   }
 })
 
+export const DSH_VIRTUAL_SKILL_ADAPTER = Object.freeze({
+  id: 'deepseek-harness',
+  displayName: 'DeepSeek Harness',
+  virtual: true,
+  projectOnly: true
+})
+
+export function listSkillPresentationAdapters() {
+  return [
+    ...Object.values(SKILL_ADAPTERS).map(({ id, displayName }) => ({ id, displayName })),
+    DSH_VIRTUAL_SKILL_ADAPTER
+  ]
+}
+
 const PROJECTION_COVERAGE = Object.freeze({
   claude: ['claude', 'opencode', 'ucode'],
   codex: ['codex', 'opencode', 'ucode'],
@@ -58,15 +72,24 @@ export function resolveSkillRoot({ adapterId, scopeType, projectPath, home = hom
   return join(resolve(home), ...adapter.userParts)
 }
 
-export function buildSkillVisibility(projectionAdapterIds) {
+export function buildSkillVisibility(projectionAdapterIds, { scopeType } = {}) {
   const projections = [...new Set(projectionAdapterIds)]
-  return Object.fromEntries(Object.keys(SKILL_ADAPTERS).map((adapterId) => {
+  const visibility = Object.fromEntries(Object.keys(SKILL_ADAPTERS).map((adapterId) => {
     const inheritedFrom = projections.filter((projectionId) =>
       projectionId !== adapterId && PROJECTION_COVERAGE[projectionId]?.includes(adapterId)
     )
     const direct = projections.includes(adapterId)
     return [adapterId, { visible: direct || inheritedFrom.length > 0, direct, inheritedFrom }]
   }))
+  if (scopeType) {
+    const projectCodexVisible = scopeType === 'project' && projections.includes('codex')
+    visibility['deepseek-harness'] = {
+      visible: projectCodexVisible,
+      direct: false,
+      inheritedFrom: projectCodexVisible ? ['codex'] : []
+    }
+  }
+  return visibility
 }
 
 export function planSkillProjections(targetAdapterIds) {

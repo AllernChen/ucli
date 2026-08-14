@@ -112,6 +112,7 @@
                       <span :class="['status-dot', s.status]"></span>
                     </div>
                     <span
+                      v-if="sessionCapabilityState(s).gateway"
                       :class="['session-relay-state', `tone-${relayView(s).tone}`]"
                       role="status"
                       :aria-label="`飞书转发：${relayView(s).label}`"
@@ -123,7 +124,7 @@
                       <span class="item-id">{{ s.id.slice(0,8) }}</span>
                       <span class="item-time">{{ fmtTime(s.createdAt || s.startedAt) }}</span>
                     </div>
-                    <div class="item-stats" v-if="s.stats">
+                    <div class="item-stats" v-if="sessionCapabilityState(s).ucliStats && s.stats">
                       ↑{{ fmtNum(s.stats.tokens.input) }} ↓{{ fmtNum(s.stats.tokens.output) }}
                       <span v-if="s.stats.turns"> · {{ s.stats.turns }}轮</span>
                     </div>
@@ -176,7 +177,7 @@
                 </a-button>
               </a-badge>
               <a-button
-                v-if="pane.sessionId"
+                v-if="paneCapabilityState(i).ucliHistory"
                 size="small"
                 type="text"
                 @click.stop="togglePaneHistory(i)"
@@ -212,7 +213,7 @@
             </a-space>
           </div>
           <!-- Pane info bar -->
-          <div v-if="pane.sessionId" class="pane-info">
+          <div v-if="paneCapabilityState(i).ucliStats" class="pane-info">
             <span
               v-if="sessions.byId(pane.sessionId)?.actualModel && sessions.byId(pane.sessionId)?.actualModel !== sessions.byId(pane.sessionId)?.model"
               class="pi-item provider-warning"
@@ -225,11 +226,22 @@
           </div>
           <!-- Terminal container -->
           <div
+            v-if="paneCapabilityState(i).terminal"
             v-show="pane.viewMode !== 'history'"
             :ref="el => setPaneRef(i, el)"
             class="pane-terminal"
           ></div>
+          <HostedWebSurface
+            v-if="paneCapabilityState(i).web"
+            :state="paneSession(i)?.surfaceState || { kind: 'web', status: 'starting', url: null, errorCode: null }"
+            class="pane-web-surface"
+          />
+          <a-empty
+            v-if="pane.sessionId && !paneCapabilityState(i).known"
+            description="该会话缺少可验证的界面能力，已安全停用交互"
+          />
           <PaneHistory
+            v-if="paneCapabilityState(i).ucliHistory"
             v-show="pane.viewMode === 'history'"
             :session-id="pane.sessionId || ''"
             :active="pane.viewMode === 'history'"
@@ -352,14 +364,18 @@ import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldBlockDuplicate
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { compactPaneSessionIds } from '../paneCompaction.js'
 import PaneHistory from '../components/PaneHistory.vue'
+import HostedWebSurface from '../components/HostedWebSurface.vue'
 import SessionConfigModal from '../components/SessionConfigModal.vue'
 import SessionMaintenanceActions from '../components/SessionMaintenanceActions.vue'
 import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
 import GatewayChannelIcon from '../components/gateway/GatewayChannelIcon.vue'
 import { deriveGatewayRelayControl } from '../gatewayRelayPresentation.js'
 import { deriveSessionConfigState } from '../sessionConfigPresentation.js'
+import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
 import { terminalSizeChanged } from '../terminalResize.js'
 import {
+  activatePaneSession,
+  createPaneAssignmentGuard,
   reconcileSessionPanes,
   restoreAssignedPaneSessions,
   resolveSessionFocusPane,
@@ -379,6 +395,18 @@ const sessions = useSessionsStore()
 const settings = useSettingsStore()
 const gateway = useGatewayStore()
 const aiProfiles = useAiCliProfilesStore()
+
+function sessionCapabilityState(session) {
+  return deriveSessionCapabilityState(session || {})
+}
+
+function paneSession(i) {
+  return sessions.byId(panes.value[i]?.sessionId) || null
+}
+
+function paneCapabilityState(i) {
+  return sessionCapabilityState(paneSession(i))
+}
 
 function relayView(session) {
   return deriveGatewayRelayControl({
@@ -438,6 +466,7 @@ function handleConfiguredSessionRemoved(sessionId) {
 // Refs storage for pane terminal containers
 const paneRefs = {}
 const paneRootRefs = {}
+const paneAssignmentGuard = createPaneAssignmentGuard()
 function setPaneRef(i, el) {
   if (el) paneRefs[i] = el
   else delete paneRefs[i]
@@ -523,16 +552,21 @@ function createPanes(count) {
   nextTick(async () => {
     const assignedPanes = []
     for (let i = 0; i < count; i++) {
-      const needsInit = !panes.value[i]?.term
-      if (needsInit) initPaneTerminal(i)
       const sessionId = panes.value[i]?.sessionId
+      const capabilities = paneCapabilityState(i)
+      if (!capabilities.terminal) {
+        destroyPaneTerminal(i)
+        unsubscribePane(i)
+      }
+      const needsInit = capabilities.terminal && !panes.value[i]?.term
+      if (needsInit) initPaneTerminal(i)
       const sessionChanged = previousSessionIds[i] !== sessionId
       if ((needsInit || sessionChanged) && sessionId) {
         if (sessionChanged) {
           unsubscribePane(i)
           panes.value[i]?.term?.clear()
         }
-        if (!unsubs[i]) subscribePaneTerminal(i, sessionId)
+        if (capabilities.terminal && !unsubs[i]) subscribePaneTerminal(i, sessionId)
         assignedPanes.push({ paneIndex: i, sessionId })
       } else {
         syncPaneTerminalSize(i)
@@ -542,6 +576,12 @@ function createPanes(count) {
       getSession: (sessionId) => sessions.byId(sessionId),
       restartSession: async (sessionId, paneIndex) => {
         await sessions.restart(sessionId)
+        if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
+        await nextTick()
+        syncPaneTerminalSize(paneIndex)
+      },
+      startSession: async (sessionId, paneIndex) => {
+        await ipc.startAdapter(sessionId)
         if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
         await nextTick()
         syncPaneTerminalSize(paneIndex)
@@ -559,6 +599,11 @@ function createPanes(count) {
 watch(splitCount, (n) => createPanes(n))
 
 function initPaneTerminal(i) {
+  const capabilities = paneCapabilityState(i)
+  if (!capabilities.terminal) {
+    destroyPaneTerminal(i)
+    return
+  }
   const el = paneRefs[i]
   if (!el || panes.value[i]?.term) return
   const term = new Terminal({
@@ -630,7 +675,7 @@ function initPaneTerminal(i) {
   // Forward input to PTY
   term.onData((data) => {
     const sid = panes.value[i]?.sessionId
-    if (sid) window.ucli.sendTerminalInput(sid, data)
+    if (sid && paneCapabilityState(i).terminal) window.ucli.sendTerminalInput(sid, data)
   })
 
   panes.value[i].term = term
@@ -674,7 +719,7 @@ function destroyPaneTerminal(i) {
 function sendPaneTerminalSize(i, nextSize) {
   const pane = panes.value[i]
   const sessionId = pane?.sessionId
-  if (!pane || !sessionId || !terminalSizeChanged(pane.lastPtySize, nextSize)) return false
+  if (!pane || !sessionId || !paneCapabilityState(i).terminal || !terminalSizeChanged(pane.lastPtySize, nextSize)) return false
   pane.lastPtySize = { cols: nextSize.cols, rows: nextSize.rows }
   ipc.terminalResize(sessionId, nextSize.cols, nextSize.rows).catch(() => {})
   return true
@@ -693,19 +738,19 @@ function syncAllPaneTerminalSizes() {
 
 function sendToPane(i, data) {
   const sid = panes.value[i]?.sessionId
-  if (sid) window.ucli.sendTerminalInput(sid, data)
+  if (sid && paneCapabilityState(i).terminal) window.ucli.sendTerminalInput(sid, data)
 }
 
 function activatePane(i) {
   activePane.value = i
-  if (panes.value[i]?.viewMode !== 'history') {
+  if (paneCapabilityState(i).terminal && panes.value[i]?.viewMode !== 'history') {
     nextTick(() => panes.value[i]?.term?.focus())
   }
 }
 
 function togglePaneHistory(i) {
   const pane = panes.value[i]
-  if (!pane?.sessionId) return
+  if (!pane?.sessionId || !paneCapabilityState(i).ucliHistory) return
   pane.viewMode = pane.viewMode === 'history' ? 'terminal' : 'history'
   activePane.value = i
   if (pane.viewMode === 'terminal') {
@@ -778,10 +823,12 @@ function assignToPane(sessionId) {
   // If same session already in other pane, clear it
   for (let i = 0; i < panes.value.length; i++) {
     if (i !== activePane.value && panes.value[i].sessionId === sessionId) {
+      paneAssignmentGuard.invalidate(i)
       panes.value[i].sessionId = null
       panes.value[i].viewMode = 'terminal'
       panes.value[i].lastPtySize = null
       panes.value[i].term?.clear()
+      destroyPaneTerminal(i)
       sessions.setWorkbenchPane(i, null)
       unsubscribePane(i)
     }
@@ -795,36 +842,36 @@ function assignToPane(sessionId) {
   panes.value[activePane.value].lastPtySize = null
   sessions.setWorkbenchPane(activePane.value, sessionId)
   const paneIndex = activePane.value
-  nextTick(() => {
-    syncPaneTerminalSize(paneIndex)
-    panes.value[paneIndex]?.term?.focus()
-  })
-  // If session is offline, auto-restart; if running, attach terminal output
+  const assignment = paneAssignmentGuard.begin(paneIndex, sessionId)
   const s = sessions.byId(sessionId)
-  // Subscribe terminal output first so we don't miss startup output
-  subscribePaneTerminal(activePane.value, sessionId)
-  if (s?.status === 'offline') {
-    // Offline persisted session — restart (which calls start → replays history)
-    sessions.restart(sessionId)
-      .then(() => {
-        if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
-        nextTick(() => syncPaneTerminalSize(paneIndex))
-      })
-      .catch(e => message.error('重启失败：' + (e?.message || e)))
-  } else if (s?.status === 'starting') {
-    // Brand new session — start the adapter (terminal is already subscribed)
-    ipc.startAdapter(sessionId)
-      .then(() => {
-        if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
-        nextTick(() => syncPaneTerminalSize(paneIndex))
-      })
-      .catch(e => message.error('启动失败：' + (e?.message || e)))
-  } else {
-    // Already running/idle — replay history to this pane
-    ipc.attachTerminal(sessionId)
-      .then(() => nextTick(() => syncPaneTerminalSize(paneIndex)))
-      .catch(() => {})
+  const capabilities = sessionCapabilityState(s)
+  if (!capabilities.terminal) {
+    destroyPaneTerminal(paneIndex)
+    unsubscribePane(paneIndex)
   }
+  nextTick(async () => {
+    try {
+      if (!paneAssignmentGuard.isCurrent(assignment, panes.value)) return
+      if (capabilities.terminal) {
+        initPaneTerminal(paneIndex)
+        if (!unsubs[paneIndex]) subscribePaneTerminal(paneIndex, sessionId)
+      }
+      if (!paneAssignmentGuard.isCurrent(assignment, panes.value)) return
+      await activatePaneSession(s, paneIndex, {
+        restartSession: (id) => sessions.restart(id),
+        startSession: (id) => ipc.startAdapter(id),
+        attachSession: (id) => ipc.attachTerminal(id)
+      })
+      if (!paneAssignmentGuard.isCurrent(assignment, panes.value)) return
+      if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
+      syncPaneTerminalSize(paneIndex)
+      if (capabilities.terminal) panes.value[paneIndex]?.term?.focus()
+    } catch (error) {
+      if (paneAssignmentGuard.isCurrent(assignment, panes.value)) {
+        message.error('会话启动失败：' + (error?.message || error))
+      }
+    }
+  })
 }
 
 function focusSessionFromNotification(sessionId) {
@@ -885,6 +932,7 @@ function clearPane(i) {
 function compactPanes(omitIndex) {
   const next = compactPaneSessionIds(panes.value.map((pane) => pane.sessionId), omitIndex)
   for (let i = 0; i < panes.value.length; i++) {
+    paneAssignmentGuard.invalidate(i)
     unsubscribePane(i)
     destroyPaneTerminal(i)
   }
@@ -1007,8 +1055,10 @@ function fmtTime(ts) {
 // --- Terminal output routing ---
 function subscribePaneTerminal(i, sessionId) {
   unsubscribePane(i)
+  const session = sessions.byId(sessionId)
+  if (!deriveSessionCapabilityState(session || {}).terminal) return
   unsubs[i] = ipc.on('session:terminal-output', (evt) => {
-    if (evt.sessionId === sessionId && panes.value[i]?.term) {
+    if (panes.value[i]?.sessionId === sessionId && evt.sessionId === sessionId && panes.value[i]?.term) {
       panes.value[i].term.write(evt.data)
     }
   })
@@ -1185,6 +1235,7 @@ onBeforeUnmount(() => {
 .pi-item.sid { font-family: monospace; color: #bfbfbf; font-size: 10px; }
 .pane-terminal { flex: 1; min-height: 0; padding: 4px; background: #0b1021; }
 .pane-terminal :deep(.xterm) { height: 100%; }
+.pane-web-surface { flex: 1; min-height: 0; }
 
 /* Import modal */
 .section-label { font-weight: 600; font-size: 13px; margin-bottom: 8px; color: #262626; }

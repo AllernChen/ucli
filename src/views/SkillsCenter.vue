@@ -662,7 +662,9 @@ const refTypeOptions = [
   { value: 'tag', label: '标签（固定）' },
   { value: 'commit', label: '提交（固定）' }
 ]
-const targetOptions = computed(() => skills.adapters.map(item => ({ value: item.id, label: item.displayName })))
+const targetOptions = computed(() => skills.adapters
+  .filter(item => !item.virtual)
+  .map(item => ({ value: item.id, label: item.displayName })))
 const collectionSkillOptions = computed(() => sourcePreview.value?.kind === 'collection'
   ? sourcePreview.value.skills.map((item) => ({
       value: item.subdir,

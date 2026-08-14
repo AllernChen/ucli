@@ -120,7 +120,7 @@ test('a fresh renderer reconstructs and activates every saved 1, 2, and 4 pane l
     await restoreAssignedPaneSessions(
       restored.panes.map((pane, paneIndex) => ({ paneIndex, sessionId: pane.sessionId })),
       {
-        getSession: (sessionId) => ({ id: sessionId, status: 'offline' }),
+        getSession: (sessionId) => ({ id: sessionId, status: 'offline', capabilities: TERMINAL_CAPABILITIES }),
         restartSession: async (sessionId, paneIndex) => activated.push({ sessionId, paneIndex }),
         attachSession: async () => {}
       }
@@ -140,7 +140,7 @@ test('restored panes activate in layout order without overlapping session starts
     { paneIndex: 1, sessionId: 'codex-a' },
     { paneIndex: 2, sessionId: 'codex-b' }
   ], {
-    getSession: (sessionId) => ({ id: sessionId, status: 'offline' }),
+    getSession: (sessionId) => ({ id: sessionId, status: 'offline', capabilities: TERMINAL_CAPABILITIES }),
     restartSession: async (sessionId) => {
       activeStarts += 1
       maxActiveStarts = Math.max(maxActiveStarts, activeStarts)
@@ -168,7 +168,7 @@ test('a failed restored pane does not prevent a later pane from activating', asy
     { paneIndex: 0, sessionId: 'broken' },
     { paneIndex: 1, sessionId: 'healthy' }
   ], {
-    getSession: (sessionId) => ({ id: sessionId, status: 'offline' }),
+    getSession: (sessionId) => ({ id: sessionId, status: 'offline', capabilities: TERMINAL_CAPABILITIES }),
     restartSession: async (sessionId) => {
       if (sessionId === 'broken') throw new Error('startup failed')
       activated.push(sessionId)
@@ -227,4 +227,8 @@ test('notification focus uses the existing session pane before an empty pane', (
     { sessionId: 'a' },
     { sessionId: 'b' }
   ], 'new-session', 1), 1)
+})
+const TERMINAL_CAPABILITIES = Object.freeze({
+  surface: 'terminal', permissionOwner: 'ucli', historyOwner: 'ucli',
+  statsOwner: 'ucli', gateway: true, bridge: false
 })

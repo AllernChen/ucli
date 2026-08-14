@@ -12,8 +12,10 @@ import {
 } from '../electron/skills/contracts.js'
 import {
   buildSkillVisibility,
+  listSkillPresentationAdapters,
   planSkillProjections,
-  resolveSkillRoot
+  resolveSkillRoot,
+  SKILL_ADAPTERS
 } from '../electron/skills/adapters.js'
 
 test('skill manifest requires Agent Skills name and description', () => {
@@ -135,5 +137,26 @@ test('projection planner uses compatible roots and reports inherited visibility'
     codex: { visible: true, direct: true, inheritedFrom: [] },
     opencode: { visible: true, direct: false, inheritedFrom: ['codex'] },
     ucode: { visible: true, direct: false, inheritedFrom: ['codex'] }
+  })
+})
+
+test('DeepSeek Harness inherits only project Codex skills without creating another skill root', () => {
+  assert.equal(Object.hasOwn(SKILL_ADAPTERS, 'deepseek-harness'), false)
+  assert.throws(
+    () => resolveSkillRoot({ adapterId: 'deepseek-harness', scopeType: 'user', home: homedir() }),
+    { code: 'SKILL_ADAPTER_UNAVAILABLE' }
+  )
+  assert.throws(
+    () => resolveSkillRoot({ adapterId: 'deepseek-harness', scopeType: 'project', projectPath: homedir() }),
+    { code: 'SKILL_ADAPTER_UNAVAILABLE' }
+  )
+
+  const adapters = listSkillPresentationAdapters()
+  assert.deepEqual(adapters.at(-1), {
+    id: 'deepseek-harness', displayName: 'DeepSeek Harness', virtual: true, projectOnly: true
+  })
+  assert.equal(buildSkillVisibility(['codex'], { scopeType: 'user' })['deepseek-harness'].visible, false)
+  assert.deepEqual(buildSkillVisibility(['codex'], { scopeType: 'project' })['deepseek-harness'], {
+    visible: true, direct: false, inheritedFrom: ['codex']
   })
 })

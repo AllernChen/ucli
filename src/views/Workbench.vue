@@ -143,6 +143,46 @@
         <div class="profile-choice-help">项目默认：{{ defaultProfile(adapterId, 'project')?.name || '未设置' }}；应用默认：{{ defaultProfile(adapterId, 'app')?.name || '未设置' }}</div>
       </div>
 
+      <div class="new-section dsh-create-options">
+        <div class="section-title">DeepSeek Harness 界面</div>
+        <a-radio-group v-model:value="dshSurfacePreference">
+          <a-radio value="tui">本机 TUI（UCLI 集成）</a-radio>
+          <a-radio value="web">本机 Web（DSH 原生控制）</a-radio>
+        </a-radio-group>
+        <div v-if="dshSurfacePreference === 'tui'" class="profile-choice-row">
+          <span>TUI profile</span>
+          <a-select
+            v-model:value="selectedDshProfileName"
+            :loading="dshProfilesLoading"
+            style="width: 280px"
+            placeholder="选择已启用 UCLI bridge 的 profile"
+          >
+            <a-select-option
+              v-for="profile in dshProfiles"
+              :key="profile.profileName"
+              :value="profile.profileName"
+              :disabled="profile.profileReady !== true || profile.bridgeCompatible !== true"
+            >
+              {{ profile.profileName }}{{ profile.profileReady && profile.bridgeCompatible ? '' : '（集成未就绪）' }}
+            </a-select-option>
+          </a-select>
+        </div>
+        <a-alert
+          v-if="dshSurfacePreference === 'tui' && !dshTuiReady"
+          type="warning"
+          show-icon
+          message="TUI profile 与 UCLI bridge 尚未同时就绪"
+        >
+          <template #action>
+            <a-button size="small" @click="router.push({ name: 'settings', query: { section: 'cli' } })">前往设置</a-button>
+          </template>
+        </a-alert>
+        <div v-else-if="dshSurfacePreference === 'web'" class="profile-choice-help">
+          Web 不使用 profile；权限模式对 Web 不生效，权限、历史与统计均由 DSH 原生界面管理。
+        </div>
+        <a-alert v-if="dshLoadError" type="error" show-icon :message="dshLoadError" />
+      </div>
+
       <!-- Tier selector (always visible) -->
       <div class="new-section">
         <div class="section-title">权限模式</div>
@@ -201,6 +241,12 @@ const discovering = ref(false)
 const discoverError = ref('')
 const filterTier = ref(undefined)
 const sessionConfig = ref({ open: false, sessionId: '' })
+const dshSurfacePreference = ref('tui')
+const dshProfiles = ref([])
+const dshRuntime = ref({})
+const dshLoadError = ref('')
+const selectedDshProfileName = ref('')
+const dshProfilesLoading = ref(false)
 
 const form = ref({
   adapterId: 'claude', cwd: '', model: undefined, tier: 'safety-rules',
@@ -245,9 +291,14 @@ const profileAdapterIds = ['codex', 'claude']
 const adapterName = (adapterId) => sessions.adapters.find((adapter) => adapter.id === adapterId)?.displayName || adapterId
 const defaultProfile = (adapterId, scope) => profilesForAdapter(adapterId)
   .find((profile) => scope === 'project' ? profile.isProjectDefault : profile.isAppDefault) || null
+const selectedDshProfile = computed(() => dshProfiles.value
+  .find((profile) => profile.profileName === selectedDshProfileName.value) || null)
+const dshTuiReady = computed(() =>
+  selectedDshProfile.value?.profileReady === true && selectedDshProfile.value?.bridgeCompatible === true
+)
 
 onMounted(async () => {
-  await Promise.all([sessions.init(), settings.load(), gateway.init()])
+  await Promise.all([sessions.init(), settings.load(), gateway.init(), loadDshProfiles()])
   form.value.adapterId = settings.defaultAdapter || 'claude'
   form.value.tier = settings.defaultTier || 'safety-rules'
   form.value.cwd = settings.defaultCwd || ''
@@ -261,8 +312,39 @@ function openNew() {
   form.value.profileSelections = { codex: 'inherit', claude: 'inherit' }
   importProfileSelections.value = { codex: 'history', claude: 'history' }
   discovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
+  loadDshProfiles().catch(() => {})
   if (form.value.cwd) discover(form.value.cwd)
   showNew.value = true
+}
+
+async function loadDshProfiles() {
+  dshProfilesLoading.value = true
+  try {
+    const state = await ipc.listDshProfiles()
+    dshRuntime.value = state?.runtime || {}
+    dshProfiles.value = Array.isArray(state?.profiles) ? state.profiles : []
+    if (!dshProfiles.value.some(profile => profile.profileName === selectedDshProfileName.value)) {
+      selectedDshProfileName.value = ''
+    }
+    dshLoadError.value = ''
+    return state
+  } catch (error) {
+    dshRuntime.value = {}
+    dshProfiles.value = []
+    selectedDshProfileName.value = ''
+    dshLoadError.value = dshWorkbenchErrorLabel(error?.code)
+    return null
+  } finally {
+    dshProfilesLoading.value = false
+  }
+}
+
+function dshWorkbenchErrorLabel(code) {
+  return ({
+    DSH_NOT_INSTALLED: '未检测到 DeepSeek Harness，请前往设置检查',
+    DSH_VERSION_UNREADABLE: '无法读取 DeepSeek Harness 版本，请前往设置检查',
+    DSH_VERSION_UNSUPPORTED: 'DeepSeek Harness 版本不兼容，请前往设置检查'
+  })[code] || 'DeepSeek Harness 状态不可用，请前往设置检查'
 }
 
 function openSession(id) {
@@ -405,6 +487,25 @@ async function newSession(adapter) {
       const profileConfig = profileConfigForSelection(false, adapter.id)
       if (profileConfig.profileId) config.profileId = profileConfig.profileId
       if (profileConfig.profileSelection) config.profileSelection = profileConfig.profileSelection
+    }
+    if (adapter.id === 'deepseek-harness') {
+      form.value.adapterId = adapter.id
+      const fresh = await loadDshProfiles()
+      if (fresh?.runtime?.installed !== true || fresh?.runtime?.compatible !== true) {
+        message.warning('请先在设置中准备兼容的 DeepSeek Harness 运行时')
+        return
+      }
+      if (dshSurfacePreference.value === 'web') {
+        config.adapterConfig = { surfacePreference: 'web' }
+      } else {
+        const profile = (fresh?.profiles || [])
+          .find(item => item.profileName === selectedDshProfileName.value)
+        if (profile?.profileReady !== true || profile?.bridgeCompatible !== true) {
+          message.warning('请先在设置中准备可启动且 bridge 兼容的 DSH TUI profile')
+          return
+        }
+        config.adapterConfig = { surfacePreference: 'tui', profileName: profile.profileName }
+      }
     }
     const sessionId = await sessions.createSession(config)
     message.success(`已创建 ${adapter.displayName} 会话`)

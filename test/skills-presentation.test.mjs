@@ -181,6 +181,45 @@ test('CLI matrix distinguishes managed, external, inherited and unapplied Skill 
   assert.equal(matrix[2].actionLabel, '直接应用')
 })
 
+test('DeepSeek Harness project visibility is read-only and never becomes an install target', () => {
+  const virtualAdapter = { id: 'deepseek-harness', displayName: 'DeepSeek Harness', virtual: true, projectOnly: true }
+  const matrix = buildSkillCliMatrix({
+    status: 'ready',
+    packages: [{ id: 'pkg-1', compatibility: {} }],
+    installations: [],
+    sources: [{
+      key: 'codex:project:diagnose', adapterId: 'codex', scopeType: 'project',
+      sourceKind: 'codex_project', origin: 'external', health: 'ready'
+    }],
+    visibility: {
+      codex: { visible: true, direct: true, inheritedFrom: [] },
+      'deepseek-harness': { visible: true, direct: false, inheritedFrom: ['codex'] }
+    }
+  }, [virtualAdapter])
+
+  assert.deepEqual(matrix[0], {
+    adapterId: 'deepseek-harness',
+    displayName: 'DeepSeek Harness',
+    state: 'inherited',
+    label: '项目 .agents/skills 可见',
+    visible: true,
+    direct: false,
+    inheritedFrom: ['codex'],
+    installation: null,
+    installations: [],
+    source: null,
+    copySource: null,
+    packageId: null,
+    packageOptions: [],
+    action: null,
+    actionLabel: '',
+    disabledReason: '由项目 .agents/skills 提供；DSH 用户级 Skill 由原生运行时管理'
+  })
+  assert.deepEqual(skillPackageApplyTargets({ compatibility: {} }, [virtualAdapter]), [])
+  const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
+  assert.match(page, /skills\.adapters[\s\S]*\.filter\(item => !item\.virtual\)/)
+})
+
 test('CLI matrix offers enable for disabled projections and blocks incompatible targets', () => {
   const matrix = buildSkillCliMatrix({
     status: 'disabled',

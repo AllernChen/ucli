@@ -10,6 +10,38 @@ function newActId() {
   return `a${Date.now()}_${actCounter}`
 }
 
+function normalizeRendererCapabilities(value) {
+  if (
+    !value || typeof value !== 'object' || Array.isArray(value) ||
+    !['terminal', 'web'].includes(value.surface) ||
+    !['ucli', 'native'].includes(value.permissionOwner) ||
+    !['ucli', 'native'].includes(value.historyOwner) ||
+    !['ucli', 'native'].includes(value.statsOwner) ||
+    typeof value.gateway !== 'boolean' || typeof value.bridge !== 'boolean'
+  ) return null
+  return {
+    surface: value.surface,
+    permissionOwner: value.permissionOwner,
+    historyOwner: value.historyOwner,
+    statsOwner: value.statsOwner,
+    gateway: value.gateway,
+    bridge: value.bridge
+  }
+}
+
+function rendererSessionCapabilities(adapterId, value, descriptor) {
+  const candidate = value ?? (adapterId === 'deepseek-harness' ? null : descriptor?.capabilities)
+  const normalized = normalizeRendererCapabilities(candidate)
+  if (adapterId !== 'deepseek-harness' || !normalized) return normalized
+  const bridgedTui = normalized.surface === 'terminal' &&
+    normalized.permissionOwner === 'ucli' && normalized.historyOwner === 'ucli' &&
+    normalized.statsOwner === 'ucli' && normalized.gateway === true && normalized.bridge === true
+  const nativeWeb = normalized.surface === 'web' &&
+    normalized.permissionOwner === 'native' && normalized.historyOwner === 'native' &&
+    normalized.statsOwner === 'native' && normalized.gateway === false && normalized.bridge === false
+  return bridgedTui || nativeWeb ? normalized : null
+}
+
 export const useSessionsStore = defineStore('sessions', {
   state: () => ({
     adapters: [],
@@ -83,7 +115,7 @@ export const useSessionsStore = defineStore('sessions', {
         cliSessionId: config.cliSessionId || null,
         nativeSessionId: config.cliSessionId || null,
         adapterConfig: created.adapterConfig || {},
-        capabilities: created.capabilities || adapter?.capabilities || null,
+        capabilities: rendererSessionCapabilities(config.adapterId || 'claude', created.capabilities, adapter),
         surfaceState: created.surfaceState || null,
         lastActivity: isImport ? ('📋 已恢复 · ' + fmtShort(config.startedAt)) : '启动中…',
         lastActivityTs: Date.now(),
@@ -226,7 +258,8 @@ export const useSessionsStore = defineStore('sessions', {
           icon: adapter?.icon || '•', cwd: s.cwd, model: s.model, tier: s.tier, status: s.status,
           stats: s.stats, cliSessionId: s.cliSessionId || s.nativeSessionId || null,
           nativeSessionId: s.nativeSessionId || s.cliSessionId || null,
-          adapterConfig: s.adapterConfig || {}, capabilities: s.capabilities || adapter?.capabilities || null,
+          adapterConfig: s.adapterConfig || {},
+          capabilities: rendererSessionCapabilities(s.adapterId, s.capabilities, adapter),
           surfaceState: s.surfaceState || null,
           provider: s.provider || null, sourceProvider: s.sourceProvider || null,
           providerPolicy: s.providerPolicy || null, explicitProvider: s.explicitProvider || null,
@@ -251,7 +284,9 @@ export const useSessionsStore = defineStore('sessions', {
         if (s.cliSessionId) row.cliSessionId = s.cliSessionId
         if (s.nativeSessionId) row.nativeSessionId = s.nativeSessionId
         if (s.adapterConfig !== undefined) row.adapterConfig = s.adapterConfig
-        if (s.capabilities !== undefined) row.capabilities = s.capabilities
+        if (s.capabilities !== undefined) {
+          row.capabilities = rendererSessionCapabilities(s.adapterId, s.capabilities, adapter)
+        }
         if (s.surfaceState !== undefined) row.surfaceState = s.surfaceState
         if (s.lastActivity) row.lastActivity = s.lastActivity
         if (s.taskNote != null) row.taskNote = s.taskNote
@@ -280,6 +315,7 @@ export const useSessionsStore = defineStore('sessions', {
 
     _onEvent(evt) {
       const row = this.sessions.find((s) => s.id === evt.sessionId)
+      if (evt.type === 'stats_update' && row?.capabilities?.statsOwner !== 'ucli') return
       if (row) {
         if (evt.status) row.status = evt.status
         if (evt.type === 'ready') {
@@ -346,9 +382,10 @@ export const useSessionsStore = defineStore('sessions', {
     },
 
     _onApprovalRequest(req) {
+      const row = this.sessions.find((s) => s.id === req.sessionId)
+      if (row?.capabilities?.permissionOwner !== 'ucli') return
       if (!this.pendingApprovals[req.sessionId]) this.pendingApprovals[req.sessionId] = []
       this.pendingApprovals[req.sessionId].push(req)
-      const row = this.sessions.find((s) => s.id === req.sessionId)
       if (row) row.status = 'waiting'
     },
     _onApprovalResolved(req) {

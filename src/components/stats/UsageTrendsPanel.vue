@@ -41,6 +41,7 @@
       />
       <a-button :loading="stats.trendLoading" @click="stats.loadTrend()">刷新趋势</a-button>
     </div>
+    <div class="ownership-note">DSH Web 使用原生统计，不计入 UCLI 使用趋势。</div>
 
     <a-alert
       v-if="stats.trendError"
@@ -128,7 +129,8 @@ const cliLabels = Object.freeze({
   claude: 'Claude Code',
   codex: 'Codex',
   opencode: 'OpenCode',
-  ucode: 'U-Code'
+  ucode: 'U-Code',
+  'deepseek-harness': 'DeepSeek Harness'
 })
 
 function uniqueOptions(values, label = (value) => value) {
@@ -214,6 +216,7 @@ onMounted(() => stats.loadTrend())
 
 <style scoped>
 .usage-trends-panel { margin-bottom: 14px; }
+.ownership-note { margin-top: 8px; color: #8c8c8c; font-size: 12px; }
 .trend-controls { display: grid; grid-template-columns: auto minmax(150px, 1fr) minmax(130px, 0.8fr) minmax(140px, 0.8fr) minmax(140px, 0.7fr) auto; gap: 10px; align-items: center; }
 .trend-content { min-height: 170px; padding-top: 16px; }
 .coverage { display: grid; grid-template-columns: minmax(260px, 1.4fr) minmax(240px, 1fr); gap: 12px; margin-top: 12px; }

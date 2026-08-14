@@ -153,11 +153,15 @@ test('pane maintenance menu distinguishes soft interrupt from process stop', () 
   const visibleText = textContent(ast)
 
   assert.equal(findElements(ast, (node) => node.tag === 'a-dropdown').length, 1)
-  for (const label of ['会话操作', '中断当前任务', '停止进程', '重启会话', '移除 UCLI 记录']) {
+  for (const label of ['会话操作', '中断当前任务', '移除 UCLI 记录']) {
     assert.match(visibleText, new RegExp(label))
   }
   assert.match(visibleText, /只中断当前任务，CLI 进程继续运行/)
-  assert.match(visibleText, /停止整个 CLI 进程，会话转为离线/)
+  assert.match(source, /copy\.stopTitle/)
+  assert.match(source, /copy\.stopHelp/)
+  assert.match(source, /copy\.restartTitle/)
+  assert.match(source, /copy\.restartHelp/)
+  assert.match(source, /deriveSessionMaintenanceCopy/)
   assert.match(source, /pendingAction/)
   assert.match(source, /sessions\.interrupt/)
   assert.match(source, /sessions\.stop/)

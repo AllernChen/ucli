@@ -657,6 +657,37 @@ test('agents root is Codex-owned and does not imply Claude visibility', async ()
     assert.equal(source.health, 'ready')
     assert.equal(source.visibility.codex.direct, true)
     assert.equal(source.visibility.claude.visible, false)
+    assert.equal(source.visibility['deepseek-harness'].visible, false)
+  })
+})
+
+test('project agents skills are exposed once to DSH without a DSH installation target', async () => {
+  await withService(async ({ root, service }) => {
+    const project = join(root, 'project')
+    const skillPath = join(project, '.agents', 'skills', 'diagnose')
+    createSkill(skillPath, 'Diagnose bugs', 'diagnose')
+
+    const state = await service.getState({ projectPath: project })
+    const sources = findSources(state, 'diagnose')
+    const source = sources.find((item) => item.adapterId === 'codex')
+
+    assert.equal(sources.filter((item) => item.entryPath === skillPath).length, 1)
+    assert.deepEqual(source.visibility['deepseek-harness'], {
+      visible: true, direct: false, inheritedFrom: ['codex']
+    })
+    assert.deepEqual(state.adapters.at(-1), {
+      id: 'deepseek-harness', displayName: 'DeepSeek Harness', virtual: true, projectOnly: true
+    })
+    const managedSource = join(root, 'managed-source')
+    createSkill(managedSource, 'Prepare releases', 'release-notes')
+    const installed = await service.install({
+      source: { type: 'local', path: managedSource },
+      targetAdapterIds: ['codex'], scopeType: 'project', projectPath: project
+    })
+    await assert.rejects(
+      service.applyToAdapter(installed.id, 'deepseek-harness'),
+      (error) => error.code === 'SKILL_ADAPTER_UNAVAILABLE'
+    )
   })
 })
 

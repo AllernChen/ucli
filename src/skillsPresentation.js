@@ -20,7 +20,7 @@ const ORIGINS = {
   system: 'CLI 系统'
 }
 
-const CLI_NAMES = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', ucode: 'U-Code' }
+const CLI_NAMES = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', ucode: 'U-Code', 'deepseek-harness': 'DeepSeek Harness' }
 const SOURCE_KINDS = {
   claude_user: 'Claude 用户目录',
   claude_project: 'Claude 项目目录',
@@ -307,7 +307,7 @@ const CLI_INSTALLATION_PRIORITY = {
 export function skillPackageApplyTargets(pkg = {}, adapters = []) {
   const directTargets = new Set((pkg.installations || []).map((item) => item.targetAdapterId))
   return adapters.filter((adapter) =>
-    !directTargets.has(adapter.id) && pkg.compatibility?.[adapter.id]?.compatible !== false
+    !adapter.virtual && !directTargets.has(adapter.id) && pkg.compatibility?.[adapter.id]?.compatible !== false
   )
 }
 
@@ -321,6 +321,27 @@ export function buildSkillCliMatrix(entry = {}, adapters = []) {
     : null
 
   return adapters.map((adapter) => {
+    if (adapter.virtual && adapter.id === 'deepseek-harness') {
+      const visibility = entry.visibility?.[adapter.id] || { visible: false, direct: false, inheritedFrom: [] }
+      return {
+        adapterId: adapter.id,
+        displayName: adapter.displayName || skillCliName(adapter.id),
+        state: visibility.visible ? 'inherited' : 'unavailable',
+        label: visibility.visible ? '项目 .agents/skills 可见' : CLI_USAGE_LABELS.unavailable,
+        visible: Boolean(visibility.visible),
+        direct: false,
+        inheritedFrom: visibility.inheritedFrom || [],
+        installation: null,
+        installations: [],
+        source: null,
+        copySource: null,
+        packageId: null,
+        packageOptions: [],
+        action: null,
+        actionLabel: '',
+        disabledReason: '由项目 .agents/skills 提供；DSH 用户级 Skill 由原生运行时管理'
+      }
+    }
     const pluginCopyCompatible = adapter.id !== 'opencode' || /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.name || '')
     const adapterInstallations = installations
       .filter((item) => item.targetAdapterId === adapter.id)
