@@ -2,10 +2,18 @@ import { BaseAdapter } from './cliAdapter.js'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { BRIDGED_DSH_TUI_CAPABILITIES } from './adapterCapabilities.js'
+import {
+  BRIDGED_DSH_TUI_CAPABILITIES,
+  DSH_WEB_CAPABILITIES
+} from './adapterCapabilities.js'
 import { normalizeDshSessionConfig } from './adapterSessionConfig.js'
 import { createDshBridgeServer } from './dshBridgeServer.js'
-import { inspectDshRuntime, SUPPORTED_DSH_VERSION } from './deepSeekHarnessRuntime.js'
+import {
+  inspectDshRuntime,
+  launchDshWebSurface,
+  normalizeDshWebSurfaceState,
+  SUPPORTED_DSH_VERSION
+} from './deepSeekHarnessRuntime.js'
 import { isSafeNativeSessionId } from '../sessionDiscovery.js'
 
 const require = createRequire(import.meta.url)
@@ -105,8 +113,16 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
   constructor({ session, engine, settings = {} }) {
     super({ id: 'deepseek-harness', displayName: 'DeepSeek Harness', session, engine })
     this.settings = settings
+    this._surfacePreference = normalizeDshSessionConfig(session.adapterConfig).surfacePreference
+    this.session.capabilities = this._surfacePreference === 'web'
+      ? DSH_WEB_CAPABILITIES
+      : BRIDGED_DSH_TUI_CAPABILITIES
     this.ptyProc = null
     this.bridge = null
+    this.webController = null
+    this.surfaceState = this._surfacePreference === 'web'
+      ? Object.freeze({ kind: 'web', status: 'starting', url: null, errorCode: null })
+      : null
     this._accepting = false
     this._epoch = 0
     this._cleanupPromise = null
@@ -168,7 +184,7 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
     this._gatewayStopped = false
     try {
       const config = normalizeDshSessionConfig(this.session.adapterConfig)
-      if (config.surfacePreference !== 'tui') throw codedError('DSH_TUI_REQUIRED')
+      if (config.surfacePreference === 'web') return await this._startWeb(epoch)
       if (this.session.cliSessionId && !isSafeNativeSessionId(this.session.cliSessionId)) {
         throw codedError('DSH_NATIVE_SESSION_INVALID')
       }
@@ -244,6 +260,22 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
       this.emitEvent({ type: 'ready' })
       return true
     } catch (error) {
+      if (this._surfacePreference === 'web' && this.surfaceState?.status === 'starting') {
+        const stableWebErrors = new Set([
+          'DSH_WEB_SPAWN_FAILED',
+          'DSH_WEB_START_TIMEOUT',
+          'DSH_WEB_READY_URL_INVALID',
+          'DSH_WEB_CLEANUP_FAILED'
+        ])
+        this._onWebSurfaceState({
+          kind: 'web',
+          status: 'error',
+          url: null,
+          errorCode: stableWebErrors.has(error?.code)
+            ? error.code
+            : 'DSH_WEB_RUNTIME_UNAVAILABLE'
+        }, epoch)
+      }
       try {
         await this._shutdown()
       } catch (cleanupError) {
@@ -251,6 +283,54 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
       }
       throw error
     }
+  }
+
+  async _startWeb(epoch) {
+    const inspectRuntime = this.settings.inspectRuntime || inspectDshRuntime
+    const runtime = await inspectRuntime()
+    this._assertStarting(epoch)
+    if (
+      !runtime?.compatible || runtime.version !== SUPPORTED_DSH_VERSION ||
+      !path.isAbsolute(runtime.launch?.file || '') ||
+      !Array.isArray(runtime.launch.prefixArgs) ||
+      !runtime.launch.prefixArgs.every(value => path.isAbsolute(value)) ||
+      !path.isAbsolute(runtime.home || '')
+    ) throw codedError('DSH_VERSION_UNSUPPORTED')
+    const launch = this.settings.launchWebSurface || launchDshWebSurface
+    const controller = launch({
+      runtime,
+      cwd: this.session.cwd,
+      env: this.settings.baseEnv,
+      platform: this.settings.platform,
+      spawnProcess: this.settings.spawnWebProcess,
+      terminateProcessTree: this.settings.terminateWebProcessTree,
+      startTimeoutMs: this.settings.webStartTimeoutMs,
+      onState: state => this._onWebSurfaceState(state, epoch),
+      onExit: code => this._onWebExit(code, epoch)
+    })
+    this.webController = controller
+    this._assertStarting(epoch)
+    await controller.ready
+    if (this.webController !== controller || controller.state?.status !== 'ready') {
+      throw codedError('DSH_WEB_EXITED')
+    }
+    this._assertStarting(epoch)
+    this.emitEvent({ type: 'ready' })
+    return true
+  }
+
+  _onWebSurfaceState(state, epoch) {
+    if (epoch !== this._epoch || this._disposed) return
+    const safeState = normalizeDshWebSurfaceState(state)
+    if (!safeState) return
+    this.surfaceState = Object.freeze(safeState)
+    this.emitEvent({ type: 'surface_state', ...safeState })
+  }
+
+  _onWebExit(code, epoch) {
+    if (epoch !== this._epoch || this._disposed) return
+    this.webController = null
+    this.emitEvent({ type: 'exit', code })
   }
 
   _isStarting(epoch) {
@@ -479,6 +559,7 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
 
   _shutdown({ exitedProc = null } = {}) {
     this._accepting = false
+    if (this.webController) return this._shutdownWeb()
     if (this._shuttingDown) return this._cleanupPromise || Promise.resolve()
     this._shuttingDown = true
     const bridge = this.bridge
@@ -524,6 +605,49 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
       }
     )
     return this._cleanupPromise
+  }
+
+  _shutdownWeb() {
+    if (this._shuttingDown) return this._cleanupPromise || Promise.resolve()
+    this._shuttingDown = true
+    const controller = this.webController
+    const epoch = this._epoch
+    const startupErrorState = this.surfaceState?.status === 'error'
+      ? this.surfaceState
+      : null
+    if (!startupErrorState) {
+      this._onWebSurfaceState({
+        kind: 'web', status: 'stopping', url: null, errorCode: null
+      }, epoch)
+    }
+    this._epoch += 1
+    const attempt = Promise.resolve().then(() => controller.stop())
+    this._cleanupPromise = attempt
+    attempt.then(
+      () => {
+        if (this.webController === controller) this.webController = null
+        if (startupErrorState) {
+          this.surfaceState = startupErrorState
+        } else {
+          this.surfaceState = Object.freeze({
+            kind: 'web', status: 'stopped', url: null, errorCode: null
+          })
+          this.emitEvent({ type: 'surface_state', ...this.surfaceState })
+        }
+        this._shuttingDown = false
+        this._cleanupPromise = null
+      },
+      () => {
+        this.surfaceState = Object.freeze({
+          kind: 'web', status: 'error', url: null,
+          errorCode: 'DSH_WEB_CLEANUP_FAILED'
+        })
+        this.emitEvent({ type: 'surface_state', ...this.surfaceState })
+        this._shuttingDown = false
+        this._cleanupPromise = null
+      }
+    )
+    return attempt
   }
 
   writeInput(data) {
@@ -576,6 +700,9 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
   }
 
   async sendTurn(text) {
+    if (this._surfacePreference === 'web') {
+      throw codedError('DSH_WEB_NATIVE_OWNERSHIP')
+    }
     if (!this._accepting || !this.bridge || !this._nativeSessionId) {
       throw codedError('DSH_BRIDGE_DISCONNECTED')
     }
@@ -586,6 +713,9 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
   }
 
   get gatewayCapabilities() {
+    if (this._surfacePreference === 'web') {
+      return { decisions: false, planSnapshot: false, resultSnapshot: false }
+    }
     return { decisions: true, planSnapshot: true, resultSnapshot: true }
   }
 
@@ -599,6 +729,7 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
   }
 
   async getLatestPlanSnapshot(decisionId) {
+    if (this._surfacePreference === 'web') return null
     let snapshot = this._latestPlan
     if (!snapshot && this.isGatewayLive()) {
       try {
@@ -624,6 +755,7 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
   }
 
   async getLatestResultSnapshot(turnId) {
+    if (this._surfacePreference === 'web') return null
     let snapshot = this._gatewayResults.get(turnId)
     if (
       !snapshot &&
@@ -657,6 +789,9 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
   }
 
   async interrupt() {
+    if (this._surfacePreference === 'web') {
+      throw codedError('DSH_WEB_NATIVE_OWNERSHIP')
+    }
     if (!this._accepting || !this.bridge || !this._nativeSessionId) {
       throw codedError('DSH_BRIDGE_DISCONNECTED')
     }
@@ -666,6 +801,9 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
   }
 
   resume(cliSessionId) {
+    if (this._surfacePreference === 'web') {
+      return Promise.reject(codedError('DSH_WEB_NATIVE_OWNERSHIP'))
+    }
     if (!isSafeNativeSessionId(cliSessionId)) throw codedError('DSH_NATIVE_SESSION_INVALID')
     if (this._resumePromise || this._state === 'starting' || this._state === 'stopping') {
       return Promise.reject(codedError('DSH_LIFECYCLE_BUSY'))
@@ -708,6 +846,13 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
       throw error
     }
   }
+
+  respondDecision() {
+    if (this._surfacePreference === 'web') {
+      return Promise.reject(codedError('DSH_WEB_NATIVE_OWNERSHIP'))
+    }
+    return super.respondDecision(...arguments)
+  }
 }
 
 export const deepSeekHarnessDescriptor = Object.freeze({
@@ -717,6 +862,9 @@ export const deepSeekHarnessDescriptor = Object.freeze({
   models: ['native'],
   costAvailable: false,
   capabilities: BRIDGED_DSH_TUI_CAPABILITIES,
+  capabilitiesForConfig: config => config?.surfacePreference === 'web'
+    ? DSH_WEB_CAPABILITIES
+    : BRIDGED_DSH_TUI_CAPABILITIES,
   normalizeSessionConfig: normalizeDshSessionConfig,
   create: (options) => new DeepSeekHarnessAdapter(options)
 })

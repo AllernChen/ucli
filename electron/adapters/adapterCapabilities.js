@@ -50,3 +50,10 @@ export function normalizeAdapterCapabilities(input = TERMINAL_ADAPTER_CAPABILITI
     bridge: capabilities.bridge
   })
 }
+
+export function resolveAdapterCapabilities(descriptor, adapterConfig) {
+  const selected = typeof descriptor?.capabilitiesForConfig === 'function'
+    ? descriptor.capabilitiesForConfig(adapterConfig)
+    : descriptor?.capabilities
+  return normalizeAdapterCapabilities(selected)
+}

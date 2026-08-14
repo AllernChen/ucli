@@ -17,9 +17,299 @@ const DSH_PACKAGE_NAME = '@deepseek-ai/dsh'
 const DSH_BIN_PATH = 'lib/bin.js'
 const MAX_MANIFEST_BYTES = 1024 * 1024
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/u
+const DSH_WEB_READY_LINE = /^dsh web: http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/u
+const DSH_WEB_OUTPUT_LIMIT = 16 * 1024
+const DSH_WEB_SURFACE_STATUSES = new Set([
+  'starting', 'ready', 'stopping', 'stopped', 'error'
+])
+const DSH_WEB_SURFACE_ERRORS = new Set([
+  'DSH_WEB_SPAWN_FAILED',
+  'DSH_WEB_RUNTIME_UNAVAILABLE',
+  'DSH_WEB_START_TIMEOUT',
+  'DSH_WEB_READY_URL_INVALID',
+  'DSH_WEB_CLEANUP_FAILED'
+])
 
 function runtimeError(code) {
   return Object.assign(new Error(code), { code })
+}
+
+export function parseDshWebReadyUrl(line) {
+  if (typeof line !== 'string') return null
+  const match = DSH_WEB_READY_LINE.exec(line)
+  if (!match) return null
+  const port = Number(match[1])
+  return port >= 1 && port <= 65_535
+    ? `http://127.0.0.1:${port}`
+    : null
+}
+
+export function normalizeDshWebSurfaceState(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+  const status = input.status
+  if (!DSH_WEB_SURFACE_STATUSES.has(status)) return null
+  if (status === 'ready') {
+    const url = parseDshWebReadyUrl(`dsh web: ${input.url}`)
+    if (!url || url !== input.url || input.errorCode != null) return null
+    return { kind: 'web', status, url, errorCode: null }
+  }
+  if (status === 'error') {
+    if (!DSH_WEB_SURFACE_ERRORS.has(input.errorCode) || input.url != null) return null
+    return { kind: 'web', status, url: null, errorCode: input.errorCode }
+  }
+  if (input.url != null || input.errorCode != null) return null
+  return { kind: 'web', status, url: null, errorCode: null }
+}
+
+function dshWebEnvironment(baseEnv, runtime) {
+  const env = { ...(baseEnv || process.env) }
+  for (const key of Object.keys(env)) {
+    if (
+      /^UCLI_DSH_BRIDGE_/iu.test(key) ||
+      /^ELECTRON_RUN_AS_NODE$/iu.test(key) ||
+      /^DSH_HOME$/iu.test(key)
+    ) {
+      delete env[key]
+    }
+  }
+  env.DSH_HOME = runtime.home
+  if (runtime.launch.prefixArgs.length > 0) env.ELECTRON_RUN_AS_NODE = '1'
+  else delete env.ELECTRON_RUN_AS_NODE
+  return env
+}
+
+export function launchDshWebSurface({
+  runtime,
+  cwd,
+  env = process.env,
+  platform = process.platform,
+  spawnProcess = spawn,
+  terminateProcessTree = (child, exitPromise) => terminateDshWebProcessTree(
+    child, exitPromise, { platform }
+  ),
+  startTimeoutMs = 60_000,
+  maxOutputBytes = DSH_WEB_OUTPUT_LIMIT,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  onState = () => {},
+  onExit = () => {}
+} = {}) {
+  if (
+    !path.isAbsolute(runtime?.launch?.file || '') ||
+    !Array.isArray(runtime?.launch?.prefixArgs) ||
+    !runtime.launch.prefixArgs.every(value => path.isAbsolute(value)) ||
+    !path.isAbsolute(runtime?.home || '') ||
+    !path.isAbsolute(cwd || '')
+  ) throw runtimeError('DSH_VERSION_UNSUPPORTED')
+
+  const startingState = Object.freeze({
+    kind: 'web', status: 'starting', url: null, errorCode: null
+  })
+  let state = startingState
+  let active = true
+  let owned = true
+  let readySettled = false
+  let startTimer = null
+  let stopPromise = null
+  let cleanupPromise = null
+  let exitHandling = false
+  let stdoutBytes = 0
+  let stderrBytes = 0
+  let stdoutBuffer = Buffer.alloc(0)
+  let resolveReady
+  let rejectReady
+  let resolveExit
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve
+    rejectReady = reject
+  })
+  const exit = new Promise(resolve => { resolveExit = resolve })
+  const args = [
+    ...runtime.launch.prefixArgs,
+    'web', '--host', '127.0.0.1', '--port', '0'
+  ]
+  let child
+  try {
+    child = spawnProcess(runtime.launch.file, args, {
+      cwd,
+      env: dshWebEnvironment(env, runtime),
+      shell: false,
+      detached: platform !== 'win32',
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+  } catch {
+    throw runtimeError('DSH_WEB_SPAWN_FAILED')
+  }
+
+  const publish = next => {
+    state = Object.freeze({ ...next })
+    onState(state)
+  }
+  const removeStartupListeners = () => {
+    child.stdout?.removeListener?.('data', onStdout)
+    child.stderr?.removeListener?.('data', onStderr)
+  }
+  const clearStartup = () => {
+    if (startTimer !== null) clearTimer(startTimer)
+    startTimer = null
+    removeStartupListeners()
+    stdoutBuffer = Buffer.alloc(0)
+  }
+  const rejectStart = error => {
+    if (readySettled) return
+    readySettled = true
+    rejectReady(error)
+  }
+  const resolveStart = url => {
+    if (readySettled || !active) return
+    readySettled = true
+    clearStartup()
+    child.stdout?.resume?.()
+    child.stderr?.resume?.()
+    const next = { kind: 'web', status: 'ready', url, errorCode: null }
+    publish(next)
+    resolveReady(state)
+  }
+  const cleanupOwned = async () => {
+    if (!owned) return true
+    if (cleanupPromise) return cleanupPromise
+    const attempt = (async () => {
+      const confirmed = await terminateProcessTree(child, exit)
+      if (confirmed !== true) throw runtimeError('DSH_WEB_CLEANUP_FAILED')
+      owned = false
+      return true
+    })()
+    cleanupPromise = attempt
+    try {
+      return await attempt
+    } catch (error) {
+      if (cleanupPromise === attempt) cleanupPromise = null
+      throw error
+    }
+  }
+  const failStart = code => {
+    if (!active || readySettled) return
+    active = false
+    clearStartup()
+    publish({ kind: 'web', status: 'error', url: null, errorCode: code })
+    const error = runtimeError(code)
+    Promise.resolve(cleanupOwned()).then(
+      () => rejectStart(error),
+      cleanupError => {
+        error.cleanupCode = cleanupError?.code || 'DSH_WEB_CLEANUP_FAILED'
+        rejectStart(error)
+      }
+    )
+  }
+  const consumeLine = bytes => {
+    let line
+    try {
+      line = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    } catch {
+      failStart('DSH_WEB_READY_URL_INVALID')
+      return
+    }
+    const url = parseDshWebReadyUrl(line)
+    if (url) resolveStart(url)
+    else if (line.startsWith('dsh web:')) failStart('DSH_WEB_READY_URL_INVALID')
+  }
+  function onStdout(chunk) {
+    if (!active || readySettled) return
+    const bytes = Buffer.from(chunk)
+    const remaining = Math.max(0, maxOutputBytes - stdoutBytes)
+    const consumed = bytes.subarray(0, remaining)
+    stdoutBytes += consumed.length
+    stdoutBuffer = Buffer.concat([stdoutBuffer, consumed])
+    let newline
+    while (active && !readySettled && (newline = stdoutBuffer.indexOf(0x0a)) >= 0) {
+      const line = stdoutBuffer.subarray(0, newline)
+      stdoutBuffer = stdoutBuffer.subarray(newline + 1)
+      consumeLine(line)
+    }
+    if (active && !readySettled && consumed.length < bytes.length) {
+      failStart('DSH_WEB_READY_URL_INVALID')
+    }
+  }
+  function onStderr(chunk) {
+    if (!active || readySettled) return
+    stderrBytes += Buffer.byteLength(chunk)
+    if (stderrBytes > maxOutputBytes) failStart('DSH_WEB_READY_URL_INVALID')
+  }
+  const onChildError = () => failStart('DSH_WEB_SPAWN_FAILED')
+  const onChildClose = code => {
+    resolveExit(Number.isInteger(code) ? code : -1)
+    if (!active || exitHandling) return
+    exitHandling = true
+    active = false
+    clearStartup()
+    if (platform === 'win32') {
+      owned = false
+      publish({ kind: 'web', status: 'stopped', url: null, errorCode: null })
+      if (!readySettled) rejectStart(runtimeError('DSH_WEB_READY_URL_INVALID'))
+      onExit(Number.isInteger(code) ? code : -1)
+      return
+    }
+    publish({ kind: 'web', status: 'stopping', url: null, errorCode: null })
+    Promise.resolve(cleanupOwned()).then(
+      () => {
+        publish({ kind: 'web', status: 'stopped', url: null, errorCode: null })
+        if (!readySettled) rejectStart(runtimeError('DSH_WEB_READY_URL_INVALID'))
+        onExit(Number.isInteger(code) ? code : -1)
+      },
+      error => {
+        publish({
+          kind: 'web', status: 'error', url: null,
+          errorCode: 'DSH_WEB_CLEANUP_FAILED'
+        })
+        if (!readySettled) {
+          const startError = runtimeError('DSH_WEB_READY_URL_INVALID')
+          startError.cleanupCode = error?.code || 'DSH_WEB_CLEANUP_FAILED'
+          rejectStart(startError)
+        }
+      }
+    )
+  }
+
+  child.stdout?.on?.('data', onStdout)
+  child.stderr?.on?.('data', onStderr)
+  child.once('error', onChildError)
+  child.once('close', onChildClose)
+  publish(startingState)
+  startTimer = setTimer(() => failStart('DSH_WEB_START_TIMEOUT'), startTimeoutMs)
+  startTimer?.unref?.()
+
+  return {
+    ready,
+    get state() { return state },
+    async stop() {
+      if (stopPromise) return stopPromise
+      active = false
+      clearStartup()
+      child.removeListener?.('error', onChildError)
+      publish({ kind: 'web', status: 'stopping', url: null, errorCode: null })
+      if (!readySettled) rejectStart(runtimeError('DSH_WEB_READY_URL_INVALID'))
+      const attempt = (async () => {
+        try {
+          await cleanupOwned()
+          publish({ kind: 'web', status: 'stopped', url: null, errorCode: null })
+        } catch (error) {
+          publish({
+            kind: 'web', status: 'error', url: null,
+            errorCode: 'DSH_WEB_CLEANUP_FAILED'
+          })
+          throw error
+        }
+      })()
+      stopPromise = attempt
+      try {
+        await attempt
+      } catch (error) {
+        stopPromise = null
+        throw error
+      }
+    }
+  }
 }
 
 function expandHomePrefix(value, homeDirectory) {
@@ -214,6 +504,85 @@ async function terminateDefaultProcessTree(child, platform) {
       return false
     }
   }
+}
+
+function waitForWebExit(exitPromise, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(runtimeError('DSH_WEB_EXIT_TIMEOUT')), timeoutMs)
+    timer.unref?.()
+    Promise.resolve(exitPromise).then(
+      value => { clearTimeout(timer); resolve(value) },
+      error => { clearTimeout(timer); reject(error) }
+    )
+  })
+}
+
+async function waitForDshWebGroupGone(pid, timeoutMs, killProcess = process.kill) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      killProcess(-pid, 0)
+    } catch (error) {
+      if (error?.code === 'ESRCH') return true
+      throw error
+    }
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  try {
+    killProcess(-pid, 0)
+    return false
+  } catch (error) {
+    if (error?.code === 'ESRCH') return true
+    throw error
+  }
+}
+
+export async function terminateDshWebProcessTree(child, exitPromise, {
+  platform = process.platform,
+  graceMs = 7_000,
+  forceWaitMs = 3_000,
+  killProcess = process.kill,
+  waitForExit = waitForWebExit,
+  waitForGroupGone = (pid, timeoutMs) => waitForDshWebGroupGone(
+    pid, timeoutMs, killProcess
+  ),
+  runWindowsTreeKill
+} = {}) {
+  if (!Number.isInteger(child?.pid) || child.pid <= 0) {
+    throw runtimeError('DSH_WEB_CLEANUP_FAILED')
+  }
+  if (platform === 'win32') {
+    const killTree = runWindowsTreeKill || (async pid => {
+      const systemRoot = process.env.SystemRoot || 'C:\\Windows'
+      const taskkill = path.join(systemRoot, 'System32', 'taskkill.exe')
+      if (!isRegularUnlinkedFile(taskkill)) return false
+      return waitForProcess(taskkill, ['/pid', String(pid), '/t', '/f'])
+    })
+    if (await killTree(child.pid) !== true) throw runtimeError('DSH_WEB_CLEANUP_FAILED')
+    try {
+      await waitForExit(exitPromise, forceWaitMs)
+    } catch (error) {
+      if (error?.code !== 'DSH_WEB_EXIT_TIMEOUT') throw error
+      throw runtimeError('DSH_WEB_CLEANUP_FAILED')
+    }
+    return true
+  }
+
+  try {
+    killProcess(-child.pid, 'SIGTERM')
+  } catch (error) {
+    if (error?.code === 'ESRCH') return true
+    throw error
+  }
+  if (await waitForGroupGone(child.pid, graceMs)) return true
+  try {
+    killProcess(-child.pid, 'SIGKILL')
+  } catch (error) {
+    if (error?.code === 'ESRCH') return true
+    throw error
+  }
+  if (await waitForGroupGone(child.pid, forceWaitMs)) return true
+  throw runtimeError('DSH_WEB_CLEANUP_FAILED')
 }
 
 export function runResolvedProcess(file, args, {

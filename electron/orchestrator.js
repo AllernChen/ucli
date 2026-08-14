@@ -11,7 +11,10 @@ import { classify, toClassifierInput, parsePattern } from './permission/classifi
 import { DEFAULT_RULESET, upgradeDefaultRuleset } from './permission/defaultRules.js'
 import { createAdapterMap } from './adapterRegistry.js'
 import { TIER } from './adapters/cliAdapter.js'
-import { normalizeAdapterCapabilities } from './adapters/adapterCapabilities.js'
+import {
+  normalizeAdapterCapabilities,
+  resolveAdapterCapabilities
+} from './adapters/adapterCapabilities.js'
 import {
   normalizePersistedSessionConfig,
   normalizeSessionConfig
@@ -19,7 +22,10 @@ import {
 import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log, truncateLog } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
-import { runResolvedProcess } from './adapters/deepSeekHarnessRuntime.js'
+import {
+  normalizeDshWebSurfaceState,
+  runResolvedProcess
+} from './adapters/deepSeekHarnessRuntime.js'
 import { createDshProfileManager, registerDshProfileIpc } from './adapters/dshProfileManager.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
 import { createSessionDiagnosticsService, registerSessionDiagnosticsIpc } from './sessionDiagnosticsService.js'
@@ -1293,6 +1299,8 @@ export function createOrchestrator() {
           explicit_provider: explicitProvider
         })
       }
+      const descriptor = adapters.get(s.adapterId) || {}
+      const adapterConfig = normalizePersistedSessionConfig(descriptor, s.adapterConfig)
       const entry = {
         adapter: null, // offline — CLI process not running
         session: {
@@ -1325,13 +1333,13 @@ export function createOrchestrator() {
           cliSessionId,
           name: sessionName,
           taskNote: s.taskNote || '',
-          adapterConfig: normalizePersistedSessionConfig(
-            adapters.get(s.adapterId) || {},
-            s.adapterConfig
-          ),
-          capabilities: normalizeAdapterCapabilities(adapters.get(s.adapterId)?.capabilities)
+          adapterConfig,
+          capabilities: resolveAdapterCapabilities(descriptor, adapterConfig)
         },
         status: 'offline',
+        surfaceState: adapterConfig.surfacePreference === 'web'
+          ? normalizeDshWebSurfaceState({ status: 'stopped', url: null, errorCode: null })
+          : null,
         stats: s.stats,
         lastActivity: '已离线',
         createdAt: s.createdAt || Date.now(),
@@ -1540,7 +1548,7 @@ export function createOrchestrator() {
     if (!descriptor) throw new Error('unknown adapter: ' + adapterId)
     const cwd = config.cwd || settings.defaultCwd || process.cwd()
     const adapterConfig = normalizeSessionConfig(descriptor, config.adapterConfig)
-    const capabilities = normalizeAdapterCapabilities(descriptor.capabilities)
+    const capabilities = resolveAdapterCapabilities(descriptor, adapterConfig)
 
     let session = {
       id: sessionId, adapterId, cwd,
@@ -1599,6 +1607,9 @@ export function createOrchestrator() {
     const costAvailable = descriptor.costAvailable !== false
     const entry = {
       adapter, session,
+      surfaceState: adapterConfig.surfacePreference === 'web'
+        ? normalizeDshWebSurfaceState({ status: 'starting', url: null, errorCode: null })
+        : null,
       status: 'starting', // not yet started — renderer calls start-adapter when pane is ready
       stats: {
         tokens: { input: 0, output: 0 },
@@ -1640,7 +1651,15 @@ export function createOrchestrator() {
       })
       db.flush()
     }
-    return { sessionId }
+    return {
+      sessionId,
+      adapterConfig: normalizePersistedSessionConfig(
+        adapters.get(entry.session.adapterId) || {},
+        entry.session.adapterConfig
+      ),
+      capabilities: normalizeAdapterCapabilities(entry.session.capabilities),
+      surfaceState: entry.surfaceState || null
+    }
   }
 
   async function handleAdapterEvent(sessionId, evt) {
@@ -1674,6 +1693,19 @@ export function createOrchestrator() {
         entry.status = evt.status
         entry.lastActivity = evt.status === 'running' ? '运行中' : '已就绪'
         break
+      case 'surface_state': {
+        const surfaceState = normalizeDshWebSurfaceState(evt)
+        if (!surfaceState) return
+        entry.surfaceState = surfaceState
+        send('session:event', {
+          sessionId,
+          type: 'surface_state',
+          surfaceState,
+          status: entry.status,
+          ts: evt.ts
+        })
+        return
+      }
       case 'terminal':
         send('session:terminal-output', { sessionId, data: evt.data })
         entry.status = 'running'
@@ -2075,6 +2107,7 @@ export function createOrchestrator() {
         e.session.adapterConfig
       ),
       capabilities: normalizeAdapterCapabilities(e.session.capabilities),
+      surfaceState: e.surfaceState || null,
       contextWindow: e.session.contextWindow || null,
       lastActivity: e.lastActivity || '',
       startedAt: e.createdAt || null,
@@ -2688,8 +2721,7 @@ export function createOrchestrator() {
     })
 
     ipcMain.handle('session:create', (_e, config) => {
-      const { sessionId } = createSession(config)
-      return { sessionId }
+      return createSession(config)
     })
 
     // Renderer calls this after it has registered the terminal-output listener
@@ -2767,6 +2799,11 @@ export function createOrchestrator() {
     ipcMain.handle('session:send-turn', (_e, sessionId, text) => {
       const e = sessions.get(sessionId)
       if (!e) throw new Error('no session')
+      if (e.session.capabilities.surface === 'web') {
+        throw Object.assign(new Error('DSH_WEB_NATIVE_OWNERSHIP'), {
+          code: 'DSH_WEB_NATIVE_OWNERSHIP'
+        })
+      }
       if (!e.adapter) throw new Error('会话已离线，请先重新启动')
       e.status = 'running'
       e._gatewayTurnActive = true
@@ -2774,6 +2811,7 @@ export function createOrchestrator() {
     })
     ipcMain.handle('session:send-terminal-input', async (_e, sessionId, data) => {
       const e = sessions.get(sessionId)
+      if (e?.session.capabilities.surface === 'web') return false
       if (e && e.adapter && typeof e.adapter.writeInput === 'function') {
         await gatewayManager?.respondDesktopInput(sessionId)
         return e.adapter.writeInput(data)
@@ -2782,18 +2820,23 @@ export function createOrchestrator() {
     })
     ipcMain.handle('session:terminal-resize', (_e, sessionId, cols, rows) => {
       const e = sessions.get(sessionId)
+      if (e?.session.capabilities.surface === 'web') return false
       if (e && e.adapter && typeof e.adapter.resize === 'function') {
-        e.adapter.resize(cols, rows)
+        return e.adapter.resize(cols, rows)
       }
+      return false
     })
     ipcMain.handle('session:attach-terminal', (_e, sessionId) => {
       const e = sessions.get(sessionId)
+      if (e?.session.capabilities.surface === 'web') return false
       if (e?.adapter && typeof e.adapter.replayHistory === 'function') {
         e.adapter.replayHistory()
       }
       return true
     })
     ipcMain.handle('session:respond-approval', async (_e, sessionId, requestId, verdict) => {
+      const e = sessions.get(sessionId)
+      if (e?.session.capabilities.permissionOwner === 'native') return false
       const gatewayResult = await gatewayManager?.respondDesktopDecision(
         sessionId,
         requestId,
@@ -2804,12 +2847,22 @@ export function createOrchestrator() {
     })
     ipcMain.handle('session:interrupt', (_e, sessionId) => {
       const e = sessions.get(sessionId)
+      if (e?.session.capabilities.surface === 'web') {
+        throw Object.assign(new Error('DSH_WEB_NATIVE_OWNERSHIP'), {
+          code: 'DSH_WEB_NATIVE_OWNERSHIP'
+        })
+      }
       if (!e || !e.adapter) throw new Error('会话已离线')
       return e.adapter.interrupt()
     })
     ipcMain.handle('session:resume', async (_e, sessionId, cliSessionId) => {
       const e = sessions.get(sessionId)
       if (!e) throw new Error('no session')
+      if (e.session.capabilities.surface === 'web') {
+        throw Object.assign(new Error('DSH_WEB_NATIVE_OWNERSHIP'), {
+          code: 'DSH_WEB_NATIVE_OWNERSHIP'
+        })
+      }
       if (!e.adapter) throw new Error('会话已离线，请先重新启动')
       if (!isSafeNativeSessionId(cliSessionId)) throw new Error('invalid native session id')
       if (e.session.adapterId === 'codex' && !e.session.profileId) {
@@ -2865,6 +2918,17 @@ export function createOrchestrator() {
         await cleanup
         e.adapter = null
         e.status = 'offline'
+        if (e.session.capabilities.surface === 'web') {
+          e.surfaceState = normalizeDshWebSurfaceState({
+            status: 'stopped', url: null, errorCode: null
+          })
+          send('session:event', {
+            sessionId,
+            type: 'surface_state',
+            surfaceState: e.surfaceState,
+            status: e.status
+          })
+        }
         if (['codex', 'claude'].includes(e.session.adapterId)) {
           e.session.activeProfileId = null
           e.session.pendingProfileId = null

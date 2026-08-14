@@ -51,7 +51,8 @@ export const useSessionsStore = defineStore('sessions', {
     },
 
     async createSession(config) {
-      const { sessionId } = await ipc.createSession(config)
+      const created = await ipc.createSession(config)
+      const { sessionId } = created
       const adapter = this.adapters.find((a) => a.id === (config.adapterId || 'claude'))
       const isImport = !!config.cliSessionId
       const summary = {
@@ -81,8 +82,9 @@ export const useSessionsStore = defineStore('sessions', {
         stats: { tokens: { input: 0, output: 0 }, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } },
         cliSessionId: config.cliSessionId || null,
         nativeSessionId: config.cliSessionId || null,
-        adapterConfig: config.adapterConfig || {},
-        capabilities: adapter?.capabilities || null,
+        adapterConfig: created.adapterConfig || {},
+        capabilities: created.capabilities || adapter?.capabilities || null,
+        surfaceState: created.surfaceState || null,
         lastActivity: isImport ? ('📋 已恢复 · ' + fmtShort(config.startedAt)) : '启动中…',
         lastActivityTs: Date.now(),
         taskNote: '',
@@ -225,6 +227,7 @@ export const useSessionsStore = defineStore('sessions', {
           stats: s.stats, cliSessionId: s.cliSessionId || s.nativeSessionId || null,
           nativeSessionId: s.nativeSessionId || s.cliSessionId || null,
           adapterConfig: s.adapterConfig || {}, capabilities: s.capabilities || adapter?.capabilities || null,
+          surfaceState: s.surfaceState || null,
           provider: s.provider || null, sourceProvider: s.sourceProvider || null,
           providerPolicy: s.providerPolicy || null, explicitProvider: s.explicitProvider || null,
           providerWarning: s.providerWarning || null, pendingProvider: s.pendingProvider || null,
@@ -249,6 +252,7 @@ export const useSessionsStore = defineStore('sessions', {
         if (s.nativeSessionId) row.nativeSessionId = s.nativeSessionId
         if (s.adapterConfig !== undefined) row.adapterConfig = s.adapterConfig
         if (s.capabilities !== undefined) row.capabilities = s.capabilities
+        if (s.surfaceState !== undefined) row.surfaceState = s.surfaceState
         if (s.lastActivity) row.lastActivity = s.lastActivity
         if (s.taskNote != null) row.taskNote = s.taskNote
         if (s.provider != null) row.provider = s.provider
@@ -289,6 +293,8 @@ export const useSessionsStore = defineStore('sessions', {
           row.lastActivity = `进程退出 (${evt.code})`
         } else if (evt.type === 'error') {
           row.lastActivity = `错误: ${evt.message}`
+        } else if (evt.type === 'surface_state') {
+          if (evt.surfaceState?.kind === 'web') row.surfaceState = evt.surfaceState
         } else if (evt.type === 'codex-runtime') {
           if (evt.provider != null) row.provider = evt.provider
           if (evt.providerPolicy != null) row.providerPolicy = evt.providerPolicy
