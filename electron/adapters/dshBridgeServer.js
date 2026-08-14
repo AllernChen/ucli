@@ -44,8 +44,6 @@ const REQUEST_METHODS = new Set([
   'snapshot.plan',
   'snapshot.result'
 ])
-// Task 3 release gate: replace this name gate with exact schemas for every event before
-// bridged TUI capabilities are released. Task 2 only authenticates transport semantics.
 const SEMANTIC_EVENT_TYPES = new Set([
   'session-ready',
   'agent-status',
@@ -58,8 +56,15 @@ const SEMANTIC_EVENT_TYPES = new Set([
   'plan-snapshot',
   'result-snapshot'
 ])
+const AGENT_STATUSES = new Set(['idle', 'running'])
+const TOOL_RESULT_STATUSES = new Set(['completed', 'failed', 'cancelled'])
+const TURN_STATUSES = new Set(['completed', 'aborted', 'blocked', 'error', 'max-tokens', 'interrupted'])
+const ATTENTION_KINDS = new Set(['approval', 'question'])
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 const SAFE_REQUEST_ID = /^[\x21-\x7e]{1,256}$/u
+const SAFE_SEMANTIC_ID = /^[\x21-\x7e]{1,256}$/u
+const SEMANTIC_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u
+const MAX_EVENT_FIELD_BYTES = 768 * 1024
 const SAFE_REMOTE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/u
 const SAFE_RANDOM_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u
 const SENSITIVE_CREDENTIAL_KEYS = new Set([
@@ -87,6 +92,91 @@ function exactKeys(value, expected) {
   if (!isPlainBridgeObject(value)) return false
   const actual = Object.keys(value).sort()
   return actual.length === expected.length && expected.every((key, index) => actual[index] === key)
+}
+
+function exactRequiredOptionalKeys(value, required, optional = []) {
+  if (!isPlainBridgeObject(value)) return false
+  const allowed = new Set([...required, ...optional])
+  const actual = Object.keys(value)
+  return required.every((key) => Object.hasOwn(value, key)) &&
+    actual.every((key) => allowed.has(key))
+}
+
+function boundedUtf8(value, maxBytes, { allowNewlines = true } = {}) {
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > maxBytes || value.includes('\0')) {
+    return false
+  }
+  return allowNewlines || !/[\r\n]/u.test(value)
+}
+
+function boundedSemanticName(value, maxBytes = 256) {
+  return boundedUtf8(value, maxBytes) && value.length > 0 && !SEMANTIC_CONTROL_CHARACTERS.test(value)
+}
+
+function boundedJson(value, maxBytes) {
+  let serialized
+  try {
+    serialized = JSON.stringify(value)
+  } catch {
+    return false
+  }
+  return typeof serialized === 'string' && Buffer.byteLength(serialized, 'utf8') <= maxBytes
+}
+
+function nonNegativeSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0
+}
+
+function validateSemanticEvent(frame) {
+  if (!SEMANTIC_EVENT_TYPES.has(frame.type)) return false
+  const id = () => SAFE_SEMANTIC_ID.test(frame.nativeSessionId || '')
+  switch (frame.type) {
+    case 'session-ready':
+      return exactRequiredOptionalKeys(frame, ['type', 'nativeSessionId'], ['cwd', 'model']) &&
+        id() &&
+        (frame.cwd === undefined || (boundedUtf8(frame.cwd, 4_096, { allowNewlines: false }))) &&
+        (frame.model === undefined || boundedSemanticName(frame.model))
+    case 'agent-status':
+      return exactKeys(frame, ['nativeSessionId', 'status', 'type']) &&
+        id() && AGENT_STATUSES.has(frame.status)
+    case 'assistant-committed':
+      return exactKeys(frame, ['nativeSessionId', 'text', 'turnId', 'type']) &&
+        id() && SAFE_SEMANTIC_ID.test(frame.turnId || '') && boundedUtf8(frame.text, MAX_EVENT_FIELD_BYTES)
+    case 'tool-request':
+      return exactRequiredOptionalKeys(
+        frame,
+        ['type', 'requestId', 'nativeSessionId', 'tool', 'input'],
+        ['cwd', 'command']
+      ) &&
+        id() && SAFE_SEMANTIC_ID.test(frame.requestId || '') && boundedSemanticName(frame.tool) &&
+        isPlainBridgeObject(frame.input) && boundedJson(frame.input, MAX_EVENT_FIELD_BYTES) &&
+        (frame.cwd === undefined || boundedUtf8(frame.cwd, 4_096, { allowNewlines: false })) &&
+        (frame.command === undefined || boundedUtf8(frame.command, 32_768))
+    case 'tool-result':
+      return exactKeys(frame, ['nativeSessionId', 'requestId', 'status', 'type']) &&
+        id() && SAFE_SEMANTIC_ID.test(frame.requestId || '') && TOOL_RESULT_STATUSES.has(frame.status)
+    case 'usage':
+      return exactRequiredOptionalKeys(
+        frame,
+        ['type', 'nativeSessionId', 'inputTokens', 'outputTokens', 'turns'],
+        ['model']
+      ) &&
+        id() && nonNegativeSafeInteger(frame.inputTokens) &&
+        nonNegativeSafeInteger(frame.outputTokens) && nonNegativeSafeInteger(frame.turns) &&
+        (frame.model === undefined || boundedSemanticName(frame.model))
+    case 'turn-complete':
+      return exactKeys(frame, ['nativeSessionId', 'status', 'turnId', 'type']) &&
+        id() && SAFE_SEMANTIC_ID.test(frame.turnId || '') && TURN_STATUSES.has(frame.status)
+    case 'attention':
+      return exactKeys(frame, ['kind', 'nativeSessionId', 'operation', 'type']) &&
+        id() && ATTENTION_KINDS.has(frame.kind) && boundedSemanticName(frame.operation)
+    case 'plan-snapshot':
+    case 'result-snapshot':
+      return exactKeys(frame, ['markdown', 'nativeSessionId', 'type']) &&
+        id() && boundedUtf8(frame.markdown, MAX_EVENT_FIELD_BYTES)
+    default:
+      return false
+  }
 }
 
 function isMissingPath(error) {
@@ -253,8 +343,8 @@ function validateHello(frame, token, profileName, timingSafeEqual) {
   if (
     !exactKeys(frame, HELLO_KEYS) ||
     typeof frame.bridgeVersion !== 'string' ||
-    frame.bridgeVersion.length === 0 ||
-    frame.bridgeVersion.length > 64 ||
+    Buffer.byteLength(frame.bridgeVersion, 'utf8') === 0 ||
+    Buffer.byteLength(frame.bridgeVersion, 'utf8') > 64 ||
     frame.profileName !== profileName ||
     frame.surface !== 'tui' ||
     !hasExactCapabilities(frame.capabilities)
@@ -491,8 +581,8 @@ export async function createDshBridgeServer({
         throw bridgeError('DSH_BRIDGE_FRAME_INVALID', 'Credential-bearing DSH bridge frame rejected')
       }
 
-      if (!SEMANTIC_EVENT_TYPES.has(frame.type)) {
-        throw bridgeError('DSH_BRIDGE_EVENT_INVALID', 'Unknown DSH bridge semantic event')
+      if (!validateSemanticEvent(frame)) {
+        throw bridgeError('DSH_BRIDGE_EVENT_INVALID', 'Invalid DSH bridge semantic event')
       }
       try {
         const result = onEvent(frame)

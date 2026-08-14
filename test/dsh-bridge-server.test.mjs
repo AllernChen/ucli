@@ -266,10 +266,11 @@ test('server rejects unsupported protocol with a distinct stable error', async (
   )
 })
 
-test('server rejects wrong profile, capability shape, and extra hello keys', async (t) => {
+test('server rejects wrong profile, capability shape, oversized UTF-8 version, and extra hello keys', async (t) => {
   const cases = [
     { profileName: 'another-profile' },
     { capabilities: { ...DSH_BRIDGE_CAPABILITIES, unexpected: true } },
+    { bridgeVersion: '界'.repeat(22) },
     { unexpected: true }
   ]
 
@@ -1145,4 +1146,103 @@ test('real POSIX startup refuses a symlinked final socket root', {
     await rm(root, { recursive: true, force: true })
     await rm(target, { recursive: true, force: true })
   }
+})
+
+const validSemanticFrames = [
+  { type: 'session-ready', nativeSessionId: 'native-1', cwd: 'C:\\workspace', model: '深度模型' },
+  { type: 'agent-status', nativeSessionId: 'native-1', status: 'running' },
+  { type: 'assistant-committed', nativeSessionId: 'native-1', turnId: '1', text: 'answer' },
+  {
+    type: 'tool-request', requestId: 'call-1', nativeSessionId: 'native-1', tool: 'bash',
+    input: { command: 'npm test' }, cwd: 'C:\\workspace', command: 'npm test'
+  },
+  { type: 'tool-result', requestId: 'call-1', nativeSessionId: 'native-1', status: 'completed' },
+  {
+    type: 'usage', nativeSessionId: 'native-1', inputTokens: 10,
+    outputTokens: 4, turns: 1, model: '深度模型'
+  },
+  { type: 'turn-complete', nativeSessionId: 'native-1', turnId: '1', status: 'completed' },
+  { type: 'attention', nativeSessionId: 'native-1', kind: 'approval', operation: 'bash' },
+  { type: 'plan-snapshot', nativeSessionId: 'native-1', markdown: '# Plan' },
+  { type: 'result-snapshot', nativeSessionId: 'native-1', markdown: 'answer' }
+]
+
+test('authenticated semantic frames pass only through the ten exact v1 event schemas', async (t) => {
+  const events = []
+  const server = await createDshBridgeServer({
+    sessionId: 'session-1', profileName: 'tui-local', onEvent: (event) => events.push(event)
+  })
+  t.after(() => server.close())
+  const socket = await authenticate(server)
+  t.after(() => closeSocket(socket))
+  for (const frame of validSemanticFrames) socket.write(encodeBridgeFrame(frame))
+  const deadline = Date.now() + 1_000
+  while (events.length < validSemanticFrames.length && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  assert.deepEqual(events, validSemanticFrames)
+})
+
+test('malformed semantic fields fail closed before onEvent', async () => {
+  const malformed = [
+    { ...validSemanticFrames[0], unexpected: true },
+    { ...validSemanticFrames[0], nativeSessionId: 'x'.repeat(257) },
+    { ...validSemanticFrames[0], cwd: `bad\0path` },
+    { ...validSemanticFrames[1], status: 'busy' },
+    { ...validSemanticFrames[2], turnId: '' },
+    { ...validSemanticFrames[2], text: 'x'.repeat(786_433) },
+    { ...validSemanticFrames[3], requestId: `call\n1` },
+    { ...validSemanticFrames[3], tool: 'x'.repeat(257) },
+    { ...validSemanticFrames[3], input: { value: 'x'.repeat(786_433) } },
+    { ...validSemanticFrames[3], input: 42 },
+    { ...validSemanticFrames[3], input: [1, 2] },
+    { ...validSemanticFrames[3], input: null },
+    { ...validSemanticFrames[3], command: 'x'.repeat(32_769) },
+    { ...validSemanticFrames[4], status: 'unknown' },
+    { ...validSemanticFrames[5], inputTokens: -1 },
+    { ...validSemanticFrames[5], outputTokens: 1.5 },
+    { ...validSemanticFrames[5], turns: Number.MAX_SAFE_INTEGER + 1 },
+    { ...validSemanticFrames[5], model: 'bad\nmodel' },
+    { ...validSemanticFrames[6], status: 'done' },
+    { ...validSemanticFrames[7], kind: 'warning' },
+    { ...validSemanticFrames[7], operation: 'x'.repeat(257) },
+    { ...validSemanticFrames[8], markdown: 'x'.repeat(786_433) },
+    { ...validSemanticFrames[9], markdown: 42 }
+  ]
+
+  for (const frame of malformed) {
+    const events = []
+    const server = await createDshBridgeServer({
+      sessionId: 'session-1', profileName: 'tui-local', onEvent: (event) => events.push(event)
+    })
+    const socket = await authenticate(server)
+    let didClose = false
+    const closed = once(socket, 'close').then(() => { didClose = true })
+    socket.write(encodeBridgeFrame(frame))
+    await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 50))])
+    try {
+      assert.deepEqual(events, [], frame.type)
+      assert.equal(didClose, true, `${frame.type} did not close the bridge`)
+    } finally {
+      socket.destroy()
+      await server.close()
+    }
+  }
+})
+
+test('semantic text above 256 KiB uses UTF-8 byte limits without closing a valid frame', async (t) => {
+  const events = []
+  const server = await createDshBridgeServer({
+    sessionId: 'session-1', profileName: 'tui-local', onEvent: (event) => events.push(event)
+  })
+  t.after(() => server.close())
+  const socket = await authenticate(server)
+  t.after(() => closeSocket(socket))
+  const text = '你'.repeat(100_000)
+  socket.write(encodeBridgeFrame({
+    type: 'assistant-committed', nativeSessionId: 'native-1', turnId: '1', text
+  }))
+  const deadline = Date.now() + 1_000
+  while (events.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(events[0]?.text, text)
 })
