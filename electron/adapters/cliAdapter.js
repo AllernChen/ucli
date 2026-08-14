@@ -122,5 +122,7 @@ export class BaseAdapter extends EventEmitter {
  * @property {string} displayName
  * @property {string} icon     emoji or short glyph for the card
  * @property {string[]} models suggested models
+ * @property {{ surface: 'terminal'|'web', permissionOwner: 'ucli'|'native', historyOwner: 'ucli'|'native', statsOwner: 'ucli'|'native', gateway: boolean, bridge: boolean }=} capabilities
+ * @property {(input: unknown) => object=} normalizeSessionConfig
  * @property {(opts: { session: object, engine: object, settings: object }) => BaseAdapter} create
  */

@@ -19,6 +19,10 @@ test('session profile binding survives database restart and native binding repai
       adapter_id: 'codex',
       native_session_id: 'native-old',
       profile_id: 'profile-1',
+      adapter_config_json: JSON.stringify({
+        profileName: 'tui',
+        surfacePreference: 'tui'
+      }),
       tier: 'safety-rules',
       status: 'offline',
       created_at: 1
@@ -28,8 +32,15 @@ test('session profile binding survives database restart and native binding repai
 
     db = await openDb(path)
     assert.equal(db.getSession('session-1').profileId, 'profile-1')
+    assert.deepEqual(db.getSession('session-1').adapterConfig, {
+      profileName: 'tui',
+      surfacePreference: 'tui'
+    })
     db.updateSession('session-1', { native_session_id: 'native-current' })
     assert.equal(db.getSession('session-1').cliSessionId, 'native-current')
+    assert.equal(db.getSession('session-1').profileId, 'profile-1')
+    db.updateSession('session-1', { adapter_config_json: '{broken' })
+    assert.deepEqual(db.getSession('session-1').adapterConfig, {})
     assert.equal(db.getSession('session-1').profileId, 'profile-1')
   } finally {
     db.close()

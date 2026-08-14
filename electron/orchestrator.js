@@ -11,6 +11,11 @@ import { classify, toClassifierInput, parsePattern } from './permission/classifi
 import { DEFAULT_RULESET, upgradeDefaultRuleset } from './permission/defaultRules.js'
 import { createAdapterMap } from './adapterRegistry.js'
 import { TIER } from './adapters/cliAdapter.js'
+import { normalizeAdapterCapabilities } from './adapters/adapterCapabilities.js'
+import {
+  normalizePersistedSessionConfig,
+  normalizeSessionConfig
+} from './adapters/adapterSessionConfig.js'
 import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log, truncateLog } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
@@ -1312,7 +1317,12 @@ export function createOrchestrator() {
           canStart: restoredSession.canStart,
           cliSessionId,
           name: sessionName,
-          taskNote: s.taskNote || ''
+          taskNote: s.taskNote || '',
+          adapterConfig: normalizePersistedSessionConfig(
+            adapters.get(s.adapterId) || {},
+            s.adapterConfig
+          ),
+          capabilities: normalizeAdapterCapabilities(adapters.get(s.adapterId)?.capabilities)
         },
         status: 'offline',
         stats: s.stats,
@@ -1522,6 +1532,8 @@ export function createOrchestrator() {
     const descriptor = adapters.get(adapterId)
     if (!descriptor) throw new Error('unknown adapter: ' + adapterId)
     const cwd = config.cwd || settings.defaultCwd || process.cwd()
+    const adapterConfig = normalizeSessionConfig(descriptor, config.adapterConfig)
+    const capabilities = normalizeAdapterCapabilities(descriptor.capabilities)
 
     let session = {
       id: sessionId, adapterId, cwd,
@@ -1534,7 +1546,9 @@ export function createOrchestrator() {
       explicitProvider: config.explicitProvider || null,
       cliSessionId: config.cliSessionId || null,
       name: config.name || null,
-      taskNote: ''
+      taskNote: '',
+      adapterConfig,
+      capabilities
     }
     let profileEnvironment = {}
     let profileLaunch = null
@@ -1608,6 +1622,7 @@ export function createOrchestrator() {
         provider_policy: session.providerPolicy,
         explicit_provider: session.explicitProvider,
         profile_id: session.profileId || null,
+        adapter_config_json: JSON.stringify(session.adapterConfig),
         status: 'starting', created_at: entry.createdAt
       })
       db.flush()
@@ -2037,6 +2052,11 @@ export function createOrchestrator() {
       nativeSessionId: e.session.cliSessionId || null,
       name: e.session.name || null,
       taskNote: e.session.taskNote || '',
+      adapterConfig: normalizePersistedSessionConfig(
+        adapters.get(e.session.adapterId) || {},
+        e.session.adapterConfig
+      ),
+      capabilities: normalizeAdapterCapabilities(e.session.capabilities),
       contextWindow: e.session.contextWindow || null,
       lastActivity: e.lastActivity || '',
       startedAt: e.createdAt || null,
