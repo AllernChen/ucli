@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-08-18
+
+### DeepSeek Harness 整改
+
+- 0.11.0 的 DSH TUI 适配建立在错误的上游假设上：公开的 `deepseek-harness` 包并不提供可由 UCLI 启动的 CLI TUI。0.11.1 因此改为 Web-only；所有新会话只启动 DSH 原生 Web，旧 TUI 会话稳定返回不可用并只提供“新建 DSH Web”迁移动作。
+- 新增 UCLI 托管 Runtime manager，固定安装并验证 `@deepseek-ai/dsh@0.1.0-rc.6`、pnpm `10.30.3` 和 npm integrity。安装、升级、修复、卸载使用 staging、原子提升、所有权标记、静默期门和失败回滚，renderer 不能提交路径、版本、registry、package 或 command。
+- 原生 profile 继续由 DSH 拥有。UCLI 只初始化官方基础 profile，并把 `@ucli/dsh-bridge@0.11.0` 识别为 legacy bridge：不会自动加载或安装，只允许用户确认后按四个元数据文件的事务边界移除并回滚。
+- DSH Skills 现在覆盖项目 `.dsh/skills`、项目 `.agents/skills`、`$DSH_HOME/skills`、用户 `.agents/skills` 及只读内置来源；按优先级选择生效来源，并让 Codex 与 DSH 的共享投影只保留一个物理副本。
+- 0.11.1 升级、迁移和 Runtime 卸载均保留 DSH_HOME、profiles、原生 sessions 与 Skills；不会因为停用旧 TUI/bridge 路径而删除用户数据。
+
+### 发布兼容
+
+- 应用与安装产物版本升级到 `0.11.1`；为识别并安全移除旧元数据，发布资源继续保留隔离的 `resources/deepseek-harness/ucli-dsh-bridge-0.11.0.tgz`，但不把它作为可启动界面或新安装依赖。
+- DSH Web 继续使用 exact loopback URL、受限 iframe 和被拥有的进程树清理；权限、历史和统计由 DSH 原生界面管理，Gateway 对 Web 与全部旧 TUI generation 均保持关闭。
+
 ## [0.11.0] - 2026-08-14
 
 ### DeepSeek Harness 适配

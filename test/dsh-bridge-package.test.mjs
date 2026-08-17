@@ -27,7 +27,7 @@ function readTar(buffer) {
   return entries
 }
 
-test('bridge package manifest uses host-resolved exact rc6 peers and a Cordis bundle patch', async () => {
+test('quarantined bridge manifest remains exactly 0.11.0 for legacy rollback compatibility', async () => {
   const manifest = JSON.parse(await readFile(
     path.join(root, 'integrations', 'deepseek-harness-bridge', 'package.json'),
     'utf8'
@@ -58,10 +58,10 @@ test('bridge package manifest uses host-resolved exact rc6 peers and a Cordis bu
   ))
 })
 
-test('a clean rc6 hoisted profile adds the bridge without a second runtime closure', async (t) => {
+test('quarantined bridge artifact remains installable only for explicit legacy rollback', async (t) => {
   const fixture = await mkdtemp(path.join(tmpdir(), 'ucli-dsh-rc6-profile-'))
   t.after(() => rm(fixture, { recursive: true, force: true }))
-  const profile = path.join(fixture, 'profiles', 'tui')
+  const profile = path.join(fixture, 'profiles', 'legacy-rollback')
   const runtime = path.join(fixture, 'runtime')
   const peerVersions = {
     '@deepseek-ai/cordis': '4.0.1',
@@ -82,7 +82,7 @@ test('a clean rc6 hoisted profile adds the bridge without a second runtime closu
   ].join('\n'))
   await writeFile(path.join(fixture, 'package.json'), JSON.stringify({ private: true }))
   await writeFile(path.join(profile, 'package.json'), JSON.stringify({
-    name: 'rc6-tui-profile',
+    name: 'rc6-legacy-rollback-profile',
     private: true,
     dependencies: Object.fromEntries(Object.keys(peerVersions).map((name) => [name, 'workspace:*']))
   }))
@@ -121,8 +121,20 @@ test('a clean rc6 hoisted profile adds the bridge without a second runtime closu
 })
 
 test('packaging creates the deterministic four-file tgz without runtime copies or secrets', async (t) => {
+  let previousArtifact = null
+  try {
+    previousArtifact = await readFile(artifact)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
   await rm(artifact, { force: true })
-  t.after(() => rm(artifact, { force: true }))
+  t.after(async () => {
+    if (previousArtifact) {
+      await writeFile(artifact, previousArtifact)
+    } else {
+      await rm(artifact, { force: true })
+    }
+  })
   const env = { ...process.env, UCLI_DSH_BRIDGE_TOKEN: 'supersecret-runtime-token' }
   const first = spawnSync(process.execPath, ['scripts/package-dsh-bridge.mjs'], {
     cwd: root,

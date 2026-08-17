@@ -252,43 +252,52 @@
 - [ ] 下载完成后确认显示“重启并安装”；只有明确点击时才把控制权交给安装器。
 - [ ] 启动便携版与开发版，确认不发起更新器网络请求，并且侧栏和设置页不提供下载操作。
 
-## 12. 0.11.0 DeepSeek Harness 验收
+## 12. 0.11.1 DeepSeek Harness 整改验收
 
-本节必须在隔离的测试 DSH_HOME、非敏感项目与专用 profile 中执行。自动化测试使用 fake runtime/socket/PTY，不调用真实 provider，不写用户 profile。Windows 与 macOS 必须分别在原生平台完成；一个平台的结果不能替代另一个平台。
+公开的 DeepSeek Harness 没有 CLI TUI；0.11.1 的产品契约是 Web-only，旧会话固定显示 **legacy TUI unavailable**。本节必须使用隔离的 DSH_HOME、非敏感项目和专用 profile。Windows x64 与 macOS arm64 必须分别在原生平台执行；自动化通过不能替代原生结果，未执行项必须保留为 pending。
 
-| 锚点 | 人工检查 | 预期结果 |
+| 锚点 | 原生平台检查 | 预期结果 |
 | --- | --- | --- |
-| `dsh-runtime-version` | 分别测试未安装、版本不可读、非 `0.1.0-rc.6` 和精确 `0.1.0-rc.6` | 前三者以稳定错误阻止 TUI/Web；精确版本可继续。界面不显示 DSH_HOME 或可执行文件路径 |
-| `dsh-profile-rollback` | 对四个 profile 元数据文件记录 bytes/mode/原缺失状态，启用 bridge 时强制 pnpm 失败 | 仅 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml` 恢复；不删除 node_modules、插件、凭据或会话；回滚失败明确报告且保留私有备份 |
-| `dsh-tui-permission-single-owner` | 分别触发 downstream allow/deny/ask、高风险命令与 `sandbox_permissions` | 每个工具最多出现一次 UCLI 提示；deny/超时/断桥不执行；workspace-write 保持固定，更宽 sandbox 直接拒绝，DSH 原生 UI 不二次询问 |
-| `dsh-tui-root-subagent-code-mode` | root、continuable subagent、普通 subagent 与 Code Mode 并发叶子分别调用工具 | 每个实际叶子都经 `tools/pre-execute`，native session 映射不串线，相同 callId 不跨 agent 复用 |
-| `dsh-two-session-isolation` | 同时运行两张 TUI 卡，分别输入、resize、审批、完成与恢复 | 两个 PTY、endpoint、token、request map、native session ID 和清理生命周期完全独立 |
-| `dsh-web-loopback-isolation` | 同时启动两张 Web 卡并检查监听地址、URL 与 iframe | 使用不同 `127.0.0.1` 动态端口；不绑定 LAN、`0.0.0.0`、`::`；iframe 仅加载对应 exact loopback URL |
-| `dsh-web-native-ownership` | 在 Web 中执行权限、查看历史与统计，并检查 UCLI 卡片/详情/Gateway | 权限、历史、统计只在 DSH 原生界面；UCLI 不挂载 xterm/history/approval/usage/Gateway，不把 native stats 记入账本 |
-| `dsh-security-no-secret-persistence` | 启动、恢复、断桥、失败安装、停止、删除并检查日志/DB/IPC/诊断 | 不出现 endpoint、token、Web URL（退出后）、provider 凭据、prompt、transcript、tool input/result 或原始 stdout/stderr |
-| `dsh-windows-native-acceptance` | 在 Windows x64 原生安装包验证 named pipe、PTY、Web、stop/restart/delete/quit | UCLI 主动清理使用进程树终止；无被拥有的子进程或 pipe 留存。记录 Windows 版本、DSH 版本、包 SHA-256 与结果 |
-| `dsh-macos-native-acceptance` | 在 macOS 原生包验证 Unix socket 权限、symlink 拒绝、PTY、Web 与退出清理 | 临时目录 `0700`、socket `0600`，endpoint containment 成立；无子进程/socket 留存。记录 macOS/架构、DSH 版本、包 SHA-256 与结果 |
+| `dsh-managed-install` | 从未安装状态在档案管理中确认安装 | 只安装并选择 UCLI owned `0.1.0-rc.6`；UI 分开显示 managed/system、受支持版本和唯一动作，不显示路径、registry、命令或原始错误 |
+| `dsh-install-interruption-rollback` | 分别在下载中取消和制造网络失败，再重启 UCLI | staging 被确认清理或保留为内部可重试状态；没有选中 partial Runtime；原 Runtime 与 DSH_HOME 均未修改 |
+| `dsh-managed-repair` | 损坏 exact owned Runtime 的受管文件后确认修复 | 重新验证 package、entry、integrity、pnpm 与所有权后原子替换；失败恢复旧 Runtime；未拥有目录不被覆盖 |
+| `dsh-web-lifecycle` | 新建两个 Web 会话并执行 start、stop、restart、remove、quit | 两个 exact loopback 动态端口互不相同；iframe 隔离；每次清理都等待 owned process tree 确认，不复用旧 controller |
+| `dsh-legacy-session-migration` | 载入含 `surface:tui` 与 `surface:legacy-tui` 的 0.11.0 数据库 | 旧记录保持不可用且不启动进程；只有确认后才以相同 cwd 新建独立 Web 会话，原记录不改写、不 resume |
+| `dsh-legacy-bridge-removal-rollback` | 在含旧 bridge 的副本 profile 中执行移除，并分别制造命令失败、回滚失败与 cleanup 失败 | 只处理四项 metadata；普通失败恢复原 bytes/mode/缺失状态；回滚或 cleanup 失败返回稳定码并保留内部重试状态，不删除其他 profile 数据 |
+| `dsh-skills-four-roots` | 在项目 `.dsh/skills`、项目 `.agents/skills`、`$DSH_HOME/skills`、用户 `.agents/skills` 各放置一个 portable Skill，并加入同名冲突 | 四个来源均被发现；rank 100/200/400/500 决定“生效/被来源遮蔽”；普通列表不显示绝对路径；内置来源只读 |
+| `dsh-shared-projection-dedupe` | 对同一项目同时选择 Codex 与 DSH 安装、更新和移除一个共享 Skill | 数据库只有一条 shared installation 和一个 `.agents/skills` 物理副本；更新不覆盖更高优先级来源，移除不碰未拥有内容 |
+| `dsh-runtime-uninstall-preserves-home` | 创建 profiles、native sessions 与 Skills 后卸载 managed Runtime | 只删除 exact owned Runtime；DSH_HOME、profiles、sessions、四类 Skills 来源和 UCLI 会话记录全部保留 |
+| `dsh-windows-native-acceptance` | 使用 0.11.1 Windows x64 Setup 与 Portable 重复上述九项 | 记录 Windows 版本、DSH 版本、两件产物 SHA-256、结果与 pending/失败原因；无 owned 子进程残留 |
+| `dsh-macos-native-acceptance` | 使用 0.11.1 macOS arm64 DMG 与 ZIP 重复上述九项 | 记录 macOS 版本/架构、DSH 版本、两件产物 SHA-256、结果与 pending/失败原因；保留 executable mode，使用进程组完成清理 |
 
-### 12.1 TUI、Gateway 与恢复
+### 12.1 自动化发布门
 
-- [ ] 确认设置页只展示精确兼容 runtime 摘要；“配置档案 → DeepSeek Harness”可以初始化基础 profile 和管理 bridge，但不声称或下载 deepseek-harness 仓库中不存在的 TUI。
-- [ ] 使用用户已有的兼容 TUI profile；确认 bridge 未安装、版本不兼容和已兼容三个状态彼此独立，操作完成后重新枚举。
-- [ ] 检查实际 argv：新建为 `dsh --profile <profile>`，恢复追加 `--resume <nativeSessionId>`；cwd 固定为卡片工作目录，未使用 shell command string。
-- [ ] 全屏交互、中文输入、复制粘贴、resize 与终端字节均正常；终端 ANSI 不会进入 transcript、最终回复或 Gateway。
-- [ ] assistant committed、tool call/result、usage、attention、turn completion 映射一次且归属正确；恢复后统计在历史基线上累计，不回退或重复。
-- [ ] Gateway 只接受 live、已认证且已有 native session ID 的 TUI。桥断开前后分别测试普通任务、队列、decision、interrupt、snapshot 与 reconnect；旧 generation 不得落卡、保存 route 或复活 token。
-- [ ] 停止、重启、恢复、移除和退出均等待 bridge 与 PTY 清理确认；清理失败卡片保持 non-accepting 且保留所有权，可重试，不报告假离线。
+- [x] Runtime manager 测试覆盖 trusted npm/Node、固定版本/integrity/pnpm、staging、原子提升、所有权、junction/symlink containment、静默期、回滚、repair、cleanup retry 与卸载边界。
+- [x] Web 测试覆盖 fixed argv、readiness budget、60 秒超时、exact loopback URL、双会话端口隔离、iframe CSP，以及 Windows tree/POSIX process-group 清理状态机。
+- [x] 旧会话测试覆盖 start/resume/restart 稳定不可用、零进程调用、迁移需确认且新建独立 Web 会话。
+- [x] profile 测试覆盖官方 base 初始化、web/headless/旧元数据拒绝、旧 bridge 四文件移除与 rollback/cleanup retry。
+- [x] Skills 测试覆盖四个默认来源、rank/遮蔽、共享投影去重、只读来源、迁移日志和失败收敛。
 
-### 12.2 Web、CSP 与生命周期
+### 12.2 Windows x64 原生验收（pending）
 
-- [ ] 检查实际 argv 精确为 `dsh web --host 127.0.0.1 --port 0`，环境不含任何 `UCLI_DSH_BRIDGE_*`。
-- [ ] readiness 只接受 stdout 完整行 `dsh web: http://127.0.0.1:<port>`；测试 ANSI、空白、路径、query、fragment、userinfo、非法端口、超过 16 KiB 和 60 秒超时均失败关闭。
-- [ ] 检查 CSP 只允许 `frame-src http://127.0.0.1:*`，不增加 loopback `connect-src`、`unsafe-eval` 或 webview；iframe 采用最小 sandbox 与 `no-referrer`。
-- [ ] Web stop/restart/remove/quit 先停用界面和 IPC，再确认整棵被拥有进程树退出；清理失败不复用 controller 或报告成功。
+- [ ] 在干净 Windows x64 VM 安装 Setup，记录 OS build、安装包 SHA-256、应用版本和初始 DSH 状态。
+- [ ] 完成 `dsh-managed-install`、`dsh-install-interruption-rollback`、`dsh-managed-repair` 与 `dsh-runtime-uninstall-preserves-home`，保存脱敏截图和结果。
+- [ ] 完成 `dsh-web-lifecycle` 与 `dsh-legacy-session-migration`，确认两个 loopback 会话和所有进程树最终清理。
+- [ ] 完成 `dsh-legacy-bridge-removal-rollback`、`dsh-skills-four-roots` 与 `dsh-shared-projection-dedupe`，确认 profile/Skills 数据边界。
+- [ ] 使用 Portable 重复安装、Web 生命周期和卸载保留检查；记录与 Setup 的差异。
 
-### 12.3 产物与回归
+### 12.3 macOS arm64 原生验收（pending）
 
-- [ ] `npm test`、`npm run build`、`npm run verify:release` 均通过，无 failed/cancelled；平台条件 skip 必须由对应原生平台验收覆盖。
-- [ ] Windows 与 macOS 安装包各只含一个 `resources/deepseek-harness/ucli-dsh-bridge-0.11.0.tgz`；tgz 仅含 `package.json`、`cordis.patch.yml`、`framing.js`、`index.js`，无 bridge 源码目录、凭据或 TUI。
-- [ ] 回归 Claude Code、Codex、OpenCode 与 U-Code 的 create/attach/input/resize/stop/restart、权限、历史、统计、总结、Skills 与 Gateway。
-- [ ] 检查 `git status --short`、`git diff --check` 和产物清单；不得包含临时 DSH profile、上游 clone、测试 token、endpoint 或未归属文件。
+- [ ] 在干净 macOS arm64 VM 安装 DMG，记录系统版本、架构、DMG SHA-256、应用版本和初始 DSH 状态。
+- [ ] 完成 `dsh-managed-install`、`dsh-install-interruption-rollback`、`dsh-managed-repair` 与 `dsh-runtime-uninstall-preserves-home`，检查 executable mode 保持正确。
+- [ ] 完成 `dsh-web-lifecycle` 与 `dsh-legacy-session-migration`，确认两个 loopback 会话使用独立端口且普通 Web 会话不创建 Unix socket。
+- [ ] 完成 `dsh-legacy-bridge-removal-rollback`、`dsh-skills-four-roots` 与 `dsh-shared-projection-dedupe`，确认 profile/Skills 数据边界。
+- [ ] 使用 ZIP 重复安装、Web 生命周期和卸载保留检查；记录与 DMG 的差异。
+
+### 12.4 产物与回归
+
+- [ ] `npm test`、`npm run build`、`npm run dist:win` 与 `npm run verify:release` 全部通过；平台条件 skip 对应到上述 pending 原生项目。
+- [ ] Windows 产物为 `UCLI-Setup-0.11.1-x64.exe` 与 `UCLI-Portable-0.11.1-x64.exe`；macOS arm64 产物为 `UCLI-0.11.1-arm64.dmg` 与 `.zip`。
+- [ ] 每个应用包只含隔离资源 `resources/deepseek-harness/ucli-dsh-bridge-0.11.0.tgz`；tgz 保持四个 allowlist 文件，不含 Runtime、凭据、测试 fixture 或可启动界面包。
+- [ ] 回归 Claude Code、Codex、OpenCode 与 U-Code 的 create/attach/input/resize/stop/restart、权限、历史、统计、总结、Skills 与通信功能。
+- [ ] 检查 `git status --short`、`git diff --check` 和产物清单；不删除或覆盖用户已有的未跟踪 dist 目录。

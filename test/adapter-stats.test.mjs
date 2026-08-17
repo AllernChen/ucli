@@ -601,12 +601,11 @@ test('orchestrator drops native-owned stats before mutating or recording session
   assert.ok(ownershipGate < handler.indexOf("send('session:event'"))
 })
 
-test('adapter startup zeroes stay visible but are marked synthetic before ledger recording', () => {
+test('UCLI-owned adapter startup zeroes are synthetic while native DSH emits no stats', () => {
   for (const file of [
     'claudeAdapter.js',
     'codexAdapter.js',
-    'openCodeAdapter.js',
-    'deepSeekHarnessAdapter.js'
+    'openCodeAdapter.js'
   ]) {
     const source = readFileSync(new URL(`../electron/adapters/${file}`, import.meta.url), 'utf8')
     assert.match(
@@ -615,6 +614,11 @@ test('adapter startup zeroes stay visible but are marked synthetic before ledger
       file
     )
   }
+  const dshSource = readFileSync(
+    new URL('../electron/adapters/deepSeekHarnessAdapter.js', import.meta.url),
+    'utf8'
+  )
+  assert.doesNotMatch(dshSource, /type:\s*'stats_update'/)
   const orchestrator = readFileSync(
     new URL('../electron/orchestrator.js', import.meta.url),
     'utf8'
