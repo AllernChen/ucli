@@ -35,6 +35,16 @@ export function reconcileSessionPanes(currentPanes, count, resolveSessionId = ()
   }
 }
 
+export function releaseChangedPaneTerminalBinding(previousSessionId, nextSessionId, {
+  clearTerminal,
+  unsubscribe
+}) {
+  if (!previousSessionId || previousSessionId === nextSessionId) return false
+  clearTerminal?.()
+  unsubscribe?.()
+  return true
+}
+
 export async function activatePaneSession(session, paneIndex, {
   restartSession,
   startSession = async () => {},

@@ -171,6 +171,7 @@ test('session detail mounts exactly one capability-owned surface and no Web term
   assert.match(source, /v-if="paneCapabilityState\(i\)\.ucliStats" class="pane-info"/)
   assert.match(source, /activatePaneSession/)
   assert.match(source, /if \(!capabilities\.terminal\)\s*{[\s\S]*destroyPaneTerminal/)
+  assert.match(source, /releaseChangedPaneTerminalBinding\(oldSid, sessionId,[\s\S]*unsubscribePane/)
   assert.match(source, /panes\.value\[i\]\?\.sessionId === sessionId && evt\.sessionId === sessionId/)
 })
 

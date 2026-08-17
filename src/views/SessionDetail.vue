@@ -377,6 +377,7 @@ import {
   activatePaneSession,
   createPaneAssignmentGuard,
   reconcileSessionPanes,
+  releaseChangedPaneTerminalBinding,
   restoreAssignedPaneSessions,
   resolveSessionFocusPane,
   resolveWorkbenchFullscreenTarget,
@@ -834,9 +835,10 @@ function assignToPane(sessionId) {
     }
   }
   const oldSid = panes.value[activePane.value].sessionId
-  if (oldSid !== sessionId) {
-    panes.value[activePane.value].term?.clear()
-  }
+  releaseChangedPaneTerminalBinding(oldSid, sessionId, {
+    clearTerminal: () => panes.value[activePane.value]?.term?.clear(),
+    unsubscribe: () => unsubscribePane(activePane.value)
+  })
   panes.value[activePane.value].sessionId = sessionId
   panes.value[activePane.value].viewMode = 'terminal'
   panes.value[activePane.value].lastPtySize = null

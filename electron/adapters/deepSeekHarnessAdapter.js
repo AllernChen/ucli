@@ -17,6 +17,7 @@ import {
 import { isSafeNativeSessionId } from '../sessionDiscovery.js'
 
 const require = createRequire(import.meta.url)
+const DSH_COLD_START_HANDSHAKE_TIMEOUT_MS = 60_000
 let defaultPty = null
 try { defaultPty = require('node-pty') } catch {}
 
@@ -210,7 +211,7 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
       const createdBridge = await bridgeFactory({
         sessionId: this.session.id,
         profileName: config.profileName,
-        handshakeTimeoutMs: 10_000,
+        handshakeTimeoutMs: DSH_COLD_START_HANDSHAKE_TIMEOUT_MS,
         onEvent: event => this._onBridgeEvent(event, epoch),
         onDisconnect: error => this._onBridgeDisconnect(error, epoch),
         onPermissionRequest: request => this._decidePermission(request, epoch)

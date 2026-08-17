@@ -88,7 +88,7 @@ test('TUI start listens on its bridge before launching the exact compatible rc6 
       profileManager: { listProfiles: async () => ({ profiles: [compatibleProfile()] }) },
       createBridgeServer: async (options) => {
         order.push('bridge')
-        assert.equal(options.handshakeTimeoutMs, 10_000)
+        assert.equal(options.handshakeTimeoutMs, 60_000)
         return bridge
       },
       pty: {

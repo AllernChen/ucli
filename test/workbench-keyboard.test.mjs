@@ -7,6 +7,7 @@ import {
 } from '../src/workbenchKeyboard.js'
 import {
   reconcileSessionPanes,
+  releaseChangedPaneTerminalBinding,
   restoreAssignedPaneSessions,
   resolveSessionFocusPane,
   resolveWorkbenchFullscreenTarget,
@@ -104,6 +105,22 @@ test('saved sessions repopulate empty pane instances during workbench restoratio
   assert.equal(restored.panes[0].sessionId, 'claude-a')
   assert.equal(restored.panes[0].term, terminal)
   assert.equal(restored.panes[1].sessionId, 'codex-b')
+})
+
+test('switching a pane session releases the old terminal output binding before replay', () => {
+  const calls = []
+
+  assert.equal(releaseChangedPaneTerminalBinding('claude-a', 'codex-b', {
+    clearTerminal: () => calls.push('clear'),
+    unsubscribe: () => calls.push('unsubscribe')
+  }), true)
+  assert.deepEqual(calls, ['clear', 'unsubscribe'])
+
+  assert.equal(releaseChangedPaneTerminalBinding('codex-b', 'codex-b', {
+    clearTerminal: () => calls.push('unexpected-clear'),
+    unsubscribe: () => calls.push('unexpected-unsubscribe')
+  }), false)
+  assert.deepEqual(calls, ['clear', 'unsubscribe'])
 })
 
 test('a fresh renderer reconstructs and activates every saved 1, 2, and 4 pane layout', async () => {
