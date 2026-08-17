@@ -24,7 +24,7 @@
 ### 修复与发布基础
 
 - Claude Code 历史会话中的 `<synthetic>` 等内部伪模型不再作为 `--model` 传回 CLI；原生会话 ID 与上下文保持不变，异常分屏可直接重新启动恢复输入。
-- DSH bridge 冷启动握手窗口延长到 60 秒，避免 Windows 首次加载 rc6 插件树较慢时被误判为 hello 超时；握手仍受随机 endpoint、token 与协议校验保护。
+- DSH bridge 冷启动握手窗口延长到 60 秒，避免 Windows 首次加载 rc6 插件树较慢时被误判为 hello 超时；hello 前 PTY 瞬时退出会在完整清理后自动重试一次，连续失败返回准确的进程启动错误，握手仍受随机 endpoint、token 与协议校验保护。
 - 修复工作台窗格切换会话时沿用旧终端输出订阅的问题，新会话会先释放旧绑定再回放上下文，无需先关闭窗格才能显示内容。
 - Electron 升级到 43.4.0，electron-builder 升级到 26.15.3，并更新 ZIP、TOML 与 Vite 构建链依赖；官方 npm 全依赖审计无已知漏洞，发布 CI 使用 Node.js 24。
 

@@ -252,6 +252,168 @@ test('failed hello closes the owned bridge then terminates and awaits only its P
   assert.equal(adapter.bridge, null)
 })
 
+test('TUI start retries once when its owned PTY exits before bridge hello', async () => {
+  const bridges = []
+  const procs = []
+  const events = []
+  let rejectFirstHello
+  const firstHello = new Promise((_, reject) => { rejectFirstHello = reject })
+  const adapter = new DeepSeekHarnessAdapter({
+    session: {
+      id: 'ucli-pre-hello-retry', cwd: 'F:\\workspace',
+      adapterConfig: { surfacePreference: 'tui', profileName: 'tui' }
+    },
+    engine: null,
+    settings: {
+      inspectRuntime: async () => compatibleRuntime(),
+      profileManager: { listProfiles: async () => ({ profiles: [compatibleProfile()] }) },
+      createBridgeServer: async () => {
+        const index = bridges.length
+        const bridge = {
+          endpoint: `endpoint-pre-hello-${index}`,
+          token: String(index + 1).repeat(64),
+          protocolVersion: 1,
+          waitForHello: index === 0
+            ? () => firstHello
+            : async () => ({ surface: 'tui', profileName: 'tui' }),
+          async close() {
+            bridge.closed = true
+            if (index === 0) {
+              rejectFirstHello(Object.assign(new Error('closed'), { code: 'DSH_BRIDGE_CLOSED' }))
+            }
+          }
+        }
+        bridges.push(bridge)
+        return bridge
+      },
+      pty: {
+        spawn() {
+          const proc = fakePtyProcess()
+          proc.pid += procs.length
+          procs.push(proc)
+          if (procs.length === 1) {
+            setImmediate(() => proc.exitHandler({ exitCode: 1 }))
+          }
+          return proc
+        }
+      },
+      async terminatePtyTree(proc, waitForExit) {
+        proc.exitHandler({ exitCode: 0 })
+        await waitForExit
+      }
+    }
+  })
+  adapter.on('event', event => events.push(event))
+
+  try {
+    assert.equal(await adapter.start(), true)
+    assert.equal(bridges.length, 2)
+    assert.equal(procs.length, 2)
+    assert.equal(bridges[0].closed, true)
+    assert.equal(events.filter(({ type }) => type === 'exit').length, 0)
+    assert.equal(events.filter(({ type }) => type === 'ready').length, 1)
+  } finally {
+    await adapter.dispose().catch(() => {})
+  }
+})
+
+test('TUI start stops after one pre-ready retry and reports the owned PTY exit', async () => {
+  const bridges = []
+  const procs = []
+  const events = []
+  const adapter = new DeepSeekHarnessAdapter({
+    session: {
+      id: 'ucli-pre-hello-persistent', cwd: 'F:\\workspace',
+      adapterConfig: { surfacePreference: 'tui', profileName: 'tui' }
+    },
+    engine: null,
+    settings: {
+      inspectRuntime: async () => compatibleRuntime(),
+      profileManager: { listProfiles: async () => ({ profiles: [compatibleProfile()] }) },
+      createBridgeServer: async () => {
+        let rejectHello
+        const hello = new Promise((_, reject) => { rejectHello = reject })
+        const bridge = {
+          endpoint: `endpoint-pre-hello-fail-${bridges.length}`,
+          token: String(bridges.length + 1).repeat(64),
+          protocolVersion: 1,
+          waitForHello: () => hello,
+          async close() {
+            rejectHello(Object.assign(new Error('closed'), { code: 'DSH_BRIDGE_CLOSED' }))
+          }
+        }
+        bridges.push(bridge)
+        return bridge
+      },
+      pty: {
+        spawn() {
+          const proc = fakePtyProcess()
+          proc.pid += procs.length
+          procs.push(proc)
+          setImmediate(() => proc.exitHandler({ exitCode: 1 }))
+          return proc
+        }
+      }
+    }
+  })
+  adapter.on('event', event => events.push(event))
+
+  await assert.rejects(
+    adapter.start(),
+    error => error.code === 'DSH_PTY_EXITED_BEFORE_READY'
+  )
+  assert.equal(bridges.length, 2)
+  assert.equal(procs.length, 2)
+  assert.equal(events.filter(({ type }) => type === 'exit').length, 0)
+  assert.equal(adapter.bridge, null)
+  assert.equal(adapter.ptyProc, null)
+})
+
+test('TUI start never retries a pre-ready exit whose bridge cleanup failed', async () => {
+  const proc = fakePtyProcess()
+  let bridgeCalls = 0
+  const bridge = {
+    endpoint: 'endpoint-pre-hello-cleanup-fail',
+    token: '9'.repeat(64),
+    protocolVersion: 1,
+    waitForHello: () => new Promise(() => {}),
+    async close() {
+      throw Object.assign(new Error('close failed'), {
+        code: 'DSH_BRIDGE_SERVER_CLOSE_FAILED'
+      })
+    }
+  }
+  const adapter = new DeepSeekHarnessAdapter({
+    session: {
+      id: 'ucli-pre-hello-cleanup-fail', cwd: 'F:\\workspace',
+      adapterConfig: { surfacePreference: 'tui', profileName: 'tui' }
+    },
+    engine: null,
+    settings: {
+      inspectRuntime: async () => compatibleRuntime(),
+      profileManager: { listProfiles: async () => ({ profiles: [compatibleProfile()] }) },
+      createBridgeServer: async () => {
+        bridgeCalls += 1
+        if (bridgeCalls > 1) throw Object.assign(new Error('retried'), { code: 'UNEXPECTED_RETRY' })
+        return bridge
+      },
+      pty: {
+        spawn() {
+          setImmediate(() => proc.exitHandler({ exitCode: 1 }))
+          return proc
+        }
+      }
+    }
+  })
+
+  await assert.rejects(adapter.start(), error => (
+    error.code === 'DSH_PTY_EXITED_BEFORE_READY' &&
+    error.cleanupCode === 'DSH_BRIDGE_SERVER_CLOSE_FAILED'
+  ))
+  assert.equal(bridgeCalls, 1)
+  assert.equal(adapter.bridge, bridge)
+})
+
 test('bridge semantic events map once without interpreting the terminal transcript', async () => {
   let bridgeOptions
   const proc = fakePtyProcess()

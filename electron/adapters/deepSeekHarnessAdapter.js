@@ -18,6 +18,7 @@ import { isSafeNativeSessionId } from '../sessionDiscovery.js'
 
 const require = createRequire(import.meta.url)
 const DSH_COLD_START_HANDSHAKE_TIMEOUT_MS = 60_000
+const DSH_PRE_READY_EXIT_RETRIES = 1
 let defaultPty = null
 try { defaultPty = require('node-pty') } catch {}
 
@@ -161,7 +162,7 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
       return Promise.reject(codedError('DSH_ADAPTER_STOPPED'))
     }
     this._state = 'starting'
-    const attempt = this._start()
+    const attempt = this._startWithRetry()
     this._startPromise = attempt
     attempt.then(
       () => { if (this._startPromise === attempt) this._state = 'ready' },
@@ -175,6 +176,23 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
       }
     )
     return attempt
+  }
+
+  async _startWithRetry() {
+    let retryCount = 0
+    while (true) {
+      try {
+        return await this._start()
+      } catch (error) {
+        if (
+          error?.code !== 'DSH_PTY_EXITED_BEFORE_READY' ||
+          error?.cleanupCode ||
+          retryCount >= DSH_PRE_READY_EXIT_RETRIES ||
+          this._disposed || this._state !== 'starting'
+        ) throw error
+        retryCount += 1
+      }
+    }
   }
 
   async _start() {
@@ -245,7 +263,11 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
         }
       })
       proc.onExit(({ exitCode }) => this._onPtyExit(proc, ptyExit, exitCode, epoch))
-      await this.bridge.waitForHello()
+      const startup = await Promise.race([
+        this.bridge.waitForHello().then(hello => ({ kind: 'hello', hello })),
+        ptyExit.promise.then(exitCode => ({ kind: 'exit', exitCode }))
+      ])
+      if (startup.kind === 'exit') throw codedError('DSH_PTY_EXITED_BEFORE_READY')
       this._assertStarting(epoch)
       if (this.bridge.isConnected?.() === false) throw codedError('DSH_BRIDGE_DISCONNECTED')
       this._accepting = true
@@ -546,6 +568,7 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
   }
 
   _onPtyExit(proc, ptyExit, exitCode, epoch) {
+    const exitedBeforeReady = this._state === 'starting' && !this._accepting
     ptyExit.resolve(exitCode)
     if (this.ptyProc === proc) {
       this.ptyProc = null
@@ -553,8 +576,10 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
     }
     if (epoch !== this._epoch) return
     this._accepting = false
-    this._emitGatewayStopped()
-    this.emitEvent({ type: 'exit', code: exitCode })
+    if (!exitedBeforeReady) {
+      this._emitGatewayStopped()
+      this.emitEvent({ type: 'exit', code: exitCode })
+    }
     if (!this._shuttingDown) this._shutdown({ exitedProc: proc }).catch(() => {})
   }
 
