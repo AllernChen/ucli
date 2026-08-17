@@ -22,6 +22,7 @@ import {
   runResolvedProcess,
   resolveDshHome,
   resolveDshLaunch,
+  resolveNpmLaunch,
   validateDshProfileName
 } from '../electron/adapters/deepSeekHarnessRuntime.js'
 import {
@@ -194,6 +195,52 @@ test('Windows npm shim resolution returns absolute node and JS entry paths witho
     assert.equal(resolveDshLaunch({
       env: { PATH: root, PATHEXT: '.CMD' }, platform: 'win32', nodeExecutable: packagedExecutable
     }), null)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('trusted npm resolution binds Windows npm.cmd to its sibling node and npm CLI', {
+  skip: process.platform !== 'win32' && 'Windows shim layout is platform-specific'
+}, () => {
+  const root = temporaryRoot('ucli-npm-shim-')
+  try {
+    const shim = path.join(root, 'npm.cmd')
+    const node = path.join(root, 'node.exe')
+    const npmCli = path.join(root, 'node_modules', 'npm', 'bin', 'npm-cli.js')
+    writeFileSync(shim, '@ECHO off\r\n')
+    writeFileSync(node, 'trusted node')
+    mkdirSync(path.dirname(npmCli), { recursive: true })
+    writeFileSync(npmCli, 'trusted npm cli')
+
+    assert.deepEqual(resolveNpmLaunch({
+      env: { PATH: root, PATHEXT: '.CMD;.EXE' }, platform: 'win32'
+    }), {
+      file: path.resolve(realpathSync(node)),
+      prefixArgs: [path.resolve(realpathSync(npmCli))]
+    })
+
+    rmSync(npmCli)
+    assert.equal(resolveNpmLaunch({
+      env: { PATH: root, PATHEXT: '.CMD' }, platform: 'win32'
+    }), null)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('POSIX npm resolution accepts only an executable from an absolute PATH entry', {
+  skip: process.platform === 'win32' && 'POSIX executable resolution is platform-specific'
+}, () => {
+  const root = temporaryRoot('ucli-posix-npm-')
+  try {
+    const npm = path.join(root, 'npm')
+    writeFileSync(npm, '#!/bin/sh\n')
+    chmodSync(npm, 0o755)
+    assert.deepEqual(resolveNpmLaunch({ env: { PATH: root }, platform: 'linux' }), {
+      file: path.resolve(realpathSync(npm)), prefixArgs: []
+    })
+    assert.equal(resolveNpmLaunch({ env: { PATH: 'relative-bin' }, platform: 'linux' }), null)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

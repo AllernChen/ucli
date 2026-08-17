@@ -462,6 +462,36 @@ export function resolveDshLaunch({
   return null
 }
 
+export function resolveNpmLaunch({
+  env = process.env,
+  platform = process.platform
+} = {}) {
+  for (const directory of pathEntries(env, platform)) {
+    if (!path.isAbsolute(directory)) continue
+    if (platform === 'win32') {
+      const npmShim = path.win32.join(directory, 'npm.cmd')
+      const nodeRuntime = path.win32.join(directory, 'node.exe')
+      const npmCli = path.win32.join(directory, 'node_modules', 'npm', 'bin', 'npm-cli.js')
+      if (![npmShim, nodeRuntime, npmCli].every(isRegularUnlinkedFile)) continue
+      try {
+        return {
+          file: path.resolve(realpathSync(nodeRuntime)),
+          prefixArgs: [path.resolve(realpathSync(npmCli))]
+        }
+      } catch {
+        continue
+      }
+    }
+    const npm = path.join(directory, 'npm')
+    try {
+      accessSync(npm, fsConstants.X_OK)
+      const resolved = realpathSync(npm)
+      if (lstatSync(resolved).isFile()) return { file: path.resolve(resolved), prefixArgs: [] }
+    } catch {}
+  }
+  return null
+}
+
 export function resolvePnpmAvailability({ env = process.env, platform = process.platform } = {}) {
   for (const directory of pathEntries(env, platform)) {
     if (!path.isAbsolute(directory)) continue
