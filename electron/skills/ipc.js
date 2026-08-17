@@ -1,6 +1,6 @@
 import { sanitiseSkillError } from './contracts.js'
 
-const ADAPTER_IDS = new Set(['claude', 'codex', 'opencode', 'ucode'])
+const ADAPTER_IDS = new Set(['claude', 'codex', 'opencode', 'ucode', 'deepseek-harness'])
 const REF_TYPES = new Set(['default', 'branch', 'tag', 'commit'])
 
 function ipcError(message) {
@@ -50,7 +50,7 @@ function source(value) {
 
 function installRequest(value) {
   const input = object(value, 'request')
-  if (!Array.isArray(input.targetAdapterIds) || !input.targetAdapterIds.length || input.targetAdapterIds.length > 4) {
+  if (!Array.isArray(input.targetAdapterIds) || !input.targetAdapterIds.length || input.targetAdapterIds.length > ADAPTER_IDS.size) {
     throw ipcError('targetAdapterIds is invalid')
   }
   const targetAdapterIds = [...new Set(input.targetAdapterIds.map((adapterId) => {
@@ -77,7 +77,7 @@ function installRequests(value) {
 function inspectionContext(value) {
   if (value == null) return {}
   const input = object(value, 'context')
-  if (!Array.isArray(input.targetAdapterIds) || !input.targetAdapterIds.length || input.targetAdapterIds.length > 4) {
+  if (!Array.isArray(input.targetAdapterIds) || !input.targetAdapterIds.length || input.targetAdapterIds.length > ADAPTER_IDS.size) {
     throw ipcError('targetAdapterIds is invalid')
   }
   const targetAdapterIds = [...new Set(input.targetAdapterIds.map((adapterId) => {

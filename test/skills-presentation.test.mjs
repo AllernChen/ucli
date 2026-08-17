@@ -1197,4 +1197,5 @@ test('Skills page explains source ownership, entry paths and broken links', () =
   assert.match(page, /item\.plugin\.id/)
   assert.match(page, /source\.health === 'ready'/)
   assert.match(page, /Skill 无效/)
+  assert.match(page, /source\.manageable !== false/)
 })

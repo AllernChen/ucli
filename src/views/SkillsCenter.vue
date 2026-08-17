@@ -253,7 +253,7 @@
                 />
               </div>
               <a-button
-                v-if="source.origin === 'external' && source.health === 'ready'"
+                v-if="source.origin === 'external' && source.health === 'ready' && source.manageable !== false"
                 size="small"
                 @click="confirmAdopt(source)"
               >接管</a-button>

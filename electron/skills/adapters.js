@@ -1,5 +1,8 @@
+import { existsSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
+
+import { resolveDshHome } from '../adapters/deepSeekHarnessRuntime.js'
 
 export const SKILL_ADAPTERS = Object.freeze({
   claude: {
@@ -29,36 +32,76 @@ export const SKILL_ADAPTERS = Object.freeze({
     projectParts: ['.ucode', 'skills'],
     userParts: ['.config', 'ucode', 'skills'],
     visibleFrom: ['ucode', 'opencode', 'claude', 'codex']
+  },
+  'deepseek-harness': {
+    id: 'deepseek-harness',
+    displayName: 'DeepSeek Harness',
+    projectParts: ['.dsh', 'skills'],
+    userRoot: ({ env, home }) => join(resolveDshHome({ env, homeDirectory: home }), 'skills'),
+    visibleFrom: ['deepseek-harness', 'codex']
   }
 })
 
-export const DSH_VIRTUAL_SKILL_ADAPTER = Object.freeze({
-  id: 'deepseek-harness',
-  displayName: 'DeepSeek Harness',
-  virtual: true,
-  projectOnly: true
-})
-
 export function listSkillPresentationAdapters() {
-  return [
-    ...Object.values(SKILL_ADAPTERS).map(({ id, displayName }) => ({ id, displayName })),
-    DSH_VIRTUAL_SKILL_ADAPTER
-  ]
+  return Object.values(SKILL_ADAPTERS).map(({ id, displayName }) => ({ id, displayName }))
 }
 
 const PROJECTION_COVERAGE = Object.freeze({
   claude: ['claude', 'opencode', 'ucode'],
-  codex: ['codex', 'opencode', 'ucode'],
+  codex: ['codex', 'opencode', 'ucode', 'deepseek-harness'],
   opencode: ['opencode', 'ucode'],
-  ucode: ['ucode']
+  ucode: ['ucode'],
+  'deepseek-harness': ['deepseek-harness']
 })
+
+function normalizedPath(path) {
+  const value = resolve(path)
+  return process.platform === 'win32' ? value.toLowerCase() : value
+}
+
+function expandHomePrefix(value, home) {
+  if (value === '~') return home
+  if (value.startsWith('~/') || value.startsWith('~\\')) return join(home, value.slice(2))
+  return value
+}
+
+export function resolveDshAgentsRoot({ home = homedir(), env = process.env, cwd = process.cwd() } = {}) {
+  const configured = typeof env.DSH_AGENTS_HOME === 'string' && env.DSH_AGENTS_HOME.trim()
+    ? env.DSH_AGENTS_HOME
+    : join(home, '.agents')
+  return join(resolve(cwd, expandHomePrefix(configured, resolve(home))), 'skills')
+}
+
+export function resolveProjectScopeRoot(projectPath) {
+  const fallback = resolve(projectPath)
+  let current
+  try { current = realpathSync(fallback) } catch { current = fallback }
+  for (let depth = 0; depth < 64; depth += 1) {
+    if (existsSync(join(current, '.git'))) return current
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return fallback
+}
+
+function codexProjectionCoversDsh(options = {}) {
+  if (options.scopeType !== 'user') return true
+  const home = resolve(options.home || homedir())
+  const codexRoot = resolveSkillRoot({ adapterId: 'codex', scopeType: 'user', home, env: options.env || process.env })
+  const dshAgentsRoot = resolveDshAgentsRoot({ home, env: options.env || process.env })
+  return normalizedPath(codexRoot) === normalizedPath(dshAgentsRoot)
+}
 
 export function resolveSkillRoot({ adapterId, scopeType, projectPath, home = homedir(), env = process.env }) {
   const adapter = SKILL_ADAPTERS[adapterId]
   if (!adapter) throw Object.assign(new Error('Skill adapter is unavailable'), { code: 'SKILL_ADAPTER_UNAVAILABLE' })
   if (scopeType === 'project') {
     if (!projectPath) throw Object.assign(new Error('Project path is required'), { code: 'SKILL_SCOPE_INVALID' })
-    return join(resolve(projectPath), ...adapter.projectParts)
+    const base = ['codex', 'deepseek-harness'].includes(adapterId)
+      ? resolveProjectScopeRoot(projectPath)
+      : resolve(projectPath)
+    return join(base, ...adapter.projectParts)
   }
   if (scopeType !== 'user') throw Object.assign(new Error('Skill scope is invalid'), { code: 'SKILL_SCOPE_INVALID' })
   if (adapterId === 'ucode' && env.UCODE_HOME) {
@@ -69,6 +112,7 @@ export function resolveSkillRoot({ adapterId, scopeType, projectPath, home = hom
     const configHome = env.XDG_CONFIG_HOME ? resolve(env.XDG_CONFIG_HOME) : join(resolve(home), '.config')
     return join(configHome, adapterId, 'skills')
   }
+  if (adapter.userRoot) return adapter.userRoot({ env, home: resolve(home) })
   return join(resolve(home), ...adapter.userParts)
 }
 
@@ -81,18 +125,10 @@ export function buildSkillVisibility(projectionAdapterIds, { scopeType } = {}) {
     const direct = projections.includes(adapterId)
     return [adapterId, { visible: direct || inheritedFrom.length > 0, direct, inheritedFrom }]
   }))
-  if (scopeType) {
-    const projectCodexVisible = scopeType === 'project' && projections.includes('codex')
-    visibility['deepseek-harness'] = {
-      visible: projectCodexVisible,
-      direct: false,
-      inheritedFrom: projectCodexVisible ? ['codex'] : []
-    }
-  }
   return visibility
 }
 
-export function planSkillProjections(targetAdapterIds) {
+export function planSkillProjections(targetAdapterIds, options = {}) {
   const adapterOrder = Object.keys(SKILL_ADAPTERS)
   const remaining = new Set(targetAdapterIds.filter((id) => SKILL_ADAPTERS[id]))
   const selected = []
@@ -100,7 +136,10 @@ export function planSkillProjections(targetAdapterIds) {
     let best = null
     let bestCoverage = []
     for (const adapterId of adapterOrder) {
-      const coverage = PROJECTION_COVERAGE[adapterId].filter((id) => remaining.has(id))
+      const adapterCoverage = adapterId === 'codex' && !codexProjectionCoversDsh(options)
+        ? PROJECTION_COVERAGE[adapterId].filter((id) => id !== 'deepseek-harness')
+        : PROJECTION_COVERAGE[adapterId]
+      const coverage = adapterCoverage.filter((id) => remaining.has(id))
       if (coverage.length > bestCoverage.length || (coverage.length === bestCoverage.length && remaining.has(adapterId))) {
         best = adapterId
         bestCoverage = coverage

@@ -1,7 +1,15 @@
-import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import {
+  closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync,
+  readdirSync, readlinkSync, realpathSync, statSync
+} from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
-import { resolveSkillRoot, SKILL_ADAPTERS } from './adapters.js'
+import { resolveDshAgentsRoot, resolveProjectScopeRoot, resolveSkillRoot, SKILL_ADAPTERS } from './adapters.js'
+import { parseSkillManifest, validateDshSkillName } from './contracts.js'
+
+const DEFAULT_MAX_FLAT_FILE_BYTES = 10 * 1024 * 1024
+const DEFAULT_MAX_FLAT_TOTAL_BYTES = 50 * 1024 * 1024
 
 function normalizedPath(path) {
   const value = resolve(String(path || '.'))
@@ -53,6 +61,11 @@ export function scanDeclaredSkillRoot({
   sourceProjects = new Map(),
   maxDepth = 0,
   sourceMetadata = {},
+  allowFlatFiles = false,
+  flatFilesOnly = false,
+  flatFileLimits = {},
+  flatFileOps = {},
+  excludedEntryNames = [],
   containmentRoot = null,
   visitedRoots = new Set(),
   inspectSkillDirectory,
@@ -66,10 +79,96 @@ export function scanDeclaredSkillRoot({
   if (visitedRoots.has(rootKey)) return
   visitedRoots.add(rootKey)
   let entries = []
-  try { entries = readdirSync(root, { withFileTypes: true }) } catch { return }
+  try { entries = readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)) } catch { return }
+  const maxFlatFileBytes = flatFileLimits.maxFileBytes ?? DEFAULT_MAX_FLAT_FILE_BYTES
+  const maxFlatTotalBytes = flatFileLimits.maxTotalBytes ?? DEFAULT_MAX_FLAT_TOTAL_BYTES
+  let flatBytesRead = 0
+  const visibilityFor = (projectionAdapterIds) => {
+    const visibility = buildSkillVisibility(projectionAdapterIds, { scopeType })
+    if (projectionAdapterIds.includes('codex') && !sourceMetadata.dshSource) {
+      visibility['deepseek-harness'] = { visible: false, direct: false, inheritedFrom: [] }
+    }
+    return visibility
+  }
 
   for (const entry of entries) {
+    if (excludedEntryNames.includes(entry.name)) continue
     const entryPath = join(root, entry.name)
+    if (allowFlatFiles && (entry.isFile() || entry.isSymbolicLink()) && entry.name.toLowerCase().endsWith('.md')) {
+      const fileName = entry.name.slice(0, -3)
+      const installation = managedPaths.get(normalizedPath(entryPath))
+      const addUnavailableFlat = ({
+        name = fileName,
+        health = 'invalid',
+        description = 'Skill Markdown 清单无效'
+      } = {}) => {
+        const sourceProject = sourceProjects.get(name) || sourceProjects.get(fileName)
+        results.push({
+          key: `${adapterId}:${scopeType}:${normalizedPath(entryPath)}`,
+          adapterId, sourceKind, scopeType, scopeKey,
+          path: entryPath, entryPath,
+          resolvedPath: entry.isSymbolicLink() ? entryPath : realpathSync(entryPath),
+          link: entry.isSymbolicLink()
+            ? { type: process.platform === 'win32' ? 'junction' : 'symlink', targetPath: null, status: 'unsupported' }
+            : null,
+          health, name, description,
+          contentSha256: null, fileList: [entry.name], status: health,
+          origin: forcedOrigin || (installation ? 'managed' : 'external'),
+          installationId: installation?.id || null,
+          visibility: visibilityFor([]),
+          format: 'flat', manageable: false, readOnly: true,
+          ...sourceMetadata,
+          ...(sourceProject ? { sourceProject } : {})
+        })
+      }
+      if (entry.isSymbolicLink()) {
+        addUnavailableFlat({ health: 'unsupported', description: 'Skill Markdown 符号链接不受支持' })
+        continue
+      }
+      let bounded
+      try { bounded = readBoundedRegularFile(entryPath, maxFlatFileBytes, flatFileOps) } catch { continue }
+      if (bounded.status === 'unsupported') {
+        addUnavailableFlat({ health: 'unsupported', description: 'Skill Markdown 文件类型不受支持' })
+        continue
+      }
+      if (bounded.status !== 'ready' || flatBytesRead + bounded.size > maxFlatTotalBytes) {
+        addUnavailableFlat()
+        continue
+      }
+      flatBytesRead += bounded.size
+      const content = bounded.content
+      try {
+        const inspected = parseSkillManifest(content.toString('utf8'))
+        validateDshSkillName(inspected.name)
+        const sourceProject = sourceProjects.get(inspected.name) || sourceProjects.get(fileName)
+        results.push({
+          key: `${adapterId}:${scopeType}:${normalizedPath(entryPath)}`,
+          adapterId,
+          sourceKind,
+          scopeType,
+          scopeKey,
+          path: entryPath,
+          entryPath,
+          resolvedPath: realpathSync(entryPath),
+          link: null,
+          health: 'ready',
+          name: inspected.name,
+          description: inspected.description,
+          contentSha256: createHash('sha256').update(content).digest('hex'),
+          fileList: [entry.name],
+          origin: forcedOrigin || (installation ? 'managed' : 'external'),
+          installationId: installation?.id || null,
+          visibility: visibilityFor([adapterId]),
+          format: 'flat', manageable: false, readOnly: true,
+          ...sourceMetadata,
+          ...(sourceProject ? { sourceProject } : {})
+        })
+      } catch {
+        addUnavailableFlat()
+      }
+      continue
+    }
+    if (flatFilesOnly) continue
     let location
     try { location = inspectEntry(entryPath) } catch { continue }
     if (!location) continue
@@ -96,7 +195,7 @@ export function scanDeclaredSkillRoot({
         status: 'broken_link',
         origin: forcedOrigin || (installation ? 'managed' : 'external'),
         installationId: installation?.id || null,
-        visibility: buildSkillVisibility([], { scopeType }),
+        visibility: visibilityFor([]),
         ...sourceMetadata,
         ...(sourceProject ? { sourceProject } : {})
       })
@@ -105,6 +204,12 @@ export function scanDeclaredSkillRoot({
 
     try {
       const inspected = inspectSkillDirectory(entryPath)
+      let dshCompatible = true
+      if (sourceMetadata.dshDirect) {
+        validateDshSkillName(inspected.name)
+      } else if (sourceMetadata.dshSource) {
+        try { validateDshSkillName(inspected.name) } catch { dshCompatible = false }
+      }
       const sourceProject = sourceProjects.get(entry.name) || sourceProjects.get(inspected.name)
       results.push({
         key: `${adapterId}:${scopeType}:${normalizedPath(entryPath)}`,
@@ -123,7 +228,12 @@ export function scanDeclaredSkillRoot({
         fileList: inspected.fileList,
         origin: forcedOrigin || (installation ? 'managed' : 'external'),
         installationId: installation?.id || null,
-        visibility: buildSkillVisibility([adapterId], { scopeType }),
+        visibility: (() => {
+          const visibility = visibilityFor([adapterId])
+          if (!dshCompatible) visibility['deepseek-harness'] = { visible: false, direct: false, inheritedFrom: [] }
+          return visibility
+        })(),
+        ...(sourceMetadata.dshSource ? { dshCompatible } : {}),
         ...sourceMetadata,
         ...(sourceProject ? { sourceProject } : {})
       })
@@ -142,6 +252,11 @@ export function scanDeclaredSkillRoot({
             sourceProjects,
             maxDepth: maxDepth - 1,
             sourceMetadata,
+            allowFlatFiles,
+            flatFilesOnly,
+            flatFileLimits,
+            flatFileOps,
+            excludedEntryNames,
             containmentRoot,
             visitedRoots,
             inspectSkillDirectory,
@@ -169,7 +284,7 @@ export function scanDeclaredSkillRoot({
         status: 'invalid',
         origin: forcedOrigin || (installation ? 'managed' : 'external'),
         installationId: installation?.id || null,
-        visibility: buildSkillVisibility([], { scopeType }),
+        visibility: visibilityFor([]),
         ...sourceMetadata,
         ...(sourceProject ? { sourceProject } : {})
       })
@@ -179,6 +294,71 @@ export function scanDeclaredSkillRoot({
 
 function entryIsDirectory(path) {
   try { return statSync(path).isDirectory() } catch { return false }
+}
+
+function sameFileIdentity(left, right) {
+  return String(left.dev) === String(right.dev) && String(left.ino) === String(right.ino)
+}
+
+function readBoundedRegularFile(path, maxBytes, fileOps = {}) {
+  const initial = lstatSync(path)
+  if (!initial.isFile() || initial.isSymbolicLink()) return { status: 'unsupported' }
+  if (initial.size > maxBytes) return { status: 'too_large', size: initial.size }
+  fileOps.beforeOpen?.(path)
+  const beforeOpen = lstatSync(path)
+  if (!beforeOpen.isFile() || beforeOpen.isSymbolicLink() || !sameFileIdentity(initial, beforeOpen)) {
+    return { status: 'unsupported' }
+  }
+  const buffer = Buffer.allocUnsafe(maxBytes + 1)
+  const fd = openSync(path, 'r')
+  let offset = 0
+  try {
+    const opened = fstatSync(fd)
+    if (!opened.isFile() || !sameFileIdentity(initial, opened)) return { status: 'unsupported' }
+    while (offset <= maxBytes) {
+      const count = readSync(fd, buffer, offset, buffer.length - offset, null)
+      if (count === 0) break
+      offset += count
+    }
+  } finally {
+    closeSync(fd)
+  }
+  return offset > maxBytes
+    ? { status: 'too_large', size: offset }
+    : { status: 'ready', content: buffer.subarray(0, offset), size: offset }
+}
+
+function dshSourceMetadata(adapterId, scopeType) {
+  if (adapterId === 'deepseek-harness') {
+    return scopeType === 'project'
+      ? { dshSource: 'project-dsh', dshRank: 100, dshDirect: true }
+      : { dshSource: 'user-dsh', dshRank: 400, dshDirect: true }
+  }
+  if (adapterId === 'codex') {
+    return scopeType === 'project'
+      ? { dshSource: 'project-agents', dshRank: 200 }
+      : { dshSource: 'user-agents', dshRank: 500 }
+  }
+  return {}
+}
+
+function applyDshPrecedence(results) {
+  const byName = new Map()
+  for (const item of results) {
+    if (!item.dshSource) continue
+    const sources = byName.get(item.name) || []
+    sources.push(item)
+    byName.set(item.name, sources)
+  }
+  for (const sources of byName.values()) {
+    const winner = sources
+      .filter((item) => item.health === 'ready' && item.dshCompatible !== false)
+      .sort((left, right) => left.dshRank - right.dshRank)[0] || null
+    for (const item of sources) {
+      item.effective = item === winner
+      item.shadowedBy = item === winner ? null : winner?.dshSource || null
+    }
+  }
 }
 
 function readInstalledClaudePlugins(home, projectPath) {
@@ -287,7 +467,10 @@ function scanPluginSkills({ adapterId, pluginsRoot, scanRoot, ...options }) {
   walk(pluginsRoot, 0)
 }
 
-export function createSkillDiscovery({ home, env = process.env, inspectSkillDirectory, buildSkillVisibility }) {
+export function createSkillDiscovery({
+  home, env = process.env, inspectSkillDirectory, buildSkillVisibility,
+  flatFileLimits = {}, flatFileOps = {}
+}) {
   const skillHome = resolve(home)
 
   return {
@@ -300,6 +483,8 @@ export function createSkillDiscovery({ home, env = process.env, inspectSkillDire
       const results = []
       const marketplaceProjects = readClaudeMarketplaceProjects(skillHome)
       const managedPaths = new Map(managedInstallations.map((item) => [normalizedPath(item.targetPath), item]))
+      const dshAgentsRoot = resolveDshAgentsRoot({ home: skillHome, env })
+      const codexUserRoot = resolveSkillRoot({ adapterId: 'codex', scopeType: 'user', home: skillHome, env })
       const scanRoot = ({
         adapterId,
         sourceKind,
@@ -310,6 +495,9 @@ export function createSkillDiscovery({ home, env = process.env, inspectSkillDire
         projects = new Map(),
         maxDepth = 0,
         sourceMetadata = {},
+        allowFlatFiles = Boolean(sourceMetadata.dshDirect),
+        flatFilesOnly = false,
+        excludedEntryNames = [],
         containmentRoot = null
       }) => scanDeclaredSkillRoot({
         adapterId,
@@ -323,29 +511,100 @@ export function createSkillDiscovery({ home, env = process.env, inspectSkillDire
         sourceProjects: projects,
         maxDepth,
         sourceMetadata,
+        allowFlatFiles,
+        flatFilesOnly,
+        flatFileLimits,
+        flatFileOps,
+        excludedEntryNames,
         containmentRoot,
         inspectSkillDirectory,
         buildSkillVisibility
       })
 
+      const canonicalProject = projectPath ? resolveProjectScopeRoot(projectPath) : null
       for (const adapterId of Object.keys(SKILL_ADAPTERS)) {
+        const userRoot = resolveSkillRoot({ adapterId, scopeType: 'user', home: skillHome, env })
+        const userMetadata = adapterId === 'codex' && normalizedPath(userRoot) !== normalizedPath(dshAgentsRoot)
+          ? {}
+          : dshSourceMetadata(adapterId, 'user')
         scanRoot({
           adapterId,
           sourceKind: `${adapterId}_user`,
           scopeType: 'user',
-          root: resolveSkillRoot({ adapterId, scopeType: 'user', home: skillHome, env }),
-          projects: sourceProjects
+          root: userRoot,
+          projects: sourceProjects,
+          sourceMetadata: userMetadata,
+          excludedEntryNames: adapterId === 'deepseek-harness' ? ['.system'] : []
         })
         if (projectPath) {
           scanRoot({
             adapterId,
             sourceKind: `${adapterId}_project`,
             scopeType: 'project',
-            scopeKey: normalizedPath(projectPath),
+            scopeKey: ['codex', 'deepseek-harness'].includes(adapterId)
+              ? normalizedPath(canonicalProject)
+              : normalizedPath(projectPath),
             root: resolveSkillRoot({ adapterId, scopeType: 'project', projectPath }),
-            projects: projectSourceProjects
+            projects: projectSourceProjects,
+            sourceMetadata: dshSourceMetadata(adapterId, 'project')
           })
         }
+      }
+
+      if (normalizedPath(codexUserRoot) === normalizedPath(dshAgentsRoot)) {
+        scanRoot({
+          adapterId: 'deepseek-harness',
+          sourceKind: 'deepseek-harness_user_agents_flat',
+          scopeType: 'user',
+          root: dshAgentsRoot,
+          projects: sourceProjects,
+          sourceMetadata: { dshSource: 'user-agents', dshRank: 500 },
+          allowFlatFiles: true,
+          flatFilesOnly: true
+        })
+      } else {
+        scanRoot({
+          adapterId: 'deepseek-harness',
+          sourceKind: 'deepseek-harness_user_agents',
+          scopeType: 'user',
+          root: dshAgentsRoot,
+          projects: sourceProjects,
+          sourceMetadata: { dshSource: 'user-agents', dshRank: 500 },
+          allowFlatFiles: true
+        })
+      }
+
+      if (canonicalProject) {
+        scanRoot({
+          adapterId: 'deepseek-harness',
+          sourceKind: 'deepseek-harness_project_agents_flat',
+          scopeType: 'project',
+          scopeKey: normalizedPath(canonicalProject),
+          root: resolveSkillRoot({ adapterId: 'codex', scopeType: 'project', projectPath: canonicalProject }),
+          projects: projectSourceProjects,
+          sourceMetadata: { dshSource: 'project-agents', dshRank: 200 },
+          allowFlatFiles: true,
+          flatFilesOnly: true
+        })
+      }
+
+      const bundledRoot = typeof env.DSH_BUNDLED_SKILL_DIR === 'string' &&
+        isAbsolute(env.DSH_BUNDLED_SKILL_DIR)
+        ? resolve(env.DSH_BUNDLED_SKILL_DIR)
+        : null
+      if (bundledRoot) {
+        scanRoot({
+          adapterId: 'deepseek-harness',
+          sourceKind: 'deepseek-harness_bundled',
+          scopeType: 'system',
+          root: bundledRoot,
+          forcedOrigin: 'bundled',
+          sourceMetadata: {
+            dshSource: 'bundled', dshRank: 600, dshDirect: true,
+            readOnly: true, manageable: false
+          },
+          containmentRoot: bundledRoot
+        })
       }
 
       const codexLegacyRoot = join(skillHome, '.codex', 'skills')
@@ -390,6 +649,7 @@ export function createSkillDiscovery({ home, env = process.env, inspectSkillDire
         scopeType: 'system',
         forcedOrigin: 'bundled'
       })
+      applyDshPrecedence(results)
       return results
     }
   }

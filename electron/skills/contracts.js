@@ -38,8 +38,17 @@ export function validateSkillCompatibility(name) {
       compatible: portable,
       reason: portable ? null : 'OpenCode requires a lowercase hyphenated skill name'
     },
-    ucode: { compatible: true, reason: null }
+    ucode: { compatible: true, reason: null },
+    'deepseek-harness': { compatible: portable, reason: portable ? null : 'DSH requires a lowercase hyphenated skill name' }
   }
+}
+
+export function validateDshSkillName(name) {
+  const value = String(name || '').trim()
+  if (!PORTABLE_NAME.test(value) || value.length > 64) {
+    throw skillError('DSH Skill name must be lowercase and hyphenated')
+  }
+  return value
 }
 
 function cleanRelativePath(value, field) {
@@ -106,5 +115,9 @@ export function sanitiseSkillError(error) {
   const code = typeof error?.code === 'string' && error.code.startsWith('SKILL_')
     ? error.code
     : 'SKILL_OPERATION_FAILED'
-  return Object.assign(new Error(code === 'SKILL_OPERATION_FAILED' ? 'Skill operation failed' : error.message), { code })
+  const safe = Object.assign(new Error(code === 'SKILL_OPERATION_FAILED' ? 'Skill operation failed' : error.message), { code })
+  if (code === 'SKILL_PROJECTION_ROLLBACK_FAILED' && error?.recoveryAction === 'retry_apply_codex') {
+    safe.recoveryAction = 'retry_apply_codex'
+  }
+  return safe
 }
