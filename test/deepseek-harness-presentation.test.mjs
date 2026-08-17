@@ -28,27 +28,34 @@ test('Settings summarizes pinned DSH runtime state and routes profile management
 
   assert.match(source, /class="dsh-profile-management"/)
   assert.match(source, /0\.1\.0-rc\.6/)
-  assert.match(source, /0\.11\.0/)
-  assert.match(source, /ipc\.listDshProfiles\(\)/)
+  assert.match(source, /ipc\.getDshState\(\)/)
   assert.match(source, /router\.push\([^\n]*profiles[^\n]*deepseek-harness/)
   assert.doesNotMatch(source, /ipc\.enableDshBridge\(/)
-  assert.match(source, /label="DSH profile"[\s\S]*?个/u)
-  assert.match(source, /label="UCLI bridge"[\s\S]*?个已兼容/u)
+  assert.match(source, /dshRuntimeView\.rows/)
   assert.match(source, /前往档案管理/)
-  assert.match(source, /UCLI 不安装 TUI/)
   assert.match(source, /Web/)
 })
 
-test('Profile Center initializes native DSH profiles and manages their bridge status', () => {
+test('Profile Center manages bounded DSH runtime actions, profiles and legacy bridge removal', () => {
   const source = loadSfc('../src/views/ProfileCenter.vue')
 
   assert.match(source, /deepseek-harness/)
+  assert.match(source, /createDshManagementController/)
+  assert.match(source, /ipc\.getDshState\(\)/)
   assert.match(source, /ipc\.listDshProfiles\(\)/)
   assert.match(source, /ipc\.initializeDshProfile\(newDshProfileName\.value\)/)
-  assert.match(source, /ipc\.enableDshBridge\(profile\.profileName\)/)
+  assert.match(source, /ipc\.removeDshLegacyBridge\(profile\.profileName\)/)
+  assert.match(source, /ipc\.installDshRuntime\(\)/)
+  assert.match(source, /ipc\.upgradeDshRuntime\(\)/)
+  assert.match(source, /ipc\.repairDshRuntime\(\)/)
+  assert.match(source, /ipc\.removeDshRuntime\(\)/)
+  assert.match(source, /Modal\.confirm\(/)
+  assert.match(source, /dshRuntimeView\.rows/)
+  assert.match(source, /受支持版本/)
   assert.match(source, /初始化基础 profile/)
-  assert.match(source, /不会安装 TUI/)
-  assert.match(source, /bridgeCompatible/)
+  assert.match(source, /移除旧 bridge/)
+  assert.doesNotMatch(source, /ipc\.enableDshBridge\(|启用 UCLI bridge|更新 UCLI bridge/)
+  assert.doesNotMatch(source, /TUI|终端模式|turtle-ui|启用 UCLI 集成/)
 })
 
 test('Workbench creates only DSH Web from a selected managed or system runtime', () => {
@@ -61,6 +68,7 @@ test('Workbench creates only DSH Web from a selected managed or system runtime',
   assert.doesNotMatch(source, /dshSurfacePreference|selectedDshProfile|ipc\.listDshProfiles\(\)/)
   assert.doesNotMatch(source, /surfacePreference:\s*'tui'|profileReady|bridgeCompatible/)
   assert.doesNotMatch(source, /adapterConfig\s*=\s*\{[^}]*profileName/)
+  assert.doesNotMatch(source, /TUI|终端模式|turtle-ui|启用 UCLI 集成/)
   assert.match(source, /前往档案管理/)
 })
 

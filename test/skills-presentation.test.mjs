@@ -10,6 +10,7 @@ import {
   buildSkillCliMatrix,
   canConfirmSkillInstall,
   createLatestRequestGuard,
+  dshSkillSourcePresentation,
   filterSkillCatalog,
   groupSkillCatalogBySourceProject,
   normaliseGitLabRepository,
@@ -181,8 +182,8 @@ test('CLI matrix distinguishes managed, external, inherited and unapplied Skill 
   assert.equal(matrix[2].actionLabel, '直接应用')
 })
 
-test('DeepSeek Harness project visibility is read-only and never becomes an install target', () => {
-  const virtualAdapter = { id: 'deepseek-harness', displayName: 'DeepSeek Harness', virtual: true, projectOnly: true }
+test('DeepSeek Harness is a native skill target and inherited project visibility can be applied', () => {
+  const dshAdapter = { id: 'deepseek-harness', displayName: 'DeepSeek Harness' }
   const matrix = buildSkillCliMatrix({
     status: 'ready',
     packages: [{ id: 'pkg-1', compatibility: {} }],
@@ -195,29 +196,79 @@ test('DeepSeek Harness project visibility is read-only and never becomes an inst
       codex: { visible: true, direct: true, inheritedFrom: [] },
       'deepseek-harness': { visible: true, direct: false, inheritedFrom: ['codex'] }
     }
-  }, [virtualAdapter])
+  }, [dshAdapter])
 
-  assert.deepEqual(matrix[0], {
-    adapterId: 'deepseek-harness',
-    displayName: 'DeepSeek Harness',
-    state: 'inherited',
-    label: '项目 .agents/skills 可见',
-    visible: true,
-    direct: false,
-    inheritedFrom: ['codex'],
-    installation: null,
-    installations: [],
-    source: null,
-    copySource: null,
-    packageId: null,
-    packageOptions: [],
-    action: null,
-    actionLabel: '',
-    disabledReason: '由项目 .agents/skills 提供；DSH 用户级 Skill 由原生运行时管理'
-  })
-  assert.deepEqual(skillPackageApplyTargets({ compatibility: {} }, [virtualAdapter]), [])
+  assert.equal(matrix[0].adapterId, 'deepseek-harness')
+  assert.equal(matrix[0].state, 'inherited')
+  assert.equal(matrix[0].visible, true)
+  assert.equal(matrix[0].action, 'apply')
+  assert.equal(matrix[0].actionLabel, '直接应用')
+  assert.deepEqual(skillPackageApplyTargets({ compatibility: {} }, [dshAdapter]), [dshAdapter])
   const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
   assert.match(page, /skills\.adapters[\s\S]*\.filter\(item => !item\.virtual\)/)
+})
+
+test('DSH physical sources use bounded consumer badges and effective conflict labels', () => {
+  const fixtures = [
+    ['project-dsh', 'DSH 项目专属'],
+    ['project-agents', 'Codex / DSH 项目共享'],
+    ['user-dsh', 'DSH 用户专属'],
+    ['user-agents', 'Codex / DSH 用户共享'],
+    ['custom', '自定义 / 内置（只读）'],
+    ['bundled', '自定义 / 内置（只读）']
+  ]
+  for (const [dshSource, badge] of fixtures) {
+    const view = dshSkillSourcePresentation({
+      dshSource,
+      effective: true,
+      path: 'C:\\Users\\private\\skills',
+      resolvedPath: 'C:\\secret\\skills'
+    })
+    assert.deepEqual(view, {
+      badge,
+      status: '生效',
+      readOnly: ['custom', 'bundled'].includes(dshSource)
+    })
+    assert.doesNotMatch(JSON.stringify(view), /Users|private|secret|path/u)
+  }
+
+  assert.deepEqual(dshSkillSourcePresentation({
+    dshSource: 'user-dsh', effective: false, shadowedBy: 'project-agents'
+  }), {
+    badge: 'DSH 用户专属',
+    status: '被 Codex / DSH 项目共享 遮蔽',
+    readOnly: false
+  })
+})
+
+test('managed DSH locations retain effective-source metadata for bounded UI rows', () => {
+  const [entry] = aggregateSkillCatalog({
+    packages: [{
+      id: 'pkg-dsh', name: 'diagnose', installations: [{
+        id: 'install-dsh', targetAdapterId: 'deepseek-harness', status: 'ready', enabled: true
+      }]
+    }],
+    discovered: [{
+      name: 'diagnose', sources: [{
+        key: 'dsh:managed', installationId: 'install-dsh', adapterId: 'deepseek-harness',
+        dshSource: 'project-dsh', effective: false, shadowedBy: 'project-agents',
+        entryPath: 'C:\\private\\entry', resolvedPath: 'C:\\private\\physical'
+      }]
+    }]
+  })
+
+  assert.equal(entry.installations[0].dshSource, 'project-dsh')
+  assert.equal(entry.installations[0].effective, false)
+  assert.equal(entry.installations[0].shadowedBy, 'project-agents')
+})
+
+test('Skills UI badges DSH sources and suppresses their absolute location cells', () => {
+  const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
+  assert.match(page, /dshSkillSourcePresentation/)
+  assert.match(page, /v-if="item\.dshSource"[\s\S]*dshSkillSourcePresentation\(item\)\.badge/)
+  assert.match(page, /v-if="source\.dshSource"[\s\S]*dshSkillSourcePresentation\(source\)\.status/)
+  assert.match(page, /v-if="!item\.dshSource"[\s\S]*item\.entryPath \|\| item\.targetPath/)
+  assert.match(page, /v-if="!source\.dshSource"[\s\S]*source\.entryPath \|\| source\.path/)
 })
 
 test('CLI matrix offers enable for disabled projections and blocks incompatible targets', () => {

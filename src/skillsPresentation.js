@@ -30,8 +30,23 @@ const SOURCE_KINDS = {
   codex_builtin: 'CLI 内置',
   claude_builtin: 'CLI 内置',
   opencode_builtin: 'CLI 内置',
-  ucode_builtin: 'CLI 内置'
+  ucode_builtin: 'CLI 内置',
+  'deepseek-harness_project': 'DSH 项目目录',
+  'deepseek-harness_user': 'DSH 用户目录',
+  'deepseek-harness_project_agents': 'Codex / DSH 项目共享',
+  'deepseek-harness_project_agents_flat': 'Codex / DSH 项目共享',
+  'deepseek-harness_user_agents': 'Codex / DSH 用户共享',
+  'deepseek-harness_user_agents_flat': 'Codex / DSH 用户共享',
+  'deepseek-harness_bundled': 'DSH 内置'
 }
+const DSH_SOURCE_BADGES = Object.freeze({
+  'project-dsh': 'DSH 项目专属',
+  'project-agents': 'Codex / DSH 项目共享',
+  'user-dsh': 'DSH 用户专属',
+  'user-agents': 'Codex / DSH 用户共享',
+  custom: '自定义 / 内置（只读）',
+  bundled: '自定义 / 内置（只读）'
+})
 const BUILT_IN_ORIGINS = new Set(['bundled', 'system'])
 const INSTALLATION_STATUS_ORDER = ['drifted', 'broken_link', 'invalid', 'missing', 'update_available', 'ready', 'disabled']
 
@@ -211,6 +226,11 @@ export function aggregateSkillCatalog({ packages = [], discovered = [], includeB
         managedInstallation.resolvedPath = source.resolvedPath || source.path
         managedInstallation.link = source.link || null
         managedInstallation.health = source.health || source.status || 'ready'
+        if (source.dshSource) {
+          managedInstallation.dshSource = source.dshSource
+          managedInstallation.effective = source.effective === true
+          managedInstallation.shadowedBy = source.shadowedBy || null
+        }
         if (source.plugin) managedInstallation.plugin = source.plugin
         if (source.sourceProject) managedInstallation.sourceProject = source.sourceProject
         if (managedInstallation.health === 'broken_link') managedInstallation.status = 'broken_link'
@@ -309,6 +329,16 @@ export function skillPackageApplyTargets(pkg = {}, adapters = []) {
   return adapters.filter((adapter) =>
     !adapter.virtual && !directTargets.has(adapter.id) && pkg.compatibility?.[adapter.id]?.compatible !== false
   )
+}
+
+export function dshSkillSourcePresentation(source = {}) {
+  const badge = DSH_SOURCE_BADGES[source.dshSource] || 'DSH 来源'
+  const shadowBadge = DSH_SOURCE_BADGES[source.shadowedBy] || '其他来源'
+  return {
+    badge,
+    status: source.effective === false ? `被 ${shadowBadge} 遮蔽` : '生效',
+    readOnly: ['custom', 'bundled'].includes(source.dshSource)
+  }
 }
 
 export function buildSkillCliMatrix(entry = {}, adapters = []) {

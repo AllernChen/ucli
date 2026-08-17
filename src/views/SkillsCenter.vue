@@ -3,7 +3,7 @@
     <div class="skills-heading">
       <div>
         <h2>Skills</h2>
-        <p>统一管理 Claude Code、Codex、OpenCode 和 U-Code 的可复用能力。</p>
+        <p>统一管理 Claude Code、Codex、OpenCode、U-Code 和 DeepSeek Harness 的可复用能力。</p>
       </div>
       <a-space>
         <a-button :loading="skills.loading" @click="reload">重新扫描</a-button>
@@ -190,17 +190,21 @@
                   <a-tag>{{ skillCliName(item.targetAdapterId) }}</a-tag>
                   <a-tag color="purple">UCLI 托管</a-tag>
                   <a-tag v-if="item.sourceKind">{{ skillSourceKindLabel(item.sourceKind) }}</a-tag>
+                  <a-tag v-if="item.dshSource" color="blue">{{ dshSkillSourcePresentation(item).badge }}</a-tag>
+                  <a-tag v-if="item.dshSource" :color="item.effective ? 'green' : 'orange'">
+                    {{ dshSkillSourcePresentation(item).status }}
+                  </a-tag>
                   <a-tag v-if="item.health" :color="sourceHealthColor(item.health)">{{ sourceHealthLabel(item.health, item.link) }}</a-tag>
                   <span>{{ scopeLabel(item.scopeType) }} · {{ skillStatusPresentation(item.status).label }}</span>
                   <div v-if="item.plugin" class="skill-plugin-id">
                     插件：{{ item.plugin.id }}@{{ item.plugin.marketplace }}
                   </div>
-                  <div class="skills-path"><span>入口：</span>{{ item.entryPath || item.targetPath }}</div>
-                  <div v-if="hasDistinctPhysicalPath(item)" class="skills-path">
+                  <div v-if="!item.dshSource" class="skills-path"><span>入口：</span>{{ item.entryPath || item.targetPath }}</div>
+                  <div v-if="!item.dshSource && hasDistinctPhysicalPath(item)" class="skills-path">
                     <span>物理位置：</span>{{ item.resolvedPath }}
                   </div>
                 </div>
-                <a-space>
+                <a-space v-if="!item.dshSource || !dshSkillSourcePresentation(item).readOnly">
                   <a-switch
                     :checked="item.enabled"
                     :loading="skills.saving"
@@ -232,6 +236,10 @@
                 <div>
                   <a-tag>{{ skillSourceKindLabel(source.sourceKind) }}</a-tag>
                   <a-tag>{{ skillOriginLabel(source.origin) }}</a-tag>
+                  <a-tag v-if="source.dshSource" color="blue">{{ dshSkillSourcePresentation(source).badge }}</a-tag>
+                  <a-tag v-if="source.dshSource" :color="source.effective ? 'green' : 'orange'">
+                    {{ dshSkillSourcePresentation(source).status }}
+                  </a-tag>
                   <a-tag :color="sourceHealthColor(source.health)">
                     {{ sourceHealthLabel(source.health, source.link) }}
                   </a-tag>
@@ -240,8 +248,8 @@
                 <div v-if="source.plugin" class="skill-plugin-id">
                   插件：{{ source.plugin.id }}@{{ source.plugin.marketplace }}
                 </div>
-                <div class="skills-path"><span>入口：</span>{{ source.entryPath || source.path }}</div>
-                <div v-if="hasDistinctPhysicalPath(source)" class="skills-path">
+                <div v-if="!source.dshSource" class="skills-path"><span>入口：</span>{{ source.entryPath || source.path }}</div>
+                <div v-if="!source.dshSource && hasDistinctPhysicalPath(source)" class="skills-path">
                   <span>物理位置：</span>{{ source.resolvedPath }}
                 </div>
                 <a-alert
@@ -253,7 +261,7 @@
                 />
               </div>
               <a-button
-                v-if="source.origin === 'external' && source.health === 'ready' && source.manageable !== false"
+                v-if="source.origin === 'external' && source.health === 'ready' && source.manageable !== false && (!source.dshSource || !dshSkillSourcePresentation(source).readOnly)"
                 size="small"
                 @click="confirmAdopt(source)"
               >接管</a-button>
@@ -553,6 +561,7 @@ import {
   buildSkillCliMatrix,
   canConfirmSkillInstall,
   createLatestRequestGuard,
+  dshSkillSourcePresentation,
   filterSkillCatalog,
   groupSkillCatalogBySourceProject,
   resolveSkillCollectionInstallSelection,
@@ -587,7 +596,7 @@ const inspectionGuard = createLatestRequestGuard()
 
 const installDraft = reactive({
   sourceType: 'local', localPath: '', gitUrl: '', refType: 'default', ref: '', subdir: '',
-  targets: ['claude', 'codex', 'opencode', 'ucode'], scopeType: 'user', projectPath: ''
+  targets: ['claude', 'codex', 'opencode', 'ucode', 'deepseek-harness'], scopeType: 'user', projectPath: ''
 })
 
 const catalog = computed(() => aggregateSkillCatalog({

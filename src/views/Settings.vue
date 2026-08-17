@@ -127,26 +127,22 @@
         <div class="cli-toolbar">
           <div>
             <strong>DeepSeek Harness 本地集成</strong>
-            <div class="muted">固定兼容 DSH 0.1.0-rc.6 · UCLI bridge 0.11.0</div>
+            <div class="muted">固定兼容 DSH 0.1.0-rc.6</div>
           </div>
-          <a-button size="small" :loading="dshProfilesLoading" @click="loadDshProfiles">刷新状态</a-button>
+          <a-button size="small" :loading="dshRuntimeLoading" @click="loadDshRuntime">刷新状态</a-button>
         </div>
         <a-alert
           type="info"
           show-icon
-          message="UCLI 不安装 TUI"
-          description="开源仓库未提供可分发的 turtle-ui；TUI 仅使用本机已有 profile，Web 是始终可选的回退界面。"
+          message="DSH 会话使用 Web 界面"
+          description="运行时安装、修复、卸载及原生 profile 管理统一在档案管理中完成。"
         />
         <a-descriptions size="small" :column="1" bordered class="dsh-statuses">
-          <a-descriptions-item label="DSH 运行时">
-            <a-tag :color="dshRuntimeReady ? 'green' : 'orange'">{{ dshRuntimeLabel }}</a-tag>
+          <a-descriptions-item v-for="row in dshRuntimeView.rows" :key="row.source" :label="row.label">
+            <a-tag :color="row.selected ? 'green' : 'default'">{{ row.selected ? '当前选用' : '未选用' }}</a-tag>
+            {{ settingsRuntimeRowLabel(row) }}
           </a-descriptions-item>
-          <a-descriptions-item label="DSH profile">
-            {{ dshProfileState.profiles.length }} 个；结构有效 {{ dshReadyProfileCount }} 个
-          </a-descriptions-item>
-          <a-descriptions-item label="UCLI bridge">
-            {{ dshCompatibleBridgeCount }} 个已兼容
-          </a-descriptions-item>
+          <a-descriptions-item label="受支持版本">{{ dshRuntimeView.supportedVersion || '未知' }}</a-descriptions-item>
         </a-descriptions>
         <a-button
           type="primary"
@@ -302,6 +298,7 @@ import SettingsSectionNav from '../components/settings/SettingsSectionNav.vue'
 import SoftwareUpdatePanel from '../components/settings/SoftwareUpdatePanel.vue'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
+import { presentDshManagement } from '../dshManagementPresentation.js'
 import { normalizeSettingsSection } from '../settingsSections.js'
 import { formatCliDiagnosticSummary, persistenceStatusLabel, profileDiagnosticSummary } from '../diagnosticsPresentation.js'
 import {
@@ -343,12 +340,12 @@ const diagnosticsLoading = ref(false)
 const diagnosticsExporting = ref(false)
 const profileRechecking = ref(false)
 const codexRuntime = ref(null)
-const dshProfileState = ref({ runtime: {}, profiles: [] })
-const dshProfilesLoading = ref(false)
+const dshRuntimeView = ref(presentDshManagement(null))
+const dshRuntimeLoading = ref(false)
 let stopCodexRuntimeListener = null
 let sectionObserver = null
 let programmaticSection = null
-let dshProfilesRequest = 0
+let dshRuntimeRequest = 0
 const lastCliOutput = computed(() => {
   const result = lastCliResult.value
   if (!result) return ''
@@ -392,24 +389,9 @@ const summaryModelOptions = computed(() => {
   const adapter = adapters.value.find(item => item.id === local.value.defaultExecutorId)
   return Array.isArray(adapter?.models) ? adapter.models.map(item => typeof item === 'string' ? item : item.id).filter(Boolean) : []
 })
-const dshRuntimeReady = computed(() =>
-  dshProfileState.value.runtime?.installed === true && dshProfileState.value.runtime?.compatible === true
-)
-const dshReadyProfileCount = computed(() =>
-  dshProfileState.value.profiles.filter(profile => profile.profileReady === true).length
-)
-const dshCompatibleBridgeCount = computed(() =>
-  dshProfileState.value.profiles.filter(profile => profile.bridgeCompatible === true).length
-)
-const dshRuntimeLabel = computed(() => {
-  const runtime = dshProfileState.value.runtime || {}
-  if (!runtime.installed) return '未检测到 DSH'
-  if (!runtime.compatible) return `版本不兼容${runtime.version ? `（${runtime.version}）` : ''}`
-  return `已兼容${runtime.version ? `（${runtime.version}）` : ''}`
-})
 onMounted(async () => {
   stopCodexRuntimeListener = ipc.onCodexRuntime((snapshot) => { codexRuntime.value = snapshot })
-  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadDshProfiles(), loadSummaryProfiles(), loadDiagnostics(), loadCodexRuntime()])
+  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadDshRuntime(), loadSummaryProfiles(), loadDiagnostics(), loadCodexRuntime()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
   observeSections()
@@ -512,34 +494,28 @@ async function loadSummaryProfiles() {
   }
 }
 
-async function loadDshProfiles() {
-  const request = ++dshProfilesRequest
-  dshProfilesLoading.value = true
+async function loadDshRuntime() {
+  const request = ++dshRuntimeRequest
+  dshRuntimeLoading.value = true
   try {
-    const state = await ipc.listDshProfiles()
-    if (request !== dshProfilesRequest) return null
-    dshProfileState.value = {
-      runtime: state?.runtime || {},
-      profiles: Array.isArray(state?.profiles) ? state.profiles : []
-    }
+    const state = await ipc.getDshState()
+    if (request !== dshRuntimeRequest) return null
+    const next = presentDshManagement(state)
+    if (next.revision >= dshRuntimeView.value.revision) dshRuntimeView.value = next
     return state
-  } catch (error) {
-    if (request !== dshProfilesRequest) return null
-    dshProfileState.value = { runtime: {}, profiles: [] }
-    message.error(dshStableErrorLabel(error?.code, '读取 DeepSeek Harness profile 状态失败'))
+  } catch {
+    if (request !== dshRuntimeRequest) return null
+    message.error('读取 DeepSeek Harness 状态失败')
     return null
   } finally {
-    if (request === dshProfilesRequest) dshProfilesLoading.value = false
+    if (request === dshRuntimeRequest) dshRuntimeLoading.value = false
   }
 }
 
-function dshStableErrorLabel(code, fallback) {
-  const labels = {
-    DSH_NOT_INSTALLED: '未检测到 DeepSeek Harness',
-    DSH_VERSION_UNREADABLE: '无法读取 DeepSeek Harness 版本',
-    DSH_VERSION_UNSUPPORTED: 'DeepSeek Harness 版本不兼容'
-  }
-  return labels[code] || fallback
+function settingsRuntimeRowLabel(row) {
+  if (!row.installed) return '未安装'
+  if (!row.compatible) return `${row.version || '未知版本'} · 不兼容`
+  return `${row.version || '未知版本'} · ${row.health === 'healthy' ? '正常' : '需要修复'}`
 }
 
 async function loadDiagnostics() {
