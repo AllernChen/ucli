@@ -10,7 +10,7 @@
 
 - 新增 DeepSeek Harness 一等适配器，固定兼容 `@deepseek-ai/dsh@0.1.0-rc.6`，并提供桥接 TUI 与本地 Web 两种界面。
 - 桥接 TUI 使用独立 PTY 保留原生全屏交互，同时通过 `@ucli/dsh-bridge@0.11.0` 提供认证的会话、权限、统计、通知、快照和 Gateway 控制平面；支持原生 session ID 持久化与 `--resume`。
-- UCLI 不捆绑、下载或宣称提供 `turtle-ui`。TUI 必须由用户已有的兼容 DSH profile 提供；设置页只显式安装或更新 UCLI bridge，并在失败时按元数据边界回滚。
+- UCLI 不捆绑、下载或宣称提供 `turtle-ui`。TUI 必须由用户已有的兼容 DSH profile 提供；“配置档案”页可初始化基础 DSH profile，并显式安装或更新 UCLI bridge，bridge 失败时按元数据边界回滚。
 - 新增 `dsh web --host 127.0.0.1 --port 0` 本地 Web 回退；严格验证 loopback URL 并在窄权限 iframe 中显示。Web 的权限、历史和统计由 DSH 原生管理，UCLI Gateway 保持关闭。
 
 ### 安全、生命周期与界面

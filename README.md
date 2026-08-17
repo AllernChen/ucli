@@ -28,7 +28,7 @@ UCLI 是一个支持 macOS 与 Windows 的本地 AI CLI 工作台。它在用户
 
 0.11.0 适配 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，固定兼容已发布的 `@deepseek-ai/dsh@0.1.0-rc.6`。UCLI 提供两种本地界面：
 
-- **桥接 TUI**：用户必须已经拥有兼容的 DSH profile 和其中提供的 TUI。`dsh --profile <name>` 启动的是 profile 提供的界面；UCLI 和被检查的 deepseek-harness 开源仓库都不捆绑、下载或分发 `turtle-ui`。设置页可显式将 `ucli-dsh-bridge-0.11.0.tgz` 加入所选 profile，失败时只回滚 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml` 与 `cordis.patch.yml` 元数据。
+- **桥接 TUI**：用户必须已经拥有兼容的 DSH profile 和其中提供的 TUI。`dsh --profile <name>` 启动的是 profile 提供的界面；UCLI 和被检查的 deepseek-harness 开源仓库都不捆绑、下载或分发 `turtle-ui`。“配置档案 → DeepSeek Harness”可以初始化仅含基础 bundle 的原生 profile，并将 `ucli-dsh-bridge-0.11.0.tgz` 加入所选 profile；初始化不会安装 TUI。bridge 失败时只回滚 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml` 与 `cordis.patch.yml` 元数据。
 - **本地 Web 回退**：UCLI 以固定参数启动 `dsh web --host 127.0.0.1 --port 0`，只接受严格的 loopback URL，并在沙箱 iframe 中显示。Web 的权限、历史和统计均由 DSH 原生管理；UCLI 不提供审批、历史、用量或 Gateway 控件。
 
 桥接 TUI 将 PTY 字节与语义控制分成两个平面：PTY 只负责原生全屏交互；认证 bridge 负责会话 ID、已提交回复、工具、权限、统计和 Gateway 事件。每个会话使用独立的 endpoint 与随机 token，二者只存在于主进程和子进程环境，不写入数据库、日志或 renderer IPC。桥断开时会话立即停止接受输入和远程任务。

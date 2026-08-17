@@ -146,6 +146,22 @@ function failure(errorCode, profile = null) {
   return { ok: false, errorCode, profile }
 }
 
+function operationEnvironment(env, runtime) {
+  const sanitized = {}
+  for (const [key, value] of Object.entries(env || {})) {
+    const normalized = key.toUpperCase()
+    if (
+      normalized.startsWith('UCLI_DSH_BRIDGE_') ||
+      normalized === 'DSH_HOME' ||
+      normalized === 'ELECTRON_RUN_AS_NODE'
+    ) continue
+    sanitized[key] = value
+  }
+  sanitized.DSH_HOME = runtime.home
+  if (runtime.launch.prefixArgs?.length) sanitized.ELECTRON_RUN_AS_NODE = '1'
+  return sanitized
+}
+
 export function createDshProfileManager({
   env = process.env,
   homeDirectory,
@@ -162,6 +178,7 @@ export function createDshProfileManager({
   if (!path.isAbsolute(String(bridgeArtifactPath || ''))) throw new TypeError('absolute bridgeArtifactPath is required')
   const files = { ...nativeFiles, ...fileOps }
   const activeInstalls = new Map()
+  const activeInitializations = new Map()
 
   async function runtimeSnapshot() {
     return inspectRuntime({ env, homeDirectory })
@@ -436,11 +453,7 @@ export function createDshProfileManager({
       records = await snapshotMetadata(runtime, identity, backupDirectory)
       const stableArtifact = await validateBridgeArtifact()
       await assertIdentity(runtime, identity)
-      const processEnvironment = {
-        ...env,
-        DSH_HOME: runtime.home,
-        ...(runtime.launch.prefixArgs?.length ? { ELECTRON_RUN_AS_NODE: '1' } : {})
-      }
+      const processEnvironment = operationEnvironment(env, runtime)
       let result
       try {
         result = await execute(
@@ -527,14 +540,101 @@ export function createDshProfileManager({
     return operation
   }
 
-  return { listProfiles, enableBridge }
+  async function performInitialize(runtime, profileName) {
+    if (
+      !path.isAbsolute(String(runtime.home || '')) ||
+      !runtime.pnpmAvailable ||
+      !runtime.launch ||
+      !path.isAbsolute(runtime.launch.file)
+    ) {
+      return failure('DSH_PROFILE_INITIALIZE_FAILED')
+    }
+    if ((runtime.launch.prefixArgs || []).some(argument => !path.isAbsolute(argument))) {
+      return failure('DSH_PROFILE_INITIALIZE_FAILED')
+    }
+    const profilesRoot = path.join(runtime.home, 'profiles')
+    try {
+      const rootStat = await files.lstat(profilesRoot)
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return failure('DSH_PROFILE_INITIALIZE_FAILED')
+      const candidate = path.join(profilesRoot, profileName)
+      try {
+        await files.lstat(candidate)
+        return failure('DSH_PROFILE_ALREADY_EXISTS')
+      } catch (error) {
+        if (error?.code !== 'ENOENT') return failure('DSH_PROFILE_INITIALIZE_FAILED')
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') return failure('DSH_PROFILE_INITIALIZE_FAILED')
+    }
+    const processEnvironment = operationEnvironment(env, runtime)
+    let result
+    try {
+      result = await execute(
+        runtime.launch.file,
+        [
+          ...(runtime.launch.prefixArgs || []),
+          'plugin', '--profile', profileName, 'install', '--ignore-scripts'
+        ],
+        {
+          env: processEnvironment,
+          shell: false,
+          windowsHide: true,
+          timeoutMs: 10 * 60_000
+        }
+      )
+    } catch {
+      return failure('DSH_PROFILE_INITIALIZE_FAILED')
+    }
+    if (result?.code !== 0 || result?.terminationConfirmed === false) {
+      return failure('DSH_PROFILE_INITIALIZE_FAILED')
+    }
+    try {
+      const identity = await resolveProfileIdentity(runtime, profileName)
+      const profile = await inspectProfile(identity)
+      if (!profile.profileReady) return failure('DSH_PROFILE_INITIALIZE_FAILED', profile)
+      return { ok: true, errorCode: null, profile }
+    } catch {
+      return failure('DSH_PROFILE_INITIALIZE_FAILED')
+    }
+  }
+
+  async function initializeProfile(profileName) {
+    try {
+      validateDshProfileName(profileName)
+    } catch {
+      return failure('DSH_PROFILE_INVALID')
+    }
+    let runtime
+    try {
+      runtime = await runtimeSnapshot()
+    } catch {
+      return failure('DSH_VERSION_UNREADABLE')
+    }
+    const runtimeFailure = runtimeErrorCode(runtime)
+    if (runtimeFailure) return failure(runtimeFailure)
+    const lockKey = normalizeForComparison(path.join(runtime.home, 'profiles', profileName), platform)
+    const active = activeInitializations.get(lockKey)
+    if (active) return active
+    const operation = performInitialize(runtime, profileName).finally(() => {
+      if (activeInitializations.get(lockKey) === operation) activeInitializations.delete(lockKey)
+    })
+    activeInitializations.set(lockKey, operation)
+    return operation
+  }
+
+  return { listProfiles, initializeProfile, enableBridge }
 }
 
 export function registerDshProfileIpc({ ipcMain, manager }) {
   if (typeof ipcMain?.handle !== 'function') throw new TypeError('ipcMain is required')
-  if (typeof manager?.listProfiles !== 'function' || typeof manager?.enableBridge !== 'function') {
+  if (
+    typeof manager?.listProfiles !== 'function' ||
+    typeof manager?.initializeProfile !== 'function' ||
+    typeof manager?.enableBridge !== 'function'
+  ) {
     throw new TypeError('DSH profile manager is required')
   }
   ipcMain.handle('dsh:listProfiles', () => manager.listProfiles())
+  ipcMain.handle('dsh:initializeProfile', (_event, profileName) => manager.initializeProfile(profileName))
   ipcMain.handle('dsh:enableBridge', (_event, profileName) => manager.enableBridge(profileName))
 }

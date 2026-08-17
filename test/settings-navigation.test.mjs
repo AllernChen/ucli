@@ -54,5 +54,5 @@ test('section deep links preserve unrelated queries and scrolling replaces histo
   assert.match(source, /query:\s*\{\s*\.\.\.route\.query,\s*panel:\s*'gateway'\s*\}/)
   assert.match(source, /scrollIntoView\(\{\s*block:\s*'start'\s*\}\)/)
   assert.match(source, /new IntersectionObserver/)
-  assert.doesNotMatch(source, /router\.push\(\{[\s\S]{0,180}section/)
+  assert.doesNotMatch(source, /router\.push\(\{[\s\S]{0,180}query:\s*\{[\s\S]{0,80}section/)
 })

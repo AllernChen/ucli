@@ -488,6 +488,11 @@ test('bridge enablement uses exact argv, absolute paths, shell false and does no
     const before = readFileSync(path.join(profile, 'package.json'), 'utf8')
     const calls = []
     const manager = createManager(home, {
+      env: {
+        PATH: process.env.PATH,
+        UCLI_DSH_BRIDGE_TOKEN: 'must-not-reach-profile-init',
+        ucli_dsh_bridge_endpoint: 'must-not-reach-profile-init'
+      },
       execute: async (file, args, options) => {
         calls.push({ file, args, options })
         const manifestPath = path.join(profile, 'package.json')
@@ -525,6 +530,85 @@ test('bridge enablement uses exact argv, absolute paths, shell false and does no
     assert.equal(calls[0].options.shell, false)
     assert.equal(calls[0].options.env.DSH_HOME, home)
     assert.equal(calls[0].options.env.ELECTRON_RUN_AS_NODE, '1')
+    assert.equal(calls[0].options.env.UCLI_DSH_BRIDGE_TOKEN, undefined)
+    assert.equal(calls[0].options.env.ucli_dsh_bridge_endpoint, undefined)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('profile initialization creates one native base profile through fixed shell-free DSH arguments', async () => {
+  const home = temporaryRoot('ucli-dsh-initialize-')
+  try {
+    const calls = []
+    const manager = createManager(home, {
+      execute: async (file, args, options) => {
+        calls.push({ file, args, options })
+        writeProfile(home, 'team-tui', { bundles: ['@deepseek-ai/dsh-base'] })
+        return { code: 0, stdout: 'sensitive profile path', stderr: '' }
+      }
+    })
+
+    const result = await manager.initializeProfile('team-tui')
+
+    assert.deepEqual(result, {
+      ok: true,
+      errorCode: null,
+      profile: {
+        profileName: 'team-tui',
+        profileReady: true,
+        bridgeInstalled: false,
+        bridgeCompatible: false,
+        bridgeVersion: '',
+        errorCode: 'DSH_BRIDGE_NOT_INSTALLED'
+      }
+    })
+    assert.equal(JSON.stringify(result).includes(home), false)
+    assert.equal(JSON.stringify(result).includes('sensitive profile path'), false)
+    assert.equal(calls.length, 1)
+    assert.equal(path.isAbsolute(calls[0].file), true)
+    assert.deepEqual(calls[0].args, [
+      '/absolute/dsh/lib/bin.js', 'plugin', '--profile', 'team-tui', 'install', '--ignore-scripts'
+    ])
+    assert.equal(calls[0].options.shell, false)
+    assert.equal(calls[0].options.env.DSH_HOME, home)
+    assert.equal(calls[0].options.env.ELECTRON_RUN_AS_NODE, '1')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('profile initialization never overwrites an existing native profile and coalesces concurrent requests', async () => {
+  const home = temporaryRoot('ucli-dsh-initialize-guards-')
+  try {
+    writeProfile(home, 'existing')
+    let executions = 0
+    let release
+    let markStarted
+    const gate = new Promise(resolve => { release = resolve })
+    const started = new Promise(resolve => { markStarted = resolve })
+    const manager = createManager(home, {
+      execute: async () => {
+        executions += 1
+        markStarted()
+        await gate
+        writeProfile(home, 'new-profile', { bundles: ['@deepseek-ai/dsh-base'] })
+        return { code: 0 }
+      }
+    })
+
+    assert.deepEqual(await manager.initializeProfile('existing'), {
+      ok: false, errorCode: 'DSH_PROFILE_ALREADY_EXISTS', profile: null
+    })
+    assert.equal(executions, 0)
+
+    const first = manager.initializeProfile('new-profile')
+    const second = manager.initializeProfile('new-profile')
+    await started
+    assert.equal(executions, 1)
+    release()
+    assert.deepEqual(await second, await first)
+    assert.equal(executions, 1)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
@@ -772,21 +856,23 @@ test('an out-of-root transaction candidate is removed before failing closed', as
   }
 })
 
-test('DSH IPC exposes only list and profile-name enable operations', async () => {
+test('DSH IPC exposes only list, profile-name initialization and bridge enable operations', async () => {
   const handlers = new Map()
   const received = []
   const manager = {
     listProfiles: async () => ({ runtime: {}, profiles: [] }),
+    initializeProfile: async name => { received.push(['initialize', name]); return { ok: true, errorCode: null, profile: null } },
     enableBridge: async name => { received.push(name); return { ok: true, errorCode: null, profile: null } }
   }
   registerDshProfileIpc({
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
     manager
   })
-  assert.deepEqual([...handlers.keys()], ['dsh:listProfiles', 'dsh:enableBridge'])
+  assert.deepEqual([...handlers.keys()], ['dsh:listProfiles', 'dsh:initializeProfile', 'dsh:enableBridge'])
   assert.deepEqual(await handlers.get('dsh:listProfiles')({ sender: 'renderer' }), { runtime: {}, profiles: [] })
+  await handlers.get('dsh:initializeProfile')({ sender: 'renderer' }, 'team-tui')
   await handlers.get('dsh:enableBridge')({ sender: 'renderer' }, 'team-tui')
-  assert.deepEqual(received, ['team-tui'])
+  assert.deepEqual(received, [['initialize', 'team-tui'], 'team-tui'])
 })
 
 test('orchestrator composes the DSH profile manager into live IPC channels', async () => {
@@ -803,6 +889,7 @@ test('orchestrator composes the DSH profile manager into live IPC channels', asy
     orchestrator = module.createOrchestrator()
     orchestrator.registerIpc()
     assert.equal(typeof handlers.get('dsh:listProfiles'), 'function')
+    assert.equal(typeof handlers.get('dsh:initializeProfile'), 'function')
     assert.equal(typeof handlers.get('dsh:enableBridge'), 'function')
     const result = await handlers.get('dsh:listProfiles')({ sender: 'renderer' })
     assert.deepEqual(Object.keys(result), ['runtime', 'profiles'])

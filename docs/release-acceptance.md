@@ -270,7 +270,7 @@
 
 ### 12.1 TUI、Gateway 与恢复
 
-- [ ] 确认设置页只检测精确兼容 runtime，不自动安装 DSH，也不声称或下载 deepseek-harness 仓库中不存在的 TUI。
+- [ ] 确认设置页只展示精确兼容 runtime 摘要；“配置档案 → DeepSeek Harness”可以初始化基础 profile 和管理 bridge，但不声称或下载 deepseek-harness 仓库中不存在的 TUI。
 - [ ] 使用用户已有的兼容 TUI profile；确认 bridge 未安装、版本不兼容和已兼容三个状态彼此独立，操作完成后重新枚举。
 - [ ] 检查实际 argv：新建为 `dsh --profile <profile>`，恢复追加 `--resume <nativeSessionId>`；cwd 固定为卡片工作目录，未使用 shell command string。
 - [ ] 全屏交互、中文输入、复制粘贴、resize 与终端字节均正常；终端 ANSI 不会进入 transcript、最终回复或 Gateway。

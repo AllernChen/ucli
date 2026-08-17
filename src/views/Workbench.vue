@@ -174,7 +174,7 @@
           message="TUI profile 与 UCLI bridge 尚未同时就绪"
         >
           <template #action>
-            <a-button size="small" @click="router.push({ name: 'settings', query: { section: 'cli' } })">前往设置</a-button>
+            <a-button size="small" @click="router.push({ name: 'profiles', query: { cli: 'deepseek-harness' } })">前往档案管理</a-button>
           </template>
         </a-alert>
         <div v-else-if="dshSurfacePreference === 'web'" class="profile-choice-help">
@@ -341,10 +341,10 @@ async function loadDshProfiles() {
 
 function dshWorkbenchErrorLabel(code) {
   return ({
-    DSH_NOT_INSTALLED: '未检测到 DeepSeek Harness，请前往设置检查',
-    DSH_VERSION_UNREADABLE: '无法读取 DeepSeek Harness 版本，请前往设置检查',
-    DSH_VERSION_UNSUPPORTED: 'DeepSeek Harness 版本不兼容，请前往设置检查'
-  })[code] || 'DeepSeek Harness 状态不可用，请前往设置检查'
+    DSH_NOT_INSTALLED: '未检测到 DeepSeek Harness，请前往档案管理检查',
+    DSH_VERSION_UNREADABLE: '无法读取 DeepSeek Harness 版本，请前往档案管理检查',
+    DSH_VERSION_UNSUPPORTED: 'DeepSeek Harness 版本不兼容，请前往档案管理检查'
+  })[code] || 'DeepSeek Harness 状态不可用，请前往档案管理检查'
 }
 
 function openSession(id) {
@@ -492,7 +492,7 @@ async function newSession(adapter) {
       form.value.adapterId = adapter.id
       const fresh = await loadDshProfiles()
       if (fresh?.runtime?.installed !== true || fresh?.runtime?.compatible !== true) {
-        message.warning('请先在设置中准备兼容的 DeepSeek Harness 运行时')
+        message.warning('请先在档案管理中检查兼容的 DeepSeek Harness 运行时')
         return
       }
       if (dshSurfacePreference.value === 'web') {
@@ -501,7 +501,7 @@ async function newSession(adapter) {
         const profile = (fresh?.profiles || [])
           .find(item => item.profileName === selectedDshProfileName.value)
         if (profile?.profileReady !== true || profile?.bridgeCompatible !== true) {
-          message.warning('请先在设置中准备可启动且 bridge 兼容的 DSH TUI profile')
+          message.warning('请先在档案管理中准备结构有效且 bridge 兼容的 DSH TUI profile')
           return
         }
         config.adapterConfig = { surfacePreference: 'tui', profileName: profile.profileName }

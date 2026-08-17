@@ -34,6 +34,7 @@ const api = {
   listCliTools: () => ipcRenderer.invoke('cli-tools:list'),
   runCliToolAction: (id, action) => ipcRenderer.invoke('cli-tools:run', id, action),
   listDshProfiles: () => ipcRenderer.invoke('dsh:listProfiles'),
+  initializeDshProfile: (profileName) => ipcRenderer.invoke('dsh:initializeProfile', profileName),
   enableDshBridge: (profileName) => ipcRenderer.invoke('dsh:enableBridge', profileName),
   getUpdateState: () => ipcRenderer.invoke('update:get-state'),
   checkForUpdates: () => ipcRenderer.invoke('update:check'),

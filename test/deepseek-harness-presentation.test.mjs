@@ -23,20 +23,32 @@ function loadSfc(relativePath) {
   return source
 }
 
-test('Settings exposes pinned DSH profile and bridge management without claiming TUI installation', () => {
+test('Settings summarizes pinned DSH runtime state and routes profile management to Profile Center', () => {
   const source = loadSfc('../src/views/Settings.vue')
 
   assert.match(source, /class="dsh-profile-management"/)
   assert.match(source, /0\.1\.0-rc\.6/)
   assert.match(source, /0\.11\.0/)
   assert.match(source, /ipc\.listDshProfiles\(\)/)
-  assert.match(source, /ipc\.enableDshBridge\(selectedDshProfile\.value\.profileName\)/)
-  assert.match(source, /profileReady/)
-  assert.match(source, /bridgeCompatible/)
-  assert.match(source, /启用 UCLI 集成/)
-  assert.match(source, /更新 UCLI 集成/)
+  assert.match(source, /router\.push\([^\n]*profiles[^\n]*deepseek-harness/)
+  assert.doesNotMatch(source, /ipc\.enableDshBridge\(/)
+  assert.match(source, /label="DSH profile"[\s\S]*?个/u)
+  assert.match(source, /label="UCLI bridge"[\s\S]*?个已兼容/u)
+  assert.match(source, /前往档案管理/)
   assert.match(source, /UCLI 不安装 TUI/)
   assert.match(source, /Web/)
+})
+
+test('Profile Center initializes native DSH profiles and manages their bridge status', () => {
+  const source = loadSfc('../src/views/ProfileCenter.vue')
+
+  assert.match(source, /deepseek-harness/)
+  assert.match(source, /ipc\.listDshProfiles\(\)/)
+  assert.match(source, /ipc\.initializeDshProfile\(newDshProfileName\.value\)/)
+  assert.match(source, /ipc\.enableDshBridge\(profile\.profileName\)/)
+  assert.match(source, /初始化基础 profile/)
+  assert.match(source, /不会安装 TUI/)
+  assert.match(source, /bridgeCompatible/)
 })
 
 test('Workbench creates DSH TUI only from a bridge-ready profile and Web without a profile', () => {
@@ -47,8 +59,8 @@ test('Workbench creates DSH TUI only from a bridge-ready profile and Web without
   assert.match(source, /profileReady\s*===\s*true\s*&&\s*selectedDshProfile\.value\?\.bridgeCompatible\s*===\s*true/)
   assert.match(source, /adapterConfig\s*=\s*\{\s*surfacePreference:\s*'web'\s*\}/)
   assert.match(source, /adapterConfig\s*=\s*\{\s*surfacePreference:\s*'tui',\s*profileName:/)
-  assert.match(source, /前往设置/)
-  assert.match(source, /router\.push\([^\n]*settings/)
+  assert.match(source, /前往档案管理/)
+  assert.match(source, /router\.push\([^\n]*profiles[^\n]*deepseek-harness/)
 })
 
 test('renderer sessions fail closed for missing DSH capabilities and ignore native Web stats events', async () => {

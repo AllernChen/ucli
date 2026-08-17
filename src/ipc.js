@@ -14,6 +14,7 @@ export const ipc = {
   listCliTools: () => u.listCliTools(),
   runCliToolAction: (id, action) => u.runCliToolAction(id, action),
   listDshProfiles: () => u.listDshProfiles(),
+  initializeDshProfile: (profileName) => u.initializeDshProfile(profileName),
   enableDshBridge: (profileName) => u.enableDshBridge(profileName),
   getUpdateState: () => u.getUpdateState(),
   checkForUpdates: () => u.checkForUpdates(),

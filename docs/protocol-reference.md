@@ -154,7 +154,7 @@ bridge 只投影 allowlist 事件：session ready/disposed、agent status、assi
 
 ### Profile、Web 与稳定失败
 
-UCLI 只兼容 `@deepseek-ai/dsh@0.1.0-rc.6`。bridge 启用操作只修改 profile 的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml`；失败时按“原存在/原缺失”恢复这四项，不删除 `node_modules`、用户插件、凭据或 native session。UCLI 不捆绑 TUI。
+UCLI 只兼容 `@deepseek-ai/dsh@0.1.0-rc.6`。“配置档案”页初始化新 profile 时只接受经过验证的 profile 名，并以 shell-free 固定参数调用 `dsh plugin --profile <name> install --ignore-scripts`；renderer 不能提交路径、命令或包规格。bridge 启用操作只修改 profile 的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml`；失败时按“原存在/原缺失”恢复这四项，不删除 `node_modules`、用户插件、凭据或 native session。基础 profile 初始化不会安装 TUI，UCLI 也不捆绑 TUI。
 
 Web 以固定 argv `dsh web --host 127.0.0.1 --port 0` 启动，不加载 bridge 环境。只接受 stdout 的 exact `http://127.0.0.1:<port>` readiness 行；16 KiB 启动输出预算和 60 秒超时均 fail-closed。Web 权限、历史、统计归 DSH native 所有，Gateway 返回 `DSH_WEB_GATEWAY_UNSUPPORTED`。
 

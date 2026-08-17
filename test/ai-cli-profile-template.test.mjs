@@ -4,14 +4,14 @@ import test from 'node:test'
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8')
 
-test('profile center is a first-level route with four honest CLI entries', () => {
+test('profile center is a first-level route with five honest CLI entries', () => {
   const app = read('../src/App.vue')
   const router = read('../src/router.js')
   const page = read('../src/views/ProfileCenter.vue')
   assert.match(router, /path:\s*'\/profiles'/)
   assert.match(app, /key="\/profiles"/)
   assert.match(app, /配置档案/)
-  for (const cli of ['Codex', 'Claude Code', 'OpenCode', 'U-Code']) assert.match(page, new RegExp(cli))
+  for (const cli of ['Codex', 'Claude Code', 'OpenCode', 'U-Code', 'DeepSeek Harness']) assert.match(page, new RegExp(cli))
   assert.match(page, /\$\{appVersion\}/)
 })
 
