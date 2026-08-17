@@ -69,6 +69,14 @@ function writeProfile(home, name, {
   return directory
 }
 
+function writeLegacyProfile(home, name = 'legacy') {
+  return writeProfile(home, name, {
+    bundles: ['@deepseek-ai/dsh-base', '@example/custom', BRIDGE_NAME],
+    dependencies: { [BRIDGE_NAME]: 'file:bridge.tgz' },
+    bridgeVersion: DSH_BRIDGE_VERSION
+  })
+}
+
 function readyRuntime(home, overrides = {}) {
   return {
     installed: true,
@@ -83,13 +91,9 @@ function readyRuntime(home, overrides = {}) {
 }
 
 function createManager(home, options = {}) {
-  const artifact = path.join(home, 'bundled', `ucli-dsh-bridge-${DSH_BRIDGE_VERSION}.tgz`)
-  mkdirSync(path.dirname(artifact), { recursive: true })
-  writeFileSync(artifact, 'bridge bytes')
   return createDshProfileManager({
     homeDirectory: home,
     tempDirectory: path.join(home, 'app-temp'),
-    bridgeArtifactPath: artifact,
     inspectRuntime: async () => readyRuntime(home),
     execute: async () => ({ code: 0, stdout: '', stderr: '' }),
     ...options
@@ -347,6 +351,7 @@ test('profile listing inspects direct safe children and returns only allowlisted
     })
     writeProfile(home, 'plain', { bundles: ['@deepseek-ai/dsh-base'] })
     writeProfile(home, 'web', { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] })
+    writeProfile(home, 'headless', { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'] })
     mkdirSync(path.join(home, 'profiles', 'node_modules'), { recursive: true })
     writeFileSync(path.join(home, 'profiles', 'README.txt'), 'not a profile')
 
@@ -361,23 +366,29 @@ test('profile listing inspects direct safe children and returns only allowlisted
     })
     assert.deepEqual(result.profiles, [
       {
-        profileName: 'outdated', profileReady: true, bridgeInstalled: true,
-        bridgeCompatible: false, bridgeVersion: '0.10.9', errorCode: 'DSH_BRIDGE_VERSION_UNSUPPORTED'
+        profileName: 'headless', profileReady: true, surface: 'headless', interactive: false,
+        legacyBridgeInstalled: false, legacyBridgeVersion: '', errorCode: null
       },
       {
-        profileName: 'plain', profileReady: true, bridgeInstalled: false,
-        bridgeCompatible: false, bridgeVersion: '', errorCode: 'DSH_BRIDGE_NOT_INSTALLED'
+        profileName: 'outdated', profileReady: true, surface: 'custom', interactive: false,
+        legacyBridgeInstalled: true, legacyBridgeVersion: '0.10.9', errorCode: null
       },
       {
-        profileName: 'ready', profileReady: true, bridgeInstalled: true,
-        bridgeCompatible: true, bridgeVersion: DSH_BRIDGE_VERSION, errorCode: null
+        profileName: 'plain', profileReady: true, surface: 'custom', interactive: false,
+        legacyBridgeInstalled: false, legacyBridgeVersion: '', errorCode: null
       },
       {
-        profileName: 'web', profileReady: true, bridgeInstalled: false,
-        bridgeCompatible: false, bridgeVersion: '', errorCode: 'DSH_BRIDGE_NOT_INSTALLED'
+        profileName: 'ready', profileReady: true, surface: 'custom', interactive: false,
+        legacyBridgeInstalled: true, legacyBridgeVersion: DSH_BRIDGE_VERSION, errorCode: null
+      },
+      {
+        profileName: 'web', profileReady: true, surface: 'web', interactive: true,
+        legacyBridgeInstalled: false, legacyBridgeVersion: '', errorCode: null
       }
     ])
-    assert.equal(result.profiles.some(profile => 'tuiReady' in profile || 'surface' in profile), false)
+    assert.equal(result.profiles.some(profile => (
+      'tuiReady' in profile || 'bridgeInstalled' in profile || 'bridgeCompatible' in profile
+    )), false)
     assert.deepEqual(Object.keys(result), ['runtime', 'profiles'])
     assert.equal(JSON.stringify(result).includes(home), false)
   } finally {
@@ -420,7 +431,7 @@ test('profile listing excludes linked children and rejects linked or oversized m
   }
 })
 
-test('bridge compatibility requires dependency, bundle, contained exact manifest and regular patch together', async () => {
+test('legacy bridge status requires dependency, bundle, contained exact manifest and regular patch together', async () => {
   const home = temporaryRoot('ucli-dsh-bridge-triad-')
   try {
     const missingDependency = writeProfile(home, 'missing-dependency', {
@@ -454,9 +465,9 @@ test('bridge compatibility requires dependency, bundle, contained exact manifest
 
     const byName = Object.fromEntries((await createManager(home).listProfiles()).profiles.map(value => [value.profileName, value]))
     for (const name of ['duplicate-bundle', 'missing-dependency', 'missing-bundle', 'missing-patch', 'wrong-name']) {
-      assert.equal(byName[name].bridgeInstalled, false, name)
-      assert.equal(byName[name].bridgeCompatible, false, name)
-      assert.equal(byName[name].errorCode, 'DSH_BRIDGE_NOT_INSTALLED', name)
+      assert.equal(byName[name].legacyBridgeInstalled, false, name)
+      assert.equal(byName[name].legacyBridgeVersion, byName[name].legacyBridgeVersion || '', name)
+      assert.equal(byName[name].errorCode, null, name)
     }
   } finally {
     rmSync(home, { recursive: true, force: true })
@@ -486,8 +497,8 @@ test('profile metadata bounds dependency specs, package names, version output an
     assert.equal(result.profiles.find(value => value.profileName === 'invalid-dependency')?.errorCode, 'DSH_PROFILE_INVALID')
     assert.equal(result.profiles.find(value => value.profileName === 'invalid-bundle')?.errorCode, 'DSH_PROFILE_INVALID')
     const longVersionStatus = result.profiles.find(value => value.profileName === 'long-version')
-    assert.equal(longVersionStatus?.bridgeInstalled, true)
-    assert.equal(longVersionStatus?.bridgeVersion, '')
+    assert.equal(longVersionStatus?.legacyBridgeInstalled, true)
+    assert.equal(longVersionStatus?.legacyBridgeVersion, '')
     assert.equal(JSON.stringify(result).includes('x'.repeat(100)), false)
   } finally {
     rmSync(home, { recursive: true, force: true })
@@ -501,8 +512,8 @@ test('malformed profile metadata is isolated as a stable invalid status', async 
     writeFileSync(path.join(directory, 'package.json'), '{not-json')
     const result = await createManager(home).listProfiles()
     assert.deepEqual(result.profiles, [{
-      profileName: 'broken', profileReady: false, bridgeInstalled: false,
-      bridgeCompatible: false, bridgeVersion: '', errorCode: 'DSH_PROFILE_INVALID'
+      profileName: 'broken', profileReady: false, surface: 'custom', interactive: false,
+      legacyBridgeInstalled: false, legacyBridgeVersion: '', errorCode: 'DSH_PROFILE_INVALID'
     }])
     assert.equal(JSON.stringify(result).includes('not-json'), false)
   } finally {
@@ -518,7 +529,8 @@ test('missing optional profile patch remains structurally ready under rc6 semant
     const status = (await createManager(home).listProfiles()).profiles[0]
     assert.equal(status.profileName, 'no-user-patch')
     assert.equal(status.profileReady, true)
-    assert.equal(status.errorCode, 'DSH_BRIDGE_NOT_INSTALLED')
+    assert.equal(status.errorCode, null)
+    assert.equal(status.surface, 'custom')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
@@ -536,16 +548,21 @@ test('missing optional bundle list is a valid empty rc6 profile', async () => {
     const status = (await createManager(home).listProfiles()).profiles[0]
     assert.equal(status.profileName, 'empty-profile')
     assert.equal(status.profileReady, true)
-    assert.equal(status.errorCode, 'DSH_BRIDGE_NOT_INSTALLED')
+    assert.equal(status.errorCode, null)
+    assert.equal(status.surface, 'custom')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
 })
 
-test('bridge enablement uses exact argv, absolute paths, shell false and does not mutate before consent', async () => {
-  const home = temporaryRoot('ucli-dsh-install-')
+test('legacy bridge removal uses exact fixed argv and returns sanitized profile status', async () => {
+  const home = temporaryRoot('ucli-dsh-remove-legacy-')
   try {
-    const profile = writeProfile(home, 'tui')
+    const profile = writeProfile(home, 'legacy', {
+      bundles: ['@deepseek-ai/dsh-base', '@example/custom', BRIDGE_NAME],
+      dependencies: { [BRIDGE_NAME]: 'file:bridge.tgz' },
+      bridgeVersion: DSH_BRIDGE_VERSION
+    })
     const before = readFileSync(path.join(profile, 'package.json'), 'utf8')
     const calls = []
     const manager = createManager(home, {
@@ -556,38 +573,32 @@ test('bridge enablement uses exact argv, absolute paths, shell false and does no
       },
       execute: async (file, args, options) => {
         calls.push({ file, args, options })
-        const manifestPath = path.join(profile, 'package.json')
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-        manifest.dependencies[BRIDGE_NAME] = 'file:bridge.tgz'
-        manifest.dsh.profile.bundles.push(BRIDGE_NAME)
-        writeJson(manifestPath, manifest)
-        writeJson(path.join(profile, 'node_modules', '@ucli', 'dsh-bridge', 'package.json'), {
-          name: BRIDGE_NAME,
-          version: DSH_BRIDGE_VERSION,
-          dsh: { bundle: { patch: './cordis.patch.yml' } }
-        })
-        writeFileSync(path.join(profile, 'node_modules', '@ucli', 'dsh-bridge', 'cordis.patch.yml'), '[]\n')
-        return { code: 0, stdout: 'sensitive install output', stderr: '' }
+        const manifestFile = path.join(profile, 'package.json')
+        const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
+        delete manifest.dependencies[BRIDGE_NAME]
+        manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter(name => name !== BRIDGE_NAME)
+        writeJson(manifestFile, manifest)
+        rmSync(path.join(profile, 'node_modules', '@ucli', 'dsh-bridge'), { recursive: true, force: true })
+        return { code: 0, stdout: 'sensitive removal output', stderr: '' }
       }
     })
 
     await manager.listProfiles()
     assert.equal(readFileSync(path.join(profile, 'package.json'), 'utf8'), before)
 
-    const result = await manager.enableBridge('tui')
+    const result = await manager.removeLegacyBridge('legacy')
     assert.equal(result.ok, true)
     assert.equal(result.errorCode, null)
-    assert.equal(result.profile.bridgeCompatible, true)
-    assert.equal(JSON.stringify(result).includes('sensitive install output'), false)
+    assert.equal(result.profile.legacyBridgeInstalled, false)
+    assert.equal(result.profile.legacyBridgeVersion, '')
+    assert.equal(result.profile.surface, 'custom')
+    assert.equal(JSON.stringify(result).includes('sensitive removal output'), false)
     assert.equal(calls.length, 1)
     assert.equal(path.isAbsolute(calls[0].file), true)
-    assert.deepEqual(calls[0].args.slice(0, 5), [
-      '/absolute/dsh/lib/bin.js', 'plugin', '--profile', 'tui', 'add'
+    assert.deepEqual(calls[0].args, [
+      '/absolute/dsh/lib/bin.js', 'plugin', '--profile', 'legacy',
+      'remove', BRIDGE_NAME, '--ignore-scripts'
     ])
-    assert.equal(path.isAbsolute(calls[0].args[5]), true)
-    assert.equal(calls[0].args[5], path.join(home, 'bundled', `ucli-dsh-bridge-${DSH_BRIDGE_VERSION}.tgz`))
-    assert.deepEqual(calls[0].args.slice(6), ['--ignore-scripts'])
-    assert.equal(existsSync(calls[0].args[5]), true)
     assert.equal(calls[0].options.shell, false)
     assert.equal(calls[0].options.env.DSH_HOME, home)
     assert.equal(calls[0].options.env.ELECTRON_RUN_AS_NODE, '1')
@@ -618,10 +629,11 @@ test('profile initialization creates one native base profile through fixed shell
       profile: {
         profileName: 'team-tui',
         profileReady: true,
-        bridgeInstalled: false,
-        bridgeCompatible: false,
-        bridgeVersion: '',
-        errorCode: 'DSH_BRIDGE_NOT_INSTALLED'
+        surface: 'custom',
+        interactive: false,
+        legacyBridgeInstalled: false,
+        legacyBridgeVersion: '',
+        errorCode: null
       }
     })
     assert.equal(JSON.stringify(result).includes(home), false)
@@ -634,6 +646,118 @@ test('profile initialization creates one native base profile through fixed shell
     assert.equal(calls[0].options.shell, false)
     assert.equal(calls[0].options.env.DSH_HOME, home)
     assert.equal(calls[0].options.env.ELECTRON_RUN_AS_NODE, '1')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('profile initialization rejects and removes web, headless, and legacy bridge output', async () => {
+  for (const fixture of [
+    { name: 'web-output', bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] },
+    { name: 'headless-output', bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'] },
+    {
+      name: 'dependency-only-output',
+      bundles: ['@deepseek-ai/dsh-base'],
+      dependencies: { [BRIDGE_NAME]: 'file:bridge.tgz' }
+    },
+    {
+      name: 'bundle-partial-output',
+      bundles: ['@deepseek-ai/dsh-base', BRIDGE_NAME]
+    },
+    {
+      name: 'installed-file-only-output',
+      bundles: ['@deepseek-ai/dsh-base'],
+      bridgeVersion: DSH_BRIDGE_VERSION
+    },
+    {
+      name: 'legacy-output',
+      bundles: ['@deepseek-ai/dsh-base', '@example/custom', BRIDGE_NAME],
+      dependencies: { [BRIDGE_NAME]: 'file:bridge.tgz' },
+      bridgeVersion: DSH_BRIDGE_VERSION
+    }
+  ]) {
+    const home = temporaryRoot(`ucli-dsh-initialize-${fixture.name}-`)
+    try {
+      const manager = createManager(home, {
+        execute: async () => {
+          writeProfile(home, fixture.name, fixture)
+          return { code: 0, stdout: `private:${home}`, stderr: '' }
+        }
+      })
+
+      assert.deepEqual(await manager.initializeProfile(fixture.name), {
+        ok: false, errorCode: 'DSH_PROFILE_INITIALIZE_FAILED', profile: null
+      })
+      assert.equal(existsSync(path.join(home, 'profiles', fixture.name)), false)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  }
+})
+
+test('profile initialization rolls back partial nonzero output and verifies deletion', async () => {
+  const cleanHome = temporaryRoot('ucli-dsh-initialize-nonzero-')
+  try {
+    const manager = createManager(cleanHome, {
+      execute: async () => {
+        writeProfile(cleanHome, 'partial', { bundles: ['@deepseek-ai/dsh-base'] })
+        return { code: 1, stderr: `private:${cleanHome}` }
+      }
+    })
+    assert.deepEqual(await manager.initializeProfile('partial'), {
+      ok: false, errorCode: 'DSH_PROFILE_INITIALIZE_FAILED', profile: null
+    })
+    assert.equal(existsSync(path.join(cleanHome, 'profiles', 'partial')), false)
+  } finally {
+    rmSync(cleanHome, { recursive: true, force: true })
+  }
+
+  for (const mode of ['throw', 'noop']) {
+    const home = temporaryRoot(`ucli-dsh-initialize-rollback-${mode}-`)
+    try {
+      const nativeRm = (await import('node:fs/promises')).rm
+      const manager = createManager(home, {
+        execute: async () => {
+          writeProfile(home, 'partial', { bundles: ['@deepseek-ai/dsh-base'] })
+          return { code: 1, stderr: `private:${home}` }
+        },
+        fileOps: {
+          rm: async (target, options) => {
+            if (path.basename(target) === 'partial' && options?.recursive) {
+              if (mode === 'throw') throw Object.assign(new Error(`private:${target}`), { code: 'EACCES' })
+              return
+            }
+            return nativeRm(target, options)
+          }
+        }
+      })
+      const result = await manager.initializeProfile('partial')
+      assert.deepEqual(result, {
+        ok: false, errorCode: 'DSH_PROFILE_INITIALIZE_ROLLBACK_FAILED', profile: null
+      })
+      assert.equal(JSON.stringify(result).includes(home), false)
+      assert.equal(existsSync(path.join(home, 'profiles', 'partial')), true)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  }
+})
+
+test('profile initialization never races rollback against an unconfirmed live descendant', async () => {
+  const home = temporaryRoot('ucli-dsh-initialize-live-descendant-')
+  try {
+    const manager = createManager(home, {
+      execute: async () => {
+        writeProfile(home, 'partial', { bundles: ['@deepseek-ai/dsh-base'] })
+        return { code: -1, terminationConfirmed: false, stderr: `private:${home}` }
+      }
+    })
+    const result = await manager.initializeProfile('partial')
+    assert.deepEqual(result, {
+      ok: false, errorCode: 'DSH_PROFILE_INITIALIZE_ROLLBACK_FAILED', profile: null
+    })
+    assert.equal(JSON.stringify(result).includes(home), false)
+    assert.equal(existsSync(path.join(home, 'profiles', 'partial')), true)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
@@ -675,10 +799,10 @@ test('profile initialization never overwrites an existing native profile and coa
   }
 })
 
-test('transaction accepts a bounded multi-megabyte pnpm lock and restores it exactly', async () => {
+test('legacy removal transaction accepts a bounded multi-megabyte pnpm lock and restores it exactly', async () => {
   const home = temporaryRoot('ucli-dsh-large-lock-')
   try {
-    const profile = writeProfile(home, 'tui')
+    const profile = writeLegacyProfile(home, 'tui')
     const lock = path.join(profile, 'pnpm-lock.yaml')
     const original = Buffer.alloc(2 * 1024 * 1024, 0x61)
     writeFileSync(lock, original)
@@ -690,7 +814,7 @@ test('transaction accepts a bounded multi-megabyte pnpm lock and restores it exa
         return { code: 1, stdout: '', stderr: '' }
       }
     })
-    assert.equal((await manager.enableBridge('tui')).errorCode, 'DSH_BRIDGE_INSTALL_FAILED')
+    assert.equal((await manager.removeLegacyBridge('tui')).errorCode, 'DSH_BRIDGE_REMOVE_FAILED')
     assert.equal(executed, true)
     assert.deepEqual(readFileSync(lock), original)
   } finally {
@@ -701,7 +825,7 @@ test('transaction accepts a bounded multi-megabyte pnpm lock and restores it exa
 test('unconfirmed timeout never races rollback against a possibly live pnpm descendant', async () => {
   const home = temporaryRoot('ucli-dsh-timeout-')
   try {
-    const profile = writeProfile(home, 'tui')
+    const profile = writeLegacyProfile(home, 'tui')
     const manifest = path.join(profile, 'package.json')
     const manager = createManager(home, {
       execute: async () => {
@@ -709,7 +833,7 @@ test('unconfirmed timeout never races rollback against a possibly live pnpm desc
         return { code: -1, stdout: '', stderr: '', terminationConfirmed: false }
       }
     })
-    const result = await manager.enableBridge('tui')
+    const result = await manager.removeLegacyBridge('tui')
     assert.deepEqual(result, { ok: false, errorCode: 'DSH_BRIDGE_ROLLBACK_FAILED', profile: null })
     assert.equal(readFileSync(manifest, 'utf8'), '{"mutatedWhileDescendantMayLive":true}\n')
     assert.equal(readdirSync(path.join(home, 'app-temp')).length, 1)
@@ -721,7 +845,7 @@ test('unconfirmed timeout never races rollback against a possibly live pnpm desc
 test('rollback restoration failure has an explicit stable outcome and preserves recovery backup', async () => {
   const home = temporaryRoot('ucli-dsh-rollback-failure-')
   try {
-    const profile = writeProfile(home, 'tui')
+    const profile = writeLegacyProfile(home, 'tui')
     const nativeRename = (await import('node:fs/promises')).rename
     const manager = createManager(home, {
       execute: async () => {
@@ -737,7 +861,7 @@ test('rollback restoration failure has an explicit stable outcome and preserves 
         }
       }
     })
-    assert.deepEqual(await manager.enableBridge('tui'), {
+    assert.deepEqual(await manager.removeLegacyBridge('tui'), {
       ok: false, errorCode: 'DSH_BRIDGE_ROLLBACK_FAILED', profile: null
     })
     const backups = readdirSync(path.join(home, 'app-temp'))
@@ -748,10 +872,10 @@ test('rollback restoration failure has an explicit stable outcome and preserves 
   }
 })
 
-test('failed bridge enablement restores only the four metadata files and keeps user content', async () => {
+test('failed legacy bridge removal restores only the four metadata files and keeps user content', async () => {
   const home = temporaryRoot('ucli-dsh-rollback-')
   try {
-    const profile = writeProfile(home, 'tui')
+    const profile = writeLegacyProfile(home, 'tui')
     writeFileSync(path.join(profile, 'pnpm-lock.yaml'), 'before-lock\n')
     writeFileSync(path.join(profile, 'keep.txt'), 'keep me')
     const metadata = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'cordis.patch.yml']
@@ -764,9 +888,9 @@ test('failed bridge enablement restores only the four metadata files and keeps u
       }
     })
 
-    const result = await manager.enableBridge('tui')
+    const result = await manager.removeLegacyBridge('tui')
 
-    assert.deepEqual(result, { ok: false, errorCode: 'DSH_BRIDGE_INSTALL_FAILED', profile: null })
+    assert.deepEqual(result, { ok: false, errorCode: 'DSH_BRIDGE_REMOVE_FAILED', profile: null })
     for (const name of metadata) assert.equal(readFileSync(path.join(profile, name), 'utf8'), before[name])
     assert.equal(readFileSync(path.join(profile, 'keep.txt'), 'utf8'), 'keep me')
     assert.equal(readFileSync(path.join(profile, 'new-user-file.txt'), 'utf8'), 'leave me')
@@ -782,7 +906,7 @@ test('rollback removes originally missing metadata and preserves original file m
 }, async () => {
   const home = temporaryRoot('ucli-dsh-rollback-mode-')
   try {
-    const profile = writeProfile(home, 'tui')
+    const profile = writeLegacyProfile(home, 'tui')
     const lock = path.join(profile, 'pnpm-lock.yaml')
     const manifest = path.join(profile, 'package.json')
     chmodSync(manifest, 0o640)
@@ -793,7 +917,7 @@ test('rollback removes originally missing metadata and preserves original file m
         return { code: 1, stdout: '', stderr: '' }
       }
     })
-    assert.equal((await manager.enableBridge('tui')).errorCode, 'DSH_BRIDGE_INSTALL_FAILED')
+    assert.equal((await manager.removeLegacyBridge('tui')).errorCode, 'DSH_BRIDGE_REMOVE_FAILED')
     assert.equal(existsSync(lock), false)
     assert.equal((await import('node:fs')).statSync(manifest).mode & 0o777, 0o640)
   } finally {
@@ -801,10 +925,10 @@ test('rollback removes originally missing metadata and preserves original file m
   }
 })
 
-test('post-check failure restores metadata and concurrent enables coalesce per profile', async () => {
+test('post-check failure restores metadata and concurrent legacy removals coalesce per profile', async () => {
   const home = temporaryRoot('ucli-dsh-concurrent-')
   try {
-    const profile = writeProfile(home, 'tui')
+    const profile = writeLegacyProfile(home, 'tui')
     const before = readFileSync(path.join(profile, 'package.json'), 'utf8')
     let release
     const gate = new Promise(resolve => { release = resolve })
@@ -812,19 +936,22 @@ test('post-check failure restores metadata and concurrent enables coalesce per p
     const manager = createManager(home, {
       execute: async () => {
         executions += 1
-        writeFileSync(path.join(profile, 'package.json'), '{"name":"still-missing-bridge"}\n')
+        const manifestFile = path.join(profile, 'package.json')
+        const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
+        manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter(name => name !== BRIDGE_NAME)
+        writeJson(manifestFile, manifest)
         await gate
         return { code: 0, stdout: '', stderr: '' }
       }
     })
 
-    const first = manager.enableBridge('tui')
-    const second = manager.enableBridge('tui')
+    const first = manager.removeLegacyBridge('tui')
+    const second = manager.removeLegacyBridge('tui')
     while (executions === 0) await new Promise(resolve => setImmediate(resolve))
     assert.equal(executions, 1)
     release()
     const [left, right] = await Promise.all([first, second])
-    assert.deepEqual(left, { ok: false, errorCode: 'DSH_BRIDGE_INSTALL_FAILED', profile: null })
+    assert.deepEqual(left, { ok: false, errorCode: 'DSH_BRIDGE_REMOVE_FAILED', profile: null })
     assert.deepEqual(right, left)
     assert.equal(readFileSync(path.join(profile, 'package.json'), 'utf8'), before)
   } finally {
@@ -832,14 +959,15 @@ test('post-check failure restores metadata and concurrent enables coalesce per p
   }
 })
 
-test('bridge enablement fails closed for invalid profile, incompatible runtime, missing pnpm and missing artifact', async () => {
+test('legacy bridge removal fails closed for invalid profile, incompatible runtime, missing pnpm and absent bridge', async () => {
   const home = temporaryRoot('ucli-dsh-guards-')
   try {
-    writeProfile(home, 'tui')
+    writeLegacyProfile(home, 'tui')
+    writeProfile(home, 'plain')
     let executions = 0
     const execute = async () => { executions += 1; return { code: 0, stdout: '', stderr: '' } }
     const invalid = createManager(home, { execute })
-    assert.deepEqual(await invalid.enableBridge('../tui'), {
+    assert.deepEqual(await invalid.removeLegacyBridge('../tui'), {
       ok: false, errorCode: 'DSH_PROFILE_INVALID', profile: null
     })
     const incompatible = createManager(home, {
@@ -850,17 +978,13 @@ test('bridge enablement fails closed for invalid profile, incompatible runtime, 
         reason: 'unsupported-version'
       })
     })
-    assert.equal((await incompatible.enableBridge('tui')).errorCode, 'DSH_VERSION_UNSUPPORTED')
+    assert.equal((await incompatible.removeLegacyBridge('tui')).errorCode, 'DSH_VERSION_UNSUPPORTED')
     const noPnpm = createManager(home, {
       execute,
       inspectRuntime: async () => readyRuntime(home, { pnpmAvailable: false })
     })
-    assert.equal((await noPnpm.enableBridge('tui')).errorCode, 'DSH_BRIDGE_INSTALL_FAILED')
-    const missingArtifact = createManager(home, {
-      execute,
-      bridgeArtifactPath: path.join(home, 'missing.tgz')
-    })
-    assert.equal((await missingArtifact.enableBridge('tui')).errorCode, 'DSH_BRIDGE_INSTALL_FAILED')
+    assert.equal((await noPnpm.removeLegacyBridge('tui')).errorCode, 'DSH_BRIDGE_REMOVE_FAILED')
+    assert.equal((await invalid.removeLegacyBridge('plain')).errorCode, 'DSH_BRIDGE_NOT_INSTALLED')
     assert.equal(executions, 0)
   } finally {
     rmSync(home, { recursive: true, force: true })
@@ -870,7 +994,7 @@ test('bridge enablement fails closed for invalid profile, incompatible runtime, 
 test('transaction temp setup failures return a stable sanitized status before execution', async () => {
   const home = temporaryRoot('ucli-dsh-temp-failure-')
   try {
-    writeProfile(home, 'tui')
+    writeLegacyProfile(home, 'tui')
     let executions = 0
     const manager = createManager(home, {
       execute: async () => { executions += 1; return { code: 0, stdout: '', stderr: '' } },
@@ -880,8 +1004,8 @@ test('transaction temp setup failures return a stable sanitized status before ex
         }
       }
     })
-    const result = await manager.enableBridge('tui')
-    assert.deepEqual(result, { ok: false, errorCode: 'DSH_BRIDGE_INSTALL_FAILED', profile: null })
+    const result = await manager.removeLegacyBridge('tui')
+    assert.deepEqual(result, { ok: false, errorCode: 'DSH_BRIDGE_REMOVE_FAILED', profile: null })
     assert.equal(JSON.stringify(result).includes(home), false)
     assert.equal(executions, 0)
   } finally {
@@ -889,10 +1013,10 @@ test('transaction temp setup failures return a stable sanitized status before ex
   }
 })
 
-test('an out-of-root transaction candidate is removed before failing closed', async () => {
+test('an out-of-root transaction candidate is never recursively removed before containment is proven', async () => {
   const home = temporaryRoot('ucli-dsh-temp-containment-')
   try {
-    writeProfile(home, 'tui')
+    writeLegacyProfile(home, 'tui')
     const outside = path.join(home, 'outside-transaction')
     mkdirSync(outside)
     const removed = []
@@ -907,36 +1031,213 @@ test('an out-of-root transaction candidate is removed before failing closed', as
       }
     })
 
-    assert.deepEqual(await manager.enableBridge('tui'), {
-      ok: false, errorCode: 'DSH_BRIDGE_INSTALL_FAILED', profile: null
+    assert.deepEqual(await manager.removeLegacyBridge('tui'), {
+      ok: false, errorCode: 'DSH_BRIDGE_REMOVE_FAILED', profile: null
     })
-    assert.deepEqual(removed, [outside])
-    assert.equal(existsSync(outside), false)
+    assert.deepEqual(removed, [])
+    assert.equal(existsSync(outside), true)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
 })
 
-test('DSH IPC exposes only list, profile-name initialization and bridge enable operations', async () => {
+test('an in-root unowned transaction candidate is never used or recursively removed', async () => {
+  const home = temporaryRoot('ucli-dsh-temp-owner-')
+  try {
+    writeLegacyProfile(home, 'tui')
+    const tempRoot = path.join(home, 'app-temp')
+    const unowned = path.join(tempRoot, 'ucli-dsh-profile-abcdef')
+    mkdirSync(unowned, { recursive: true })
+    writeFileSync(path.join(unowned, 'keep.txt'), 'keep')
+    const removed = []
+    let executed = false
+    const manager = createManager(home, {
+      execute: async () => { executed = true; return { code: 1 } },
+      fileOps: {
+        mkdtemp: async () => unowned,
+        rm: async (target, options) => {
+          removed.push(target)
+          return (await import('node:fs/promises')).rm(target, options)
+        }
+      }
+    })
+
+    assert.deepEqual(await manager.removeLegacyBridge('tui'), {
+      ok: false, errorCode: 'DSH_BRIDGE_REMOVE_FAILED', profile: null
+    })
+    assert.equal(executed, false)
+    assert.equal(removed.includes(unowned), false)
+    assert.equal(readFileSync(path.join(unowned, 'keep.txt'), 'utf8'), 'keep')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a swapped transaction directory or forged owner marker is never recursively removed', async () => {
+  const home = temporaryRoot('ucli-dsh-temp-owner-swap-')
+  try {
+    writeLegacyProfile(home, 'tui')
+    const tempRoot = path.join(home, 'app-temp')
+    let swappedDirectory = null
+    const managerRemoved = []
+    const nativeRm = (await import('node:fs/promises')).rm
+    const manager = createManager(home, {
+      execute: async () => {
+        const [name] = readdirSync(tempRoot).filter(value => value.startsWith('ucli-dsh-profile-'))
+        swappedDirectory = path.join(tempRoot, name)
+        rmSync(swappedDirectory, { recursive: true, force: true })
+        mkdirSync(swappedDirectory)
+        writeFileSync(path.join(swappedDirectory, '.ucli-dsh-profile-owner.json'), '{"forged":true}\n')
+        writeFileSync(path.join(swappedDirectory, 'keep.txt'), 'keep')
+        return { code: 1 }
+      },
+      fileOps: {
+        rm: async (target, options) => {
+          managerRemoved.push(target)
+          return nativeRm(target, options)
+        }
+      }
+    })
+
+    assert.deepEqual(await manager.removeLegacyBridge('tui'), {
+      ok: false, errorCode: 'DSH_BRIDGE_CLEANUP_FAILED', profile: null
+    })
+    assert.equal(managerRemoved.includes(swappedDirectory), false)
+    assert.equal(readFileSync(path.join(swappedDirectory, 'keep.txt'), 'utf8'), 'keep')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('legacy removal surfaces backup cleanup failure and retries the internal cleanup without renderer paths', async () => {
+  const home = temporaryRoot('ucli-dsh-cleanup-retry-')
+  try {
+    const profile = writeLegacyProfile(home, 'legacy')
+    let executions = 0
+    let cleanupAttempts = 0
+    let releaseCleanup
+    let markCleanupStarted
+    const cleanupGate = new Promise(resolve => { releaseCleanup = resolve })
+    const cleanupStarted = new Promise(resolve => { markCleanupStarted = resolve })
+    const nativeRm = (await import('node:fs/promises')).rm
+    const manager = createManager(home, {
+      execute: async () => {
+        executions += 1
+        const manifestFile = path.join(profile, 'package.json')
+        const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
+        delete manifest.dependencies[BRIDGE_NAME]
+        manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter(name => name !== BRIDGE_NAME)
+        writeJson(manifestFile, manifest)
+        rmSync(path.join(profile, 'node_modules', '@ucli', 'dsh-bridge'), { recursive: true, force: true })
+        return { code: 0, stdout: `private:${home}`, stderr: '' }
+      },
+      fileOps: {
+        rm: async (target, options) => {
+          if (options?.recursive && path.basename(target).startsWith('ucli-dsh-profile-')) {
+            cleanupAttempts += 1
+            if (cleanupAttempts === 1) throw Object.assign(new Error(`private:${target}`), { code: 'EACCES' })
+            if (cleanupAttempts === 2) {
+              markCleanupStarted()
+              await cleanupGate
+            }
+          }
+          return nativeRm(target, options)
+        }
+      }
+    })
+
+    const first = await manager.removeLegacyBridge('legacy')
+    assert.deepEqual(first, { ok: false, errorCode: 'DSH_BRIDGE_CLEANUP_FAILED', profile: null })
+    assert.equal(JSON.stringify(first).includes(home), false)
+    assert.equal(executions, 1)
+    assert.equal(readdirSync(path.join(home, 'app-temp')).length, 1)
+
+    const firstRetry = manager.removeLegacyBridge('legacy', { path: home, command: 'ignored' })
+    await cleanupStarted
+    const concurrentRetry = manager.removeLegacyBridge('legacy', { version: 'ignored' })
+    releaseCleanup()
+    const [retried, coalesced] = await Promise.all([firstRetry, concurrentRetry])
+    assert.deepEqual(coalesced, retried)
+    assert.equal(retried.ok, true)
+    assert.equal(retried.profile.legacyBridgeInstalled, false)
+    assert.equal(executions, 1)
+    assert.equal(cleanupAttempts, 2)
+    assert.equal(readdirSync(path.join(home, 'app-temp')).length, 0)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('DSH IPC exposes only fixed managed-runtime and profile operations', async () => {
   const handlers = new Map()
   const received = []
-  const manager = {
+  const profileManager = {
     listProfiles: async () => ({ runtime: {}, profiles: [] }),
     initializeProfile: async name => { received.push(['initialize', name]); return { ok: true, errorCode: null, profile: null } },
-    enableBridge: async name => { received.push(name); return { ok: true, errorCode: null, profile: null } }
+    removeLegacyBridge: async name => { received.push(['removeLegacyBridge', name]); return { ok: true, errorCode: null, profile: null } }
+  }
+  const runtimeManager = {
+    getState: async (...args) => { received.push(['getState', args]); return { status: 'missing' } },
+    install: async (...args) => { received.push(['install', args]); return { status: 'healthy' } },
+    upgrade: async (...args) => { received.push(['upgrade', args]); return { status: 'healthy' } },
+    repair: async (...args) => { received.push(['repair', args]); return { status: 'healthy' } },
+    remove: async (...args) => { received.push(['remove', args]); return { status: 'missing' } }
   }
   registerDshProfileIpc({
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
-    manager
+    profileManager,
+    runtimeManager
   })
-  assert.deepEqual([...handlers.keys()], ['dsh:listProfiles', 'dsh:initializeProfile', 'dsh:enableBridge'])
+  assert.deepEqual([...handlers.keys()], [
+    'dsh:getState',
+    'dsh:listProfiles',
+    'dsh:initializeProfile',
+    'dsh:installRuntime',
+    'dsh:upgradeRuntime',
+    'dsh:repairRuntime',
+    'dsh:removeRuntime',
+    'dsh:removeLegacyBridge'
+  ])
+  const malicious = { version: 'latest', registry: 'https://evil.invalid', command: 'rm -rf' }
+  await handlers.get('dsh:getState')({ sender: 'renderer' }, malicious)
   assert.deepEqual(await handlers.get('dsh:listProfiles')({ sender: 'renderer' }), { runtime: {}, profiles: [] })
-  await handlers.get('dsh:initializeProfile')({ sender: 'renderer' }, 'team-tui')
-  await handlers.get('dsh:enableBridge')({ sender: 'renderer' }, 'team-tui')
-  assert.deepEqual(received, [['initialize', 'team-tui'], 'team-tui'])
+  await handlers.get('dsh:initializeProfile')({ sender: 'renderer' }, 'team-web', malicious)
+  await handlers.get('dsh:installRuntime')({ sender: 'renderer' }, malicious)
+  await handlers.get('dsh:upgradeRuntime')({ sender: 'renderer' }, malicious)
+  await handlers.get('dsh:repairRuntime')({ sender: 'renderer' }, malicious)
+  await handlers.get('dsh:removeRuntime')({ sender: 'renderer' }, malicious)
+  await handlers.get('dsh:removeLegacyBridge')({ sender: 'renderer' }, 'legacy', malicious)
+  assert.deepEqual(received, [
+    ['getState', []],
+    ['initialize', 'team-web'],
+    ['install', []],
+    ['upgrade', []],
+    ['repair', []],
+    ['remove', []],
+    ['removeLegacyBridge', 'legacy']
+  ])
 })
 
-test('orchestrator composes the DSH profile manager into live IPC channels', async () => {
+test('preload and renderer wrappers expose fixed DSH runtime actions without bridge enablement', () => {
+  const preload = readFileSync(new URL('../electron/preload.js', import.meta.url), 'utf8')
+  const renderer = readFileSync(new URL('../src/ipc.js', import.meta.url), 'utf8')
+  for (const [name, channel] of [
+    ['getDshState', 'dsh:getState'],
+    ['installDshRuntime', 'dsh:installRuntime'],
+    ['upgradeDshRuntime', 'dsh:upgradeRuntime'],
+    ['repairDshRuntime', 'dsh:repairRuntime'],
+    ['removeDshRuntime', 'dsh:removeRuntime']
+  ]) {
+    assert.match(preload, new RegExp(`${name}: \\(\\) => ipcRenderer\\.invoke\\('${channel}'\\)`))
+    assert.match(renderer, new RegExp(`${name}: \\(\\) => u\\.${name}\\(\\)`))
+  }
+  assert.match(preload, /removeDshLegacyBridge: \(profileName\) => ipcRenderer\.invoke\('dsh:removeLegacyBridge', profileName\)/)
+  assert.match(renderer, /removeDshLegacyBridge: \(profileName\) => u\.removeDshLegacyBridge\(profileName\)/)
+  assert.doesNotMatch(preload, /enableDshBridge|dsh:enableBridge/)
+  assert.doesNotMatch(renderer, /enableDshBridge/)
+})
+
+test('orchestrator composes managed runtime and profile operations into live IPC channels', async () => {
   register('./fixtures/electron-stub-loader.mjs', import.meta.url)
   const electron = await import('electron')
   const handlers = new Map()
@@ -949,9 +1250,15 @@ test('orchestrator composes the DSH profile manager into live IPC channels', asy
     const module = await import(`../electron/orchestrator.js?dsh-ipc=${Date.now()}`)
     orchestrator = module.createOrchestrator()
     orchestrator.registerIpc()
-    assert.equal(typeof handlers.get('dsh:listProfiles'), 'function')
-    assert.equal(typeof handlers.get('dsh:initializeProfile'), 'function')
-    assert.equal(typeof handlers.get('dsh:enableBridge'), 'function')
+    assert.deepEqual([...handlers.keys()].filter(channel => channel.startsWith('dsh:')), [
+      'dsh:getState', 'dsh:listProfiles', 'dsh:initializeProfile',
+      'dsh:installRuntime', 'dsh:upgradeRuntime', 'dsh:repairRuntime',
+      'dsh:removeRuntime', 'dsh:removeLegacyBridge'
+    ])
+    const state = await handlers.get('dsh:getState')({ sender: 'renderer' }, { path: root })
+    assert.deepEqual(Object.keys(state), [
+      'revision', 'supportedVersion', 'managed', 'system', 'selected', 'action', 'busy', 'errorCode'
+    ])
     const result = await handlers.get('dsh:listProfiles')({ sender: 'renderer' })
     assert.deepEqual(Object.keys(result), ['runtime', 'profiles'])
     assert.equal(JSON.stringify(result).includes(root), false)
@@ -961,4 +1268,26 @@ test('orchestrator composes the DSH profile manager into live IPC channels', asy
     else process.env.UCLI_TEST_USER_DATA = previous
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('orchestrator quiescent gate stops owned DSH Web adapters and retains a failed handle', async () => {
+  register('./fixtures/electron-stub-loader.mjs', import.meta.url)
+  const module = await import(`../electron/orchestrator.js?dsh-quiescent=${Date.now()}`)
+  const events = []
+  const stopped = { _accepting: true, dispose: async () => { events.push('stopped') } }
+  const failed = { _accepting: true, dispose: async () => { events.push('failed'); throw new Error('private path') } }
+  const entries = new Map([
+    ['stopped', { adapter: stopped, session: { adapterId: 'deepseek-harness', capabilities: { surface: 'web' } }, status: 'online' }],
+    ['failed', { adapter: failed, session: { adapterId: 'deepseek-harness', capabilities: { surface: 'web' } }, status: 'online' }],
+    ['other', { adapter: { dispose: async () => assert.fail('non-DSH must remain live') }, session: { adapterId: 'claude' }, status: 'online' }]
+  ])
+
+  await assert.rejects(module.assertDshQuiescent(entries), { code: 'DSH_RUNTIME_BUSY' })
+  assert.equal(stopped._accepting, false)
+  assert.equal(failed._accepting, false)
+  assert.equal(entries.get('stopped').adapter, null)
+  assert.equal(entries.get('stopped').status, 'offline')
+  assert.equal(entries.get('failed').adapter, failed)
+  assert.equal(entries.get('failed').status, 'online')
+  assert.deepEqual(events, ['stopped', 'failed'])
 })

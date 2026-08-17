@@ -23,10 +23,14 @@ import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log, truncateLog } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import {
+  SUPPORTED_DSH_VERSION,
+  inspectDshRuntime,
   normalizeDshWebSurfaceState,
+  resolveDshHome,
   runResolvedProcess
 } from './adapters/deepSeekHarnessRuntime.js'
 import { createDshProfileManager, registerDshProfileIpc } from './adapters/dshProfileManager.js'
+import { createDshRuntimeManager } from './adapters/dshRuntimeManager.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
 import { createSessionDiagnosticsService, registerSessionDiagnosticsIpc } from './sessionDiagnosticsService.js'
 import { annotateImportedSessions, isSafeNativeSessionId, isSafeProviderName, listClaudeTranscriptFiles, resolveCodexResumeProvider, resolveCodexTranscriptSessionInHome } from './sessionDiscovery.js'
@@ -643,6 +647,32 @@ function assertDshSessionStartable(session) {
   }
 }
 
+export async function assertDshQuiescent(entries) {
+  const ownedWebEntries = [...entries.values()].filter(entry => (
+    entry?.adapter &&
+    entry.session?.adapterId === 'deepseek-harness' &&
+    (
+      entry.session?.capabilities?.surface === 'web' ||
+      entry.session?.adapterConfig?.surfacePreference === 'web'
+    )
+  ))
+  for (const entry of ownedWebEntries) entry.adapter._accepting = false
+  for (const entry of ownedWebEntries) {
+    const adapter = entry.adapter
+    try {
+      await adapter.dispose()
+    } catch {
+      throw Object.assign(new Error('DSH_RUNTIME_BUSY'), { code: 'DSH_RUNTIME_BUSY' })
+    }
+    if (entry.adapter === adapter) entry.adapter = null
+    entry.status = 'offline'
+    entry.surfaceState = normalizeDshWebSurfaceState({
+      status: 'stopped', url: null, errorCode: null
+    })
+  }
+  return true
+}
+
 export function createOrchestrator() {
   initLogger()
   log('createOrchestrator() — starting')
@@ -666,6 +696,7 @@ export function createOrchestrator() {
   let summaryCacheService = null
   let storageService = null
   let dshProfileManager = null
+  let dshRuntimeManager = null
   let summaryCacheLastPrunedAt = null
   let persistenceRecovery = null
   const storageRoots = resolveUcliStorageRoots({
@@ -2546,21 +2577,38 @@ export function createOrchestrator() {
   // ---- IPC registration ----
   function getDshProfileManager() {
     if (dshProfileManager) return dshProfileManager
-    const resourcesRoot = app.isPackaged
-      ? join(process.resourcesPath, 'resources')
-      : join(app.getAppPath(), 'resources')
     dshProfileManager = createDshProfileManager({
       env: process.env,
       homeDirectory: app.getPath('home'),
       tempDirectory: join(app.getPath('temp'), 'ucli-dsh-profile-transactions'),
-      bridgeArtifactPath: join(
-        resourcesRoot,
-        'deepseek-harness',
-        'ucli-dsh-bridge-0.11.0.tgz'
-      ),
+      inspectRuntime: async options => {
+        const selected = await getDshRuntimeManager().selectLaunch()
+        if (selected?.source !== 'managed') return inspectDshRuntime(options)
+        return {
+          installed: true,
+          compatible: true,
+          version: SUPPORTED_DSH_VERSION,
+          reason: '',
+          pnpmAvailable: true,
+          launch: selected.launch,
+          home: selected.home
+        }
+      },
       execute: runResolvedProcess
     })
     return dshProfileManager
+  }
+
+  function getDshRuntimeManager() {
+    if (dshRuntimeManager) return dshRuntimeManager
+    const homeDirectory = app.getPath('home')
+    dshRuntimeManager = createDshRuntimeManager({
+      runtimeDirectory: join(app.getPath('userData'), 'runtimes', 'deepseek-harness'),
+      dshHome: resolveDshHome({ env: process.env, homeDirectory }),
+      env: process.env,
+      assertQuiescent: () => assertDshQuiescent(sessions)
+    })
+    return dshRuntimeManager
   }
 
   function registerIpc() {
@@ -2690,7 +2738,11 @@ export function createOrchestrator() {
     )
     ipcMain.handle('cli-tools:list', () => inspectCliTools())
     ipcMain.handle('cli-tools:run', (_e, id, action) => runCliToolAction(id, action))
-    registerDshProfileIpc({ ipcMain, manager: getDshProfileManager() })
+    registerDshProfileIpc({
+      ipcMain,
+      profileManager: getDshProfileManager(),
+      runtimeManager: getDshRuntimeManager()
+    })
     ipcMain.handle('diagnostics:get', () => diagnostics.getReport())
     ipcMain.handle('diagnostics:export', () => diagnostics.exportReport())
     ipcMain.handle('codex:runtime:get', () =>

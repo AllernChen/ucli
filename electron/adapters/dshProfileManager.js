@@ -13,13 +13,20 @@ import {
 } from 'node:fs/promises'
 import path from 'node:path'
 import {
-  DSH_BRIDGE_VERSION,
   inspectDshRuntime,
   validateDshProfileName
 } from './deepSeekHarnessRuntime.js'
 
 const BRIDGE_PACKAGE = '@ucli/dsh-bridge'
 const BRIDGE_PATCH = './cordis.patch.yml'
+const OFFICIAL_WEB_BUNDLES = Object.freeze([
+  '@deepseek-ai/dsh-base',
+  '@deepseek-ai/dsh-web-app'
+])
+const OFFICIAL_HEADLESS_BUNDLES = Object.freeze([
+  '@deepseek-ai/dsh-base',
+  '@deepseek-ai/dsh-headless'
+])
 const PROFILE_METADATA_FILES = Object.freeze([
   'package.json',
   'pnpm-lock.yaml',
@@ -28,12 +35,13 @@ const PROFILE_METADATA_FILES = Object.freeze([
 ])
 const MAX_METADATA_BYTES = 1024 * 1024
 const MAX_LOCKFILE_BYTES = 8 * 1024 * 1024
-const MAX_BRIDGE_ARCHIVE_BYTES = 64 * 1024 * 1024
 const MAX_PROFILE_BUNDLES = 256
 const MAX_PROFILES = 256
-const WINDOWS_CMD_METACHARACTERS = /[&|<>^()%!"]/u
 const PACKAGE_NAME = /^(?:@[A-Za-z0-9][A-Za-z0-9._~-]*\/)?[A-Za-z0-9][A-Za-z0-9._~-]*$/u
 const SAFE_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/u
+const TRANSACTION_DIRECTORY = /^ucli-dsh-profile-[0-9A-Za-z_-]{6,64}$/u
+const TRANSACTION_OWNER_FILE = '.ucli-dsh-profile-owner.json'
+const TRANSACTION_OWNER_NAME = 'ucli-dsh-profile-transaction'
 
 const nativeFiles = {
   chmod,
@@ -114,11 +122,16 @@ function invalidProfileStatus(profileName) {
   return {
     profileName,
     profileReady: false,
-    bridgeInstalled: false,
-    bridgeCompatible: false,
-    bridgeVersion: '',
+    surface: 'custom',
+    interactive: false,
+    legacyBridgeInstalled: false,
+    legacyBridgeVersion: '',
     errorCode: 'DSH_PROFILE_INVALID'
   }
+}
+
+function isExactTuple(actual, expected) {
+  return actual.length === expected.length && actual.every((value, index) => value === expected[index])
 }
 
 function sanitizeRuntime(runtime) {
@@ -166,7 +179,6 @@ export function createDshProfileManager({
   env = process.env,
   homeDirectory,
   tempDirectory,
-  bridgeArtifactPath,
   inspectRuntime = options => inspectDshRuntime(options),
   execute,
   platform = process.platform,
@@ -175,10 +187,10 @@ export function createDshProfileManager({
   if (typeof inspectRuntime !== 'function') throw new TypeError('inspectRuntime is required')
   if (typeof execute !== 'function') throw new TypeError('execute is required')
   if (!path.isAbsolute(String(tempDirectory || ''))) throw new TypeError('absolute tempDirectory is required')
-  if (!path.isAbsolute(String(bridgeArtifactPath || ''))) throw new TypeError('absolute bridgeArtifactPath is required')
   const files = { ...nativeFiles, ...fileOps }
-  const activeInstalls = new Map()
+  const activeRemovals = new Map()
   const activeInitializations = new Map()
+  const pendingTransactionCleanups = new Map()
 
   async function runtimeSnapshot() {
     return inspectRuntime({ env, homeDirectory })
@@ -307,35 +319,75 @@ export function createDshProfileManager({
       const hasDependency = Object.prototype.hasOwnProperty.call(dependencies || {}, BRIDGE_PACKAGE)
       const hasBundle = bundles.filter(bundle => bundle === BRIDGE_PACKAGE).length === 1
       const installedManifest = await inspectInstalledBridge(identity)
-      const bridgeInstalled = Boolean(
+      const legacyBridgeInstalled = Boolean(
         hasDependency &&
         hasBundle &&
         installedManifest?.exactName &&
         installedManifest.exactPatch
       )
-      const rawBridgeVersion = installedManifest?.exactName ? installedManifest.version : ''
-      const bridgeVersion = rawBridgeVersion.length <= 64 && SAFE_VERSION.test(rawBridgeVersion)
+      const rawBridgeVersion = legacyBridgeInstalled ? installedManifest.version : ''
+      const legacyBridgeVersion = rawBridgeVersion.length <= 64 && SAFE_VERSION.test(rawBridgeVersion)
         ? rawBridgeVersion
         : ''
-      const bridgeCompatible = Boolean(
-        hasDependency &&
-        hasBundle &&
-        installedManifest?.exactName &&
-        installedManifest.exactPatch &&
-        bridgeVersion === DSH_BRIDGE_VERSION
-      )
+      const surface = legacyBridgeInstalled
+        ? 'custom'
+        : isExactTuple(bundles, OFFICIAL_WEB_BUNDLES)
+          ? 'web'
+          : isExactTuple(bundles, OFFICIAL_HEADLESS_BUNDLES)
+            ? 'headless'
+            : 'custom'
       return {
         profileName: identity.name,
         profileReady: true,
-        bridgeInstalled,
-        bridgeCompatible,
-        bridgeVersion,
-        errorCode: bridgeCompatible
-          ? null
-          : bridgeInstalled ? 'DSH_BRIDGE_VERSION_UNSUPPORTED' : 'DSH_BRIDGE_NOT_INSTALLED'
+        surface,
+        interactive: surface === 'web',
+        legacyBridgeInstalled,
+        legacyBridgeVersion,
+        errorCode: null
       }
     } catch {
       return invalidProfileStatus(identity.name)
+    }
+  }
+
+  async function legacyBridgeMetadataAbsent(identity) {
+    try {
+      const record = await readBoundedRegularFile(path.join(identity.declared, 'package.json'), files)
+      const manifest = parseJsonObject(record.bytes)
+      const bundles = manifest?.dsh?.profile?.bundles ?? []
+      const dependencies = manifest.dependencies ?? {}
+      if (!validBundleList(bundles) || !dependencies || typeof dependencies !== 'object' || Array.isArray(dependencies)) {
+        return false
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(dependencies, BRIDGE_PACKAGE) ||
+        bundles.includes(BRIDGE_PACKAGE)
+      ) return false
+      try {
+        await files.lstat(path.join(identity.declared, 'node_modules', '@ucli', 'dsh-bridge'))
+        return false
+      } catch (error) {
+        return error?.code === 'ENOENT'
+      }
+    } catch {
+      return false
+    }
+  }
+
+  async function isExactInitializedBaseProfile(identity, status) {
+    if (
+      !status?.profileReady ||
+      status.surface !== 'custom' ||
+      status.interactive ||
+      status.legacyBridgeInstalled
+    ) return false
+    try {
+      const record = await readBoundedRegularFile(path.join(identity.declared, 'package.json'), files)
+      const manifest = parseJsonObject(record.bytes)
+      return isExactTuple(manifest?.dsh?.profile?.bundles ?? [], ['@deepseek-ai/dsh-base']) &&
+        await legacyBridgeMetadataAbsent(identity)
+    } catch {
+      return false
     }
   }
 
@@ -402,56 +454,130 @@ export function createDshProfileManager({
     await assertIdentity(runtime, identity)
   }
 
-  async function validateBridgeArtifact() {
-    const artifactStat = await files.lstat(bridgeArtifactPath)
-    if (
-      !artifactStat.isFile() ||
-      artifactStat.isSymbolicLink() ||
-      artifactStat.size > MAX_BRIDGE_ARCHIVE_BYTES
-    ) throw codedError('DSH_BRIDGE_INSTALL_FAILED')
-    if (platform === 'win32' && WINDOWS_CMD_METACHARACTERS.test(bridgeArtifactPath)) {
-      throw codedError('DSH_BRIDGE_INSTALL_FAILED')
+  async function confirmMetadata(identity, records) {
+    for (const name of PROFILE_METADATA_FILES) {
+      const current = await readBoundedRegularFile(path.join(identity.declared, name), files, {
+        optional: true,
+        maximum: name === 'pnpm-lock.yaml' ? MAX_LOCKFILE_BYTES : MAX_METADATA_BYTES
+      })
+      const expected = records.get(name)
+      if (Boolean(current) !== Boolean(expected)) return false
+      if (current && (!current.bytes.equals(expected.bytes) || current.mode !== expected.mode)) return false
     }
-    return bridgeArtifactPath
+    return true
   }
 
-  async function performEnable(runtime, identity) {
+  async function verifyTransactionOwnership(transaction) {
+    try {
+      const directory = transaction?.directory
+      if (!path.isAbsolute(String(directory || ''))) return false
+      if (!TRANSACTION_DIRECTORY.test(path.basename(directory))) return false
+      if (!hasExactParent(path.resolve(directory), path.resolve(tempDirectory), platform)) return false
+      const tempStat = await files.lstat(tempDirectory)
+      const transactionStat = await files.lstat(directory)
+      if (
+        !tempStat.isDirectory() || tempStat.isSymbolicLink() ||
+        !transactionStat.isDirectory() || transactionStat.isSymbolicLink()
+      ) return false
+      if (transactionStat.dev !== transaction.device || transactionStat.ino !== transaction.inode) return false
+      const canonicalTemp = await files.realpath(tempDirectory)
+      const canonicalTransaction = await files.realpath(directory)
+      if (!hasExactParent(canonicalTransaction, canonicalTemp, platform)) return false
+      if (
+        normalizeForComparison(canonicalTransaction, platform) !==
+        normalizeForComparison(transaction.canonical, platform)
+      ) return false
+      const marker = await readBoundedRegularFile(path.join(directory, TRANSACTION_OWNER_FILE), files, {
+        maximum: 512
+      })
+      if (!marker.bytes.equals(transaction.markerBytes)) return false
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  async function cleanupTransactionDirectory(transaction) {
+    try {
+      if (!await verifyTransactionOwnership(transaction)) return false
+      const directory = transaction.directory
+      await files.rm(directory, { recursive: true, force: true })
+      try {
+        await files.lstat(directory)
+        return false
+      } catch (error) {
+        return error?.code === 'ENOENT'
+      }
+    } catch {
+      return false
+    }
+  }
+
+  async function performRemove(runtime, identity) {
     const runtimeFailure = runtimeErrorCode(runtime)
     if (runtimeFailure) return failure(runtimeFailure)
     if (!runtime.pnpmAvailable || !runtime.launch || !path.isAbsolute(runtime.launch.file)) {
-      return failure('DSH_BRIDGE_INSTALL_FAILED')
+      return failure('DSH_BRIDGE_REMOVE_FAILED')
     }
     if ((runtime.launch.prefixArgs || []).some(argument => !path.isAbsolute(argument))) {
-      return failure('DSH_BRIDGE_INSTALL_FAILED')
+      return failure('DSH_BRIDGE_REMOVE_FAILED')
     }
     let backupDirectory = null
+    let transaction = null
     try {
       await files.mkdir(tempDirectory, { recursive: true, mode: 0o700 })
       const tempRootStat = await files.lstat(tempDirectory)
       if (!tempRootStat.isDirectory() || tempRootStat.isSymbolicLink()) {
-        return failure('DSH_BRIDGE_INSTALL_FAILED')
+        return failure('DSH_BRIDGE_REMOVE_FAILED')
       }
       const canonicalTempRoot = await files.realpath(tempDirectory)
       backupDirectory = await files.mkdtemp(path.join(tempDirectory, 'ucli-dsh-profile-'))
+      if (!TRANSACTION_DIRECTORY.test(path.basename(backupDirectory))) {
+        throw codedError('DSH_BRIDGE_REMOVE_FAILED')
+      }
       if (!hasExactParent(path.resolve(backupDirectory), path.resolve(tempDirectory), platform)) {
-        throw codedError('DSH_BRIDGE_INSTALL_FAILED')
+        throw codedError('DSH_BRIDGE_REMOVE_FAILED')
       }
       const canonicalBackup = await files.realpath(backupDirectory)
       if (!hasExactParent(canonicalBackup, canonicalTempRoot, platform)) {
-        throw codedError('DSH_BRIDGE_INSTALL_FAILED')
+        throw codedError('DSH_BRIDGE_REMOVE_FAILED')
+      }
+      const backupStat = await files.lstat(backupDirectory)
+      if (!backupStat.isDirectory() || backupStat.isSymbolicLink()) {
+        throw codedError('DSH_BRIDGE_REMOVE_FAILED')
+      }
+      if ((await files.readdir(backupDirectory)).length !== 0) {
+        throw codedError('DSH_BRIDGE_REMOVE_FAILED')
       }
       await files.chmod(backupDirectory, 0o700)
-    } catch {
-      if (backupDirectory) {
-        await files.rm(backupDirectory, { recursive: true, force: true }).catch(() => {})
+      const markerBytes = Buffer.from(`${JSON.stringify({
+        owner: TRANSACTION_OWNER_NAME,
+        nonce: randomUUID()
+      })}\n`)
+      transaction = {
+        directory: backupDirectory,
+        canonical: canonicalBackup,
+        device: backupStat.dev,
+        inode: backupStat.ino,
+        markerBytes
       }
-      return failure('DSH_BRIDGE_INSTALL_FAILED')
+      await files.writeFile(path.join(backupDirectory, TRANSACTION_OWNER_FILE), markerBytes, {
+        flag: 'wx',
+        mode: 0o600
+      })
+      if (!await verifyTransactionOwnership(transaction)) {
+        throw codedError('DSH_BRIDGE_REMOVE_FAILED')
+      }
+    } catch {
+      if (transaction) {
+        await cleanupTransactionDirectory(transaction)
+      }
+      return failure('DSH_BRIDGE_REMOVE_FAILED')
     }
     let records
     let preserveBackup = false
     try {
       records = await snapshotMetadata(runtime, identity, backupDirectory)
-      const stableArtifact = await validateBridgeArtifact()
       await assertIdentity(runtime, identity)
       const processEnvironment = operationEnvironment(env, runtime)
       let result
@@ -460,7 +586,7 @@ export function createDshProfileManager({
           runtime.launch.file,
           [
             ...(runtime.launch.prefixArgs || []),
-            'plugin', '--profile', identity.name, 'add', stableArtifact, '--ignore-scripts'
+            'plugin', '--profile', identity.name, 'remove', BRIDGE_PACKAGE, '--ignore-scripts'
           ],
           {
             env: processEnvironment,
@@ -476,39 +602,53 @@ export function createDshProfileManager({
         preserveBackup = true
         return failure('DSH_BRIDGE_ROLLBACK_FAILED')
       }
-      let installed = null
+      let inspected = null
       if (result?.code === 0) {
         try {
           await assertIdentity(runtime, identity)
-          installed = await inspectProfile(identity)
+          inspected = await inspectProfile(identity)
         } catch {}
       }
-      if (result?.code === 0 && installed?.bridgeCompatible) {
-        return { ok: true, errorCode: null, profile: installed }
+      if (
+        result?.code === 0 &&
+        inspected?.profileReady &&
+        !inspected.legacyBridgeInstalled &&
+        await legacyBridgeMetadataAbsent(identity)
+      ) {
+        return { ok: true, errorCode: null, profile: inspected }
       }
       try {
         await restoreMetadata(runtime, identity, records)
+        if (!await confirmMetadata(identity, records)) throw codedError('DSH_BRIDGE_ROLLBACK_FAILED')
       } catch {
         preserveBackup = true
         return failure('DSH_BRIDGE_ROLLBACK_FAILED')
       }
-      return failure('DSH_BRIDGE_INSTALL_FAILED')
+      return failure('DSH_BRIDGE_REMOVE_FAILED')
     } catch {
       if (records) {
         try {
           await restoreMetadata(runtime, identity, records)
+          if (!await confirmMetadata(identity, records)) throw codedError('DSH_BRIDGE_ROLLBACK_FAILED')
         } catch {
           preserveBackup = true
           return failure('DSH_BRIDGE_ROLLBACK_FAILED')
         }
       }
-      return failure('DSH_BRIDGE_INSTALL_FAILED')
+      return failure('DSH_BRIDGE_REMOVE_FAILED')
     } finally {
-      if (!preserveBackup) await files.rm(backupDirectory, { recursive: true, force: true }).catch(() => {})
+      if (!preserveBackup) {
+        const lockKey = normalizeForComparison(identity.canonical, platform)
+        if (!await cleanupTransactionDirectory(transaction)) {
+          pendingTransactionCleanups.set(lockKey, transaction)
+          return failure('DSH_BRIDGE_CLEANUP_FAILED')
+        }
+        pendingTransactionCleanups.delete(lockKey)
+      }
     }
   }
 
-  async function enableBridge(profileName) {
+  async function removeLegacyBridge(profileName) {
     try {
       validateDshProfileName(profileName)
     } catch {
@@ -528,16 +668,51 @@ export function createDshProfileManager({
     } catch {
       return failure('DSH_PROFILE_INVALID')
     }
-    const profile = await inspectProfile(identity)
-    if (!profile.profileReady) return failure('DSH_PROFILE_NOT_READY')
     const lockKey = normalizeForComparison(identity.canonical, platform)
-    const active = activeInstalls.get(lockKey)
+    const active = activeRemovals.get(lockKey)
     if (active) return active
-    const operation = performEnable(runtime, identity).finally(() => {
-      if (activeInstalls.get(lockKey) === operation) activeInstalls.delete(lockKey)
+    const operation = (async () => {
+      const profile = await inspectProfile(identity)
+      if (!profile.profileReady) return failure('DSH_PROFILE_NOT_READY')
+      const pendingCleanup = pendingTransactionCleanups.get(lockKey)
+      if (pendingCleanup) {
+        if (!await cleanupTransactionDirectory(pendingCleanup)) {
+          return failure('DSH_BRIDGE_CLEANUP_FAILED')
+        }
+        pendingTransactionCleanups.delete(lockKey)
+        if (!profile.legacyBridgeInstalled) return { ok: true, errorCode: null, profile }
+      }
+      if (!profile.legacyBridgeInstalled) return failure('DSH_BRIDGE_NOT_INSTALLED', profile)
+      return performRemove(runtime, identity)
+    })().finally(() => {
+      if (activeRemovals.get(lockKey) === operation) activeRemovals.delete(lockKey)
     })
-    activeInstalls.set(lockKey, operation)
+    activeRemovals.set(lockKey, operation)
     return operation
+  }
+
+  async function rollbackInitializedProfile(runtime, profileName) {
+    try {
+      const root = await resolveProfilesRoot(runtime)
+      if (!root) return true
+      const candidate = path.join(root.declared, profileName)
+      try {
+        await files.lstat(candidate)
+      } catch (error) {
+        return error?.code === 'ENOENT'
+      }
+      const identity = await resolveProfileIdentity(runtime, profileName)
+      await assertIdentity(runtime, identity)
+      await files.rm(identity.declared, { recursive: true, force: true })
+      try {
+        await files.lstat(identity.declared)
+        return false
+      } catch (error) {
+        return error?.code === 'ENOENT'
+      }
+    } catch {
+      return false
+    }
   }
 
   async function performInitialize(runtime, profileName) {
@@ -567,6 +742,11 @@ export function createDshProfileManager({
       if (error?.code !== 'ENOENT') return failure('DSH_PROFILE_INITIALIZE_FAILED')
     }
     const processEnvironment = operationEnvironment(env, runtime)
+    async function failWithContainedRollback() {
+      return await rollbackInitializedProfile(runtime, profileName)
+        ? failure('DSH_PROFILE_INITIALIZE_FAILED')
+        : failure('DSH_PROFILE_INITIALIZE_ROLLBACK_FAILED')
+    }
     let result
     try {
       result = await execute(
@@ -583,18 +763,23 @@ export function createDshProfileManager({
         }
       )
     } catch {
-      return failure('DSH_PROFILE_INITIALIZE_FAILED')
+      return failWithContainedRollback()
     }
-    if (result?.code !== 0 || result?.terminationConfirmed === false) {
-      return failure('DSH_PROFILE_INITIALIZE_FAILED')
+    if (result?.terminationConfirmed === false) {
+      return failure('DSH_PROFILE_INITIALIZE_ROLLBACK_FAILED')
+    }
+    if (result?.code !== 0) {
+      return failWithContainedRollback()
     }
     try {
       const identity = await resolveProfileIdentity(runtime, profileName)
       const profile = await inspectProfile(identity)
-      if (!profile.profileReady) return failure('DSH_PROFILE_INITIALIZE_FAILED', profile)
+      if (!await isExactInitializedBaseProfile(identity, profile)) {
+        return failWithContainedRollback()
+      }
       return { ok: true, errorCode: null, profile }
     } catch {
-      return failure('DSH_PROFILE_INITIALIZE_FAILED')
+      return failWithContainedRollback()
     }
   }
 
@@ -622,19 +807,33 @@ export function createDshProfileManager({
     return operation
   }
 
-  return { listProfiles, initializeProfile, enableBridge }
+  return { listProfiles, initializeProfile, removeLegacyBridge }
 }
 
-export function registerDshProfileIpc({ ipcMain, manager }) {
+export function registerDshProfileIpc({ ipcMain, profileManager, runtimeManager }) {
   if (typeof ipcMain?.handle !== 'function') throw new TypeError('ipcMain is required')
   if (
-    typeof manager?.listProfiles !== 'function' ||
-    typeof manager?.initializeProfile !== 'function' ||
-    typeof manager?.enableBridge !== 'function'
+    typeof profileManager?.listProfiles !== 'function' ||
+    typeof profileManager?.initializeProfile !== 'function' ||
+    typeof profileManager?.removeLegacyBridge !== 'function'
   ) {
     throw new TypeError('DSH profile manager is required')
   }
-  ipcMain.handle('dsh:listProfiles', () => manager.listProfiles())
-  ipcMain.handle('dsh:initializeProfile', (_event, profileName) => manager.initializeProfile(profileName))
-  ipcMain.handle('dsh:enableBridge', (_event, profileName) => manager.enableBridge(profileName))
+  if (
+    typeof runtimeManager?.getState !== 'function' ||
+    typeof runtimeManager?.install !== 'function' ||
+    typeof runtimeManager?.upgrade !== 'function' ||
+    typeof runtimeManager?.repair !== 'function' ||
+    typeof runtimeManager?.remove !== 'function'
+  ) {
+    throw new TypeError('DSH runtime manager is required')
+  }
+  ipcMain.handle('dsh:getState', () => runtimeManager.getState())
+  ipcMain.handle('dsh:listProfiles', () => profileManager.listProfiles())
+  ipcMain.handle('dsh:initializeProfile', (_event, profileName) => profileManager.initializeProfile(profileName))
+  ipcMain.handle('dsh:installRuntime', () => runtimeManager.install())
+  ipcMain.handle('dsh:upgradeRuntime', () => runtimeManager.upgrade())
+  ipcMain.handle('dsh:repairRuntime', () => runtimeManager.repair())
+  ipcMain.handle('dsh:removeRuntime', () => runtimeManager.remove())
+  ipcMain.handle('dsh:removeLegacyBridge', (_event, profileName) => profileManager.removeLegacyBridge(profileName))
 }
