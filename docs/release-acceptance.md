@@ -19,6 +19,7 @@
 
 - [ ] `npm test` 通过。
 - [ ] `npm run build` 通过。
+- [ ] `npm audit --registry=https://registry.npmjs.org` 通过，生产与构建依赖均无已知漏洞。
 - [ ] `npm run dist` 生成 Windows x64 的安装版、便携版、blockmap 与 `latest.yml`。
 - [ ] `npm run verify:release` 通过。
 - [ ] `git diff --check` 通过。

@@ -102,7 +102,7 @@ Windows: %APPDATA%\ucli\ucli.db
 
 ## 本地开发
 
-要求 Node.js 与 npm。macOS 请在目标架构的 Mac 上构建；Windows 建议在 Windows 10/11 x64 环境构建。
+要求 Node.js 22.12.0 或更高版本与 npm；发布 CI 固定使用 Node.js 24。macOS 请在目标架构的 Mac 上构建；Windows 建议在 Windows 10/11 x64 环境构建。
 
 ```sh
 npm install

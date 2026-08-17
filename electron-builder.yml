@@ -25,11 +25,11 @@ extraResources:
   - from: resources/
     to: resources/
 win:
-  icon: resources/icons/ucli.png
+  icon: build/icon.ico
   target:
     - nsis
     - portable
-  sign: false
+  signExecutable: false
   forceCodeSigning: false
 mac:
   icon: resources/icons/ucli.png

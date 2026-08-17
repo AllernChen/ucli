@@ -5,6 +5,8 @@ import test from 'node:test'
 const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8')
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const testRunner = readFileSync(new URL('../scripts/run-tests.cjs', import.meta.url), 'utf8')
+const builderConfig = readFileSync(new URL('../electron-builder.yml', import.meta.url), 'utf8')
+const windowsIcon = readFileSync(new URL('../build/icon.ico', import.meta.url))
 
 test('test runner discovers test files consistently on Windows and CI', () => {
   assert.equal(packageJson.scripts.test, 'node scripts/run-tests.cjs')
@@ -15,6 +17,7 @@ test('test runner discovers test files consistently on Windows and CI', () => {
 test('release workflow uses Actions versions backed by the Node 24 runtime', () => {
   assert.match(workflow, /actions\/checkout@v7/)
   assert.match(workflow, /actions\/setup-node@v7/)
+  assert.match(workflow, /node-version:\s*24/)
   assert.match(workflow, /actions\/upload-artifact@v7/)
   assert.match(workflow, /actions\/download-artifact@v8/)
 })
@@ -32,4 +35,10 @@ test('macOS release targets arm64 so the published U-Code binary can run', () =>
 
 test('release workflow runs tests, packaging, and artifact verification before publishing', () => {
   assert.match(workflow, /- run: npm test[\s\S]*- run: npm run build[\s\S]*- run: \$\{\{ matrix\.dist_command \}\}[\s\S]*- run: \$\{\{ matrix\.verify_command \}\}/)
+})
+
+test('Windows packaging uses the committed ICO and disables executable signing', () => {
+  assert.match(builderConfig, /win:\s*[\s\S]*icon:\s*build\/icon\.ico/)
+  assert.match(builderConfig, /signExecutable:\s*false/)
+  assert.deepEqual([...windowsIcon.subarray(0, 4)], [0, 0, 1, 0])
 })

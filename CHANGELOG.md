@@ -21,6 +21,11 @@
 - Settings、Workbench、会话卡片、详情、统计、维护与 Gateway 改为 authoritative capability 驱动。DSH Web 不挂载终端、历史、审批、用量或 Gateway 控件；缺失能力默认安全停用。
 - DSH Skills 仅作为项目 `.agents/skills` 的只读虚拟可见目标，与 Codex 共享同一物理投影，不创建用户级 DSH 安装或重复来源。
 
+### 修复与发布基础
+
+- Claude Code 历史会话中的 `<synthetic>` 等内部伪模型不再作为 `--model` 传回 CLI；原生会话 ID 与上下文保持不变，异常分屏可直接重新启动恢复输入。
+- Electron 升级到 43.4.0，electron-builder 升级到 26.15.3，并更新 ZIP、TOML 与 Vite 构建链依赖；官方 npm 全依赖审计无已知漏洞，发布 CI 使用 Node.js 24。
+
 ## [0.10.2] - 2026-08-13
 
 ### 设置与应用空间管理
