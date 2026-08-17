@@ -24,7 +24,9 @@ export function normalizeSessionConfig(descriptor, input) {
 
 export function normalizePersistedSessionConfig(descriptor, input) {
   try {
-    return normalizeSessionConfig(descriptor, input)
+    const normalized = descriptor.normalizePersistedSessionConfig?.(input) ??
+      descriptor.normalizeSessionConfig?.(input) ?? {}
+    return structuredClone(normalized)
   } catch {
     return {}
   }
@@ -40,4 +42,28 @@ export function normalizeDshSessionConfig(input) {
   }
 
   return { profileName: validateDshProfileName(input?.profileName), surfacePreference }
+}
+
+export function normalizeDshCreateConfig(input) {
+  if (input?.surfacePreference !== 'web') {
+    throw Object.assign(new Error('DSH surface is unsupported'), {
+      code: 'DSH_SURFACE_UNSUPPORTED'
+    })
+  }
+  return { surfacePreference: 'web' }
+}
+
+export function normalizePersistedDshConfig(input) {
+  if (input?.surfacePreference === 'web') {
+    return { surfacePreference: 'web' }
+  }
+  if (input?.surfacePreference === 'tui' || input?.surfacePreference === 'legacy-tui') {
+    return {
+      surfacePreference: 'legacy-tui',
+      profileName: validateDshProfileName(input?.profileName)
+    }
+  }
+  throw Object.assign(new Error('DSH surface is unsupported'), {
+    code: 'DSH_SURFACE_UNSUPPORTED'
+  })
 }

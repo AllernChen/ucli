@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   BRIDGED_DSH_TUI_CAPABILITIES,
+  DSH_UNAVAILABLE_CAPABILITIES,
   DSH_WEB_CAPABILITIES,
   TERMINAL_ADAPTER_CAPABILITIES,
   normalizeAdapterCapabilities
@@ -40,6 +41,17 @@ test('bridged DSH TUI capabilities keep UCLI ownership and enable the bridge', (
 test('DSH Web capabilities keep native ownership and fail Gateway closed', () => {
   assert.deepEqual(normalizeAdapterCapabilities(DSH_WEB_CAPABILITIES), {
     surface: 'web',
+    permissionOwner: 'native',
+    historyOwner: 'native',
+    statsOwner: 'native',
+    gateway: false,
+    bridge: false
+  })
+})
+
+test('retired DSH TUI capabilities are unavailable and fail every UCLI control closed', () => {
+  assert.deepEqual(normalizeAdapterCapabilities(DSH_UNAVAILABLE_CAPABILITIES), {
+    surface: 'unavailable',
     permissionOwner: 'native',
     historyOwner: 'native',
     statsOwner: 'native',

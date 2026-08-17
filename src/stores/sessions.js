@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { DSH_UNAVAILABLE_CAPABILITIES } from '../../electron/adapters/adapterCapabilities.js'
 import { ipc } from '../ipc.js'
 
 let unsub = null
@@ -13,7 +14,7 @@ function newActId() {
 function normalizeRendererCapabilities(value) {
   if (
     !value || typeof value !== 'object' || Array.isArray(value) ||
-    !['terminal', 'web'].includes(value.surface) ||
+    !['terminal', 'web', 'unavailable'].includes(value.surface) ||
     !['ucli', 'native'].includes(value.permissionOwner) ||
     !['ucli', 'native'].includes(value.historyOwner) ||
     !['ucli', 'native'].includes(value.statsOwner) ||
@@ -32,14 +33,15 @@ function normalizeRendererCapabilities(value) {
 function rendererSessionCapabilities(adapterId, value, descriptor) {
   const candidate = value ?? (adapterId === 'deepseek-harness' ? null : descriptor?.capabilities)
   const normalized = normalizeRendererCapabilities(candidate)
-  if (adapterId !== 'deepseek-harness' || !normalized) return normalized
-  const bridgedTui = normalized.surface === 'terminal' &&
-    normalized.permissionOwner === 'ucli' && normalized.historyOwner === 'ucli' &&
-    normalized.statsOwner === 'ucli' && normalized.gateway === true && normalized.bridge === true
+  if (adapterId !== 'deepseek-harness') return normalized
+  if (!normalized) return DSH_UNAVAILABLE_CAPABILITIES
   const nativeWeb = normalized.surface === 'web' &&
     normalized.permissionOwner === 'native' && normalized.historyOwner === 'native' &&
     normalized.statsOwner === 'native' && normalized.gateway === false && normalized.bridge === false
-  return bridgedTui || nativeWeb ? normalized : null
+  const unavailable = normalized.surface === 'unavailable' &&
+    normalized.permissionOwner === 'native' && normalized.historyOwner === 'native' &&
+    normalized.statsOwner === 'native' && normalized.gateway === false && normalized.bridge === false
+  return nativeWeb || unavailable ? normalized : DSH_UNAVAILABLE_CAPABILITIES
 }
 
 export const useSessionsStore = defineStore('sessions', {

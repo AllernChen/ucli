@@ -80,7 +80,10 @@ test('renderer sessions fail closed for missing DSH capabilities and ignore nati
     id: 'unknown-dsh', adapterId: 'deepseek-harness', cwd: 'C:/project', status: 'offline',
     stats: { tokens: { input: 0, output: 0 }, turns: 0, costUsd: 0 }
   })
-  assert.equal(store.byId('unknown-dsh').capabilities, null)
+  assert.deepEqual(store.byId('unknown-dsh').capabilities, {
+    surface: 'unavailable', permissionOwner: 'native', historyOwner: 'native',
+    statsOwner: 'native', gateway: false, bridge: false
+  })
   store._upsertSummary({
     id: 'mixed-dsh', adapterId: 'deepseek-harness', cwd: 'C:/project', status: 'offline',
     stats: { tokens: { input: 0, output: 0 }, turns: 0, costUsd: 0 },
@@ -89,7 +92,10 @@ test('renderer sessions fail closed for missing DSH capabilities and ignore nati
       statsOwner: 'ucli', gateway: true, bridge: true
     }
   })
-  assert.equal(store.byId('mixed-dsh').capabilities, null)
+  assert.deepEqual(store.byId('mixed-dsh').capabilities, {
+    surface: 'unavailable', permissionOwner: 'native', historyOwner: 'native',
+    statsOwner: 'native', gateway: false, bridge: false
+  })
 
   const web = {
     id: 'web-dsh', adapterId: 'deepseek-harness', cwd: 'C:/project', status: 'running',

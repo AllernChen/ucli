@@ -10,7 +10,11 @@ import { claudeDescriptor } from '../electron/adapters/claudeAdapter.js'
 import { getDb, openDb } from '../electron/persistence/db.js'
 import { PermissionEngine } from '../electron/permission/engine.js'
 
-const { normalizeDshSessionConfig, normalizeSessionConfig } = sessionConfig
+const {
+  normalizeDshCreateConfig,
+  normalizePersistedDshConfig,
+  normalizeSessionConfig
+} = sessionConfig
 
 register('./fixtures/electron-stub-loader.mjs', import.meta.url)
 
@@ -35,37 +39,27 @@ test('descriptor-owned normalization returns an isolated value', () => {
   })
 })
 
-test('DSH session config keeps only the persisted allowlist', () => {
-  assert.deepEqual(normalizeDshSessionConfig({
-    profileName: 'tui',
-    surfacePreference: 'tui',
+test('DSH persisted config keeps only the legacy migration allowlist', () => {
+  assert.deepEqual(normalizePersistedDshConfig({
+    profileName: 'TUI',
+    surfacePreference: 'legacy-tui',
     endpoint: '\\\\.\\pipe\\ucli-secret',
     token: 'must-not-leak',
     webUrl: 'http://127.0.0.1:1234',
     dshHome: 'C:\\secret'
   }), {
-    profileName: 'tui',
-    surfacePreference: 'tui'
+    profileName: 'TUI',
+    surfacePreference: 'legacy-tui'
   })
 })
 
-test('DSH session config accepts a named TUI profile', () => {
-  assert.deepEqual(normalizeDshSessionConfig({
-    profileName: 'team-profile',
-    surfacePreference: 'tui'
-  }), {
-    profileName: 'team-profile',
-    surfacePreference: 'tui'
-  })
-})
-
-test('DSH Web session config does not require or retain a profile name', () => {
-  assert.deepEqual(normalizeDshSessionConfig({
+test('DSH Web create config does not require or retain a profile name', () => {
+  assert.deepEqual(normalizeDshCreateConfig({
     surfacePreference: 'web'
   }), {
     surfacePreference: 'web'
   })
-  assert.deepEqual(normalizeDshSessionConfig({
+  assert.deepEqual(normalizeDshCreateConfig({
     profileName: 'obsolete/profile',
     surfacePreference: 'web'
   }), {
@@ -73,7 +67,7 @@ test('DSH Web session config does not require or retain a profile name', () => {
   })
 })
 
-test('DSH session config rejects unsafe or unsupported profile names', () => {
+test('DSH persisted legacy config rejects unsafe profile names', () => {
   const invalidNames = [
     '',
     'a'.repeat(129),
@@ -97,7 +91,7 @@ test('DSH session config rejects unsafe or unsupported profile names', () => {
 
   for (const profileName of invalidNames) {
     assert.throws(
-      () => normalizeDshSessionConfig({ profileName, surfacePreference: 'tui' }),
+      () => normalizePersistedDshConfig({ profileName, surfacePreference: 'tui' }),
       /profile name/i,
       JSON.stringify(profileName)
     )
@@ -118,6 +112,20 @@ test('persisted session normalization fails safe when descriptor config is obsol
   assert.throws(
     () => normalizeSessionConfig(descriptor, { oldVersion: true }),
     /obsolete persisted config/
+  )
+})
+
+test('persisted session normalization uses the descriptor migration contract', () => {
+  const descriptor = {
+    normalizeSessionConfig: () => assert.fail('create normalization must not restore persisted rows'),
+    normalizePersistedSessionConfig: normalizePersistedDshConfig
+  }
+
+  assert.deepEqual(
+    sessionConfig.normalizePersistedSessionConfig(descriptor, {
+      surfacePreference: 'tui', profileName: 'TUI'
+    }),
+    { surfacePreference: 'legacy-tui', profileName: 'TUI' }
   )
 })
 
@@ -258,10 +266,10 @@ test('stop, delete, and shutdown remove permission sessions before lifecycle com
   }
 })
 
-test('DSH session config rejects unsupported surfaces', () => {
+test('DSH create config rejects unsupported surfaces with a stable code', () => {
   assert.throws(
-    () => normalizeDshSessionConfig({ profileName: 'tui', surfacePreference: 'headless' }),
-    /surface preference/i
+    () => normalizeDshCreateConfig({ profileName: 'tui', surfacePreference: 'headless' }),
+    { code: 'DSH_SURFACE_UNSUPPORTED' }
   )
 })
 

@@ -632,6 +632,17 @@ export function createStatsQueryHandler(getUsageQueryService) {
   }
 }
 
+function assertDshSessionStartable(session) {
+  if (
+    session?.adapterId === 'deepseek-harness' &&
+    session.adapterConfig?.surfacePreference !== 'web'
+  ) {
+    throw Object.assign(new Error('DSH_TUI_UNAVAILABLE'), {
+      code: 'DSH_TUI_UNAVAILABLE'
+    })
+  }
+}
+
 export function createOrchestrator() {
   initLogger()
   log('createOrchestrator() — starting')
@@ -1306,6 +1317,9 @@ export function createOrchestrator() {
       }
       const descriptor = adapters.get(s.adapterId) || {}
       const adapterConfig = normalizePersistedSessionConfig(descriptor, s.adapterConfig)
+      const canStart = s.adapterId === 'deepseek-harness' && adapterConfig.surfacePreference !== 'web'
+        ? false
+        : restoredSession.canStart
       const entry = {
         adapter: null, // offline — CLI process not running
         session: {
@@ -1334,7 +1348,7 @@ export function createOrchestrator() {
           profileRuntimeRevision: null,
           pendingProfileRuntimeRevision: null,
           restartRequired: false,
-          canStart: restoredSession.canStart,
+          canStart,
           cliSessionId,
           name: sessionName,
           taskNote: s.taskNote || '',
@@ -2224,6 +2238,7 @@ export function createOrchestrator() {
   async function restartSession(sessionId) {
     const entry = sessions.get(sessionId)
     if (!entry) throw new Error('no session')
+    assertDshSessionStartable(entry.session)
     if (entry.adapter) throw new Error('session already running')
     const descriptor = adapters.get(entry.session.adapterId)
     if (!descriptor) throw new Error('unknown adapter: ' + entry.session.adapterId)
@@ -2735,6 +2750,7 @@ export function createOrchestrator() {
     // Renderer calls this after it has registered the terminal-output listener
     ipcMain.handle('session:start-adapter', async (_e, sessionId) => {
       const e = sessions.get(sessionId)
+      if (e) assertDshSessionStartable(e.session)
       if (!e || !e.adapter) return false
       if (e.session.adapterId === 'codex') {
         if (e.session.profileId) {

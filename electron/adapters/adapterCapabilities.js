@@ -25,13 +25,22 @@ export const DSH_WEB_CAPABILITIES = Object.freeze({
   bridge: false
 })
 
+export const DSH_UNAVAILABLE_CAPABILITIES = Object.freeze({
+  surface: 'unavailable',
+  permissionOwner: 'native',
+  historyOwner: 'native',
+  statsOwner: 'native',
+  gateway: false,
+  bridge: false
+})
+
 export function normalizeAdapterCapabilities(input = TERMINAL_ADAPTER_CAPABILITIES) {
   const capabilities = input
   if (
     !capabilities ||
     typeof capabilities !== 'object' ||
     Array.isArray(capabilities) ||
-    !['terminal', 'web'].includes(capabilities.surface) ||
+    !['terminal', 'web', 'unavailable'].includes(capabilities.surface) ||
     !['ucli', 'native'].includes(capabilities.permissionOwner) ||
     !['ucli', 'native'].includes(capabilities.historyOwner) ||
     !['ucli', 'native'].includes(capabilities.statsOwner) ||
