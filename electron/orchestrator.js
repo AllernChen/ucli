@@ -40,6 +40,7 @@ import { createProfileService } from './aiCliProfiles/profileService.js'
 import { reconcileActiveProfile } from './aiCliProfiles/profileResolver.js'
 import {
   describeClaudeModelSelection,
+  normalizeClaudeHistoryModel,
   prepareClaudeProfileSession
 } from './aiCliProfiles/claudeProfileAdapter.js'
 import {
@@ -1256,6 +1257,9 @@ export function createOrchestrator() {
           providerPolicy = 'source'
         }
       }
+      const persistedSystemModel = s.adapterId === 'claude' && cliSessionId
+        ? normalizeClaudeHistoryModel(s.systemModel ?? s.model)
+        : s.systemModel ?? null
       const storedProfile = s.profileId
         ? profileService.listProfiles({ adapterId: s.adapterId }).find((profile) => profile.id === s.profileId) || null
         : null
@@ -1275,7 +1279,7 @@ export function createOrchestrator() {
         : s.adapterId === 'claude' && s.profileId
           ? {
               profileId: s.profileId,
-              model: storedProfile?.model ?? s.systemModel ?? null,
+              model: storedProfile?.model ?? persistedSystemModel,
               profileStatus: storedProfile?.status || 'missing_profile',
               canStart: storedProfile?.canStart === true,
               provider,
@@ -1307,8 +1311,8 @@ export function createOrchestrator() {
         session: {
           id: s.id, adapterId: s.adapterId,
           cwd: s.cwd || s.projectPath,
-          model: restoredSession.model ?? s.systemModel ?? null,
-          systemModel: s.systemModel ?? null,
+          model: restoredSession.model ?? persistedSystemModel,
+          systemModel: persistedSystemModel,
           tier: s.tier, rulesetId: 'default',
           provider,
           sourceProvider,
@@ -1916,7 +1920,7 @@ export function createOrchestrator() {
         const sessionId = transcript.sessionId
         const meta = idx.get(sessionId) || {}
         const fullPath = transcript.fullPath
-        let model = meta.model || null
+        let model = normalizeClaudeHistoryModel(meta.model)
         let turns = 0
         try {
           const content = readFileSync(fullPath, 'utf8')
@@ -1924,7 +1928,9 @@ export function createOrchestrator() {
           for (const line of content.slice(0, 2048).split('\n').filter(Boolean)) {
             try {
               const obj = JSON.parse(line)
-              if (obj.type === 'system' && obj.subtype === 'init' && !model) model = obj.model
+              if (obj.type === 'system' && obj.subtype === 'init' && !model) {
+                model = normalizeClaudeHistoryModel(obj.model)
+              }
               if (obj.type === 'result' && obj.num_turns) turns = obj.num_turns
             } catch { /* skip */ }
           }
@@ -1943,7 +1949,7 @@ export function createOrchestrator() {
           sessionId,
           name: meta.name || null,
           startedAt: meta.startedAt || transcript.startedAt,
-          model: model || meta.model || null,
+          model,
           turns,
           lastMessage: _extractLastText(fullPath)
         })

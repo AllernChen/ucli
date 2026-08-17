@@ -31,6 +31,15 @@ test('explicit Claude profile model overrides the session model as a separate ar
   ])
 })
 
+test('Claude history without a safe model resumes without a model override', () => {
+  assert.deepEqual(buildClaudeProfileArgs({
+    session: { model: null, cliSessionId: 'native-history-session' },
+    profile: null
+  }), [
+    '--resume', 'native-history-session'
+  ])
+})
+
 test('Claude profile arguments reject shell syntax before reaching cmd.exe', () => {
   for (const model of ['sonnet & calc.exe', 'sonnet|other', 'sonnet > file', '"sonnet"']) {
     assert.throws(

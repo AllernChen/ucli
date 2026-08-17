@@ -55,6 +55,107 @@ test('Claude project directory resolver finds transcripts for Chinese cwd', () =
   }
 })
 
+test('restored Claude history ignores an internal pseudo-model and keeps its native session binding', async () => {
+  const electron = await import('electron')
+  const handlers = new Map()
+  electron.ipcMain.handle = (channel, handler) => handlers.set(channel, handler)
+  const root = mkdtempSync(join(tmpdir(), 'ucli-claude-pseudo-model-'))
+  const userData = join(root, 'user-data')
+  mkdirSync(userData, { recursive: true })
+  const previousUserData = process.env.UCLI_TEST_USER_DATA
+  process.env.UCLI_TEST_USER_DATA = userData
+
+  const seed = await openDb(join(userData, 'ucli.db'))
+  seed.insertSession({
+    id: 'claude-history',
+    project_path: 'F:\\projects\\demo',
+    adapter_id: 'claude',
+    native_session_id: 'native-claude-session',
+    model: '<synthetic>',
+    system_model: '<synthetic>',
+    tier: 'safety-rules',
+    status: 'offline',
+    created_at: 1
+  })
+  seed.flush()
+  seed.close()
+
+  let orchestrator = null
+  try {
+    const orchestratorModule = await import(`../electron/orchestrator.js?claude-pseudo-model=${Date.now()}`)
+    orchestrator = orchestratorModule.createOrchestrator()
+    await orchestrator.initPersistence()
+    orchestrator.registerIpc()
+
+    const restored = handlers.get('session:list')()
+      .find((session) => session.id === 'claude-history')
+    assert.equal(restored.model, null)
+    assert.equal(restored.cliSessionId, 'native-claude-session')
+  } finally {
+    await orchestrator?.shutdown()
+    getDb()?.close()
+    if (previousUserData === undefined) delete process.env.UCLI_TEST_USER_DATA
+    else process.env.UCLI_TEST_USER_DATA = previousUserData
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('Claude history discovery does not expose an internal pseudo-model as a launch model', async () => {
+  const electron = await import('electron')
+  const handlers = new Map()
+  electron.ipcMain.handle = (channel, handler) => handlers.set(channel, handler)
+  const root = mkdtempSync(join(tmpdir(), 'ucli-claude-discovery-model-'))
+  const userData = join(root, 'user-data')
+  const cwd = 'F:\\projects\\demo'
+  const projectDir = join(root, '.claude', 'projects', claudeProjectHash(cwd))
+  mkdirSync(userData, { recursive: true })
+  mkdirSync(projectDir, { recursive: true })
+  writeFileSync(join(projectDir, 'native-claude-session.jsonl'), [
+    JSON.stringify({
+      type: 'system', subtype: 'init', session_id: 'native-claude-session',
+      cwd, model: '<synthetic>'
+    }),
+    JSON.stringify({ type: 'result', num_turns: 2 })
+  ].join('\n') + '\n')
+  writeFileSync(join(projectDir, 'native-valid-session.jsonl'), [
+    JSON.stringify({
+      type: 'system', subtype: 'init', session_id: 'native-valid-session',
+      cwd, model: 'claude-sonnet-5'
+    }),
+    JSON.stringify({ type: 'result', num_turns: 1 })
+  ].join('\n') + '\n')
+
+  const previousHome = process.env.HOME
+  const previousProfile = process.env.USERPROFILE
+  const previousUserData = process.env.UCLI_TEST_USER_DATA
+  delete process.env.HOME
+  process.env.USERPROFILE = root
+  process.env.UCLI_TEST_USER_DATA = userData
+  let orchestrator = null
+  try {
+    const orchestratorModule = await import(`../electron/orchestrator.js?claude-discovery-model=${Date.now()}`)
+    orchestrator = orchestratorModule.createOrchestrator()
+    await orchestrator.initPersistence()
+    orchestrator.registerIpc()
+
+    const discovered = await handlers.get('session:discover')({}, cwd)
+    assert.equal(discovered.claude.length, 2)
+    const byId = new Map(discovered.claude.map((session) => [session.sessionId, session]))
+    assert.equal(byId.get('native-claude-session').model, null)
+    assert.equal(byId.get('native-valid-session').model, 'claude-sonnet-5')
+  } finally {
+    await orchestrator?.shutdown()
+    getDb()?.close()
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    if (previousProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = previousProfile
+    if (previousUserData === undefined) delete process.env.UCLI_TEST_USER_DATA
+    else process.env.UCLI_TEST_USER_DATA = previousUserData
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('provider transcript resolvers return only the requested native session file', () => {
   const home = mkdtempSync(join(tmpdir(), 'ucli-history-source-'))
   const claudeDir = join(home, '.claude', 'projects', 'F--projects-ucli')
