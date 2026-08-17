@@ -127,10 +127,14 @@ test('Windows npm shim resolution returns absolute node and JS entry paths witho
   const root = temporaryRoot('ucli-dsh-shim-')
   try {
     const shim = path.join(root, 'dsh.cmd')
+    const siblingNode = path.join(root, 'node.exe')
+    const packagedExecutable = path.join(root, 'UCLI.exe')
     const packageDirectory = path.join(root, 'node_modules', '@deepseek-ai', 'dsh')
     const entry = path.join(packageDirectory, 'lib', 'bin.js')
     mkdirSync(path.dirname(entry), { recursive: true })
     writeFileSync(shim, '@ECHO off\r\n')
+    writeFileSync(siblingNode, 'trusted node runtime')
+    writeFileSync(packagedExecutable, 'packaged electron runtime')
     writeFileSync(entry, '#!/usr/bin/env node\n')
     writeJson(path.join(packageDirectory, 'package.json'), {
       name: '@deepseek-ai/dsh',
@@ -140,10 +144,10 @@ test('Windows npm shim resolution returns absolute node and JS entry paths witho
     const launch = resolveDshLaunch({
       env: { PATH: root, PATHEXT: '.CMD;.EXE' },
       platform: 'win32',
-      nodeExecutable: process.execPath
+      nodeExecutable: packagedExecutable
     })
     assert.deepEqual(launch, {
-      file: path.resolve(realpathSync(process.execPath)),
+      file: path.resolve(realpathSync(siblingNode)),
       prefixArgs: [path.resolve(entry)]
     })
     assert.equal(path.isAbsolute(launch.file), true)
@@ -156,7 +160,7 @@ test('Windows npm shim resolution returns absolute node and JS entry paths witho
       bin: { dsh: 'lib/bin.js' }
     })
     const unsupportedLaunch = resolveDshLaunch({
-      env: { PATH: root, PATHEXT: '.CMD' }, platform: 'win32', nodeExecutable: process.execPath
+      env: { PATH: root, PATHEXT: '.CMD' }, platform: 'win32', nodeExecutable: packagedExecutable
     })
     assert.ok(unsupportedLaunch)
     const unsupported = await inspectDshRuntime({
@@ -173,12 +177,22 @@ test('Windows npm shim resolution returns absolute node and JS entry paths witho
       bin: { dsh: 'lib/bin.js' }
     })
     assert.equal(resolveDshLaunch({
-      env: { PATH: root, PATHEXT: '.CMD' }, platform: 'win32', nodeExecutable: process.execPath
+      env: { PATH: root, PATHEXT: '.CMD' }, platform: 'win32', nodeExecutable: packagedExecutable
     }), null)
 
     writeFileSync(path.join(root, 'dsh.exe'), 'not the pinned npm package')
     assert.equal(resolveDshLaunch({
-      env: { PATH: root, PATHEXT: '.EXE' }, platform: 'win32', nodeExecutable: process.execPath
+      env: { PATH: root, PATHEXT: '.EXE' }, platform: 'win32', nodeExecutable: packagedExecutable
+    }), null)
+
+    writeJson(path.join(packageDirectory, 'package.json'), {
+      name: '@deepseek-ai/dsh',
+      version: SUPPORTED_DSH_VERSION,
+      bin: { dsh: 'lib/bin.js' }
+    })
+    rmSync(siblingNode)
+    assert.equal(resolveDshLaunch({
+      env: { PATH: root, PATHEXT: '.CMD' }, platform: 'win32', nodeExecutable: packagedExecutable
     }), null)
   } finally {
     rmSync(root, { recursive: true, force: true })

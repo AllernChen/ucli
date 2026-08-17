@@ -373,6 +373,24 @@ function windowsCommandCandidates(directory, command, env) {
   return extensions.map(extension => path.win32.join(directory, `${command}${extension}`))
 }
 
+function resolveWindowsNodeRuntime(shim, nodeExecutable) {
+  const candidates = [
+    path.win32.join(path.win32.dirname(shim), 'node.exe'),
+    nodeExecutable
+  ]
+  for (const candidate of candidates) {
+    if (
+      typeof candidate !== 'string' ||
+      path.win32.basename(candidate).toLowerCase() !== 'node.exe' ||
+      !isRegularUnlinkedFile(candidate)
+    ) continue
+    try {
+      return path.resolve(realpathSync(candidate))
+    } catch {}
+  }
+  return null
+}
+
 function resolveWindowsDshShim(shim, nodeExecutable) {
   if (path.win32.extname(shim).toLowerCase() !== '.cmd') return null
   const packageDirectory = path.win32.join(
@@ -390,6 +408,7 @@ function resolveWindowsDshShim(shim, nodeExecutable) {
   let canonicalPackage
   let canonicalManifest
   let canonicalEntry
+  const nodeRuntime = resolveWindowsNodeRuntime(shim, nodeExecutable)
   try {
     canonicalPackage = realpathSync(packageDirectory)
     canonicalManifest = realpathSync(manifestPath)
@@ -404,12 +423,12 @@ function resolveWindowsDshShim(shim, nodeExecutable) {
     !VERSION_PATTERN.test(manifest.version) ||
     String(declaredBin || '').replaceAll('\\', '/') !== DSH_BIN_PATH ||
     !isRegularUnlinkedFile(entryPath) ||
-    !isRegularUnlinkedFile(nodeExecutable) ||
+    !nodeRuntime ||
     path.win32.dirname(canonicalManifest).toLowerCase() !== canonicalPackage.toLowerCase() ||
     !canonicalEntry.toLowerCase().startsWith(`${canonicalPackage.toLowerCase()}\\`)
   ) return null
   return {
-    file: path.resolve(realpathSync(nodeExecutable)),
+    file: nodeRuntime,
     prefixArgs: [path.resolve(canonicalEntry)]
   }
 }
