@@ -101,7 +101,7 @@ test('stopping a disconnected selected session never creates a missing root', as
     adapterId: 'deepseek-harness',
     status: 'offline',
     gatewayEligible: false,
-    gatewayReason: 'DSH_BRIDGE_DISCONNECTED'
+    gatewayReason: 'DSH_TUI_UNAVAILABLE'
   })
   const port = createPort([value])
   const routes = new MemoryRouteStore()
@@ -137,7 +137,7 @@ test('a root created by an old generation stays inert after stop and restart', a
   await new Promise(resolve => setImmediate(resolve))
   port.sessions.set(value.id, {
     ...value, status: 'offline', gatewayEligible: false,
-    gatewayReason: 'DSH_BRIDGE_DISCONNECTED'
+    gatewayReason: 'DSH_TUI_UNAVAILABLE'
   })
   await runtime.handleGatewayEvent({ type: 'session_stopped', sessionId: value.id })
   port.sessions.set(value.id, { ...value, status: 'idle', gatewayEligible: true })

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { register } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,9 +20,7 @@ test('new DSH sessions accept only the Web surface and discard profile data', ()
     surfacePreference: 'web',
     profileName: 'TUI',
     token: 'must-not-leak'
-  }), {
-    surfacePreference: 'web'
-  })
+  }), { surfacePreference: 'web' })
 })
 
 test('new DSH sessions reject the retired TUI surface with a stable code', () => {
@@ -46,7 +44,6 @@ test('persisted TUI sessions migrate to a bounded legacy-unavailable config', ()
 
 test('the registered DSH descriptor separates Web creation from legacy restoration', () => {
   const descriptor = listAdapterDescriptors().find(({ id }) => id === 'deepseek-harness')
-
   assert.deepEqual(descriptor.normalizeSessionConfig({ surfacePreference: 'web' }), {
     surfacePreference: 'web'
   })
@@ -60,7 +57,10 @@ test('the registered DSH descriptor separates Web creation from legacy restorati
     surfacePreference: 'legacy-tui', profileName: 'TUI'
   })
   assert.equal(descriptor.capabilities.surface, 'web')
-  assert.equal(descriptor.capabilitiesForConfig({ surfacePreference: 'legacy-tui' }).surface, 'unavailable')
+  assert.equal(
+    descriptor.capabilitiesForConfig({ surfacePreference: 'legacy-tui' }).surface,
+    'unavailable'
+  )
 })
 
 test('renderer restoration maps missing, malformed, and legacy DSH capabilities to unavailable', async () => {
@@ -152,8 +152,8 @@ test('restored non-Web DSH sessions are public unavailable rows and reject every
 
   let orchestrator
   try {
-    const orchestratorModule = await import(`../electron/orchestrator.js?dsh-web-only-restore=${Date.now()}`)
-    orchestrator = orchestratorModule.createOrchestrator()
+    const module = await import(`../electron/orchestrator.js?dsh-web-only-restore=${Date.now()}`)
+    orchestrator = module.createOrchestrator()
     await orchestrator.initPersistence()
     orchestrator.registerIpc()
 
@@ -189,4 +189,46 @@ test('restored non-Web DSH sessions are public unavailable rows and reject every
     else process.env.UCLI_TEST_USER_DATA = previousUserData
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+const workbench = readFileSync(new URL('../src/views/Workbench.vue', import.meta.url), 'utf8')
+
+test('new DSH sessions are Web-only without profile or TUI controls', () => {
+  assert.match(workbench, /config\.adapterConfig = \{ surfacePreference: 'web' \}/)
+  assert.doesNotMatch(workbench, /surfacePreference:\s*'tui'|value="tui"/)
+  assert.doesNotMatch(workbench, /selectedDshProfileName|dshTuiReady|TUI profile|UCLI bridge/iu)
+})
+
+test('legacy DSH sessions expose only a bounded same-cwd Web migration action', () => {
+  const detail = readFileSync(
+    new URL('../src/views/SessionDetail.vue', import.meta.url),
+    'utf8'
+  )
+  const workbench = readFileSync(
+    new URL('../src/views/Workbench.vue', import.meta.url),
+    'utf8'
+  )
+
+  assert.match(detail, /isLegacyDshSession\(paneSession\(i\)\)/)
+  assert.match(detail, /boundedLegacyDshText/)
+  assert.match(detail, /新建 DSH Web（同工作目录）/u)
+  assert.match(detail, /createDshWeb:\s*'1'/)
+  const actionStart = detail.indexOf('function openLegacyDshWeb')
+  const actionEnd = detail.indexOf('\n}', actionStart)
+  assert.ok(actionStart >= 0 && actionEnd > actionStart)
+  const action = detail.slice(actionStart, actionEnd)
+  assert.match(action, /router\.push/)
+  assert.doesNotMatch(action, /sessions\.(?:restart|resume|createSession)|adapterConfig\s*=/)
+
+  assert.match(workbench, /useRoute\(\)/)
+  assert.match(workbench, /route\.query\.createDshWeb/)
+  const migrationStart = workbench.indexOf("if (route.query.createDshWeb === '1')")
+  const migrationEnd = workbench.indexOf('\n  }', migrationStart)
+  assert.ok(migrationStart >= 0 && migrationEnd > migrationStart)
+  const migration = workbench.slice(migrationStart, migrationEnd)
+  assert.match(migration, /form\.value\.adapterId\s*=\s*'deepseek-harness'/)
+  assert.match(migration, /showNew\.value\s*=\s*true/)
+  assert.doesNotMatch(migration, /newSession|createSession/)
+  assert.match(workbench, /@click="newSession\(dshAdapter\)"/)
+  assert.match(workbench, /config\.adapterConfig\s*=\s*\{\s*surfacePreference:\s*'web'\s*\}/)
 })

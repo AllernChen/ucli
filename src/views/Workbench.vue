@@ -145,42 +145,16 @@
 
       <div class="new-section dsh-create-options">
         <div class="section-title">DeepSeek Harness 界面</div>
-        <a-radio-group v-model:value="dshSurfacePreference">
-          <a-radio value="tui">本机 TUI（UCLI 集成）</a-radio>
-          <a-radio value="web">本机 Web（DSH 原生控制）</a-radio>
-        </a-radio-group>
-        <div v-if="dshSurfacePreference === 'tui'" class="profile-choice-row">
-          <span>TUI profile</span>
-          <a-select
-            v-model:value="selectedDshProfileName"
-            :loading="dshProfilesLoading"
-            style="width: 280px"
-            placeholder="选择已启用 UCLI bridge 的 profile"
-          >
-            <a-select-option
-              v-for="profile in dshProfiles"
-              :key="profile.profileName"
-              :value="profile.profileName"
-              :disabled="profile.profileReady !== true || profile.bridgeCompatible !== true"
-            >
-              {{ profile.profileName }}{{ profile.profileReady && profile.bridgeCompatible ? '' : '（集成未就绪）' }}
-            </a-select-option>
-          </a-select>
-        </div>
-        <a-alert
-          v-if="dshSurfacePreference === 'tui' && !dshTuiReady"
-          type="warning"
-          show-icon
-          message="TUI profile 与 UCLI bridge 尚未同时就绪"
-        >
-          <template #action>
-            <a-button size="small" @click="router.push({ name: 'profiles', query: { cli: 'deepseek-harness' } })">前往档案管理</a-button>
-          </template>
-        </a-alert>
-        <div v-else-if="dshSurfacePreference === 'web'" class="profile-choice-help">
-          Web 不使用 profile；权限模式对 Web 不生效，权限、历史与统计均由 DSH 原生界面管理。
+        <div class="profile-choice-help">
+          本机 Web（DSH 原生控制）；权限、历史与统计均由 DSH 原生界面管理。
         </div>
         <a-alert v-if="dshLoadError" type="error" show-icon :message="dshLoadError" />
+        <a-button
+          type="primary"
+          :disabled="!dshAdapter || !['managed', 'system'].includes(dshRuntime.selected)"
+          :loading="creating || dshProfilesLoading"
+          @click="newSession(dshAdapter)"
+        >新建 DSH Web</a-button>
       </div>
 
       <!-- Tier selector (always visible) -->
@@ -211,7 +185,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
   PlusOutlined,
@@ -230,6 +204,7 @@ import { groupSessionsByProject } from '../sessionGrouping.js'
 import { ipc } from '../ipc.js'
 
 const router = useRouter()
+const route = useRoute()
 const sessions = useSessionsStore()
 const settings = useSettingsStore()
 const gateway = useGatewayStore()
@@ -241,11 +216,8 @@ const discovering = ref(false)
 const discoverError = ref('')
 const filterTier = ref(undefined)
 const sessionConfig = ref({ open: false, sessionId: '' })
-const dshSurfacePreference = ref('tui')
-const dshProfiles = ref([])
 const dshRuntime = ref({})
 const dshLoadError = ref('')
-const selectedDshProfileName = ref('')
 const dshProfilesLoading = ref(false)
 
 const form = ref({
@@ -289,49 +261,58 @@ const profilesForAdapter = (adapterId) => aiProfiles.profiles.filter((profile) =
 const profileCapableAdapter = (adapterId) => ['codex', 'claude'].includes(adapterId)
 const profileAdapterIds = ['codex', 'claude']
 const adapterName = (adapterId) => sessions.adapters.find((adapter) => adapter.id === adapterId)?.displayName || adapterId
+const dshAdapter = computed(() => sessions.adapters.find(
+  adapter => adapter.id === 'deepseek-harness'
+) || null)
 const defaultProfile = (adapterId, scope) => profilesForAdapter(adapterId)
   .find((profile) => scope === 'project' ? profile.isProjectDefault : profile.isAppDefault) || null
-const selectedDshProfile = computed(() => dshProfiles.value
-  .find((profile) => profile.profileName === selectedDshProfileName.value) || null)
-const dshTuiReady = computed(() =>
-  selectedDshProfile.value?.profileReady === true && selectedDshProfile.value?.bridgeCompatible === true
-)
-
 onMounted(async () => {
-  await Promise.all([sessions.init(), settings.load(), gateway.init(), loadDshProfiles()])
+  await Promise.all([sessions.init(), settings.load(), gateway.init(), loadDshRuntime()])
   form.value.adapterId = settings.defaultAdapter || 'claude'
   form.value.tier = settings.defaultTier || 'safety-rules'
   form.value.cwd = settings.defaultCwd || ''
   selectedSessions.value = {}
+  if (route.query.createDshWeb === '1') {
+    form.value.adapterId = 'deepseek-harness'
+    form.value.cwd = dshMigrationCwd(route.query.cwd)
+    await aiProfiles.load(form.value.cwd)
+    await router.replace({ path: '/' })
+    if (form.value.cwd) discover(form.value.cwd)
+    showNew.value = true
+    return
+  }
   await aiProfiles.load(form.value.cwd)
   if (form.value.cwd) discover(form.value.cwd)
 })
+
+function dshMigrationCwd(value) {
+  const candidate = Array.isArray(value) ? value[0] : value
+  if (typeof candidate !== 'string') return ''
+  return Array.from(candidate
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .normalize('NFC')
+    .trim()).slice(0, 4096).join('')
+}
 
 function openNew() {
   selectedSessions.value = {}
   form.value.profileSelections = { codex: 'inherit', claude: 'inherit' }
   importProfileSelections.value = { codex: 'history', claude: 'history' }
   discovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
-  loadDshProfiles().catch(() => {})
+  loadDshRuntime().catch(() => {})
   if (form.value.cwd) discover(form.value.cwd)
   showNew.value = true
 }
 
-async function loadDshProfiles() {
+async function loadDshRuntime() {
   dshProfilesLoading.value = true
   try {
-    const state = await ipc.listDshProfiles()
-    dshRuntime.value = state?.runtime || {}
-    dshProfiles.value = Array.isArray(state?.profiles) ? state.profiles : []
-    if (!dshProfiles.value.some(profile => profile.profileName === selectedDshProfileName.value)) {
-      selectedDshProfileName.value = ''
-    }
+    const state = await ipc.getDshState()
+    dshRuntime.value = state || {}
     dshLoadError.value = ''
     return state
   } catch (error) {
     dshRuntime.value = {}
-    dshProfiles.value = []
-    selectedDshProfileName.value = ''
     dshLoadError.value = dshWorkbenchErrorLabel(error?.code)
     return null
   } finally {
@@ -490,22 +471,12 @@ async function newSession(adapter) {
     }
     if (adapter.id === 'deepseek-harness') {
       form.value.adapterId = adapter.id
-      const fresh = await loadDshProfiles()
-      if (fresh?.runtime?.installed !== true || fresh?.runtime?.compatible !== true) {
+      const fresh = await loadDshRuntime()
+      if (!['managed', 'system'].includes(fresh?.selected)) {
         message.warning('请先在档案管理中检查兼容的 DeepSeek Harness 运行时')
         return
       }
-      if (dshSurfacePreference.value === 'web') {
-        config.adapterConfig = { surfacePreference: 'web' }
-      } else {
-        const profile = (fresh?.profiles || [])
-          .find(item => item.profileName === selectedDshProfileName.value)
-        if (profile?.profileReady !== true || profile?.bridgeCompatible !== true) {
-          message.warning('请先在档案管理中准备结构有效且 bridge 兼容的 DSH TUI profile')
-          return
-        }
-        config.adapterConfig = { surfacePreference: 'tui', profileName: profile.profileName }
-      }
+      config.adapterConfig = { surfacePreference: 'web' }
     }
     const sessionId = await sessions.createSession(config)
     message.success(`已创建 ${adapter.displayName} 会话`)

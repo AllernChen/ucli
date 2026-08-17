@@ -2,12 +2,15 @@ import { randomBytes } from 'node:crypto'
 
 import { DecisionRegistry } from './decisionRegistry.js'
 import { prepareDecisionSummary, redactDisplayText } from './redaction.js'
+import { describeGatewaySessionEligibility } from './orchestratorPort.js'
 import { SnapshotStore } from './snapshotStore.js'
 import { GatewayTaskQueue } from './taskQueue.js'
 
 const READY_SESSION_STATES = new Set(['idle', 'running'])
 
 function gatewayUnavailableReason(session) {
+  const eligibility = describeGatewaySessionEligibility(session)
+  if (!eligibility.eligible) return eligibility.reason
   if (session?.gatewayEligible !== false) return null
   return safeText(session.gatewayReason, 'gateway_session_unavailable')
 }
@@ -233,6 +236,7 @@ export class GatewayRuntime {
       this.decisionRegistry.invalidateRemoteTokens('target_migrated')
       this.actions.clear()
     }
+    this._clearUnavailableDshTransients()
     this.channel = channel
     this.acceptingInbound = true
     this.config = structuredClone(config)
@@ -620,6 +624,13 @@ export class GatewayRuntime {
 
   async handleGatewayEvent(event) {
     if (!event?.sessionId) return { accepted: false, reason: 'invalid_event' }
+    const eventSession = this.port.getSession(event.sessionId)
+    const unavailableReason = gatewayUnavailableReason(eventSession)
+    if (eventSession?.adapterId === 'deepseek-harness' && unavailableReason) {
+      this._clearSessionTransients(event.sessionId, 'dsh_gateway_unavailable')
+      this._publish()
+      return { accepted: false, reason: unavailableReason }
+    }
     if (event.type === 'decision_required') {
       await this._handleDecision(event)
     } else if (event.type === 'turn_started') {
@@ -638,30 +649,7 @@ export class GatewayRuntime {
     } else if (event.type === 'turn_interrupted') {
       await this._handleProviderInterruption(event)
     } else if (event.type === 'session_stopped') {
-      this.sessionGenerations.set(
-        event.sessionId,
-        (this.sessionGenerations.get(event.sessionId) || 0) + 1
-      )
-      this.taskQueue.onSessionStopped(event.sessionId)
-      this.providerBusySessions.delete(event.sessionId)
-      this.latestCompletions.delete(event.sessionId)
-      for (const [turnId, task] of this.turnTasks) {
-        if (task?.sessionId === event.sessionId) this.turnTasks.delete(turnId)
-      }
-      this.decisionRegistry.cancelForSession(event.sessionId, 'session_stopped')
-      this.decisionRegistry.invalidateRemoteTokensForSession(
-        event.sessionId,
-        'session_stopped'
-      )
-      for (const [key, pending] of this.pendingDecisions) {
-        if (pending.sessionId === event.sessionId) this.pendingDecisions.delete(key)
-      }
-      for (const [detailId, detail] of this.decisionDetails) {
-        if (detail.sessionId === event.sessionId) this.decisionDetails.delete(detailId)
-      }
-      for (const [token, binding] of this.actions) {
-        if (binding.sessionId === event.sessionId) this.actions.delete(token)
-      }
+      this._clearSessionTransients(event.sessionId, 'session_stopped')
       await this._updateRoot(event.sessionId, {
         stateLabel: 'stopped',
         interruptToken: null
@@ -712,6 +700,7 @@ export class GatewayRuntime {
   }
 
   async _resyncAfterReconnect() {
+    this._clearUnavailableDshTransients()
     await this._syncSelectedRoots()
     for (const route of this._selectedRoutes()) {
       if (!isGatewaySessionReady(this.port.getSession(route.sessionId))) continue
@@ -799,6 +788,38 @@ export class GatewayRuntime {
       })
     }
     return route
+  }
+
+  _clearUnavailableDshTransients() {
+    for (const session of this.port.listSessions()) {
+      if (session?.adapterId === 'deepseek-harness') {
+        this._clearSessionTransients(session.id, 'dsh_gateway_unavailable')
+      }
+    }
+  }
+
+  _clearSessionTransients(sessionId, reason) {
+    this.sessionGenerations.set(
+      sessionId,
+      (this.sessionGenerations.get(sessionId) || 0) + 1
+    )
+    this.taskQueue.onSessionStopped(sessionId)
+    this.providerBusySessions.delete(sessionId)
+    this.latestCompletions.delete(sessionId)
+    for (const [turnId, task] of this.turnTasks) {
+      if (task?.sessionId === sessionId) this.turnTasks.delete(turnId)
+    }
+    this.decisionRegistry.cancelForSession(sessionId, reason)
+    this.decisionRegistry.invalidateRemoteTokensForSession(sessionId, reason)
+    for (const [key, pending] of this.pendingDecisions) {
+      if (pending.sessionId === sessionId) this.pendingDecisions.delete(key)
+    }
+    for (const [detailId, detail] of this.decisionDetails) {
+      if (detail.sessionId === sessionId) this.decisionDetails.delete(detailId)
+    }
+    for (const [token, binding] of this.actions) {
+      if (binding.sessionId === sessionId) this.actions.delete(token)
+    }
   }
 
   async _updateRoot(sessionId, overrides = {}) {
@@ -914,6 +935,12 @@ export class GatewayRuntime {
   }
 
   async _startTask(task) {
+    const unavailableReason = gatewayUnavailableReason(
+      this.port.getSession(task.sessionId)
+    )
+    if (unavailableReason) {
+      return { accepted: false, reason: unavailableReason }
+    }
     let result
     try {
       result = await this.port.sendTurn(task.sessionId, task.text)
@@ -1032,6 +1059,12 @@ export class GatewayRuntime {
   }
 
   async _interrupt(sessionId) {
+    const unavailableReason = gatewayUnavailableReason(
+      this.port.getSession(sessionId)
+    )
+    if (unavailableReason) {
+      return { accepted: false, reason: unavailableReason }
+    }
     const generation = this.sessionGenerations.get(sessionId) || 0
     let result
     try {

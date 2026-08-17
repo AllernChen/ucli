@@ -21,15 +21,7 @@ export function describeGatewaySessionEligibility(session) {
   ) {
     return { eligible: false, reason: 'DSH_WEB_GATEWAY_UNSUPPORTED' }
   }
-  if (
-    capabilities?.surface !== 'terminal' ||
-    capabilities?.gateway !== true ||
-    capabilities?.bridge !== true ||
-    session.bridgeLive !== true
-  ) {
-    return { eligible: false, reason: 'DSH_BRIDGE_DISCONNECTED' }
-  }
-  return { eligible: true, reason: null }
+  return { eligible: false, reason: 'DSH_TUI_UNAVAILABLE' }
 }
 
 export function createGatewaySessionOperations({ getEntry, getSession }) {
@@ -62,13 +54,16 @@ export function createGatewaySessionOperations({ getEntry, getSession }) {
       return entry.adapter.respondDecision(decisionId, response)
     },
     getDecisionContext(sessionId, decisionId) {
-      return getEntry(sessionId)?.adapter?.getDecisionContext(decisionId) || null
+      const { entry } = eligibleEntry(sessionId)
+      return entry?.adapter?.getDecisionContext(decisionId) || null
     },
     getLatestPlanSnapshot(sessionId, decisionId) {
-      return getEntry(sessionId)?.adapter?.getLatestPlanSnapshot(decisionId) || null
+      const { entry } = eligibleEntry(sessionId)
+      return entry?.adapter?.getLatestPlanSnapshot(decisionId) || null
     },
     getLatestResultSnapshot(sessionId, turnId) {
-      return getEntry(sessionId)?.adapter?.getLatestResultSnapshot(turnId) || null
+      const { entry } = eligibleEntry(sessionId)
+      return entry?.adapter?.getLatestResultSnapshot(turnId) || null
     }
   })
 }

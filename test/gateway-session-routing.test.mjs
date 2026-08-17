@@ -90,7 +90,7 @@ test('DeepSeek routes fail closed before queue, route, or reaction mutation', as
   const unavailable = session('dsh-tui', {
     adapterId: 'deepseek-harness',
     gatewayEligible: false,
-    gatewayReason: 'DSH_BRIDGE_DISCONNECTED'
+    gatewayReason: 'DSH_TUI_UNAVAILABLE'
   })
   const ready = session('codex-ready')
   const port = createPort([unavailable, ready])
@@ -116,14 +116,14 @@ test('DeepSeek routes fail closed before queue, route, or reaction mutation', as
     replyToMessageId: 'dsh-root'
   })), {
     accepted: false,
-    reason: 'DSH_BRIDGE_DISCONNECTED'
+    reason: 'DSH_TUI_UNAVAILABLE'
   })
   routes.setRelayEnabled(ready.id, false)
   assert.deepEqual(await runtime.handleInboundMessage(message({
     messageId: 'fallback-message'
   })), {
     accepted: false,
-    reason: 'DSH_BRIDGE_DISCONNECTED'
+    reason: 'DSH_TUI_UNAVAILABLE'
   })
   assert.deepEqual(port.calls.turns, [])
   assert.deepEqual(channel.reactions, [])
@@ -159,7 +159,7 @@ test('a stopped DSH session cannot publish a late completion after snapshot wait
     ...dsh,
     status: 'offline',
     gatewayEligible: false,
-    gatewayReason: 'DSH_BRIDGE_DISCONNECTED'
+    gatewayReason: 'DSH_TUI_UNAVAILABLE'
   })
   await runtime.handleGatewayEvent({ type: 'session_stopped', sessionId: dsh.id })
   const completionCount = channel.completions.length
@@ -178,14 +178,13 @@ test('a stopped DSH session cannot publish a late completion after snapshot wait
   assert.equal(runtime.getSessionRelayState(dsh.id).queueCount, 0)
 })
 
-test('a bridge disconnect during turn RPC rolls back before route or reaction side effects', async () => {
+test('a stale DSH route is rejected before turn RPC or route side effects', async () => {
   const dsh = session('dsh-race', {
     adapterId: 'deepseek-harness', gatewayEligible: true, gatewayReason: null
   })
   const port = createPort([dsh])
-  port.sendTurn = async () => ({
-    accepted: false, reason: 'DSH_BRIDGE_DISCONNECTED'
-  })
+  let sendTurns = 0
+  port.sendTurn = async () => { sendTurns += 1; return { accepted: true } }
   const routes = new MemoryRouteStore()
   routes.upsertSessionRoute({ sessionId: dsh.id, relayEnabled: true })
   const channel = new FakeGatewayChannel()
@@ -196,14 +195,15 @@ test('a bridge disconnect during turn RPC rolls back before route or reaction si
   const routesBefore = structuredClone(routes.messageRoutes)
 
   assert.deepEqual(await runtime.handleInboundMessage(message()), {
-    accepted: false, reason: 'DSH_BRIDGE_DISCONNECTED'
+    accepted: false, reason: 'DSH_TUI_UNAVAILABLE'
   })
+  assert.equal(sendTurns, 0)
   assert.equal(runtime.getSessionRelayState(dsh.id).queueCount, 0)
   assert.deepEqual(routes.messageRoutes, routesBefore)
   assert.deepEqual(channel.reactions, [])
 })
 
-test('a bridge disconnect during interrupt RPC preserves the running queue without cards', async () => {
+test('a stale DSH route is rejected before interrupt RPC or cards', async () => {
   const dsh = session('dsh-interrupt-race', {
     adapterId: 'deepseek-harness', gatewayEligible: true, gatewayReason: null
   })
@@ -218,14 +218,14 @@ test('a bridge disconnect during interrupt RPC preserves the running queue witho
   await runtime.handleInboundMessage(message())
   const reactionCount = channel.reactions.length
   const cardCount = channel.cards.length
-  port.interrupt = async () => ({
-    accepted: false, reason: 'DSH_BRIDGE_DISCONNECTED'
-  })
+  let interrupts = 0
+  port.interrupt = async () => { interrupts += 1; return { accepted: true } }
 
   assert.deepEqual(await runtime._interrupt(dsh.id), {
-    accepted: false, reason: 'DSH_BRIDGE_DISCONNECTED'
+    accepted: false, reason: 'DSH_TUI_UNAVAILABLE'
   })
-  assert.equal(runtime.getSessionRelayState(dsh.id).queueCount, 1)
+  assert.equal(interrupts, 0)
+  assert.equal(runtime.getSessionRelayState(dsh.id).queueCount, 0)
   assert.equal(channel.reactions.length, reactionCount)
   assert.equal(channel.cards.length, cardCount)
 })
@@ -263,7 +263,7 @@ test('a stopped DSH generation cannot publish a late plan decision after restart
   await new Promise(resolve => setImmediate(resolve))
   port.sessions.set(dsh.id, {
     ...dsh, status: 'offline', gatewayEligible: false,
-    gatewayReason: 'DSH_BRIDGE_DISCONNECTED'
+    gatewayReason: 'DSH_TUI_UNAVAILABLE'
   })
   await runtime.handleGatewayEvent({ type: 'session_stopped', sessionId: dsh.id })
   port.sessions.set(dsh.id, { ...dsh, status: 'idle', gatewayEligible: true })
@@ -282,7 +282,7 @@ test('continue clears a resumed queue when the bridge refuses the next turn', as
   })
   const port = createPort([dsh])
   port.sendTurn = async () => {
-    throw Object.assign(new Error('gone'), { code: 'DSH_BRIDGE_DISCONNECTED' })
+    throw Object.assign(new Error('gone'), { code: 'DSH_TUI_UNAVAILABLE' })
   }
   const routes = new MemoryRouteStore()
   routes.upsertSessionRoute({ sessionId: dsh.id, relayEnabled: true })
@@ -297,7 +297,7 @@ test('continue clears a resumed queue when the bridge refuses the next turn', as
 
   assert.deepEqual(await runtime.handleInboundAction({
     token, senderOpenId: 'ou_operator'
-  }), { accepted: false, reason: 'DSH_BRIDGE_DISCONNECTED' })
+  }), { accepted: false, reason: 'DSH_TUI_UNAVAILABLE' })
   assert.equal(runtime.getSessionRelayState(dsh.id).queueCount, 0)
 })
 
@@ -315,7 +315,7 @@ test('completion clears a queued next turn when its bridge start is refused', as
   await runtime.handleInboundMessage(message({ messageId: 'current' }))
   await runtime.handleInboundMessage(message({ messageId: 'waiting' }))
   port.sendTurn = async () => {
-    throw Object.assign(new Error('gone'), { code: 'DSH_BRIDGE_DISCONNECTED' })
+    throw Object.assign(new Error('gone'), { code: 'DSH_TUI_UNAVAILABLE' })
   }
 
   await runtime.handleGatewayEvent({
@@ -345,7 +345,7 @@ test('a completion sent by an old generation stays inert after stop and restart'
   await new Promise(resolve => setImmediate(resolve))
   port.sessions.set(dsh.id, {
     ...dsh, status: 'offline', gatewayEligible: false,
-    gatewayReason: 'DSH_BRIDGE_DISCONNECTED'
+    gatewayReason: 'DSH_TUI_UNAVAILABLE'
   })
   await runtime.handleGatewayEvent({ type: 'session_stopped', sessionId: dsh.id })
   port.sessions.set(dsh.id, { ...dsh, status: 'idle', gatewayEligible: true })

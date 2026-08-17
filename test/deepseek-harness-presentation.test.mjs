@@ -51,16 +51,17 @@ test('Profile Center initializes native DSH profiles and manages their bridge st
   assert.match(source, /bridgeCompatible/)
 })
 
-test('Workbench creates DSH TUI only from a bridge-ready profile and Web without a profile', () => {
+test('Workbench creates only DSH Web from a selected managed or system runtime', () => {
   const source = loadSfc('../src/views/Workbench.vue')
 
-  assert.match(source, /dshSurfacePreference/)
-  assert.match(source, /ipc\.listDshProfiles\(\)/)
-  assert.match(source, /profileReady\s*===\s*true\s*&&\s*selectedDshProfile\.value\?\.bridgeCompatible\s*===\s*true/)
+  assert.match(source, /ipc\.getDshState\(\)/)
+  assert.match(source, /\['managed', 'system'\]\.includes\(fresh\?\.selected\)/)
+  assert.match(source, />新建 DSH Web<\/a-button>/u)
   assert.match(source, /adapterConfig\s*=\s*\{\s*surfacePreference:\s*'web'\s*\}/)
-  assert.match(source, /adapterConfig\s*=\s*\{\s*surfacePreference:\s*'tui',\s*profileName:/)
+  assert.doesNotMatch(source, /dshSurfacePreference|selectedDshProfile|ipc\.listDshProfiles\(\)/)
+  assert.doesNotMatch(source, /surfacePreference:\s*'tui'|profileReady|bridgeCompatible/)
+  assert.doesNotMatch(source, /adapterConfig\s*=\s*\{[^}]*profileName/)
   assert.match(source, /前往档案管理/)
-  assert.match(source, /router\.push\([^\n]*profiles[^\n]*deepseek-harness/)
 })
 
 test('renderer sessions fail closed for missing DSH capabilities and ignore native Web stats events', async () => {

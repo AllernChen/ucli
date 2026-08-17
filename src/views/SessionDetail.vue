@@ -165,7 +165,7 @@
             </span>
             <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
             <a-space size="small">
-              <a-badge v-if="pane.sessionId" :dot="sessionConfigNeedsAttention(pane.sessionId)" status="warning">
+              <a-badge v-if="pane.sessionId && !isLegacyDshSession(paneSession(i))" :dot="sessionConfigNeedsAttention(pane.sessionId)" status="warning">
                 <a-button
                   size="small"
                   type="text"
@@ -198,7 +198,7 @@
                 <FullscreenOutlined v-else />
               </a-button>
               <SessionMaintenanceActions
-                v-if="pane.sessionId"
+                v-if="pane.sessionId && !isLegacyDshSession(paneSession(i))"
                 :session-id="pane.sessionId"
                 @removed="handleConfiguredSessionRemoved"
               />
@@ -211,6 +211,22 @@
                 @click.stop="clearPane(i)"
               >关闭</a-button>
             </a-space>
+          </div>
+          <div
+            v-if="isLegacyDshSession(paneSession(i))"
+            class="legacy-dsh-migration"
+            role="status"
+          >
+            <strong>旧版 DSH TUI 会话已停用</strong>
+            <span>名称：{{ legacyDshSummary(paneSession(i)).name }}</span>
+            <span>目录：{{ legacyDshSummary(paneSession(i)).cwd }}</span>
+            <span>档案：{{ legacyDshSummary(paneSession(i)).profile }}</span>
+            <a-button
+              size="small"
+              type="primary"
+              :disabled="!legacyDshMigrationCwd(paneSession(i))"
+              @click.stop="openLegacyDshWeb(paneSession(i))"
+            >新建 DSH Web（同工作目录）</a-button>
           </div>
           <!-- Pane info bar -->
           <div v-if="paneCapabilityState(i).ucliStats" class="pane-info">
@@ -237,7 +253,7 @@
             class="pane-web-surface"
           />
           <a-empty
-            v-if="pane.sessionId && !paneCapabilityState(i).known"
+            v-if="pane.sessionId && !paneCapabilityState(i).known && !isLegacyDshSession(paneSession(i))"
             description="该会话缺少可验证的界面能力，已安全停用交互"
           />
           <PaneHistory
@@ -407,6 +423,58 @@ function paneSession(i) {
 
 function paneCapabilityState(i) {
   return sessionCapabilityState(paneSession(i))
+}
+
+function isLegacyDshSession(session) {
+  return Boolean(
+    session?.adapterId === 'deepseek-harness' &&
+    session?.adapterConfig?.surfacePreference !== 'web' &&
+    session?.capabilities?.surface !== 'web'
+  )
+}
+
+function boundedLegacyDshText(value, fallback, maxLength) {
+  if (typeof value !== 'string') return fallback
+  const normalized = value
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .normalize('NFC')
+    .trim()
+  return normalized
+    ? Array.from(normalized).slice(0, maxLength).join('')
+    : fallback
+}
+
+function legacyDshSummary(session) {
+  return {
+    name: boundedLegacyDshText(
+      session?.displayName || session?.name,
+      '未命名会话',
+      80
+    ),
+    cwd: boundedLegacyDshText(session?.cwd, '未记录工作目录', 180),
+    profile: boundedLegacyDshText(
+      session?.adapterConfig?.profileName || session?.profileName,
+      '旧版 TUI',
+      80
+    )
+  }
+}
+
+function legacyDshMigrationCwd(session) {
+  if (typeof session?.cwd !== 'string') return ''
+  return Array.from(session.cwd
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .normalize('NFC')
+    .trim()).slice(0, 4096).join('')
+}
+
+function openLegacyDshWeb(session) {
+  const cwd = legacyDshMigrationCwd(session)
+  if (!isLegacyDshSession(session) || !cwd) return
+  router.push({
+    path: '/',
+    query: { createDshWeb: '1', cwd }
+  })
 }
 
 function relayView(session) {
@@ -1228,6 +1296,13 @@ onBeforeUnmount(() => {
 }
 .pane-session { font-size: 12px; font-weight: 500; display: flex; align-items: center; gap: 4px; }
 .pane-session.empty { color: #bfbfbf; }
+.legacy-dsh-migration {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 7px;
+  margin: auto; max-width: min(520px, calc(100% - 32px)); padding: 18px;
+  border: 1px solid #ffe58f; border-radius: 8px; background: #fffbe6;
+  color: #595959; overflow-wrap: anywhere;
+}
+.legacy-dsh-migration strong { color: #ad6800; }
 
 .pane-info {
   display: flex; gap: 10px; padding: 2px 8px; background: #fff; font-size: 11px;
