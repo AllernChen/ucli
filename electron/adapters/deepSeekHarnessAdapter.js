@@ -10,6 +10,7 @@ import {
   inspectDshRuntime,
   launchDshWebSurface,
   normalizeDshWebSurfaceState,
+  registerDshWorkspaceSession,
   SUPPORTED_DSH_VERSION
 } from './deepSeekHarnessRuntime.js'
 
@@ -119,6 +120,16 @@ export class DeepSeekHarnessAdapter extends BaseAdapter {
         throw codedError('DSH_WEB_EXITED')
       }
       this._assertStarting(epoch)
+      const openWorkspace = this.settings.openWorkspace || registerDshWorkspaceSession
+      try {
+        await openWorkspace({
+          url: controller.state.url,
+          cwd: this.session.cwd,
+          fetchImpl: this.settings.webFetch
+        })
+      } catch {
+        // Best-effort: a failed workspace pre-open must not fail the Web surface.
+      }
       this.emitEvent({ type: 'ready' })
       return true
     } catch (error) {

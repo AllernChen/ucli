@@ -597,7 +597,7 @@ test('legacy bridge removal uses exact fixed argv and returns sanitized profile 
     assert.equal(path.isAbsolute(calls[0].file), true)
     assert.deepEqual(calls[0].args, [
       '/absolute/dsh/lib/bin.js', 'plugin', '--profile', 'legacy',
-      'remove', BRIDGE_NAME, '--ignore-scripts'
+      'remove', BRIDGE_NAME, '--config.ignore-scripts=true'
     ])
     assert.equal(calls[0].options.shell, false)
     assert.equal(calls[0].options.env.DSH_HOME, home)

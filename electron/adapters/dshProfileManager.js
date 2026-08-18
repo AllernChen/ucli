@@ -586,7 +586,7 @@ export function createDshProfileManager({
           runtime.launch.file,
           [
             ...(runtime.launch.prefixArgs || []),
-            'plugin', '--profile', identity.name, 'remove', BRIDGE_PACKAGE, '--ignore-scripts'
+            'plugin', '--profile', identity.name, 'remove', BRIDGE_PACKAGE, '--config.ignore-scripts=true'
           ],
           {
             env: processEnvironment,

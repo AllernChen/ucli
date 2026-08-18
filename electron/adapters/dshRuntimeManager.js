@@ -456,7 +456,7 @@ export function createDshRuntimeManager({
           '--registry=https://registry.npmjs.org', '--ignore-scripts', '--no-audit', '--no-fund',
           '--package-lock=true', `@deepseek-ai/dsh@${SUPPORTED_DSH_VERSION}`, `pnpm@${MANAGED_PNPM_VERSION}`
         ], {
-          cwd: runtimeDirectory, env, shell: false, timeoutMs: 120_000, maxOutputBytes: 16 * 1024
+          cwd: runtimeDirectory, env, shell: false, timeoutMs: 900_000, maxOutputBytes: 16 * 1024
         })
         if (result?.code !== 0 || result?.terminationConfirmed === false) throw runtimeError('DSH_RUNTIME_INSTALL_FAILED')
         assertSafeRuntimePlacement(runtimeDirectory, dshHome, io)

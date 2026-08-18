@@ -11,6 +11,7 @@ import {
   launchDshWebSurface,
   normalizeDshWebSurfaceState,
   parseDshWebReadyUrl,
+  registerDshWorkspaceSession,
   terminateDshWebProcessTree
 } from '../electron/adapters/deepSeekHarnessRuntime.js'
 import { DeepSeekHarnessAdapter } from '../electron/adapters/deepSeekHarnessAdapter.js'
@@ -420,7 +421,8 @@ test('a Web adapter publishes a validated surface and rejects UCLI-owned operati
       }),
       platform: 'win32',
       spawnWebProcess: () => child,
-      terminateWebProcessTree: async () => { terminated += 1; return true }
+      terminateWebProcessTree: async () => { terminated += 1; return true },
+      openWorkspace: async () => null
     }
   })
   const events = []
@@ -449,6 +451,116 @@ test('a Web adapter publishes a validated surface and rejects UCLI-owned operati
   await assert.rejects(adapter.interrupt(), { code: 'DSH_WEB_NATIVE_OWNERSHIP' })
   await adapter.dispose()
   assert.equal(terminated, 1)
+})
+
+test('registerDshWorkspaceSession materializes the cwd workspace then pre-opens a session', async () => {
+  const calls = []
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options })
+    const method = url.slice(url.lastIndexOf('/api/') + '/api/'.length)
+    const body = JSON.parse(options.body)
+    if (method === 'workspace.create') {
+      assert.equal(body.type, 'client-request')
+      assert.equal(body.method, 'workspace.create')
+      assert.equal(typeof body.rpcId, 'string')
+      assert.deepEqual(body.payload, { path: TEST_CWD })
+      return { ok: true, json: async () => ({ result: { ok: true, value: { workspaceId: 'ws-1' } } }) }
+    }
+    if (method === 'session.create') {
+      assert.equal(body.method, 'session.create')
+      assert.deepEqual(body.payload, { workspaceId: 'ws-1' })
+      return { ok: true, json: async () => ({ result: { ok: true, value: { sessionId: 's-1' } } }) }
+    }
+    throw new Error(`unexpected method ${method}`)
+  }
+  const result = await registerDshWorkspaceSession({
+    url: 'http://127.0.0.1:43127',
+    cwd: TEST_CWD,
+    fetchImpl
+  })
+  assert.deepEqual(result, { workspaceId: 'ws-1', sessionId: 's-1' })
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].options.method, 'POST')
+  assert.equal(calls[0].options.headers['content-type'], 'application/json')
+  assert.match(calls[0].options.body, /client-request/)
+})
+
+test('registerDshWorkspaceSession fails closed on a non-loopback origin or API rejection', async () => {
+  const throwFetch = async () => { throw new Error('must not be reached') }
+  assert.equal(await registerDshWorkspaceSession({
+    url: 'http://evil.example.com:43127', cwd: TEST_CWD, fetchImpl: throwFetch
+  }), null)
+  assert.equal(await registerDshWorkspaceSession({
+    url: 'http://127.0.0.1:43127', cwd: TEST_CWD,
+    fetchImpl: async () => ({ ok: false, json: async () => ({}) })
+  }), null)
+  assert.equal(await registerDshWorkspaceSession({
+    url: 'http://127.0.0.1:43127', cwd: '', fetchImpl: throwFetch
+  }), null)
+})
+
+test('a Web adapter pre-opens the session workspace after readiness', async () => {
+  const child = fakeChild()
+  const opened = []
+  const adapter = new DeepSeekHarnessAdapter({
+    session: {
+      id: 'web-open-workspace', adapterId: 'deepseek-harness', cwd: TEST_CWD,
+      model: 'native', cliSessionId: null, adapterConfig: { surfacePreference: 'web' }
+    },
+    engine: { decide: async () => ({ verdict: 'allow' }) },
+    settings: {
+      inspectRuntime: async () => ({
+        compatible: true, version: '0.1.0-rc.6', home: TEST_DSH_HOME,
+        launch: { file: TEST_EXECUTABLE, prefixArgs: [] }
+      }),
+      platform: 'win32',
+      spawnWebProcess: () => child,
+      terminateWebProcessTree: async () => true,
+      openWorkspace: async (options) => {
+        opened.push(options)
+        return { workspaceId: 'ws-1', sessionId: 's-1' }
+      }
+    }
+  })
+  adapter.on('event', () => {})
+  const starting = adapter.start()
+  await new Promise(resolve => setImmediate(resolve))
+  child.stdout.write('dsh web: http://127.0.0.1:43127\n')
+  await starting
+  assert.deepEqual(opened, [{
+    url: 'http://127.0.0.1:43127', cwd: TEST_CWD, fetchImpl: undefined
+  }])
+  await adapter.dispose()
+})
+
+test('a Web adapter tolerates a failed workspace pre-open without failing the surface', async () => {
+  const child = fakeChild()
+  const adapter = new DeepSeekHarnessAdapter({
+    session: {
+      id: 'web-open-fail', adapterId: 'deepseek-harness', cwd: TEST_CWD,
+      model: 'native', cliSessionId: null, adapterConfig: { surfacePreference: 'web' }
+    },
+    engine: { decide: async () => ({ verdict: 'allow' }) },
+    settings: {
+      inspectRuntime: async () => ({
+        compatible: true, version: '0.1.0-rc.6', home: TEST_DSH_HOME,
+        launch: { file: TEST_EXECUTABLE, prefixArgs: [] }
+      }),
+      platform: 'win32',
+      spawnWebProcess: () => child,
+      terminateWebProcessTree: async () => true,
+      openWorkspace: async () => { throw new Error('loopback down') }
+    }
+  })
+  const events = []
+  adapter.on('event', event => events.push(event))
+  const starting = adapter.start()
+  await new Promise(resolve => setImmediate(resolve))
+  child.stdout.write('dsh web: http://127.0.0.1:43127\n')
+  await starting
+  assert.equal(adapter.surfaceState.status, 'ready')
+  assert.equal(events.some(event => event.type === 'ready'), true)
+  await adapter.dispose()
 })
 
 test('a same-tick Web root close wins over readiness without a trailing ready event', async () => {

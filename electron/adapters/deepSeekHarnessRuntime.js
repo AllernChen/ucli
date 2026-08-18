@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import {
   accessSync,
   constants as fsConstants,
@@ -59,6 +60,55 @@ export function normalizeDshWebSurfaceState(input) {
   }
   if (input.url != null || input.errorCode != null) return null
   return { kind: 'web', status, url: null, errorCode: null }
+}
+
+function isDshWebLoopbackOrigin(url) {
+  const match = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/u.exec(typeof url === 'string' ? url : '')
+  if (!match) return false
+  const port = Number(match[1])
+  return port >= 1 && port <= 65_535
+}
+
+/**
+ * Best-effort: once the DSH Web surface is ready, materialize the selected
+ * project directory as a workspace and pre-open a blank session inside it, so
+ * the native Web UI opens scoped to the chosen directory instead of empty.
+ * DSH does not derive a workspace from its process cwd, so UCLI drives the
+ * loopback JSON-RPC API directly. Every failure resolves to `null` and never
+ * fails the surface start.
+ * @param url - validated `http://127.0.0.1:<port>` origin of the ready surface.
+ * @param cwd - absolute project directory the session was created for.
+ * @param fetchImpl - injectable fetch (defaults to the global fetch).
+ * @returns `{ workspaceId, sessionId }` or `null` on any rejection.
+ */
+export async function registerDshWorkspaceSession({
+  url,
+  cwd,
+  fetchImpl = globalThis.fetch
+} = {}) {
+  if (
+    !isDshWebLoopbackOrigin(url) ||
+    typeof cwd !== 'string' || cwd.length === 0 ||
+    typeof fetchImpl !== 'function'
+  ) return null
+  const request = async (method, payload) => {
+    const response = await fetchImpl(`${url}/api/${method}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: randomUUID(), method, payload })
+    })
+    if (!response?.ok) return null
+    const body = await response.json().catch(() => null)
+    return body?.result?.ok === true ? body.result.value : null
+  }
+  try {
+    const workspace = await request('workspace.create', { path: cwd })
+    if (!workspace?.workspaceId) return null
+    const session = await request('session.create', { workspaceId: workspace.workspaceId })
+    return { workspaceId: workspace.workspaceId, sessionId: session?.sessionId || null }
+  } catch {
+    return null
+  }
 }
 
 function dshWebEnvironment(baseEnv, runtime) {
