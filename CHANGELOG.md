@@ -14,6 +14,13 @@
 - DSH Skills 现在覆盖项目 `.dsh/skills`、项目 `.agents/skills`、`$DSH_HOME/skills`、用户 `.agents/skills` 及只读内置来源；按优先级选择生效来源，并让 Codex 与 DSH 的共享投影只保留一个物理副本。
 - 0.11.1 升级、迁移和 Runtime 卸载均保留 DSH_HOME、profiles、原生 sessions 与 Skills；不会因为停用旧 TUI/bridge 路径而删除用户数据。
 
+### 修复
+
+- 新建 DSH Web 会话时，通过 DSH loopback API 自动把选中目录注册为 workspace 并预开一个空白会话，Web 界面打开即定位到该目录，而非空工作台。
+- 修复移除 legacy bridge 失败：`pnpm remove` 不接受 `--ignore-scripts`，改用 `--config.ignore-scripts=true` 后按原四文件事务边界移除。
+- 修复托管 Runtime 安装失败：安装超时由 2 分钟放宽到 15 分钟，慢网环境下冷装 `@deepseek-ai/dsh` 不再被提前终止。
+- 修复新建会话面板中 DeepSeek Harness 出现两个入口的问题：通用「快速新建」与「发现历史会话」不再渲染 DSH，只保留专属「新建 DSH Web」。
+
 ### 发布兼容
 
 - 应用与安装产物版本升级到 `0.11.1`；为识别并安全移除旧元数据，发布资源继续保留隔离的 `resources/deepseek-harness/ucli-dsh-bridge-0.11.0.tgz`，但不把它作为可启动界面或新安装依赖。
