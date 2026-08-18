@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
@@ -73,9 +73,12 @@ export function resolveDshAgentsRoot({ home = homedir(), env = process.env, cwd 
 }
 
 export function resolveProjectScopeRoot(projectPath) {
+  // Walk the logical path (path.resolve) instead of realpath: macOS exposes the
+  // temp root under /var -> /private/var, so realpath would expand it and the
+  // returned project root would disagree with the path the user sees. .git
+  // detection follows symlinks either way.
   const fallback = resolve(projectPath)
-  let current
-  try { current = realpathSync(fallback) } catch { current = fallback }
+  let current = fallback
   for (let depth = 0; depth < 64; depth += 1) {
     if (existsSync(join(current, '.git'))) return current
     const parent = dirname(current)

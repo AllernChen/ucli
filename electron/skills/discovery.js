@@ -588,10 +588,16 @@ export function createSkillDiscovery({
         })
       }
 
-      const bundledRoot = typeof env.DSH_BUNDLED_SKILL_DIR === 'string' &&
+      const configuredBundledRoot = typeof env.DSH_BUNDLED_SKILL_DIR === 'string' &&
         isAbsolute(env.DSH_BUNDLED_SKILL_DIR)
         ? resolve(env.DSH_BUNDLED_SKILL_DIR)
         : null
+      // Canonicalize the bundled root so its containment check agrees with the
+      // realpath-resolved skill entries below (macOS /var -> /private/var).
+      let bundledRoot = configuredBundledRoot
+      if (configuredBundledRoot) {
+        try { bundledRoot = realpathSync(configuredBundledRoot) } catch { /* keep logical */ }
+      }
       if (bundledRoot) {
         scanRoot({
           adapterId: 'deepseek-harness',

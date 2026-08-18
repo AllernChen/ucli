@@ -267,8 +267,11 @@ export function createDshBridgeEndpoint({
   // and make listen() fail with EINVAL. Shorten only the basename when the
   // resolved path is at risk; short temp dirs keep the full UUID.
   const socketName = `${randomId}.sock`
+  // 16 chars keeps 64 bits of uniqueness while staying well under the ~107
+  // char sun_path limit even on long macOS temp dirs; shorter names risk
+  // collisions inside the shared tmpdir/ucli-dsh directory.
   const cappedName = socketRoot.length + socketName.length + 1 > 100
-    ? `${randomId.slice(0, 8)}.sock`
+    ? `${randomId.slice(0, 16)}.sock`
     : socketName
   return {
     endpoint: path.posix.join(socketRoot, cappedName),
