@@ -5,6 +5,15 @@
   "author": "ucli",
   "license": "MIT",
   "main": "out/main/index.js",
+  "allowScripts": {
+    "electron": true,
+    "node-pty": true,
+    "esbuild": true,
+    "vue-demi": true,
+    "protobufjs": true,
+    "core-js": true,
+    "electron-winstaller": true
+  },
   "scripts": {
     "postinstall": "node scripts/fix-node-pty-permissions.cjs",
     "package:dsh-bridge": "node scripts/package-dsh-bridge.mjs",
