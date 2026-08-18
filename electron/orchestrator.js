@@ -806,37 +806,42 @@ export function createOrchestrator() {
         sanitize: false
       })
     },
-    exportDshHistory: async (session) => {
+    exportDshHistory: async (session, { start, endExclusive } = {}) => {
       const entry = sessions.get(session.id)
       const url = entry?.surfaceState?.url
       const client = getDshWebClient()
       const collect = async (activeUrl) => {
         const nativeSessions = await client.listSessions(activeUrl)
         if (!nativeSessions) return null
+        const matched = nativeSessions.filter((s) =>
+          typeof s.updatedAt === 'number' &&
+          s.updatedAt >= start && s.updatedAt < endExclusive)
         const items = []
-        for (const s of nativeSessions) {
+        for (const s of matched) {
           const text = await client.exportSession(activeUrl, s.sessionId)
           if (text) items.push(...parseDshHistory(text.split(/\r?\n/)))
         }
         return { items, sourceKind: 'export', sourceTruncated: false }
       }
       if (typeof url === 'string' && url) return collect(url)
-      // web 未运行：临时拉起，导出后关闭
+      // web 未运行：临时拉起，导出后关闭。session.list 读 DSH_HOME 全局持久化，
+      // 临时拉起无需注册 workspace 即可导出历史会话。
       const selected = await getDshRuntimeManager().selectLaunch()
       if (!selected) return null
-      const controller = launchDshWebSurface({
-        runtime: selected,
-        cwd: session.cwd,
-        env: process.env,
-        platform: process.platform
-      })
+      let controller = null
       try {
+        controller = launchDshWebSurface({
+          runtime: selected,
+          cwd: session.cwd,
+          env: process.env,
+          platform: process.platform
+        })
         await controller.ready
         return await collect(controller.state.url)
       } catch {
         return null
       } finally {
-        await controller.stop().catch(() => {})
+        if (controller) await controller.stop().catch(() => {})
       }
     }
   })

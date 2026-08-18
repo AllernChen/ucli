@@ -53,7 +53,9 @@ function sourceSignature(session) {
 }
 
 function historySourceKind(adapterId) {
-  return adapterId === 'opencode' || adapterId === 'ucode' ? 'export' : 'transcript'
+  return adapterId === 'opencode' || adapterId === 'ucode' || adapterId === 'deepseek-harness'
+    ? 'export'
+    : 'transcript'
 }
 
 function digestText(value) {
@@ -263,10 +265,10 @@ export function createSessionHistoryService({
     }
   }
 
-  async function loadProviderHistory(session) {
+  async function loadProviderHistory(session, range) {
     if (session.adapterId === 'deepseek-harness') {
       if (typeof exportDshHistory !== 'function') throw new Error('history provider unsupported')
-      const history = await exportDshHistory(session)
+      const history = await exportDshHistory(session, range)
       if (!history?.items) throw new Error('history source unavailable')
       return history
     }
@@ -378,7 +380,9 @@ export function createSessionHistoryService({
 
     let history
     try {
-      history = await providerHistory(sessionId, session)
+      history = isDsh
+        ? await loadProviderHistory(session, { start, endExclusive })
+        : await providerHistory(sessionId, session)
     } catch {
       return missing()
     }

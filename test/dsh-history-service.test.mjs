@@ -6,8 +6,9 @@ import { parseDshHistory } from '../electron/sessionHistory.js'
 test('DSH history loads via injected exporter', async () => {
   const service = createSessionHistoryService({
     resolveSession: () => ({ id: 'u1', adapterId: 'deepseek-harness', cwd: 'C:/proj' }),
-    exportDshHistory: async (session) => {
+    exportDshHistory: async (session, range) => {
       assert.equal(session.id, 'u1')
+      assert.deepEqual(range, { start: 1000000, endExclusive: 2000000 })
       return {
         items: parseDshHistory([
           JSON.stringify({ seq: 1, type: 'user/message', time: 1500, data: { content: [{ type: 'text', text: 'x' }] } })
