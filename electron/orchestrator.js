@@ -35,6 +35,7 @@ import { createDshProfileManager, registerDshProfileIpc } from './adapters/dshPr
 import { createDshRuntimeManager } from './adapters/dshRuntimeManager.js'
 import { createDshStatsPoller } from './adapters/dshStatsPoller.js'
 import { createDshWebClient } from './adapters/dshWebClient.js'
+import { createDshHistoryExporter } from './adapters/dshHistoryExporter.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
 import { createSessionDiagnosticsService, registerSessionDiagnosticsIpc } from './sessionDiagnosticsService.js'
 import { annotateImportedSessions, isSafeNativeSessionId, isSafeProviderName, listClaudeTranscriptFiles, resolveCodexResumeProvider, resolveCodexTranscriptSessionInHome } from './sessionDiscovery.js'
@@ -786,6 +787,18 @@ export function createOrchestrator() {
       })
     }
   })
+  // DSH 历史导出：优先复用运行中的 web surface；否则临时拉起再导出后关闭。
+  // session.list 读 DSH_HOME 全局持久化，临时拉起无需注册 workspace 即可导出历史会话。
+  const exportDshHistory = createDshHistoryExporter({
+    getSessionUrl: (id) => sessions.get(id)?.surfaceState?.url ?? null,
+    dshClient: {
+      listSessions: (u) => getDshWebClient().listSessions(u),
+      exportSession: (u, id) => getDshWebClient().exportSession(u, id)
+    },
+    selectLaunch: () => getDshRuntimeManager().selectLaunch(),
+    launchWeb: (runtime, cwd) => launchDshWebSurface({ runtime, cwd, env: process.env, platform: process.platform }),
+    parseHistory: (text) => parseDshHistory(text)
+  })
   const historyService = createSessionHistoryService({
     resolveSession: (sessionId) => {
       const entry = sessions.get(sessionId)
@@ -806,44 +819,7 @@ export function createOrchestrator() {
         sanitize: false
       })
     },
-    exportDshHistory: async (session, { start, endExclusive } = {}) => {
-      const entry = sessions.get(session.id)
-      const url = entry?.surfaceState?.url
-      const client = getDshWebClient()
-      const collect = async (activeUrl) => {
-        const nativeSessions = await client.listSessions(activeUrl)
-        if (!nativeSessions) return null
-        const matched = nativeSessions.filter((s) =>
-          typeof s.updatedAt === 'number' &&
-          s.updatedAt >= start && s.updatedAt < endExclusive)
-        const items = []
-        for (const s of matched) {
-          const text = await client.exportSession(activeUrl, s.sessionId)
-          if (text) items.push(...parseDshHistory(text.split(/\r?\n/)))
-        }
-        return { items, sourceKind: 'export', sourceTruncated: false }
-      }
-      if (typeof url === 'string' && url) return collect(url)
-      // web 未运行：临时拉起，导出后关闭。session.list 读 DSH_HOME 全局持久化，
-      // 临时拉起无需注册 workspace 即可导出历史会话。
-      const selected = await getDshRuntimeManager().selectLaunch()
-      if (!selected) return null
-      let controller = null
-      try {
-        controller = launchDshWebSurface({
-          runtime: selected,
-          cwd: session.cwd,
-          env: process.env,
-          platform: process.platform
-        })
-        await controller.ready
-        return await collect(controller.state.url)
-      } catch {
-        return null
-      } finally {
-        if (controller) await controller.stop().catch(() => {})
-      }
-    }
+    exportDshHistory
   })
 
   // ---- DB init (async — callers must await) ----
