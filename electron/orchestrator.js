@@ -25,10 +25,12 @@ import { inspectCliTools, runCliToolAction } from './cliTools.js'
 import {
   SUPPORTED_DSH_VERSION,
   inspectDshRuntime,
+  launchDshWebSurface,
   normalizeDshWebSurfaceState,
   resolveDshHome,
   runResolvedProcess
 } from './adapters/deepSeekHarnessRuntime.js'
+import { parseDshHistory } from './sessionHistory.js'
 import { createDshProfileManager, registerDshProfileIpc } from './adapters/dshProfileManager.js'
 import { createDshRuntimeManager } from './adapters/dshRuntimeManager.js'
 import { createDshStatsPoller } from './adapters/dshStatsPoller.js'
@@ -803,6 +805,39 @@ export function createOrchestrator() {
         prefixArgs: launch.prefixArgs,
         sanitize: false
       })
+    },
+    exportDshHistory: async (session) => {
+      const entry = sessions.get(session.id)
+      const url = entry?.surfaceState?.url
+      const client = getDshWebClient()
+      const collect = async (activeUrl) => {
+        const nativeSessions = await client.listSessions(activeUrl)
+        if (!nativeSessions) return null
+        const items = []
+        for (const s of nativeSessions) {
+          const text = await client.exportSession(activeUrl, s.sessionId)
+          if (text) items.push(...parseDshHistory(text.split(/\r?\n/)))
+        }
+        return { items, sourceKind: 'export', sourceTruncated: false }
+      }
+      if (typeof url === 'string' && url) return collect(url)
+      // web 未运行：临时拉起，导出后关闭
+      const selected = await getDshRuntimeManager().selectLaunch()
+      if (!selected) return null
+      const controller = launchDshWebSurface({
+        runtime: selected,
+        cwd: session.cwd,
+        env: process.env,
+        platform: process.platform
+      })
+      try {
+        await controller.ready
+        return await collect(controller.state.url)
+      } catch {
+        return null
+      } finally {
+        await controller.stop().catch(() => {})
+      }
     }
   })
 
