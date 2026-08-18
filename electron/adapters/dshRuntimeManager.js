@@ -80,7 +80,13 @@ function assertRuntimeAncestorsUnlinked(runtimeDirectory, io) {
     const isRootAlias = path.dirname(cursor) === root
     try {
       const stat = io.lstat(cursor)
-      if (!stat.isDirectory() || (stat.isSymbolicLink() && !isRootAlias)) {
+      // A root-level alias is a fixed OS symlink (/var -> /private/var) that
+      // lstat reports as neither a plain directory nor a plain file: accept it
+      // explicitly. Any deeper symlink means the runtime directory could be
+      // redirected elsewhere and is rejected regardless of its reported type.
+      if (stat.isSymbolicLink()) {
+        if (!isRootAlias) throw runtimeError('DSH_RUNTIME_PATH_UNSAFE')
+      } else if (!stat.isDirectory()) {
         throw runtimeError('DSH_RUNTIME_PATH_UNSAFE')
       }
     } catch (error) {

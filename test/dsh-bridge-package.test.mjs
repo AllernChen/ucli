@@ -11,6 +11,17 @@ import { replaceBridgeArtifact } from '../scripts/package-dsh-bridge.mjs'
 const root = path.resolve(import.meta.dirname, '..')
 const artifact = path.join(root, 'resources', 'deepseek-harness', 'ucli-dsh-bridge-0.11.0.tgz')
 
+/**
+ * Run a pnpm command. CI installs pnpm globally (npm install -g pnpm), so it is
+ * resolved from PATH on every platform; UCLI_TEST_PNPM overrides for local hosts
+ * where pnpm lives elsewhere. shell:true lets the .cmd shim resolve on Windows.
+ */
+function spawnPnpm(args, options = {}) {
+  const command = process.env.UCLI_TEST_PNPM ||
+    (process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm')
+  return spawnSync(command, args, { shell: process.platform === 'win32', ...options })
+}
+
 function readTar(buffer) {
   const entries = new Map()
   let offset = 0
@@ -92,19 +103,14 @@ test('quarantined bridge artifact remains installable only for explicit legacy r
     await writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({ name, version }))
   }
 
-  const command = process.platform === 'win32' ? process.execPath : 'pnpm'
-  const commandPrefix = process.platform === 'win32'
-    ? [path.join(path.dirname(process.execPath), 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')]
-    : []
-  const installed = spawnSync(command, [
-    ...commandPrefix, 'install', '--offline', '--ignore-scripts', '--reporter=append-only'
+  const installed = spawnPnpm([
+    'install', '--offline', '--ignore-scripts', '--reporter=append-only'
   ], {
     cwd: fixture,
     encoding: 'utf8'
   })
   assert.equal(installed.status, 0, installed.stderr || installed.stdout)
-  const added = spawnSync(command, [
-    ...commandPrefix,
+  const added = spawnPnpm([
     '--dir', profile, 'add', path.join(root, 'integrations', 'deepseek-harness-bridge'),
     '--offline', '--ignore-scripts', '--reporter=append-only'
   ], { cwd: fixture, encoding: 'utf8' })

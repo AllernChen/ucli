@@ -43,6 +43,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm install -g pnpm@10.30.3
+      - run: npm run package:dsh-bridge
       - run: npm test
       - run: npm run build
       - run: ${{ matrix.dist_command }}

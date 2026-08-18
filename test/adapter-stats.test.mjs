@@ -590,7 +590,10 @@ test('orchestrator records ledger observations beside legacy cumulative stats', 
 })
 
 test('orchestrator drops native-owned stats before mutating or recording session state', () => {
+  // Normalize CRLF so Windows checkouts (git autocrlf) still match the source
+  // line patterns; the regex below anchors on literal \n line endings.
   const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+    .replace(/\r\n/g, '\n')
   const handler = source.match(/async function handleAdapterEvent[\s\S]*?\n  }\n/)?.[0] || ''
   const ownershipGate = handler.indexOf("evt?.type === 'stats_update' && !sessionUsesUcliStats(entry.session)")
 

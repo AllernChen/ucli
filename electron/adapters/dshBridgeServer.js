@@ -262,8 +262,16 @@ export function createDshBridgeEndpoint({
   }
 
   const socketRoot = path.posix.resolve(tempDirectory, 'ucli-dsh')
+  // Unix socket paths are capped at ~107 chars (sun_path). macOS temp dirs are
+  // long (/var/folders/xx/.../T), so a full 36-char UUID basename can overflow
+  // and make listen() fail with EINVAL. Shorten only the basename when the
+  // resolved path is at risk; short temp dirs keep the full UUID.
+  const socketName = `${randomId}.sock`
+  const cappedName = socketRoot.length + socketName.length + 1 > 100
+    ? `${randomId.slice(0, 8)}.sock`
+    : socketName
   return {
-    endpoint: path.posix.join(socketRoot, `${randomId}.sock`),
+    endpoint: path.posix.join(socketRoot, cappedName),
     socketRoot
   }
 }

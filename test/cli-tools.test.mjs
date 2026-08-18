@@ -287,7 +287,9 @@ test('OpenCode upgrade runs the npm global installer', async () => {
   }
 })
 
-test('CLI inspection parses path and version', async () => {
+test('CLI inspection parses path and version', {
+  skip: process.platform !== 'win32' && 'mock runner returns Windows path semantics'
+}, async () => {
   const calls = []
   const runner = async (command) => {
     calls.push(command)
