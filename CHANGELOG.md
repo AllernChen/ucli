@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-08-19
+
+### DeepSeek Harness 数据接入
+
+- DSH Web 会话现在纳入 UCLI 的 token 统计：capabilities 契约把 `statsOwner` 从 native 改为 ucli（权限/历史仍由 DSH 原生管理），新增 loopback API 客户端与每 10 秒的轮询器，把 DSH Web 的 token 用量聚合写入会话统计并在工作台/统计页展示。
+- DSH 会话接入 summary：`sessionHistoryService` 新增 DSH 分支，总结时从 DSH Web 导出会话转录（Web 未运行时临时拉起再导出、完成后回收），按时间范围过滤，执行器仍为 claude/opencode。
+- 引入 `fflate`（DSH 同款零依赖 ZIP 库）用于解压 DSH 的会话日志归档。
+
 ## [0.11.1] - 2026-08-18
 
 ### DeepSeek Harness 整改

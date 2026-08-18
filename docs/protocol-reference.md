@@ -151,6 +151,15 @@ Web 以固定 argv `dsh web --host 127.0.0.1 --port 0` 启动，不注入任何 
 
 stop、restart、remove 和应用退出先停用界面，再确认同一 owned process tree 完整退出。两个并发 Web 会话必须使用不同动态端口和独立生命周期；root 退出但子进程仍在时保持 stopping，不复用 controller，也不报告假成功。
 
+### Loopback HTTP API
+
+DSH Web 在 `http://127.0.0.1:<port>` 暴露 JSON-RPC 风格 API。UCLI 的 `dshWebClient` 通过 `POST /api/<method>`（body 为 `{type:"client-request", rpcId, method, payload}`）读取数据，每个方法都先做 loopback origin 校验，失败返回稳定空值而非抛错：
+
+- `session.list`：返回各 native session 的 `sessionId`、`updatedAt` 与 `tokenUsage`（`uncachedInputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens`）；轮询器每 10 秒聚合为 `{input, output}` 写入 `session.stats.tokens`。
+- `session.export?sessionId=<id>`：GET，返回 ZIP 归档，内含 `session.jsonl`（逐事件日志）；summary 时解压读取转录，并按 native session 的 `updatedAt` 落在时间范围过滤。
+
+DSH API 不暴露费用数字，`costAvailable` 保持 false；本次只做 token 数量。
+
 ### DSH Skills 来源与优先级
 
 同名 Skill 以较小 rank 为优先，保留所有来源并标记“生效”或“被来源遮蔽”：
