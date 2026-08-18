@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { unzipSync } from 'fflate'
 
 const LOOPBACK_ORIGIN = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/u
 
@@ -56,5 +57,25 @@ export function createDshWebClient({ fetchImpl = globalThis.fetch } = {}) {
     return { input, output }
   }
 
-  return { listSessions, aggregateTokenUsage }
+  async function exportSession(url, sessionId) {
+    if (!isLoopbackOrigin(url) || typeof sessionId !== 'string' || !sessionId) return null
+    let response
+    try {
+      response = await fetchImpl(`${url}/api/session.export?sessionId=${encodeURIComponent(sessionId)}`)
+    } catch {
+      return null
+    }
+    if (!response?.ok) return null
+    const buffer = await response.arrayBuffer().catch(() => null)
+    if (!buffer) return null
+    try {
+      const files = unzipSync(new Uint8Array(buffer))
+      const jsonl = files['session.jsonl']
+      return jsonl ? new TextDecoder().decode(jsonl) : null
+    } catch {
+      return null
+    }
+  }
+
+  return { listSessions, aggregateTokenUsage, exportSession }
 }
