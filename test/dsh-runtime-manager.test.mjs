@@ -822,7 +822,13 @@ test('constructor rejects canonical overlap and linked runtime ancestors', () =>
       dshHome,
       fs: {
         realpath(target) {
-          if (target === dshHome) return path.join(runtimeDirectory, 'canonical-home')
+          // Simulate dshHome's canonical path landing inside the runtime tree.
+          // Base it on the runtime directory's own realpath so macOS /var ->
+          // /private/var aliasing keeps both canonical paths on the same prefix
+          // (the manager compares realpath projections).
+          if (target === dshHome) {
+            return path.join(realpathSync(runtimeDirectory), 'canonical-home')
+          }
           return realpathSync(target)
         }
       }
