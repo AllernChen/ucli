@@ -210,12 +210,12 @@ test('session configuration hides UCLI permission and Gateway controls from nati
   assert.match(source, /v-if="capabilities\.ucliHistory" label="CLI /)
   assert.match(source, /v-if="capabilities\.ucliPermission" label="权限模式"/)
   assert.match(source, /v-if="capabilities\.gateway" class="control-row"/)
-  assert.match(source, /v-if="capabilities\.web"[\s\S]*权限、历史、统计与审批均由 DSH 原生界面管理/)
+  assert.match(source, /v-if="capabilities\.web"[\s\S]*权限、历史与审批由 DSH 原生界面管理；token 统计由 UCLI 拉取展示/)
 })
 
-test('usage trends identify DSH while excluding native Web ownership', () => {
+test('usage trends identify DeepSeek Harness without a native-stats exclusion note', () => {
   const source = loadSfc('../src/components/stats/UsageTrendsPanel.vue')
 
   assert.match(source, /'deepseek-harness': 'DeepSeek Harness'/)
-  assert.match(source, /DSH Web.*UCLI/)
+  assert.doesNotMatch(source, /DSH Web 使用原生统计|不计入 UCLI 使用趋势/)
 })

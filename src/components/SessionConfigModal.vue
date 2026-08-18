@@ -56,7 +56,7 @@
           type="info"
           show-icon
           message="DSH 原生控制"
-          description="权限、历史、统计与审批均由 DSH 原生界面管理。"
+          description="权限、历史与审批由 DSH 原生界面管理；token 统计由 UCLI 拉取展示。"
           class="runtime-alert"
         />
         <a-form layout="vertical">
