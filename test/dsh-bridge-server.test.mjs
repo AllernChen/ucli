@@ -710,7 +710,9 @@ test('successful response results cannot return the handshake token', async (t) 
   await rejected
 })
 
-test('Windows pipe endpoint cannot escape through semantic events or successful responses', async (t) => {
+test('Windows pipe endpoint cannot escape through semantic events or successful responses', {
+  skip: process.platform !== 'win32' && 'named-pipe endpoint shape is Windows-only'
+}, async (t) => {
   for (const channel of ['semantic', 'response']) {
     const events = []
     const server = await createDshBridgeServer({
