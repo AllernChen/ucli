@@ -13,14 +13,14 @@ function verifyReleaseArtifacts({ rootDir }) {
   return verifyReleaseArtifactsForPlatform({ rootDir, platform: 'win32', arch: 'x64' })
 }
 
-test('0.11.1 release package and acceptance documentation agree', async () => {
+test('app release package and acceptance documentation agree', async () => {
   const [packageSource, readme, changelog, acceptance] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../README.md', import.meta.url), 'utf8'),
     readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8'),
     readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8')
   ])
-  assert.equal(JSON.parse(packageSource).version, '0.11.1')
+  assert.equal(JSON.parse(packageSource).version, '0.11.2')
   assert.match(readme, /配置档案/)
   assert.match(readme, /CC Switch/)
   assert.match(readme, /Claude 登录态/)
