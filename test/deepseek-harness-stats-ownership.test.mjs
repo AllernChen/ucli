@@ -12,16 +12,17 @@ const TUI = {
 }
 const WEB = {
   surface: 'web', permissionOwner: 'native', historyOwner: 'native',
-  statsOwner: 'native', gateway: false, bridge: false
+  statsOwner: 'ucli', gateway: false, bridge: false
 }
 
 test('stats ownership accepts only authoritative UCLI-owned session capabilities', () => {
   assert.equal(sessionUsesUcliStats({ capabilities: TUI }), true)
-  assert.equal(sessionUsesUcliStats({ capabilities: WEB }), false)
+  assert.equal(sessionUsesUcliStats({ capabilities: WEB }), true)
   assert.equal(sessionUsesUcliStats({}), false)
   assert.equal(sessionUsesUcliStats({ capabilities: undefined }), false)
   assert.equal(sessionUsesUcliStats({ capabilities: null }), false)
-  assert.equal(sessionUsesUcliStats({ capabilities: { ...WEB, statsOwner: 'ucli' } }), false)
+  // web surface 但 stats 由 native 管理（legacy 契约）仍然不是 UCLI 拥有
+  assert.equal(sessionUsesUcliStats({ capabilities: { ...WEB, statsOwner: 'native' } }), false)
 })
 
 test('model aggregates omit native sessions instead of rendering zero-valued rows', () => {

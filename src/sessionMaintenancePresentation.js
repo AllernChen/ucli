@@ -15,7 +15,7 @@ export function deriveSessionCapabilityState(session = {}) {
   const coherentOwnership = validShape && (
     capabilities.surface === 'terminal'
       ? capabilities.permissionOwner === 'ucli' && capabilities.historyOwner === 'ucli' && capabilities.statsOwner === 'ucli'
-      : capabilities.permissionOwner === 'native' && capabilities.historyOwner === 'native' && capabilities.statsOwner === 'native'
+      : capabilities.permissionOwner === 'native' && capabilities.historyOwner === 'native'
   )
   const validDshContract = session.adapterId !== 'deepseek-harness' || (validShape && (
     capabilities.surface === 'terminal'

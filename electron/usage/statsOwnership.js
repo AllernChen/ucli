@@ -6,10 +6,7 @@ export function sessionUsesUcliStats(session = {}) {
   }
   try {
     const capabilities = normalizeAdapterCapabilities(session.capabilities)
-    return capabilities.surface === 'terminal' &&
-      capabilities.permissionOwner === 'ucli' &&
-      capabilities.historyOwner === 'ucli' &&
-      capabilities.statsOwner === 'ucli'
+    return capabilities.statsOwner === 'ucli'
   } catch {
     return false
   }

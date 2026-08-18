@@ -28,7 +28,7 @@ test('registry exposes DSH Web by default and unavailable capabilities for legac
   const descriptor = listAdapterDescriptors().find(value => value.id === 'deepseek-harness')
   assert.deepEqual(descriptor.capabilities, {
     surface: 'web', permissionOwner: 'native', historyOwner: 'native',
-    statsOwner: 'native', gateway: false, bridge: false
+    statsOwner: 'ucli', gateway: false, bridge: false
   })
   assert.equal(descriptor.capabilitiesForConfig({ surfacePreference: 'web' }).surface, 'web')
   assert.deepEqual(descriptor.capabilitiesForConfig({

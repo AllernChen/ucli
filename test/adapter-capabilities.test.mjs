@@ -38,12 +38,12 @@ test('bridged DSH TUI capabilities keep UCLI ownership and enable the bridge', (
   })
 })
 
-test('DSH Web capabilities keep native ownership and fail Gateway closed', () => {
+test('DSH Web capabilities keep native permission/history ownership and fail Gateway closed', () => {
   assert.deepEqual(normalizeAdapterCapabilities(DSH_WEB_CAPABILITIES), {
     surface: 'web',
     permissionOwner: 'native',
     historyOwner: 'native',
-    statsOwner: 'native',
+    statsOwner: 'ucli',
     gateway: false,
     bridge: false
   })

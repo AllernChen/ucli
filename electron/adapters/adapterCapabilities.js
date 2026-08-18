@@ -20,7 +20,7 @@ export const DSH_WEB_CAPABILITIES = Object.freeze({
   surface: 'web',
   permissionOwner: 'native',
   historyOwner: 'native',
-  statsOwner: 'native',
+  statsOwner: 'ucli',
   gateway: false,
   bridge: false
 })

@@ -37,7 +37,7 @@ function rendererSessionCapabilities(adapterId, value, descriptor) {
   if (!normalized) return DSH_UNAVAILABLE_CAPABILITIES
   const nativeWeb = normalized.surface === 'web' &&
     normalized.permissionOwner === 'native' && normalized.historyOwner === 'native' &&
-    normalized.statsOwner === 'native' && normalized.gateway === false && normalized.bridge === false
+    normalized.gateway === false && normalized.bridge === false
   const unavailable = normalized.surface === 'unavailable' &&
     normalized.permissionOwner === 'native' && normalized.historyOwner === 'native' &&
     normalized.statsOwner === 'native' && normalized.gateway === false && normalized.bridge === false
