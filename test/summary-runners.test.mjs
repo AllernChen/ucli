@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync
@@ -321,7 +322,9 @@ test('Claude uses only an explicitly validated persistent work directory and del
       prompt: 'persistent workspace', schema: SUMMARY_SCHEMA,
       workspaceDirectory: work, timeoutMs: 5000, maxOutputBytes: 8192
     })
-    assert.equal(result.value.cwd, work)
+    // The child reports process.cwd(), which macOS resolves through the /var
+    // -> /private/var alias; compare against the canonical directory.
+    assert.equal(result.value.cwd, realpathSync(work))
     assert.deepEqual(result.value.entries, [])
     assert.ok(result.value.env.HOME)
     assert.equal(result.value.env.HOME.startsWith(root), false)
@@ -846,7 +849,9 @@ test('process runner sends the prompt through stdin with shell disabled', async 
     assert.equal(spawnOptions.cwd, fake.directory)
     assert.deepEqual(parseJsonOutput(result.stdout), {
       prompt: 'summarize this',
-      cwd: fake.directory,
+      // The child echoes process.cwd(), which macOS resolves through the
+      // /var -> /private/var alias; compare against the canonical directory.
+      cwd: realpathSync(fake.directory),
       args: ['--flag']
     })
   } finally {
@@ -880,7 +885,9 @@ test('process runner maps exit codes, timeouts, aborts, and output limits to typ
   }
 })
 
-test('safe CLI resolution bypasses a Windows npm cmd shim without a shell', () => {
+test('safe CLI resolution bypasses a Windows npm cmd shim without a shell', {
+  skip: process.platform !== 'win32' && 'the fixture builds Windows-path .cmd shims'
+}, () => {
   const directory = mkdtempSync(join(tmpdir(), 'ucli-safe-cli-'))
   const shim = join(directory, 'claude.cmd')
   const entry = join(directory, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js')

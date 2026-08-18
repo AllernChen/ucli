@@ -41,6 +41,17 @@ async function closeSocket(socket) {
   socket.destroy()
 }
 
+// macOS propagates a destroyed Unix socket's close asynchronously, so state
+// assertions must poll instead of assuming a single tick is enough.
+async function waitFor(predicate, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return true
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return predicate()
+}
+
 async function authenticate(server, overrides) {
   const socket = await connect(server.endpoint)
   const inbox = createFrameInbox(socket)
@@ -250,8 +261,9 @@ test('disconnect callback fires once only for an authenticated unexpected discon
 
   socket.destroy()
   await once(socket, 'close')
-  await new Promise(resolve => setImmediate(resolve))
+  await waitFor(() => !server.isConnected())
   assert.equal(server.isConnected(), false)
+  await waitFor(() => notifications.length > 0)
   assert.deepEqual(notifications, ['DSH_BRIDGE_DISCONNECTED'])
 
   await server.close()
@@ -1349,6 +1361,10 @@ test('normal close surfaces sync and callback errors, shares the failing attempt
     }
     const server = await createDshBridgeServer({
       sessionId: 'session-1', profileName: 'tui-local', onEvent() {},
+      // The fake server never materializes a real Unix socket file, so pin the
+      // Windows named-pipe path where no socket-file verification runs; this
+      // test only exercises close-error handling, not socket file semantics.
+      platform: 'win32',
       createServer: () => fakeServer
     })
 
