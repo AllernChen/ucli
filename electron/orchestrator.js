@@ -31,6 +31,8 @@ import {
 } from './adapters/deepSeekHarnessRuntime.js'
 import { createDshProfileManager, registerDshProfileIpc } from './adapters/dshProfileManager.js'
 import { createDshRuntimeManager } from './adapters/dshRuntimeManager.js'
+import { createDshStatsPoller } from './adapters/dshStatsPoller.js'
+import { createDshWebClient } from './adapters/dshWebClient.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
 import { createSessionDiagnosticsService, registerSessionDiagnosticsIpc } from './sessionDiagnosticsService.js'
 import { annotateImportedSessions, isSafeNativeSessionId, isSafeProviderName, listClaudeTranscriptFiles, resolveCodexResumeProvider, resolveCodexTranscriptSessionInHome } from './sessionDiscovery.js'
@@ -697,6 +699,7 @@ export function createOrchestrator() {
   let storageService = null
   let dshProfileManager = null
   let dshRuntimeManager = null
+  let dshWebClient = null
   let summaryCacheLastPrunedAt = null
   let persistenceRecovery = null
   const storageRoots = resolveUcliStorageRoots({
@@ -2611,6 +2614,21 @@ export function createOrchestrator() {
     return dshRuntimeManager
   }
 
+  function getDshWebClient() {
+    if (dshWebClient) return dshWebClient
+    dshWebClient = createDshWebClient()
+    return dshWebClient
+  }
+
+  const dshStatsPoller = createDshStatsPoller({
+    entries: () => sessions,
+    dshClient: { aggregateTokenUsage: (url) => getDshWebClient().aggregateTokenUsage(url) },
+    onStats: (sessionId, tokens) => handleAdapterEvent(sessionId, {
+      type: 'stats_update',
+      usage: { inputTokens: tokens.input, outputTokens: tokens.output }
+    })
+  })
+
   function registerIpc() {
     registerGatewayIpc({ ipcMain, manager: gatewayManager })
     registerAiCliProfileIpc({
@@ -3198,6 +3216,7 @@ export function createOrchestrator() {
     if (shutdownPromise) return shutdownPromise
     shutdownPromise = (async () => {
       log('shutdown() called')
+      dshStatsPoller.stop()
       if (flushTimer) {
         clearTimeout(flushTimer)
         flushTimer = null
@@ -3243,6 +3262,8 @@ export function createOrchestrator() {
     })()
     return shutdownPromise
   }
+
+  dshStatsPoller.start()
 
   return {
     registerIpc,
