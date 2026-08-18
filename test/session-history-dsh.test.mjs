@@ -6,7 +6,7 @@ test('parseDshHistory maps user/assistant/tool events to normalized items', () =
   const lines = [
     { seq: 1, type: 'user/message', time: 1000, data: { role: 'user', content: [{ type: 'text', text: 'hello' }] } },
     { seq: 2, type: 'assistant/message', time: 2000, data: { message: { content: [{ type: 'text', text: 'hi there' }] } } },
-    { seq: 3, type: 'tool/result', time: 3000, data: { message: { content: [{ type: 'text', text: 'file written' }] } } },
+    { seq: 3, type: 'tool/result', time: 3000, data: { message: { content: [{ type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'text', text: 'file written' }], isError: false }] } } },
     { seq: 4, type: 'request/header', time: 3000, data: {} }
   ]
   assert.deepEqual(parseDshHistory(lines.map(JSON.stringify)), [

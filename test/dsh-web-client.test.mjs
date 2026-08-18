@@ -85,3 +85,8 @@ test('exportSession returns null on non-loopback origin or missing session.jsonl
   const emptyZip = createDshWebClient({ fetchImpl: async () => ({ ok: true, arrayBuffer: async () => zipSync({}).buffer }) })
   assert.equal(await emptyZip.exportSession('http://127.0.0.1:43127', 'abc'), null)
 })
+
+test('exportSession returns null on corrupt ZIP bytes', async () => {
+  const client = createDshWebClient({ fetchImpl: async () => ({ ok: true, arrayBuffer: async () => new TextEncoder().encode('not a zip').buffer }) })
+  assert.equal(await client.exportSession('http://127.0.0.1:43127', 'abc'), null)
+})
