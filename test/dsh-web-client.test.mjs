@@ -42,3 +42,27 @@ test('client rejects non-loopback origins and API errors with null', async () =>
   const failing = createDshWebClient({ fetchImpl: async () => ({ ok: false, json: async () => ({}) }) })
   assert.equal(await failing.listSessions('http://127.0.0.1:43127'), null)
 })
+
+test('listSessions returns null on network error with a valid loopback origin', async () => {
+  const client = createDshWebClient({ fetchImpl: async () => { throw new Error('ECONNREFUSED') } })
+  assert.equal(await client.listSessions('http://127.0.0.1:43127'), null)
+})
+
+test('listSessions normalizes items to { sessionId, updatedAt, tokenUsage }', async () => {
+  const fetchImpl = jsonFetch(() => ({
+    ok: true,
+    json: async () => ({
+      result: {
+        ok: true,
+        value: {
+          items: [
+            { sessionId: 'a', updatedAt: 1, projections: { values: { tokenUsage: { uncachedInputTokens: 10, outputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: 1 } } } }
+          ]
+        }
+      }
+    })
+  }))
+  const client = createDshWebClient({ fetchImpl })
+  const items = await client.listSessions('http://127.0.0.1:43127')
+  assert.deepEqual(items, [{ sessionId: 'a', updatedAt: 1, tokenUsage: { uncachedInputTokens: 10, outputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: 1 } }])
+})
