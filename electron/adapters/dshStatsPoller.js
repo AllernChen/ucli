@@ -35,6 +35,7 @@ export function createDshStatsPoller({
     const loop = async () => {
       if (!running) return
       await tick()
+      if (!running) return
       timer = setTimer(loop, intervalMs)
     }
     timer = setTimer(loop, intervalMs)
