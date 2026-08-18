@@ -517,7 +517,9 @@ test('OpenCode runs in a validated persistent work directory without exposing it
       prompt: 'persistent workspace', schema: SUMMARY_SCHEMA,
       workspaceDirectory: work, timeoutMs: 5000, maxOutputBytes: 8192
     })
-    assert.equal(result.value.cwd, work)
+    // The child reports process.cwd(), which macOS resolves through the /var
+    // -> /private/var alias; compare against the canonical directory.
+    assert.equal(result.value.cwd, realpathSync(work))
     assert.equal(result.value.env.HOME.startsWith(root), false)
     assert.equal(existsSync(result.value.env.HOME), false)
     assert.equal(existsSync(work), true)
