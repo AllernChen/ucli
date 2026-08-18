@@ -107,7 +107,7 @@
         <div v-else class="discover-empty">该目录下没有发现历史会话。</div>
         <div class="cli-quick-new">
           <span>快速新建：</span>
-          <a-button v-for="a in sessions.adapters" :key="a.id" size="small" type="primary" ghost @click="newSession(a)">
+          <a-button v-for="a in discoverableAdapters" :key="a.id" size="small" type="primary" ghost @click="newSession(a)">
             {{ a.icon }} {{ a.displayName }}
           </a-button>
         </div>
@@ -245,9 +245,16 @@ const totalSelected = computed(() => {
   return n
 })
 
+// DeepSeek Harness is not a discover/import adapter: its sessions live in the
+// native DSH UI and it has a dedicated Web-only creation entry below. Exclude
+// it from the generic quick-new and discover blocks so it is not presented as
+// a second create button alongside that dedicated entry.
+const discoverableAdapters = computed(() =>
+  sessions.adapters.filter((a) => a.id !== 'deepseek-harness')
+)
 const cliGroups = computed(() => {
   const groups = []
-  for (const a of sessions.adapters) {
+  for (const a of discoverableAdapters.value) {
     groups.push({
       id: a.id,
       icon: a.icon,

@@ -199,6 +199,17 @@ test('new DSH sessions are Web-only without profile or TUI controls', () => {
   assert.doesNotMatch(workbench, /selectedDshProfileName|dshTuiReady|TUI profile|UCLI bridge/iu)
 })
 
+test('generic quick-new and discover blocks exclude DeepSeek Harness', () => {
+  // The dedicated Web-only entry is the single DSH create button; the generic
+  // quick-new/discover blocks must not surface a second (legacy TUI-looking) one.
+  assert.match(workbench, /discoverableAdapters\s*=\s*computed/)
+  assert.match(workbench, /a\.id !== 'deepseek-harness'/)
+  assert.doesNotMatch(workbench, /v-for="a in sessions\.adapters"/)
+  assert.match(workbench, /v-for="a in discoverableAdapters"/)
+  assert.match(workbench, /for \(const a of discoverableAdapters\.value\)/)
+  assert.match(workbench, /@click="newSession\(dshAdapter\)"/)
+})
+
 test('legacy DSH sessions expose only a bounded same-cwd Web migration action', () => {
   const detail = readFileSync(
     new URL('../src/views/SessionDetail.vue', import.meta.url),
