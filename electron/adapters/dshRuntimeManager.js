@@ -72,9 +72,15 @@ function assertRuntimeAncestorsUnlinked(runtimeDirectory, io) {
   let cursor = root
   for (const segment of relative.split(path.sep).filter(Boolean)) {
     cursor = path.join(cursor, segment)
+    // A symlink directly under the filesystem root is a fixed OS alias (for
+    // example macOS /var -> /private/var, /tmp -> /private/tmp), not a
+    // redirection attack — the root of a volume is not attacker-writable.
+    // Any deeper ancestor symlink still means the runtime directory can be
+    // redirected to an unexpected location and is rejected.
+    const isRootAlias = path.dirname(cursor) === root
     try {
       const stat = io.lstat(cursor)
-      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      if (!stat.isDirectory() || (stat.isSymbolicLink() && !isRootAlias)) {
         throw runtimeError('DSH_RUNTIME_PATH_UNSAFE')
       }
     } catch (error) {
