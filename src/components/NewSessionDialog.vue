@@ -193,7 +193,7 @@ const defaultProfile = (adapterId, scope) => profilesForAdapter(adapterId)
   .find((profile) => scope === 'project' ? profile.isProjectDefault : profile.isAppDefault) || null
 
 onMounted(async () => {
-  await Promise.all([settings.load(), loadDshRuntime()])
+  await Promise.all([sessions.init(), settings.load(), loadDshRuntime()])
   form.value.adapterId = settings.defaultAdapter || 'claude'
   form.value.tier = settings.defaultTier || 'safety-rules'
   form.value.cwd = settings.defaultCwd || ''
