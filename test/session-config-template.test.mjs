@@ -106,7 +106,9 @@ test('populated pane headers expose compact settings, viewing, maintenance, and 
 
   const buttons = findElements(paneHeader, (node) => node.tag === 'a-button')
   const staticLabels = buttons.map((node) => textContent(node).trim()).filter(Boolean)
-  assert.equal(buttons.length, 4)
+  assert.equal(buttons.length, 5)
+  assert.ok(buttons.some((node) => attribute(node, 'aria-label') === '在工作台定位'))
+  assert.ok(buttons.some((node) => directiveExpression(node, 'on') === 'locateSession(pane.sessionId)'))
   assert.ok(buttons.some((node) => attribute(node, 'aria-label') === '配置会话'))
   assert.ok(buttons.some((node) => directiveExpression(node, 'on') === 'togglePaneHistory(i)'))
   assert.ok(buttons.some((node) => directiveExpression(node, 'on') === 'togglePaneFullscreen(i)'))
