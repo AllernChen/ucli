@@ -131,6 +131,7 @@ export const ipc = {
   saveWorkbench: (state) => u.saveWorkbench(state),
   // shell
   openExternal: (url) => u.openExternal(url),
+  openPath: (path) => u.openPath(path),
   // events
   on: (channel, handler) => u.on(channel, handler)
 }

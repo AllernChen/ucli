@@ -3225,6 +3225,15 @@ export function createOrchestrator() {
         return false
       }
     })
+
+    ipcMain.handle('shell:open-path', async (_e, path) => {
+      try {
+        return await shell.openPath(String(path || ''))
+      } catch (err) {
+        log('shell:open-path failed for', path, err)
+        return 'failed'
+      }
+    })
   }
 
   let shutdownPromise = null

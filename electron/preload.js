@@ -208,6 +208,7 @@ const api = {
 
   // ---- shell ----
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
+  openPath: (path) => ipcRenderer.invoke('shell:open-path', path),
 
   // ---- events ----
   on: (channel, handler) => {

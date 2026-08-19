@@ -39,6 +39,9 @@
             <span class="project-name">{{ project.name }}</span>
             <span class="project-path" :title="project.path">{{ project.path || '未设置工作目录' }}</span>
           </span>
+          <a-button size="small" type="text" class="header-open-dir" title="打开目录" aria-label="打开目录" @click.stop="openProjectDir(project.path)">
+            <ExportOutlined />
+          </a-button>
           <span class="group-count">{{ project.count }} 个会话</span>
           <a-button size="small" type="text" class="header-quick-add" title="在此项目新建会话" @click.stop="openQuickNew(project.path)">
             <PlusOutlined />
@@ -103,11 +106,13 @@ import {
   AppstoreOutlined,
   DownOutlined,
   RightOutlined,
-  FolderOpenOutlined
+  FolderOpenOutlined,
+  ExportOutlined
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { useGatewayStore } from '../stores/gateway.js'
+import { ipc } from '../ipc.js'
 import SessionCard from '../components/SessionCard.vue'
 import SessionConfigModal from '../components/SessionConfigModal.vue'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
@@ -151,6 +156,12 @@ function openNew() {
 function openQuickNew(cwd) {
   quickNew.value = { cwd: cwd || '' }
   showNew.value = true
+}
+
+async function openProjectDir(dir) {
+  if (!dir) { message.warning('该项目未设置工作目录'); return }
+  const result = await ipc.openPath(dir)
+  if (result && result !== '') message.error('无法打开目录')
 }
 
 function openSession(id) {
@@ -345,5 +356,7 @@ function confirmDeleteSession(id) {
 .adapter-name { font-size: 12px; font-weight: 600; }
 .header-quick-add { flex-shrink: 0; color: #8c8c8c; }
 .header-quick-add:hover { color: #1677ff; }
+.header-open-dir { flex-shrink: 0; color: #8c8c8c; }
+.header-open-dir:hover { color: #1677ff; }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 </style>
