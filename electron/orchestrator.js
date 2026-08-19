@@ -2108,8 +2108,10 @@ export function createOrchestrator() {
               const fullPath = join(dayDir, f)
               let meta = null
               try {
-                // Codex session_meta lines can be large — read 64 KB for the first line
-                const head = _readFileHead(fullPath, 65536)
+                // Codex session_meta lines can be large. Read enough bytes to cover
+                // 65536 UTF-16 code units (UTF-8 max 4 bytes/unit) so CJK first lines
+                // are not truncated, then slice to the original code-unit bound.
+                const head = _readFileHead(fullPath, 65536 * 4).slice(0, 65536)
                 const nl = head.indexOf('\n')
                 if (nl > 0) {
                   const firstLine = head.slice(0, nl)
