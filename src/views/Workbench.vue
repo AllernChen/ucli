@@ -23,8 +23,8 @@
       <a-space>
         <a-button size="small" @click="selectAllSessions">{{ allSelected ? '取消全选' : '全选' }}</a-button>
         <span class="batch-count">已选 {{ batchSelection.selected().size }} 个会话</span>
-        <a-button size="small" danger :disabled="!batchSelection.selected().size" @click="batchDelete">批量删除</a-button>
-        <a-button size="small" :disabled="!batchSelection.selected().size" @click="batchStop">批量停止</a-button>
+        <a-button size="small" danger :disabled="!batchSelection.hasSelection()" @click="confirmBatchDelete">批量删除</a-button>
+        <a-button size="small" :disabled="!batchSelection.hasSelection()" @click="batchStop">批量停止</a-button>
         <a-button size="small" @click="exitBatchMode">退出多选</a-button>
       </a-space>
     </div>
@@ -458,31 +458,47 @@ function selectAllSessions() {
   else batchSelection.setAll(filtered.value.map((s) => s.id))
 }
 
-async function batchDelete() {
+function confirmBatchDelete() {
   const ids = [...batchSelection.selected()]
-  for (const id of ids) {
-    try {
-      await sessions.deleteSession(id)
-    } catch (e) {
-      message.error('移除失败：' + (e?.message || e))
+  if (!ids.length) return
+  Modal.confirm({
+    title: `批量移除 ${ids.length} 个会话？`,
+    content: '仅移除 UCLI 中的会话记录，原生 CLI 历史与用量统计会保留。',
+    okText: '移除',
+    okType: 'danger',
+    onOk: async () => {
+      let ok = 0
+      for (const id of ids) {
+        try {
+          await sessions.deleteSession(id)
+          ok++
+        } catch (e) {
+          message.error('移除失败：' + (e?.message || e))
+        }
+      }
+      if (ok > 0) {
+        message.success(ok < ids.length ? `已移除 ${ok} 个会话，${ids.length - ok} 个失败` : `已移除 ${ok} 个会话`)
+      }
+      exitBatchMode()
     }
-  }
-  if (ids.length) message.success(`已移除 ${ids.length} 个会话`)
-  exitBatchMode()
+  })
 }
 
 async function batchStop() {
   const ids = [...batchSelection.selected()]
+  let ok = 0
   for (const id of ids) {
     const state = deriveSessionMaintenanceState(sessions.byId(id))
     if (!state.canStop) continue
     try {
       await sessions.stop(id)
+      ok++
     } catch (e) {
       message.error('停止失败：' + (e?.message || e))
     }
   }
-  batchSelection.clear()
+  if (ok > 0) message.success(`已停止 ${ok} 个会话`)
+  exitBatchMode()
 }
 
 async function stopSession(id) {

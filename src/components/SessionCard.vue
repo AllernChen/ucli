@@ -1,10 +1,10 @@
 <template>
-  <a-card class="session-card" hoverable size="small" :class="{ waiting: ucliWaiting }" @click="$emit('open', session.id)">
+  <a-card class="session-card" hoverable size="small" :class="{ waiting: ucliWaiting }" @click="onCardClick">
     <div v-if="selectable" class="select-overlay" @click.stop>
       <a-checkbox :checked="selected" @change="onSelect" />
     </div>
     <template #title>
-      <div class="card-title">
+      <div class="card-title" :class="{ 'selectable-indent': selectable }">
         <span class="icon">{{ session.icon }}</span>
         <span class="name">{{ session.displayName }}</span>
         <span :class="['status-badge', statusCls]">{{ statusText }}</span>
@@ -91,6 +91,11 @@ function onSelect() {
   emit('select', props.session.id)
 }
 
+function onCardClick() {
+  if (props.selectable) emit('select', props.session.id)
+  else emit('open', props.session.id)
+}
+
 function onMenuClick({ key, domEvent }) {
   domEvent?.stopPropagation()
   emit('action', props.session.id, key)
@@ -127,6 +132,7 @@ function fmtShort(ts) {
 .select-overlay { position: absolute; top: 8px; left: 8px; z-index: 2; background: #fff; border-radius: 4px; padding: 2px 3px; line-height: 1; box-shadow: 0 1px 4px rgba(0, 0, 0, .15); }
 .session-card.waiting { border-color: #faad14; box-shadow: 0 0 0 2px rgba(250,173,20,.25); }
 .card-title { display: flex; align-items: center; gap: 6px; }
+.card-title.selectable-indent { padding-left: 22px; }
 .card-title .icon { font-size: 16px; }
 .card-title .name { min-width: 0; overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .card-title .status-badge { margin-left: auto; }

@@ -7,7 +7,7 @@ export function createBatchSelection() {
     setAll(allIds) { state.ids = new Set(allIds) },
     isAllSelected(allIds) { return allIds.length > 0 && allIds.every(id => state.ids.has(id)) },
     selected() { return state.ids },
-    mode() { return state.ids.size > 0 },
+    hasSelection() { return state.ids.size > 0 },
     clear() { state.ids = new Set() }
   }
 }

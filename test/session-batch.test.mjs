@@ -13,9 +13,9 @@ test('batch selection toggles, selects all, and clears', () => {
   assert.equal(b.selected().size, 0)
 })
 
-test('batch selection has mode and reports hasSelection', () => {
+test('batch selection reports hasSelection', () => {
   const b = createBatchSelection()
-  assert.equal(b.mode(), false)
+  assert.equal(b.hasSelection(), false)
   b.toggle('a')
-  assert.equal(b.mode(), true)
+  assert.equal(b.hasSelection(), true)
 })
