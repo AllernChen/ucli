@@ -130,6 +130,11 @@ import { useSettingsStore } from '../stores/settings.js'
 import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import { ipc } from '../ipc.js'
 
+const props = defineProps({
+  initialCwd: { type: String, default: '' },
+  initialAdapterId: { type: [String, null], default: null }
+})
+
 const open = defineModel('open', { default: false })
 
 const router = useRouter()
@@ -216,6 +221,8 @@ watch(open, (val) => {
   form.value.profileSelections = { codex: 'inherit', claude: 'inherit' }
   importProfileSelections.value = { codex: 'history', claude: 'history' }
   discovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
+  if (props.initialCwd) form.value.cwd = props.initialCwd
+  if (props.initialAdapterId) form.value.adapterId = props.initialAdapterId
   loadDshRuntime().catch(() => {})
   if (form.value.cwd) discover(form.value.cwd)
 })

@@ -31,7 +31,7 @@
 
     <div v-if="filtered.length" class="project-list">
       <section v-for="project in groupedSessions" :key="project.key" class="project-group">
-        <button type="button" class="project-header" @click="toggleProject(project.key)">
+        <div class="project-header" role="button" @click="toggleProject(project.key)">
           <DownOutlined v-if="!collapsedProjects.has(project.key)" />
           <RightOutlined v-else />
           <FolderOpenOutlined class="project-icon" />
@@ -40,17 +40,23 @@
             <span class="project-path" :title="project.path">{{ project.path || '未设置工作目录' }}</span>
           </span>
           <span class="group-count">{{ project.count }} 个会话</span>
-        </button>
+          <a-button size="small" type="text" class="header-quick-add" title="在此项目新建会话" @click.stop="openQuickNew(project.path)">
+            <PlusOutlined />
+          </a-button>
+        </div>
 
         <div v-show="!collapsedProjects.has(project.key)" class="project-content">
           <section v-for="cli in project.cliGroups" :key="cli.key" class="adapter-group">
-            <button type="button" class="adapter-header" @click="toggleCli(cli.key)">
+            <div class="adapter-header" role="button" @click="toggleCli(cli.key)">
               <DownOutlined v-if="!collapsedClis.has(cli.key)" />
               <RightOutlined v-else />
               <span class="adapter-icon">{{ cli.icon }}</span>
               <span class="adapter-name">{{ cli.displayName }}</span>
               <span class="group-count">{{ cli.count }} 个会话</span>
-            </button>
+              <a-button size="small" type="text" class="header-quick-add" :title="`新建 ${cli.displayName} 会话`" @click.stop="openQuickNew(project.path, cli.id)">
+                <PlusOutlined />
+              </a-button>
+            </div>
             <div v-show="!collapsedClis.has(cli.key)" class="card-grid">
               <SessionCard
                 v-for="s in cli.sessions"
@@ -70,7 +76,7 @@
     </div>
     <a-empty v-else description="还没有会话，点击「新建会话」开始" style="margin-top: 60px" />
 
-    <NewSessionDialog v-model:open="showNew" />
+    <NewSessionDialog v-model:open="showNew" :initial-cwd="quickNew.cwd" :initial-adapter-id="quickNew.adapterId" />
 
     <SessionConfigModal
       v-model:open="sessionConfig.open"
@@ -115,6 +121,7 @@ const settings = useSettingsStore()
 const gateway = useGatewayStore()
 
 const showNew = ref(false)
+const quickNew = ref({ cwd: '', adapterId: null })
 const filterTier = ref(undefined)
 const sessionConfig = ref({ open: false, sessionId: '' })
 const renameState = ref({ open: false, id: '', name: '' })
@@ -137,6 +144,11 @@ onMounted(async () => {
 })
 
 function openNew() {
+  showNew.value = true
+}
+
+function openQuickNew(cwd, adapterId) {
+  quickNew.value = { cwd: cwd || '', adapterId: adapterId || null }
   showNew.value = true
 }
 
@@ -330,5 +342,7 @@ function confirmDeleteSession(id) {
 .adapter-header:hover .adapter-name { color: #1677ff; }
 .adapter-icon { font-size: 15px; }
 .adapter-name { font-size: 12px; font-weight: 600; }
+.header-quick-add { flex-shrink: 0; color: #8c8c8c; }
+.header-quick-add:hover { color: #1677ff; }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 </style>
