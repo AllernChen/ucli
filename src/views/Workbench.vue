@@ -67,6 +67,7 @@
                 :session="s"
                 :selectable="batchMode"
                 :selected="batchSelection.selected().has(s.id)"
+                :highlight="s.id === locatingId"
                 @open="openSession"
                 @configure="openSessionConfig"
                 @action="handleSessionAction"
@@ -98,8 +99,8 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, nextTick } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import {
   PlusOutlined,
@@ -121,6 +122,7 @@ import { deriveSessionMaintenanceState } from '../sessionMaintenancePresentation
 import { createBatchSelection } from '../sessionBatch.js'
 
 const router = useRouter()
+const route = useRoute()
 const sessions = useSessionsStore()
 const settings = useSettingsStore()
 const gateway = useGatewayStore()
@@ -132,6 +134,7 @@ const sessionConfig = ref({ open: false, sessionId: '' })
 const renameState = ref({ open: false, id: '', name: '' })
 const batchSelection = createBatchSelection()
 const batchMode = ref(false)
+const locatingId = ref(null)
 
 const filtered = computed(() =>
   filterTier.value ? sessions.sessions.filter((s) => s.tier === filterTier.value) : sessions.sessions
@@ -146,7 +149,48 @@ const allSelected = computed(() =>
 
 onMounted(async () => {
   await Promise.all([sessions.init(), settings.load(), gateway.init()])
+  const locateId = route.query.locate
+  if (locateId) {
+    router.replace({ path: '/', query: {} })
+    locateSession(String(locateId))
+  }
 })
+
+function findSessionGroups(sessionId) {
+  for (const project of groupedSessions.value) {
+    for (const cli of project.cliGroups) {
+      if (cli.sessions.some((s) => s.id === sessionId)) {
+        return { projectKey: project.key, cliKey: cli.key }
+      }
+    }
+  }
+  return null
+}
+
+async function locateSession(sessionId) {
+  if (!sessionId || !sessions.byId(sessionId)) return
+  let groups = findSessionGroups(sessionId)
+  // The session may be hidden by the tier filter; clear it so the card is visible.
+  if (!groups && filterTier.value) {
+    filterTier.value = undefined
+    groups = findSessionGroups(sessionId)
+  }
+  if (!groups) return
+  collapsedProjects.value = new Set(
+    [...collapsedProjects.value].filter((k) => k !== groups.projectKey)
+  )
+  collapsedClis.value = new Set(
+    [...collapsedClis.value].filter((k) => k !== groups.cliKey)
+  )
+  locatingId.value = sessionId
+  await nextTick()
+  document
+    .querySelector(`[data-session-id="${CSS.escape(sessionId)}"]`)
+    ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  setTimeout(() => {
+    if (locatingId.value === sessionId) locatingId.value = null
+  }, 3000)
+}
 
 function openNew() {
   quickNew.value = { cwd: '' }

@@ -165,6 +165,16 @@
             </span>
             <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
             <a-space size="small">
+              <a-button
+                v-if="pane.sessionId"
+                size="small"
+                type="text"
+                aria-label="在工作台定位"
+                title="在工作台定位"
+                @click.stop="locateSession(pane.sessionId)"
+              >
+                <AimOutlined />
+              </a-button>
               <a-badge v-if="pane.sessionId && !isLegacyDshSession(paneSession(i))" :dot="sessionConfigNeedsAttention(pane.sessionId)" status="warning">
                 <a-button
                   size="small"
@@ -366,6 +376,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   SettingOutlined,
+  AimOutlined,
   DownOutlined,
   RightOutlined,
   FolderOpenOutlined
@@ -478,6 +489,11 @@ function openLegacyDshWeb(session) {
     path: '/',
     query: { createDshWeb: '1', cwd }
   })
+}
+
+function locateSession(sessionId) {
+  if (!sessionId) return
+  router.push({ path: '/', query: { locate: sessionId } })
 }
 
 function relayView(session) {

@@ -1,5 +1,12 @@
 <template>
-  <a-card class="session-card" hoverable size="small" :class="{ waiting: ucliWaiting }" @click="onCardClick">
+  <a-card
+    class="session-card"
+    hoverable
+    size="small"
+    :class="{ waiting: ucliWaiting, highlight }"
+    :data-session-id="session.id"
+    @click="onCardClick"
+  >
     <div v-if="selectable" class="select-overlay" @click.stop>
       <a-checkbox :checked="selected" @change="onSelect" />
     </div>
@@ -75,7 +82,8 @@ import { sessionCardActionItems } from '../sessionCardActions.js'
 const props = defineProps({
   session: { type: Object, required: true },
   selectable: { type: Boolean, default: false },
-  selected: { type: Boolean, default: false }
+  selected: { type: Boolean, default: false },
+  highlight: { type: Boolean, default: false }
 })
 const emit = defineEmits(['open', 'configure', 'action', 'select'])
 const view = computed(() => deriveSessionConfigState(props.session))
@@ -131,6 +139,12 @@ function fmtShort(ts) {
 .session-card { position: relative; cursor: pointer; transition: box-shadow .15s; }
 .select-overlay { position: absolute; top: 8px; left: 8px; z-index: 2; background: #fff; border-radius: 4px; padding: 2px 3px; line-height: 1; box-shadow: 0 1px 4px rgba(0, 0, 0, .15); }
 .session-card.waiting { border-color: #faad14; box-shadow: 0 0 0 2px rgba(250,173,20,.25); }
+.session-card.highlight { border-color: #1677ff; box-shadow: 0 0 0 2px rgba(22,119,255,.35); animation: locate-flash 2.4s ease; }
+@keyframes locate-flash {
+  0% { background: #e6f4ff; }
+  40% { background: #e6f4ff; }
+  100% { background: transparent; }
+}
 .card-title { display: flex; align-items: center; gap: 6px; }
 .card-title.selectable-indent { padding-left: 22px; }
 .card-title .icon { font-size: 16px; }
