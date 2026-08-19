@@ -31,7 +31,7 @@
 
     <div v-if="filtered.length" class="project-list">
       <section v-for="project in groupedSessions" :key="project.key" class="project-group">
-        <div class="project-header" role="button" tabindex="0" @click="toggleProject(project.key)" @keydown.enter.prevent="toggleProject(project.key)" @keydown.space.prevent="toggleProject(project.key)">
+        <div class="project-header" role="button" tabindex="0" @click="toggleProject(project.key)" @keydown.enter.self.prevent="toggleProject(project.key)" @keydown.space.self.prevent="toggleProject(project.key)">
           <DownOutlined v-if="!collapsedProjects.has(project.key)" />
           <RightOutlined v-else />
           <FolderOpenOutlined class="project-icon" />
@@ -47,7 +47,7 @@
 
         <div v-show="!collapsedProjects.has(project.key)" class="project-content">
           <section v-for="cli in project.cliGroups" :key="cli.key" class="adapter-group">
-            <div class="adapter-header" role="button" tabindex="0" @click="toggleCli(cli.key)" @keydown.enter.prevent="toggleCli(cli.key)" @keydown.space.prevent="toggleCli(cli.key)">
+            <div class="adapter-header" role="button" tabindex="0" @click="toggleCli(cli.key)" @keydown.enter.self.prevent="toggleCli(cli.key)" @keydown.space.self.prevent="toggleCli(cli.key)">
               <DownOutlined v-if="!collapsedClis.has(cli.key)" />
               <RightOutlined v-else />
               <span class="adapter-icon">{{ cli.icon }}</span>
