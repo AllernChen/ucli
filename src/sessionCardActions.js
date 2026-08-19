@@ -7,6 +7,6 @@ export function sessionCardActionItems(session) {
   if (state.canStop) items.push({ key: 'stop', label: copy.stopTitle, danger: false })
   if (state.canRestart) items.push({ key: 'restart', label: copy.restartTitle, danger: false })
   items.push({ key: 'rename', label: '重命名', danger: false })
-  if (state.canRemove) items.push({ key: 'delete', label: '删除', danger: true })
+  if (state.canRemove) items.push({ key: 'delete', label: '移除', danger: true })
   return items
 }
