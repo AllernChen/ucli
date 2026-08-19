@@ -102,13 +102,20 @@ function isCommandShell(executable) {
 
 export function parseOpenCodeSessionStats(source) {
   const info = source?.info || {}
-  const sessionTokens = usageTokens(info.tokens)
-  const sessionCostAvailable = Number.isFinite(info.cost)
   const messages = Array.isArray(source?.messages) ? source.messages : []
   const models = new Map()
   let turnsCount = 0
   let completedTurnsCount = 0
   let lastModel = modelName(info.model?.providerID, info.model?.id)
+  // Some providers (ucode) omit the session-level `info.tokens` aggregate and
+  // only record per-message usage. Accumulate message usage as a fallback so
+  // the top-level token totals stay populated when `info.tokens` is absent.
+  const summed = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    reasoningOutputTokens: 0
+  }
 
   for (const message of messages) {
     const messageInfo = message?.info || {}
@@ -124,6 +131,11 @@ export function parseOpenCodeSessionStats(source) {
     lastModel = model
 
     const tokens = usageTokens(messageInfo.tokens)
+    summed.inputTokens += tokens.inputTokens
+    summed.outputTokens += tokens.outputTokens
+    summed.cachedInputTokens += tokens.cachedInputTokens
+    summed.reasoningOutputTokens += tokens.reasoningOutputTokens
+
     const costAvailable = Number.isFinite(messageInfo.cost)
     if (!models.has(model)) {
       models.set(model, {
@@ -136,6 +148,9 @@ export function parseOpenCodeSessionStats(source) {
     }
     addModelUsage(models.get(model), tokens, number(messageInfo.cost), costAvailable)
   }
+
+  const sessionCostAvailable = Number.isFinite(info.cost)
+  const sessionTokens = info.tokens ? usageTokens(info.tokens) : summed
 
   return {
     ...sessionTokens,
