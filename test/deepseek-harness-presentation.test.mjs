@@ -59,7 +59,7 @@ test('Profile Center manages bounded DSH runtime actions, profiles and legacy br
 })
 
 test('Workbench creates only DSH Web from a selected managed or system runtime', () => {
-  const source = loadSfc('../src/views/Workbench.vue')
+  const source = loadSfc('../src/components/NewSessionDialog.vue')
 
   assert.match(source, /ipc\.getDshState\(\)/)
   assert.match(source, /\['managed', 'system'\]\.includes\(fresh\?\.selected\)/)

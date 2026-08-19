@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
-const source = readFileSync(new URL('../src/views/Workbench.vue', import.meta.url), 'utf8')
+const source = readFileSync(new URL('../src/components/NewSessionDialog.vue', import.meta.url), 'utf8')
 
 test('new Codex sessions can choose project, app, system, or a concrete profile', () => {
   for (const label of ['按项目默认', '按应用默认', '跟随当前', '具体档案']) {

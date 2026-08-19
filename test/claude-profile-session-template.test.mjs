@@ -2,16 +2,16 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
-const workbench = readFileSync(new URL('../src/views/Workbench.vue', import.meta.url), 'utf8')
+const newDialog = readFileSync(new URL('../src/components/NewSessionDialog.vue', import.meta.url), 'utf8')
 const sessionDetail = readFileSync(new URL('../src/views/SessionDetail.vue', import.meta.url), 'utf8')
 const sessionConfig = readFileSync(new URL('../src/components/SessionConfigModal.vue', import.meta.url), 'utf8')
 
 test('new and imported Claude sessions use the shared profile selector', () => {
-  assert.match(workbench, /profileCapableAdapter/)
-  assert.match(workbench, /\['codex', 'claude'\]/)
-  assert.match(workbench, /profilesForAdapter/)
-  assert.match(workbench, /保持历史连接/)
-  assert.match(workbench, /profileConfigForSelection\(true/)
+  assert.match(newDialog, /profileCapableAdapter/)
+  assert.match(newDialog, /\['codex', 'claude'\]/)
+  assert.match(newDialog, /profilesForAdapter/)
+  assert.match(newDialog, /保持历史连接/)
+  assert.match(newDialog, /profileConfigForSelection\(true/)
 })
 
 test('Claude sessions switch profiles in the shared modal and panes show actual model', () => {
