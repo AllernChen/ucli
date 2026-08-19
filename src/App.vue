@@ -172,7 +172,18 @@ onBeforeUnmount(() => {
 .logo img { width: 30px; height: 30px; object-fit: contain; margin-right: 8px; }
 .logo.collapsed { flex-direction: column; justify-content: center; padding: 0; gap: 2px; }
 .logo.collapsed img { margin-right: 0; }
-.collapse-btn { flex-shrink: 0; }
+.collapse-btn {
+  flex-shrink: 0;
+  color: #595959;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+}
+.collapse-btn:hover,
+.collapse-btn:focus-visible {
+  background: #f0f0f0;
+  color: #1677ff;
+  border-color: #1677ff;
+}
 .header-main { display: flex; align-items: center; gap: 8px; }
 :deep(.ant-layout-sider-children) { display: flex; flex-direction: column; }
 </style>

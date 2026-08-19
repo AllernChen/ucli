@@ -17,7 +17,7 @@
       <GatewayHeaderControl />
       <a-space size="small">
         <a-button size="small" @click="showImport = true">📥 导入</a-button>
-        <a-button size="small" @click="showNewSession = true">➕ 新建</a-button>
+        <a-button size="small" @click="openNew">➕ 新建</a-button>
         <span v-if="assignedPaneCount > 1" class="shortcut-hint"><kbd>Tab</kbd> 切换会话</span>
         <a-radio-group v-model:value="splitCount" size="small" button-style="solid">
           <a-radio-button :value="1">1</a-radio-button>
@@ -67,7 +67,14 @@
         </div>
         <div class="session-list">
           <section v-for="project in groupedSessions" :key="project.key" class="sidebar-project">
-            <button type="button" class="sidebar-project-header" @click="toggleProjectGroup(project.key)">
+            <div
+              class="sidebar-project-header"
+              role="button"
+              tabindex="0"
+              @click="toggleProjectGroup(project.key)"
+              @keydown.enter.self.prevent="toggleProjectGroup(project.key)"
+              @keydown.space.self.prevent="toggleProjectGroup(project.key)"
+            >
               <DownOutlined v-if="!collapsedProjects.has(project.key)" />
               <RightOutlined v-else />
               <FolderOpenOutlined class="sidebar-project-icon" />
@@ -75,24 +82,52 @@
                 <span class="sidebar-project-name">{{ project.name }}</span>
                 <span class="sidebar-project-path" :title="project.path">{{ project.path || '未设置工作目录' }}</span>
               </span>
+              <a-button
+                size="small"
+                type="text"
+                class="sidebar-open-dir"
+                title="打开目录"
+                aria-label="打开目录"
+                @click.stop="openProjectDir(project.path)"
+              >
+                <ExportOutlined />
+              </a-button>
               <span class="sidebar-count">{{ project.count }}</span>
-            </button>
+            </div>
 
             <div v-show="!collapsedProjects.has(project.key)" class="sidebar-project-content">
               <section v-for="cli in project.cliGroups" :key="cli.key" class="sidebar-cli">
-                <button type="button" class="sidebar-cli-header" @click="toggleCliGroup(cli.key)">
+                <div
+                  class="sidebar-cli-header"
+                  role="button"
+                  tabindex="0"
+                  @click="toggleCliGroup(cli.key)"
+                  @keydown.enter.self.prevent="toggleCliGroup(cli.key)"
+                  @keydown.space.self.prevent="toggleCliGroup(cli.key)"
+                >
                   <DownOutlined v-if="!collapsedClis.has(cli.key)" />
                   <RightOutlined v-else />
                   <span>{{ cli.icon }}</span>
                   <span class="sidebar-cli-name">{{ cli.displayName }}</span>
+                  <a-button
+                    size="small"
+                    type="text"
+                    class="sidebar-quick-add"
+                    :title="`新建 ${cli.displayName} 会话`"
+                    aria-label="新建会话"
+                    @click.stop="openQuickNew(project.path, cli.id)"
+                  >
+                    <PlusOutlined />
+                  </a-button>
                   <span class="sidebar-count">{{ cli.count }}</span>
-                </button>
+                </div>
 
                 <div v-show="!collapsedClis.has(cli.key)">
                   <div
                     v-for="s in cli.sessions"
                     :key="s.id"
-                    :class="['session-item', activePane !== null && panes[activePane]?.sessionId === s.id ? 'assigned' : '']"
+                    :data-session-id="s.id"
+                    :class="['session-item', activePane !== null && panes[activePane]?.sessionId === s.id ? 'assigned' : '', locatingId === s.id ? 'locating' : '']"
                     @click="handleSessionClick(s.id, $event)"
                     @dblclick="openInNewPane(s.id)"
                   >
@@ -281,7 +316,7 @@
       :session-id="sessionConfig.sessionId"
     />
 
-    <NewSessionDialog v-model:open="showNewSession" />
+    <NewSessionDialog v-model:open="showNewSession" :initial-cwd="quickNew.cwd" :initial-adapter-id="quickNew.adapterId" />
 
     <!-- Import historical sessions modal -->
     <a-modal v-model:open="showImport" title="导入历史会话" :footer="null" width="640px">
@@ -379,7 +414,9 @@ import {
   AimOutlined,
   DownOutlined,
   RightOutlined,
-  FolderOpenOutlined
+  FolderOpenOutlined,
+  PlusOutlined,
+  ExportOutlined
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
@@ -491,9 +528,35 @@ function openLegacyDshWeb(session) {
   })
 }
 
-function locateSession(sessionId) {
-  if (!sessionId) return
-  router.push({ path: '/', query: { locate: sessionId } })
+function findSessionGroups(sessionId) {
+  for (const project of groupedSessions.value) {
+    for (const cli of project.cliGroups) {
+      if (cli.sessions.some((s) => s.id === sessionId)) {
+        return { projectKey: project.key, cliKey: cli.key }
+      }
+    }
+  }
+  return null
+}
+
+async function locateSession(sessionId) {
+  if (!sessionId || !sessions.byId(sessionId)) return
+  const groups = findSessionGroups(sessionId)
+  if (!groups) return
+  collapsedProjects.value = new Set(
+    [...collapsedProjects.value].filter((k) => k !== groups.projectKey)
+  )
+  collapsedClis.value = new Set(
+    [...collapsedClis.value].filter((k) => k !== groups.cliKey)
+  )
+  locatingId.value = sessionId
+  await nextTick()
+  document
+    .querySelector(`[data-session-id="${CSS.escape(sessionId)}"]`)
+    ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  setTimeout(() => {
+    if (locatingId.value === sessionId) locatingId.value = null
+  }, 3000)
 }
 
 function relayView(session) {
@@ -588,6 +651,7 @@ const filteredSessions = computed(() => {
 const groupedSessions = computed(() => groupSessionsByProject(filteredSessions.value, sessions.adapters))
 const collapsedProjects = ref(new Set())
 const collapsedClis = ref(new Set())
+const locatingId = ref(null)
 
 function toggleProjectGroup(key) {
   const next = new Set(collapsedProjects.value)
@@ -1047,6 +1111,23 @@ function compactPanes(omitIndex) {
 
 // New session dialog (opened in place)
 const showNewSession = ref(false)
+const quickNew = ref({ cwd: '', adapterId: '' })
+
+function openNew() {
+  quickNew.value = { cwd: '', adapterId: '' }
+  showNewSession.value = true
+}
+
+function openQuickNew(cwd, adapterId) {
+  quickNew.value = { cwd: cwd || '', adapterId: adapterId || '' }
+  showNewSession.value = true
+}
+
+async function openProjectDir(dir) {
+  if (!dir) { message.warning('该项目未设置工作目录'); return }
+  const result = await ipc.openPath(dir)
+  if (result && result !== '') message.error('无法打开目录')
+}
 
 // Import historical sessions
 const showImport = ref(false)
@@ -1264,12 +1345,15 @@ onBeforeUnmount(() => {
 .sidebar-cli-header:hover .sidebar-cli-name { color: #1677ff; }
 .sidebar-cli-name { overflow: hidden; flex: 1; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-count { margin-left: auto; color: #bfbfbf; font-size: 10px; }
+.sidebar-open-dir, .sidebar-quick-add { flex-shrink: 0; color: #8c8c8c; }
+.sidebar-open-dir:hover, .sidebar-quick-add:hover { color: #1677ff; }
 .session-item {
   padding: 7px 8px 7px 19px; cursor: pointer; border-radius: 6px; margin-bottom: 2px;
   transition: background .12s; border: 1px solid transparent;
 }
 .session-item:hover { background: #f5f5f5; }
 .session-item.assigned { background: #e6f4ff; border-color: #1677ff; }
+.session-item.locating { background: #fff7e6; border-color: #faad14; }
 .item-head { display: flex; align-items: center; gap: 4px; }
 .item-name { flex: 1; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-relay-state { display: inline-flex; align-items: center; gap: 3px; margin-top: 2px; font-size: 10px; color: #8c8c8c; }

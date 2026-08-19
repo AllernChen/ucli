@@ -56,7 +56,7 @@
               <span class="adapter-icon">{{ cli.icon }}</span>
               <span class="adapter-name">{{ cli.displayName }}</span>
               <span class="group-count">{{ cli.count }} 个会话</span>
-              <a-button size="small" type="text" class="header-quick-add" :title="`新建 ${cli.displayName} 会话`" @click.stop="openQuickNew(project.path)">
+              <a-button size="small" type="text" class="header-quick-add" :title="`新建 ${cli.displayName} 会话`" @click.stop="openQuickNew(project.path, cli.id)">
                 <PlusOutlined />
               </a-button>
             </div>
@@ -80,7 +80,7 @@
     </div>
     <a-empty v-else description="还没有会话，点击「新建会话」开始" style="margin-top: 60px" />
 
-    <NewSessionDialog v-model:open="showNew" :initial-cwd="quickNew.cwd" />
+    <NewSessionDialog v-model:open="showNew" :initial-cwd="quickNew.cwd" :initial-adapter-id="quickNew.adapterId" />
 
     <SessionConfigModal
       v-model:open="sessionConfig.open"
@@ -128,7 +128,7 @@ const settings = useSettingsStore()
 const gateway = useGatewayStore()
 
 const showNew = ref(false)
-const quickNew = ref({ cwd: '' })
+const quickNew = ref({ cwd: '', adapterId: '' })
 const filterTier = ref(undefined)
 const sessionConfig = ref({ open: false, sessionId: '' })
 const renameState = ref({ open: false, id: '', name: '' })
@@ -193,12 +193,12 @@ async function locateSession(sessionId) {
 }
 
 function openNew() {
-  quickNew.value = { cwd: '' }
+  quickNew.value = { cwd: '', adapterId: '' }
   showNew.value = true
 }
 
-function openQuickNew(cwd) {
-  quickNew.value = { cwd: cwd || '' }
+function openQuickNew(cwd, adapterId) {
+  quickNew.value = { cwd: cwd || '', adapterId: adapterId || '' }
   showNew.value = true
 }
 

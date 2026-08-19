@@ -55,7 +55,7 @@
       <div v-if="discovering" class="discover-empty"><a-spin size="small" /> 正在查找历史会话…</div>
       <a-alert v-else-if="discoverError" type="error" show-icon :message="`历史会话读取失败：${discoverError}`" />
       <div v-else class="discover-empty">该目录下没有发现历史会话。</div>
-      <div class="cli-quick-new">
+      <div v-if="discoverableAdapters.length" class="cli-quick-new">
         <span>快速新建：</span>
         <a-button v-for="a in discoverableAdapters" :key="a.id" size="small" type="primary" ghost @click="newSession(a)">
           {{ a.icon }} {{ a.displayName }}
@@ -63,7 +63,7 @@
       </div>
     </div>
 
-    <div v-for="adapterId in profileAdapterIds" :key="adapterId" class="new-section">
+    <div v-for="adapterId in visibleProfileAdapterIds" :key="adapterId" class="new-section">
       <div class="section-title">{{ adapterName(adapterId) }} 配置档案</div>
       <div class="profile-choice-row">
         <span>新建 {{ adapterName(adapterId) }}</span>
@@ -93,7 +93,7 @@
       <div class="profile-choice-help">项目默认：{{ defaultProfile(adapterId, 'project')?.name || '未设置' }}；应用默认：{{ defaultProfile(adapterId, 'app')?.name || '未设置' }}</div>
     </div>
 
-    <div class="new-section dsh-create-options">
+    <div v-if="!initialAdapterId || initialAdapterId === 'deepseek-harness'" class="new-section dsh-create-options">
       <div class="section-title">DeepSeek Harness 界面</div>
       <div class="profile-choice-help">
         本机 Web（DSH 原生控制）；权限、历史与统计均由 DSH 原生界面管理。
@@ -137,7 +137,8 @@ import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import { ipc } from '../ipc.js'
 
 const props = defineProps({
-  initialCwd: { type: String, default: '' }
+  initialCwd: { type: String, default: '' },
+  initialAdapterId: { type: String, default: '' }
 })
 
 const open = defineModel('open', { default: false })
@@ -165,7 +166,7 @@ const selectedSessions = ref({})
 const importProfileSelections = ref({ codex: 'history', claude: 'history' })
 
 const hasAnySessions = computed(() =>
-  Object.values(discovered.value).some((items) => items.length > 0)
+  discoverableAdapters.value.some((a) => (discovered.value[a.id] || []).length > 0)
 )
 
 const totalSelected = computed(() => {
@@ -178,9 +179,12 @@ const totalSelected = computed(() => {
 // native DSH UI and it has a dedicated Web-only creation entry below. Exclude
 // it from the generic quick-new and discover blocks so it is not presented as
 // a second create button alongside that dedicated entry.
-const discoverableAdapters = computed(() =>
-  sessions.adapters.filter((a) => a.id !== 'deepseek-harness')
-)
+const discoverableAdapters = computed(() => {
+  const base = sessions.adapters.filter((a) => a.id !== 'deepseek-harness')
+  return props.initialAdapterId
+    ? base.filter((a) => a.id === props.initialAdapterId)
+    : base
+})
 const cliGroups = computed(() => {
   const groups = []
   for (const a of discoverableAdapters.value) {
@@ -196,6 +200,11 @@ const cliGroups = computed(() => {
 const profilesForAdapter = (adapterId) => aiProfiles.profiles.filter((profile) => profile.adapterId === adapterId)
 const profileCapableAdapter = (adapterId) => ['codex', 'claude'].includes(adapterId)
 const profileAdapterIds = ['codex', 'claude']
+const visibleProfileAdapterIds = computed(() =>
+  props.initialAdapterId
+    ? profileAdapterIds.filter((id) => id === props.initialAdapterId)
+    : profileAdapterIds
+)
 const adapterName = (adapterId) => sessions.adapters.find((adapter) => adapter.id === adapterId)?.displayName || adapterId
 const dshAdapter = computed(() => sessions.adapters.find(
   adapter => adapter.id === 'deepseek-harness'
