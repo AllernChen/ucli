@@ -1,5 +1,8 @@
 <template>
   <a-card class="session-card" hoverable size="small" :class="{ waiting: ucliWaiting }" @click="$emit('open', session.id)">
+    <div v-if="selectable" class="select-overlay" @click.stop>
+      <a-checkbox :checked="selected" @change="onSelect" />
+    </div>
     <template #title>
       <div class="card-title">
         <span class="icon">{{ session.icon }}</span>
@@ -69,8 +72,12 @@ import { deriveSessionConfigState } from '../sessionConfigPresentation.js'
 import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
 import { sessionCardActionItems } from '../sessionCardActions.js'
 
-const props = defineProps({ session: { type: Object, required: true } })
-const emit = defineEmits(['open', 'configure', 'action'])
+const props = defineProps({
+  session: { type: Object, required: true },
+  selectable: { type: Boolean, default: false },
+  selected: { type: Boolean, default: false }
+})
+const emit = defineEmits(['open', 'configure', 'action', 'select'])
 const view = computed(() => deriveSessionConfigState(props.session))
 const capabilities = computed(() => deriveSessionCapabilityState(props.session))
 
@@ -78,6 +85,10 @@ const actionItems = computed(() => sessionCardActionItems(props.session))
 
 function configure() {
   emit('configure', props.session.id)
+}
+
+function onSelect() {
+  emit('select', props.session.id)
 }
 
 function onMenuClick({ key, domEvent }) {
@@ -112,7 +123,8 @@ function fmtShort(ts) {
 </script>
 
 <style scoped>
-.session-card { cursor: pointer; transition: box-shadow .15s; }
+.session-card { position: relative; cursor: pointer; transition: box-shadow .15s; }
+.select-overlay { position: absolute; top: 8px; left: 8px; z-index: 2; background: #fff; border-radius: 4px; padding: 2px 3px; line-height: 1; box-shadow: 0 1px 4px rgba(0, 0, 0, .15); }
 .session-card.waiting { border-color: #faad14; box-shadow: 0 0 0 2px rgba(250,173,20,.25); }
 .card-title { display: flex; align-items: center; gap: 6px; }
 .card-title .icon { font-size: 16px; }

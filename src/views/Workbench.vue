@@ -4,6 +4,7 @@
       <a-button size="small" @click="openNew">
         <PlusOutlined /> 新建
       </a-button>
+      <a-button size="small" :type="batchMode ? 'primary' : 'default'" @click="toggleBatchMode">多选</a-button>
       <a-select v-model:value="filterTier" size="small" style="width: 100px" allowClear placeholder="筛选">
         <a-select-option value="always-agree">一直同意</a-select-option>
         <a-select-option value="safety-rules">安全规则</a-select-option>
@@ -16,6 +17,16 @@
       <a-button size="small" class="goto-btn" @click="$router.push('/session')" title="工作台">
         <AppstoreOutlined />
       </a-button>
+    </div>
+
+    <div v-if="batchMode" class="batch-bar">
+      <a-space>
+        <a-button size="small" @click="selectAllSessions">{{ allSelected ? '取消全选' : '全选' }}</a-button>
+        <span class="batch-count">已选 {{ batchSelection.selected().size }} 个会话</span>
+        <a-button size="small" danger :disabled="!batchSelection.selected().size" @click="batchDelete">批量删除</a-button>
+        <a-button size="small" :disabled="!batchSelection.selected().size" @click="batchStop">批量停止</a-button>
+        <a-button size="small" @click="exitBatchMode">退出多选</a-button>
+      </a-space>
     </div>
 
     <div v-if="filtered.length" class="project-list">
@@ -45,9 +56,12 @@
                 v-for="s in cli.sessions"
                 :key="s.id"
                 :session="s"
+                :selectable="batchMode"
+                :selected="batchSelection.selected().has(s.id)"
                 @open="openSession"
                 @configure="openSessionConfig"
                 @action="handleSessionAction"
+                @select="batchSelection.toggle"
               />
             </div>
           </section>
@@ -212,6 +226,7 @@ import SessionCard from '../components/SessionCard.vue'
 import SessionConfigModal from '../components/SessionConfigModal.vue'
 import { groupSessionsByProject } from '../sessionGrouping.js'
 import { deriveSessionMaintenanceState } from '../sessionMaintenancePresentation.js'
+import { createBatchSelection } from '../sessionBatch.js'
 import { ipc } from '../ipc.js'
 
 const router = useRouter()
@@ -231,6 +246,8 @@ const renameState = ref({ open: false, id: '', name: '' })
 const dshRuntime = ref({})
 const dshLoadError = ref('')
 const dshProfilesLoading = ref(false)
+const batchSelection = createBatchSelection()
+const batchMode = ref(false)
 
 const form = ref({
   adapterId: 'claude', cwd: '', model: undefined, tier: 'safety-rules',
@@ -246,6 +263,10 @@ const filtered = computed(() =>
 const groupedSessions = computed(() => groupSessionsByProject(filtered.value, sessions.adapters))
 const collapsedProjects = ref(new Set())
 const collapsedClis = ref(new Set())
+
+const allSelected = computed(() =>
+  batchSelection.isAllSelected(filtered.value.map((s) => s.id))
+)
 
 const hasAnySessions = computed(() =>
   Object.values(discovered.value).some((items) => items.length > 0)
@@ -422,6 +443,48 @@ function handleSessionAction(id, key) {
   else if (key === 'delete') confirmDeleteSession(id)
 }
 
+function toggleBatchMode() {
+  if (batchMode.value) batchSelection.clear()
+  batchMode.value = !batchMode.value
+}
+
+function exitBatchMode() {
+  batchSelection.clear()
+  batchMode.value = false
+}
+
+function selectAllSessions() {
+  if (allSelected.value) batchSelection.clear()
+  else batchSelection.setAll(filtered.value.map((s) => s.id))
+}
+
+async function batchDelete() {
+  const ids = [...batchSelection.selected()]
+  for (const id of ids) {
+    try {
+      await sessions.deleteSession(id)
+    } catch (e) {
+      message.error('移除失败：' + (e?.message || e))
+    }
+  }
+  if (ids.length) message.success(`已移除 ${ids.length} 个会话`)
+  exitBatchMode()
+}
+
+async function batchStop() {
+  const ids = [...batchSelection.selected()]
+  for (const id of ids) {
+    const state = deriveSessionMaintenanceState(sessions.byId(id))
+    if (!state.canStop) continue
+    try {
+      await sessions.stop(id)
+    } catch (e) {
+      message.error('停止失败：' + (e?.message || e))
+    }
+  }
+  batchSelection.clear()
+}
+
 async function stopSession(id) {
   try {
     await sessions.stop(id)
@@ -575,6 +638,8 @@ async function newSession(adapter) {
 .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
 .spacer { flex: 1; }
 .count { color: #bfbfbf; font-size: 12px; }
+.batch-bar { margin-bottom: 12px; padding: 8px 12px; background: #e6f4ff; border: 1px solid #91caff; border-radius: 8px; }
+.batch-count { color: #0958d9; font-size: 12px; }
 .goto-btn { color: #8c8c8c; }
 
 .project-list { display: flex; flex-direction: column; gap: 12px; }
