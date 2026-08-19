@@ -48,6 +48,19 @@ test('a configured non-default shortcut is handled as terminal paste', () => {
   }, true), true)
 })
 
+test('keydown Ctrl/Cmd+V is the exact gate that suppresses the xterm 6.x native paste', () => {
+  // xterm 6.0 registers a native `paste` event listener that re-pastes the clipboard
+  // when the browser's default Ctrl/Cmd+V action is not prevented. The keydown handler
+  // uses shouldSendClipboardPaste as the gate for preventDefault, so it must be true
+  // only for the exact clipboard-paste keydown — never for keypress/keyup or bare keys.
+  assert.equal(shouldSendClipboardPaste({ ctrlKey: true, metaKey: false, key: 'v', type: 'keydown' }), true)
+  assert.equal(shouldSendClipboardPaste({ ctrlKey: false, metaKey: true, key: 'v', type: 'keydown' }), true)
+  assert.equal(shouldSendClipboardPaste({ ctrlKey: true, shiftKey: true, metaKey: false, key: 'V', type: 'keydown' }), true)
+  assert.equal(shouldSendClipboardPaste({ ctrlKey: true, metaKey: false, key: 'v', type: 'keypress' }), false)
+  assert.equal(shouldSendClipboardPaste({ ctrlKey: true, metaKey: false, key: 'v', type: 'keyup' }), false)
+  assert.equal(shouldSendClipboardPaste({ ctrlKey: false, metaKey: false, key: 'v', type: 'keydown' }), false)
+})
+
 test('Command+C is handled as the macOS clipboard copy shortcut', () => {
   assert.equal(isClipboardCopyShortcut({
     type: 'keydown', ctrlKey: false, altKey: false, metaKey: true, key: 'c'

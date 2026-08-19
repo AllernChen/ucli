@@ -19,6 +19,9 @@ export function shouldHandleTerminalPaste(event, bindingMatches) {
 
 // xterm forwards keydown, keypress and keyup through the custom key handler.
 // Only the keydown event may read and forward clipboard data to the PTY.
+// This is also the gate for preventDefault: xterm 6.x fires a native `paste`
+// event for the browser's default Ctrl/Cmd+V action when the key handler returns
+// false, so the keydown handler must preventDefault to avoid a second paste.
 export function shouldSendClipboardPaste(event) {
   return event?.type === 'keydown' && isClipboardPasteShortcut(event)
 }
