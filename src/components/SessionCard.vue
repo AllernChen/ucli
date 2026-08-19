@@ -74,14 +74,14 @@ const emit = defineEmits(['open', 'configure', 'action'])
 const view = computed(() => deriveSessionConfigState(props.session))
 const capabilities = computed(() => deriveSessionCapabilityState(props.session))
 
-const isRunning = computed(() => ['running', 'waiting', 'starting'].includes(props.session.status))
-const actionItems = computed(() => sessionCardActionItems({ running: isRunning.value }))
+const actionItems = computed(() => sessionCardActionItems(props.session))
 
 function configure() {
   emit('configure', props.session.id)
 }
 
-function onMenuClick({ key }) {
+function onMenuClick({ key, domEvent }) {
+  domEvent?.stopPropagation()
   emit('action', props.session.id, key)
 }
 

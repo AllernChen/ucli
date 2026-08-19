@@ -211,6 +211,7 @@ import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import SessionCard from '../components/SessionCard.vue'
 import SessionConfigModal from '../components/SessionConfigModal.vue'
 import { groupSessionsByProject } from '../sessionGrouping.js'
+import { deriveSessionMaintenanceState } from '../sessionMaintenancePresentation.js'
 import { ipc } from '../ipc.js'
 
 const router = useRouter()
@@ -417,7 +418,6 @@ function openSessionConfig(sessionId) {
 function handleSessionAction(id, key) {
   if (key === 'stop') stopSession(id)
   else if (key === 'restart') restartSession(id)
-  else if (key === 'configure') openSessionConfig(id)
   else if (key === 'rename') renameSession(id)
   else if (key === 'delete') confirmDeleteSession(id)
 }
@@ -432,7 +432,9 @@ async function stopSession(id) {
 }
 
 async function restartSession(id) {
+  const state = deriveSessionMaintenanceState(sessions.byId(id))
   try {
+    if (state.stopBeforeRestart) await sessions.stop(id)
     await sessions.restart(id)
     message.success('已重启会话')
   } catch (e) {
@@ -460,16 +462,16 @@ async function confirmRename() {
 
 function confirmDeleteSession(id) {
   Modal.confirm({
-    title: '删除会话',
-    content: '删除后不可恢复，确定要删除该会话吗？',
-    okText: '删除',
+    title: '从 UCLI 移除该会话？',
+    content: '仅移除 UCLI 中的会话记录，原生 CLI 历史与用量统计会保留。',
+    okText: '移除',
     okType: 'danger',
     onOk: async () => {
       try {
         await sessions.deleteSession(id)
-        message.success('已删除会话')
+        message.success('会话已从 UCLI 移除')
       } catch (e) {
-        message.error('删除失败：' + (e?.message || e))
+        message.error('移除失败：' + (e?.message || e))
       }
     }
   })
