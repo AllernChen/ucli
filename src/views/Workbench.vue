@@ -144,6 +144,7 @@ onMounted(async () => {
 })
 
 function openNew() {
+  quickNew.value = { cwd: '', adapterId: null }
   showNew.value = true
 }
 

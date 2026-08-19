@@ -1,5 +1,11 @@
 <template>
   <a-modal v-model:open="open" title="新建会话" :footer="null" width="640px" :destroyOnClose="true">
+    <!-- Step 0: optional name -->
+    <div class="new-section">
+      <div class="section-title">会话名称</div>
+      <a-input v-model:value="form.name" placeholder="会话名称（可选）" allow-clear />
+    </div>
+
     <!-- Step 1: pick directory -->
     <div class="new-section">
       <div class="section-title">工作目录</div>
@@ -151,7 +157,7 @@ const dshLoadError = ref('')
 const dshProfilesLoading = ref(false)
 
 const form = ref({
-  adapterId: 'claude', cwd: '', model: undefined, tier: 'safety-rules',
+  adapterId: 'claude', cwd: '', name: '', model: undefined, tier: 'safety-rules',
   profileSelections: { codex: 'inherit', claude: 'inherit' }
 })
 const discovered = ref({ claude: [], codex: [], opencode: [], ucode: [] })
@@ -220,6 +226,7 @@ watch(open, (val) => {
   selectedSessions.value = {}
   form.value.profileSelections = { codex: 'inherit', claude: 'inherit' }
   importProfileSelections.value = { codex: 'history', claude: 'history' }
+  form.value.name = ''
   discovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
   if (props.initialCwd) form.value.cwd = props.initialCwd
   if (props.initialAdapterId) form.value.adapterId = props.initialAdapterId
@@ -364,6 +371,8 @@ async function newSession(adapter) {
       cwd: form.value.cwd,
       tier: form.value.tier
     }
+    const name = (form.value.name || '').trim()
+    if (name) config.name = name
     if (profileCapableAdapter(adapter.id)) {
       form.value.adapterId = adapter.id
       const profileConfig = profileConfigForSelection(false, adapter.id)
