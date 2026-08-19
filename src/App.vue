@@ -7,8 +7,20 @@
       :collapsed="navCollapsed"
     >
       <div :class="['logo', { collapsed: navCollapsed }]">
-        <img :src="ucliLogo" alt="" />
-        <span v-if="!navCollapsed">UCLI</span>
+        <div class="logo-brand">
+          <img :src="ucliLogo" alt="" />
+          <span v-if="!navCollapsed">UCLI</span>
+        </div>
+        <a-button
+          size="small"
+          type="text"
+          class="collapse-btn"
+          :title="navCollapsed ? '展开菜单导航' : '收缩菜单导航'"
+          @click="navCollapsed = !navCollapsed"
+        >
+          <MenuUnfoldOutlined v-if="navCollapsed" />
+          <MenuFoldOutlined v-else />
+        </a-button>
       </div>
       <a-menu
         v-model:selectedKeys="selectedKeys"
@@ -56,15 +68,6 @@
     <a-layout class="main-layout">
       <a-layout-header v-if="!isWorkbenchRoute" class="header">
         <div class="header-main">
-          <a-button
-            size="small"
-            type="text"
-            :title="navCollapsed ? '展开菜单导航' : '收缩菜单导航'"
-            @click="navCollapsed = !navCollapsed"
-          >
-            <MenuUnfoldOutlined v-if="navCollapsed" />
-            <MenuFoldOutlined v-else />
-          </a-button>
           <span>{{ title }}</span>
         </div>
       </a-layout-header>
@@ -164,8 +167,12 @@ onBeforeUnmount(() => {
 }
 .sider-footer.collapsed { align-items: center; padding: 10px 0; }
 .approval-indicator { display: flex; justify-content: flex-start; }
+.logo { justify-content: space-between; padding: 0 12px 0 16px; }
+.logo-brand { display: flex; align-items: center; }
 .logo img { width: 30px; height: 30px; object-fit: contain; margin-right: 8px; }
+.logo.collapsed { flex-direction: column; justify-content: center; padding: 0; gap: 2px; }
 .logo.collapsed img { margin-right: 0; }
+.collapse-btn { flex-shrink: 0; }
 .header-main { display: flex; align-items: center; gap: 8px; }
 :deep(.ant-layout-sider-children) { display: flex; flex-direction: column; }
 </style>
