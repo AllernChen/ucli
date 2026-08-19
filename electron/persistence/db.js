@@ -608,6 +608,13 @@ class Db {
     return rows(r).map(rowToSession)
   }
 
+  countSessions({ includeRemoved = false } = {}) {
+    const where = includeRemoved ? '' : 'WHERE removed_at IS NULL'
+    const r = this.sql.exec(`SELECT COUNT(*) AS n FROM sessions ${where}`)
+    const row = rows(r)[0]
+    return row ? Number(row.n) || 0 : 0
+  }
+
   getSession(id) {
     const r = this.sql.exec(
       `SELECT s.*,

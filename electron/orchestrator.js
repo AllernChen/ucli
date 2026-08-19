@@ -1,7 +1,7 @@
 import { app, ipcMain, dialog, shell, Notification, safeStorage } from 'electron'
 import { join } from 'path'
 import { homedir } from 'os'
-import { readFileSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
+import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
 import { createHash, randomUUID } from 'crypto'
 import { openAllowedExternalUrl } from './externalLinks.js'
 import { PermissionEngine } from './permission/engine.js'
@@ -1215,8 +1215,8 @@ export function createOrchestrator() {
       }
     } catch { /* ignore */ }
 
-    const existingSessions = db.listSessions()
-    const shouldMigrateLegacyJson = !existingSessions.length && oldCfg
+    const existingSessionCount = db.countSessions()
+    const shouldMigrateLegacyJson = existingSessionCount === 0 && oldCfg
     if (shouldMigrateLegacyJson) {
       db.migrateFromJson(
         oldCfg.rulesets || null,
@@ -1913,9 +1913,43 @@ export function createOrchestrator() {
 
   /** Read the last ~16 KB of a transcript file and extract the last text-bearing
    *  message (user or assistant). Returns a short preview string or null. */
+  /** Read only the first `maxBytes` of a file without loading the whole file.
+   *  Transcripts can be many MB; metadata extraction only needs the head. */
+  function _readFileHead(path, maxBytes = 64 * 1024) {
+    let fd = null
+    try {
+      fd = openSync(path, 'r')
+      const buffer = Buffer.allocUnsafe(maxBytes)
+      const bytesRead = readSync(fd, buffer, 0, maxBytes, 0)
+      return buffer.toString('utf8', 0, bytesRead)
+    } catch {
+      return ''
+    } finally {
+      if (fd != null) { try { closeSync(fd) } catch { /* ignore */ } }
+    }
+  }
+
+  /** Read only the last `maxBytes` of a file without loading the whole file. */
+  function _readFileTail(path, maxBytes = 64 * 1024) {
+    let fd = null
+    try {
+      fd = openSync(path, 'r')
+      const { size } = fstatSync(fd)
+      if (!size) return ''
+      const length = Math.min(size, maxBytes)
+      const buffer = Buffer.allocUnsafe(length)
+      const bytesRead = readSync(fd, buffer, 0, length, size - length)
+      return buffer.toString('utf8', 0, bytesRead)
+    } catch {
+      return ''
+    } finally {
+      if (fd != null) { try { closeSync(fd) } catch { /* ignore */ } }
+    }
+  }
+
   function _extractLastText(jsonlPath) {
     try {
-      const content = readFileSync(jsonlPath, 'utf8')
+      const content = _readFileTail(jsonlPath)
       const tail = content.length > 16384 ? content.slice(-16384) : content
       const lines = tail.split('\n')
       for (let i = lines.length - 1; i >= 0; i--) {
@@ -2075,7 +2109,7 @@ export function createOrchestrator() {
               let meta = null
               try {
                 // Codex session_meta lines can be large — read 64 KB for the first line
-                const head = readFileSync(fullPath, 'utf8').slice(0, 65536)
+                const head = _readFileHead(fullPath, 65536)
                 const nl = head.indexOf('\n')
                 if (nl > 0) {
                   const firstLine = head.slice(0, nl)
