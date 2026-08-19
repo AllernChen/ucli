@@ -47,6 +47,7 @@
                 :session="s"
                 @open="openSession"
                 @configure="openSessionConfig"
+                @action="handleSessionAction"
               />
             </div>
           </section>
@@ -180,13 +181,22 @@
       v-model:open="sessionConfig.open"
       :session-id="sessionConfig.sessionId"
     />
+
+    <a-modal
+      v-model:open="renameState.open"
+      title="重命名会话"
+      ok-text="确定"
+      @ok="confirmRename"
+    >
+      <a-input v-model:value="renameState.name" placeholder="会话名称" @pressEnter="confirmRename" />
+    </a-modal>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import {
   PlusOutlined,
   AppstoreOutlined,
@@ -216,6 +226,7 @@ const discovering = ref(false)
 const discoverError = ref('')
 const filterTier = ref(undefined)
 const sessionConfig = ref({ open: false, sessionId: '' })
+const renameState = ref({ open: false, id: '', name: '' })
 const dshRuntime = ref({})
 const dshLoadError = ref('')
 const dshProfilesLoading = ref(false)
@@ -401,6 +412,67 @@ async function discover(cwd) {
 
 function openSessionConfig(sessionId) {
   sessionConfig.value = { open: true, sessionId }
+}
+
+function handleSessionAction(id, key) {
+  if (key === 'stop') stopSession(id)
+  else if (key === 'restart') restartSession(id)
+  else if (key === 'configure') openSessionConfig(id)
+  else if (key === 'rename') renameSession(id)
+  else if (key === 'delete') confirmDeleteSession(id)
+}
+
+async function stopSession(id) {
+  try {
+    await sessions.stop(id)
+    message.success('已停止会话')
+  } catch (e) {
+    message.error('停止失败：' + (e?.message || e))
+  }
+}
+
+async function restartSession(id) {
+  try {
+    await sessions.restart(id)
+    message.success('已重启会话')
+  } catch (e) {
+    message.error('重启失败：' + (e?.message || e))
+  }
+}
+
+function renameSession(id) {
+  const s = sessions.byId(id)
+  renameState.value = { open: true, id, name: s?.displayName || '' }
+}
+
+async function confirmRename() {
+  const { id, name } = renameState.value
+  const trimmed = (name || '').trim()
+  if (!trimmed) { message.warning('名称不能为空'); return }
+  try {
+    await sessions.updateName(id, trimmed)
+    message.success('已重命名')
+    renameState.value.open = false
+  } catch (e) {
+    message.error('重命名失败：' + (e?.message || e))
+  }
+}
+
+function confirmDeleteSession(id) {
+  Modal.confirm({
+    title: '删除会话',
+    content: '删除后不可恢复，确定要删除该会话吗？',
+    okText: '删除',
+    okType: 'danger',
+    onOk: async () => {
+      try {
+        await sessions.deleteSession(id)
+        message.success('已删除会话')
+      } catch (e) {
+        message.error('删除失败：' + (e?.message || e))
+      }
+    }
+  })
 }
 
 function profileConfigForSelection(imported, adapterId) {

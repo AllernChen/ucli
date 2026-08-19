@@ -19,6 +19,24 @@
           <SettingOutlined />
         </a-button>
       </a-badge>
+      <a-dropdown :trigger="['click']">
+        <a-button
+          type="text"
+          size="small"
+          aria-label="更多操作"
+          title="更多操作"
+          @click.stop
+        >
+          <MoreOutlined />
+        </a-button>
+        <template #overlay>
+          <a-menu @click="onMenuClick">
+            <a-menu-item v-for="item in actionItems" :key="item.key" :danger="item.danger">
+              {{ item.label }}
+            </a-menu-item>
+          </a-menu>
+        </template>
+      </a-dropdown>
       <a-tag v-if="capabilities.ucliPermission" :color="tierColor">{{ tierLabel }}</a-tag>
     </template>
 
@@ -46,17 +64,25 @@
 
 <script setup>
 import { computed } from 'vue'
-import { FolderOpenOutlined, SettingOutlined } from '@ant-design/icons-vue'
+import { FolderOpenOutlined, MoreOutlined, SettingOutlined } from '@ant-design/icons-vue'
 import { deriveSessionConfigState } from '../sessionConfigPresentation.js'
 import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
+import { sessionCardActionItems } from '../sessionCardActions.js'
 
 const props = defineProps({ session: { type: Object, required: true } })
-const emit = defineEmits(['open', 'configure'])
+const emit = defineEmits(['open', 'configure', 'action'])
 const view = computed(() => deriveSessionConfigState(props.session))
 const capabilities = computed(() => deriveSessionCapabilityState(props.session))
 
+const isRunning = computed(() => ['running', 'waiting', 'starting'].includes(props.session.status))
+const actionItems = computed(() => sessionCardActionItems({ running: isRunning.value }))
+
 function configure() {
   emit('configure', props.session.id)
+}
+
+function onMenuClick({ key }) {
+  emit('action', props.session.id, key)
 }
 
 const isWaiting = computed(() => props.session.status === 'waiting')
