@@ -137,8 +137,7 @@ import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import { ipc } from '../ipc.js'
 
 const props = defineProps({
-  initialCwd: { type: String, default: '' },
-  initialAdapterId: { type: [String, null], default: null }
+  initialCwd: { type: String, default: '' }
 })
 
 const open = defineModel('open', { default: false })
@@ -155,6 +154,7 @@ const discoverError = ref('')
 const dshRuntime = ref({})
 const dshLoadError = ref('')
 const dshProfilesLoading = ref(false)
+const dshMigrationOpen = ref(false)
 
 const form = ref({
   adapterId: 'claude', cwd: '', name: '', model: undefined, tier: 'safety-rules',
@@ -214,6 +214,7 @@ onMounted(async () => {
     form.value.cwd = dshMigrationCwd(route.query.cwd)
     await aiProfiles.load(form.value.cwd)
     await router.replace({ path: '/' })
+    dshMigrationOpen.value = true
     open.value = true
     return
   }
@@ -228,8 +229,11 @@ watch(open, (val) => {
   importProfileSelections.value = { codex: 'history', claude: 'history' }
   form.value.name = ''
   discovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
-  if (props.initialCwd) form.value.cwd = props.initialCwd
-  if (props.initialAdapterId) form.value.adapterId = props.initialAdapterId
+  if (dshMigrationOpen.value) {
+    dshMigrationOpen.value = false
+  } else {
+    form.value.cwd = props.initialCwd || settings.defaultCwd || ''
+  }
   loadDshRuntime().catch(() => {})
   if (form.value.cwd) discover(form.value.cwd)
 })

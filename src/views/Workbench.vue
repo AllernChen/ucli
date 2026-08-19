@@ -31,7 +31,7 @@
 
     <div v-if="filtered.length" class="project-list">
       <section v-for="project in groupedSessions" :key="project.key" class="project-group">
-        <div class="project-header" role="button" @click="toggleProject(project.key)">
+        <div class="project-header" role="button" tabindex="0" @click="toggleProject(project.key)" @keydown.enter.prevent="toggleProject(project.key)" @keydown.space.prevent="toggleProject(project.key)">
           <DownOutlined v-if="!collapsedProjects.has(project.key)" />
           <RightOutlined v-else />
           <FolderOpenOutlined class="project-icon" />
@@ -47,13 +47,13 @@
 
         <div v-show="!collapsedProjects.has(project.key)" class="project-content">
           <section v-for="cli in project.cliGroups" :key="cli.key" class="adapter-group">
-            <div class="adapter-header" role="button" @click="toggleCli(cli.key)">
+            <div class="adapter-header" role="button" tabindex="0" @click="toggleCli(cli.key)" @keydown.enter.prevent="toggleCli(cli.key)" @keydown.space.prevent="toggleCli(cli.key)">
               <DownOutlined v-if="!collapsedClis.has(cli.key)" />
               <RightOutlined v-else />
               <span class="adapter-icon">{{ cli.icon }}</span>
               <span class="adapter-name">{{ cli.displayName }}</span>
               <span class="group-count">{{ cli.count }} 个会话</span>
-              <a-button size="small" type="text" class="header-quick-add" :title="`新建 ${cli.displayName} 会话`" @click.stop="openQuickNew(project.path, cli.id)">
+              <a-button size="small" type="text" class="header-quick-add" :title="`新建 ${cli.displayName} 会话`" @click.stop="openQuickNew(project.path)">
                 <PlusOutlined />
               </a-button>
             </div>
@@ -76,7 +76,7 @@
     </div>
     <a-empty v-else description="还没有会话，点击「新建会话」开始" style="margin-top: 60px" />
 
-    <NewSessionDialog v-model:open="showNew" :initial-cwd="quickNew.cwd" :initial-adapter-id="quickNew.adapterId" />
+    <NewSessionDialog v-model:open="showNew" :initial-cwd="quickNew.cwd" />
 
     <SessionConfigModal
       v-model:open="sessionConfig.open"
@@ -121,7 +121,7 @@ const settings = useSettingsStore()
 const gateway = useGatewayStore()
 
 const showNew = ref(false)
-const quickNew = ref({ cwd: '', adapterId: null })
+const quickNew = ref({ cwd: '' })
 const filterTier = ref(undefined)
 const sessionConfig = ref({ open: false, sessionId: '' })
 const renameState = ref({ open: false, id: '', name: '' })
@@ -144,12 +144,12 @@ onMounted(async () => {
 })
 
 function openNew() {
-  quickNew.value = { cwd: '', adapterId: null }
+  quickNew.value = { cwd: '' }
   showNew.value = true
 }
 
-function openQuickNew(cwd, adapterId) {
-  quickNew.value = { cwd: cwd || '', adapterId: adapterId || null }
+function openQuickNew(cwd) {
+  quickNew.value = { cwd: cwd || '' }
   showNew.value = true
 }
 
