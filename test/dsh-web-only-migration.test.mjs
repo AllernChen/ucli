@@ -191,23 +191,23 @@ test('restored non-Web DSH sessions are public unavailable rows and reject every
   }
 })
 
-const workbench = readFileSync(new URL('../src/views/Workbench.vue', import.meta.url), 'utf8')
+const newDialog = readFileSync(new URL('../src/components/NewSessionDialog.vue', import.meta.url), 'utf8')
 
 test('new DSH sessions are Web-only without profile or TUI controls', () => {
-  assert.match(workbench, /config\.adapterConfig = \{ surfacePreference: 'web' \}/)
-  assert.doesNotMatch(workbench, /surfacePreference:\s*'tui'|value="tui"/)
-  assert.doesNotMatch(workbench, /selectedDshProfileName|dshTuiReady|TUI profile|UCLI bridge/iu)
+  assert.match(newDialog, /config\.adapterConfig = \{ surfacePreference: 'web' \}/)
+  assert.doesNotMatch(newDialog, /surfacePreference:\s*'tui'|value="tui"/)
+  assert.doesNotMatch(newDialog, /selectedDshProfileName|dshTuiReady|TUI profile|UCLI bridge/iu)
 })
 
 test('generic quick-new and discover blocks exclude DeepSeek Harness', () => {
   // The dedicated Web-only entry is the single DSH create button; the generic
   // quick-new/discover blocks must not surface a second (legacy TUI-looking) one.
-  assert.match(workbench, /discoverableAdapters\s*=\s*computed/)
-  assert.match(workbench, /a\.id !== 'deepseek-harness'/)
-  assert.doesNotMatch(workbench, /v-for="a in sessions\.adapters"/)
-  assert.match(workbench, /v-for="a in discoverableAdapters"/)
-  assert.match(workbench, /for \(const a of discoverableAdapters\.value\)/)
-  assert.match(workbench, /@click="newSession\(dshAdapter\)"/)
+  assert.match(newDialog, /discoverableAdapters\s*=\s*computed/)
+  assert.match(newDialog, /a\.id !== 'deepseek-harness'/)
+  assert.doesNotMatch(newDialog, /v-for="a in sessions\.adapters"/)
+  assert.match(newDialog, /v-for="a in discoverableAdapters"/)
+  assert.match(newDialog, /for \(const a of discoverableAdapters\.value\)/)
+  assert.match(newDialog, /@click="newSession\(dshAdapter\)"/)
 })
 
 test('legacy DSH sessions expose only a bounded same-cwd Web migration action', () => {
@@ -215,8 +215,8 @@ test('legacy DSH sessions expose only a bounded same-cwd Web migration action', 
     new URL('../src/views/SessionDetail.vue', import.meta.url),
     'utf8'
   )
-  const workbench = readFileSync(
-    new URL('../src/views/Workbench.vue', import.meta.url),
+  const newDialog = readFileSync(
+    new URL('../src/components/NewSessionDialog.vue', import.meta.url),
     'utf8'
   )
 
@@ -231,15 +231,15 @@ test('legacy DSH sessions expose only a bounded same-cwd Web migration action', 
   assert.match(action, /router\.push/)
   assert.doesNotMatch(action, /sessions\.(?:restart|resume|createSession)|adapterConfig\s*=/)
 
-  assert.match(workbench, /useRoute\(\)/)
-  assert.match(workbench, /route\.query\.createDshWeb/)
-  const migrationStart = workbench.indexOf("if (route.query.createDshWeb === '1')")
-  const migrationEnd = workbench.indexOf('\n  }', migrationStart)
+  assert.match(newDialog, /useRoute\(\)/)
+  assert.match(newDialog, /route\.query\.createDshWeb/)
+  const migrationStart = newDialog.indexOf("if (route.query.createDshWeb === '1')")
+  const migrationEnd = newDialog.indexOf('\n  }', migrationStart)
   assert.ok(migrationStart >= 0 && migrationEnd > migrationStart)
-  const migration = workbench.slice(migrationStart, migrationEnd)
+  const migration = newDialog.slice(migrationStart, migrationEnd)
   assert.match(migration, /form\.value\.adapterId\s*=\s*'deepseek-harness'/)
-  assert.match(migration, /showNew\.value\s*=\s*true/)
+  assert.match(migration, /open\.value\s*=\s*true/)
   assert.doesNotMatch(migration, /newSession|createSession/)
-  assert.match(workbench, /@click="newSession\(dshAdapter\)"/)
-  assert.match(workbench, /config\.adapterConfig\s*=\s*\{\s*surfacePreference:\s*'web'\s*\}/)
+  assert.match(newDialog, /@click="newSession\(dshAdapter\)"/)
+  assert.match(newDialog, /config\.adapterConfig\s*=\s*\{\s*surfacePreference:\s*'web'\s*\}/)
 })

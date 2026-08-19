@@ -17,7 +17,7 @@
       <GatewayHeaderControl />
       <a-space size="small">
         <a-button size="small" @click="showImport = true">📥 导入</a-button>
-        <a-button size="small" @click="$router.push('/')">➕ 新建</a-button>
+        <a-button size="small" @click="showNewSession = true">➕ 新建</a-button>
         <span v-if="assignedPaneCount > 1" class="shortcut-hint"><kbd>Tab</kbd> 切换会话</span>
         <a-radio-group v-model:value="splitCount" size="small" button-style="solid">
           <a-radio-button :value="1">1</a-radio-button>
@@ -271,6 +271,8 @@
       :session-id="sessionConfig.sessionId"
     />
 
+    <NewSessionDialog v-model:open="showNewSession" />
+
     <!-- Import historical sessions modal -->
     <a-modal v-model:open="showImport" title="导入历史会话" :footer="null" width="640px">
       <a-form layout="vertical">
@@ -382,6 +384,7 @@ import { compactPaneSessionIds } from '../paneCompaction.js'
 import PaneHistory from '../components/PaneHistory.vue'
 import HostedWebSurface from '../components/HostedWebSurface.vue'
 import SessionConfigModal from '../components/SessionConfigModal.vue'
+import NewSessionDialog from '../components/NewSessionDialog.vue'
 import SessionMaintenanceActions from '../components/SessionMaintenanceActions.vue'
 import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
 import GatewayChannelIcon from '../components/gateway/GatewayChannelIcon.vue'
@@ -1017,6 +1020,9 @@ function compactPanes(omitIndex) {
   }))
   nextTick(() => createPanes(next.splitCount))
 }
+
+// New session dialog (opened in place)
+const showNewSession = ref(false)
 
 // Import historical sessions
 const showImport = ref(false)
