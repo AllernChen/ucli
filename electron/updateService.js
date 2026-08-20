@@ -155,7 +155,10 @@ export function createUpdateService({
       error: ''
     })
   })
-  updater.on('error', () => fail('更新检查失败'))
+  updater.on('error', (error) => {
+    console.error('[update] update check failed:', error?.message || error)
+    fail('更新检查失败')
+  })
 
   function check() {
     if (!supported) return Promise.resolve(snapshot())
@@ -177,7 +180,8 @@ export function createUpdateService({
     checkPromise = (async () => {
       try {
         await updater.checkForUpdates()
-      } catch {
+      } catch (error) {
+        console.error('[update] update check failed:', error?.message || error)
         fail('更新检查失败')
       }
       emit({ checkedAt: safeInteger(now()) })
@@ -198,7 +202,10 @@ export function createUpdateService({
       status: 'downloading', progressPercent: 0,
       transferred: null, total: null, bytesPerSecond: null, error: ''
     })
-    try { await updater.downloadUpdate() } catch { fail('更新下载失败') }
+    try { await updater.downloadUpdate() } catch (error) {
+      console.error('[update] update download failed:', error?.message || error)
+      fail('更新下载失败')
+    }
     return snapshot()
   }
 
@@ -207,7 +214,10 @@ export function createUpdateService({
     emit({ status: 'installing', error: '' })
     installTimer = schedule(() => {
       installTimer = null
-      try { updater.quitAndInstall(false, true) } catch { fail('更新安装失败') }
+      try { updater.quitAndInstall(false, true) } catch (error) {
+        console.error('[update] update install failed:', error?.message || error)
+        fail('更新安装失败')
+      }
     }, 200)
     return true
   }
