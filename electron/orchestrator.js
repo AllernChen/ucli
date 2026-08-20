@@ -1013,8 +1013,7 @@ export function createOrchestrator() {
     summaryScheduler = createSummaryScheduler({
       getSettings: () => summarySettings,
       listReports: filters => summaryRepository.list(filters),
-      generate: request => summaryJobService.generate(request),
-      cancel: reportId => summaryJobService.cancel(reportId),
+      onReminder: reminder => notifySummaryDue(reminder),
       maintain: () => summaryStorageMaintenance(),
       onMaintenanceError: event => log('summary-maintenance', event)
     })
@@ -1626,6 +1625,22 @@ export function createOrchestrator() {
       notification.close()
     })
     notification.on('close', () => completionNotifications.delete(notification))
+    notification.show()
+  }
+
+  function notifySummaryDue(reminder) {
+    if (!Notification.isSupported()) return
+    const labels = { day: '每日', week: '每周', month: '每月', quarter: '每季度', year: '每年' }
+    const label = labels[reminder.periodType] || reminder.periodType
+    const notification = new Notification({
+      title: '该生成工作总结了',
+      body: `${label}总结已到期，点击去生成`
+    })
+    notification.on('click', () => {
+      focusMainWindow()
+      send('summary:open', { periodType: reminder.periodType })
+      notification.close()
+    })
     notification.show()
   }
 
@@ -2644,18 +2659,8 @@ export function createOrchestrator() {
     }
     const db = getDb()
     const automationAvailable = Boolean(db && summaryScheduler)
-    const availableExecutors = candidate.autoEnabled && automationAvailable
-      ? await inspectCliTools()
-      : []
-    const availableProfiles = candidate.autoEnabled && automationAvailable && candidate.defaultExecutorId
-      ? profileService?.listProfiles({ adapterId: candidate.defaultExecutorId }) || []
-      : []
     summarySettings = {
-      ...updateSummarySettings(summarySettings, summary, {
-        availableExecutors,
-        availableProfiles,
-        automationAvailable
-      }),
+      ...updateSummarySettings(summarySettings, summary, { automationAvailable }),
       cacheEnabled: candidate.cacheEnabled,
       cacheMaxBytes: candidate.cacheMaxBytes,
       failedWorkspaceRetentionDays: candidate.failedWorkspaceRetentionDays,

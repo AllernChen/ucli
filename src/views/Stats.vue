@@ -95,7 +95,8 @@ import WorkSummaryPanel from '../components/summaries/WorkSummaryPanel.vue'
 
 const stats = useStatsStore()
 const sessions = useSessionsStore()
-const activeTab = ref('usage')
+const route = useRoute()
+const activeTab = ref(route.query.tab === 'summary' ? 'summary' : 'usage')
 
 const columns = [
   { title: '状态', dataIndex: 'status', width: 70 },
@@ -176,7 +177,6 @@ function formatCost(record) {
 }
 
 onMounted(load)
-const route = useRoute()
 watch(() => route.path, (p) => { if (p === '/stats') load() })
 
 async function load() {

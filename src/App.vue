@@ -135,6 +135,7 @@ function onMenuClick({ key }) {
 }
 
 let stopSessionFocus = null
+let stopSummaryOpen = null
 onMounted(async () => {
   // Wait for the initial navigation to resolve before checking the route.
   // The artifact preview window loads with a `#/preview` hash, but at mount
@@ -157,9 +158,13 @@ onMounted(async () => {
     sessions.pendingAssign = sessionId
     router.push('/session')
   })
+  stopSummaryOpen = ipc.on('summary:open', () => {
+    router.push({ path: '/stats', query: { tab: 'summary' } })
+  })
 })
 onBeforeUnmount(() => {
   stopSessionFocus?.()
+  stopSummaryOpen?.()
   updates.dispose()
 })
 </script>

@@ -9,14 +9,6 @@ import {
   updateSummarySettings
 } from '../electron/summaries/summaryScheduler.js'
 
-const available = id => ({ id, installed: true, summaryExecutorAvailable: true })
-const authUnavailable = id => ({ id, installed: true, safeForSummary: true, summaryExecutorAvailable: false })
-const unsafe = id => ({ id, installed: true, safeForSummary: false, summaryExecutorAvailable: false })
-const managedClaudeProfile = {
-  id: 'claude-managed', adapterId: 'claude', kind: 'managed',
-  connectionMode: 'api_key', status: 'ready'
-}
-
 test('summary settings expose the exact opt-in defaults', () => {
   assert.deepEqual(DEFAULT_SUMMARY_SETTINGS, {
     autoEnabled: false,
@@ -29,34 +21,23 @@ test('summary settings expose the exact opt-in defaults', () => {
   })
 })
 
-test('automatic enablement requires an installed default executor and accepted disclosure', () => {
+test('automatic reminders require disclosure acceptance but not a default executor', () => {
   assert.throws(
-    () => updateSummarySettings({}, { autoEnabled: true, defaultExecutorId: 'codex' }, {
-      availableExecutors: [available('claude')]
-    }),
+    () => updateSummarySettings({}, { autoEnabled: true, defaultExecutorId: 'codex' }),
     error => error.code === 'SUMMARY_DISCLOSURE_REQUIRED'
   )
-  assert.throws(
-    () => updateSummarySettings({}, {
-      autoEnabled: true,
-      defaultExecutorId: 'claude',
-      firstEnableDisclosureAcceptedAt: 123
-    }, { availableExecutors: [available('opencode')] }),
-    error => error.code === 'SUMMARY_EXECUTOR_UNAVAILABLE'
-  )
-
+  // Reminders need no executor, so enabling without one is allowed after disclosure.
   const enabled = updateSummarySettings({}, {
     autoEnabled: true,
-    defaultExecutorId: 'claude',
     firstEnableDisclosureAcceptedAt: 123,
     autoPeriods: { month: true }
-  }, { availableExecutors: [available('claude')] })
+  })
   assert.equal(enabled.autoEnabled, true)
   assert.equal(enabled.autoPeriods.day, true)
   assert.equal(enabled.autoPeriods.month, true)
 })
 
-test('enabled automation keeps a valid executor and clears stale executor-specific defaults', () => {
+test('changing the default CLI clears stale profile and model defaults', () => {
   const current = {
     autoEnabled: true,
     defaultExecutorId: 'claude',
@@ -64,86 +45,33 @@ test('enabled automation keeps a valid executor and clears stale executor-specif
     defaultModel: 'claude-model',
     firstEnableDisclosureAcceptedAt: 123
   }
-  assert.throws(
-    () => updateSummarySettings(current, { defaultExecutorId: null }, {
-      availableExecutors: [available('claude')]
-    }),
-    error => error.code === 'SUMMARY_EXECUTOR_UNAVAILABLE'
-  )
-  assert.throws(
-    () => updateSummarySettings(current, { defaultExecutorId: 'ucode' }, {
-      availableExecutors: [available('claude'), unsafe('ucode')]
-    }),
-    error => error.code === 'SUMMARY_EXECUTOR_UNSAFE'
-  )
+  // A previously "unsafe" executor no longer blocks reminders.
+  const kept = updateSummarySettings(current, { defaultExecutorId: 'ucode' })
+  assert.equal(kept.autoEnabled, true)
+  assert.equal(kept.defaultExecutorId, 'ucode')
 
-  const changed = updateSummarySettings(current, { defaultExecutorId: 'opencode' }, {
-    availableExecutors: [available('claude'), available('opencode')]
-  })
+  const changed = updateSummarySettings(current, { defaultExecutorId: 'opencode' })
   assert.equal(changed.defaultProfileId, null)
   assert.equal(changed.defaultModel, null)
 })
 
-test('automatic summaries allow a ready managed Claude credential but never an unsafe executor', () => {
+test('automatic reminders ignore the legacy executor capability matrix', () => {
   const enabled = updateSummarySettings({}, {
     autoEnabled: true,
     defaultExecutorId: 'claude',
-    defaultProfileId: managedClaudeProfile.id,
+    defaultProfileId: 'claude-managed',
     firstEnableDisclosureAcceptedAt: 123
-  }, {
-    availableExecutors: [authUnavailable('claude')],
-    availableProfiles: [managedClaudeProfile]
   })
   assert.equal(enabled.autoEnabled, true)
-  assert.equal(enabled.defaultProfileId, managedClaudeProfile.id)
+  assert.equal(enabled.defaultProfileId, 'claude-managed')
 
-  assert.throws(() => updateSummarySettings({}, {
-    autoEnabled: true,
-    defaultExecutorId: 'claude',
-    firstEnableDisclosureAcceptedAt: 123
-  }, {
-    availableExecutors: [authUnavailable('claude')],
-    availableProfiles: []
-  }), error => error.code === 'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE')
-
-  assert.throws(() => updateSummarySettings({}, {
-    autoEnabled: true,
-    defaultExecutorId: 'codex',
-    defaultProfileId: 'codex-managed',
-    firstEnableDisclosureAcceptedAt: 123
-  }, {
-    availableExecutors: [unsafe('codex')],
-    availableProfiles: [{
-      id: 'codex-managed', adapterId: 'codex', kind: 'managed', status: 'ready'
-    }]
-  }), error => error.code === 'SUMMARY_EXECUTOR_UNSAFE')
-})
-
-test('subscription/reference profiles do not claim isolated Claude authentication', () => {
-  const reference = {
-    id: 'claude-login', adapterId: 'claude', kind: 'reference',
-    connectionMode: 'subscription', status: 'ready'
-  }
-  assert.throws(() => updateSummarySettings({}, {
+  const reference = updateSummarySettings({}, {
     autoEnabled: true,
     defaultExecutorId: 'claude',
     defaultProfileId: 'claude-login',
     firstEnableDisclosureAcceptedAt: 123
-  }, {
-    availableExecutors: [authUnavailable('claude')],
-    availableProfiles: [reference]
-  }), error => error.code === 'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE')
-
-  const enabled = updateSummarySettings({}, {
-    autoEnabled: true,
-    defaultExecutorId: 'claude',
-    defaultProfileId: reference.id,
-    firstEnableDisclosureAcceptedAt: 123
-  }, {
-    availableExecutors: [available('claude')],
-    availableProfiles: [reference]
   })
-  assert.equal(enabled.defaultProfileId, reference.id)
+  assert.equal(reference.defaultProfileId, 'claude-login')
 })
 
 test('automatic enablement is rejected when durable scheduling is unavailable', () => {
@@ -152,10 +80,7 @@ test('automatic enablement is rejected when durable scheduling is unavailable', 
       autoEnabled: true,
       defaultExecutorId: 'claude',
       firstEnableDisclosureAcceptedAt: 123
-    }, {
-      availableExecutors: [available('claude')],
-      automationAvailable: false
-    }),
+    }, { automationAvailable: false }),
     error => error.code === 'SUMMARY_AUTOMATION_UNAVAILABLE'
   )
 })
