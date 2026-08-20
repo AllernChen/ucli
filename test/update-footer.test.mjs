@@ -47,6 +47,16 @@ test('collapsed popover explains installing and error states without unsafe acti
   assert.doesNotMatch(footer, /updates\.status === 'error'[\s\S]{0,300}updates\.(download|install)\(\)/)
 })
 
+test('available state exposes version plus expandable release notes beside the download action', () => {
+  assert.match(footer, /updates\.status === 'available'/)
+  assert.match(footer, /发现 v\{\{ updates\.availableVersion \}\}/)
+  assert.match(footer, /updates\.releaseNotes/)
+  assert.match(footer, /notesExpanded/)
+  assert.match(footer, /查看升级说明/)
+  assert.match(footer, /收起升级说明/)
+  assert.match(footer, /releaseNotesSummary/)
+})
+
 test('unsupported and error states never render as an available update action', () => {
   assert.match(footer, /actionable/)
   assert.match(footer, /\['available', 'downloading', 'downloaded', 'installing'\]/)
