@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-08-20
+
+- 会话产物：从 Claude / Codex / OpenCode / U-Code transcript 提取 AI 写入的文件路径，抽屉列出并支持内嵌预览（HTML / Markdown / 文本 / 图片）与系统程序打开，可弹出到独立原生窗口。
+
 ## [0.11.3] - 2026-08-19
 
 ### 修复

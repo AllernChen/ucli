@@ -14,9 +14,9 @@ const bridgePackage = JSON.parse(readFileSync(
 ))
 
 test('app metadata retains the quarantined 0.11.0 bridge package', () => {
-  assert.equal(packageJson.version, '0.11.3')
-  assert.equal(packageLock.version, '0.11.3')
-  assert.equal(packageLock.packages[''].version, '0.11.3')
+  assert.equal(packageJson.version, '0.11.4')
+  assert.equal(packageLock.version, '0.11.4')
+  assert.equal(packageLock.packages[''].version, '0.11.4')
   assert.equal(bridgePackage.version, '0.11.0')
 })
 
