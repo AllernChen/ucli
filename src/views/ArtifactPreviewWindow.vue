@@ -13,22 +13,27 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import ipc from '../ipc.js'
 import ArtifactPreview from '../components/ArtifactPreview.vue'
 
 const route = useRoute()
-const sessionId = String(route.query.session || '')
+const sessionId = computed(() => String(route.query.session || ''))
 const loading = ref(true)
 const missing = ref(false)
 const error = ref('')
 const artifacts = ref([])
 const activeKey = ref('')
 
-onMounted(async () => {
+async function load() {
+  loading.value = true
+  missing.value = false
+  error.value = ''
+  artifacts.value = []
+  activeKey.value = ''
   try {
-    const result = await ipc.listArtifacts(sessionId)
+    const result = await ipc.listArtifacts(sessionId.value)
     missing.value = Boolean(result.missing)
     artifacts.value = result.artifacts || []
     if (artifacts.value.length) activeKey.value = artifacts.value[0].absolutePath
@@ -37,7 +42,9 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
-})
+}
+
+watch(sessionId, load, { immediate: true })
 </script>
 
 <style scoped>
