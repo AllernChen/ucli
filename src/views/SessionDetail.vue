@@ -210,6 +210,16 @@
               >
                 <AimOutlined />
               </a-button>
+              <a-button
+                v-if="pane.sessionId && !isLegacyDshSession(paneSession(i))"
+                size="small"
+                type="text"
+                aria-label="会话产物"
+                title="会话产物"
+                @click.stop="openArtifacts(pane.sessionId)"
+              >
+                <FileTextOutlined />
+              </a-button>
               <a-badge v-if="pane.sessionId && !isLegacyDshSession(paneSession(i))" :dot="sessionConfigNeedsAttention(pane.sessionId)" status="warning">
                 <a-button
                   size="small"
@@ -318,6 +328,11 @@
 
     <NewSessionDialog v-model:open="showNewSession" :initial-cwd="quickNew.cwd" :initial-adapter-id="quickNew.adapterId" />
 
+    <ArtifactDrawer
+      v-model:open="artifactsOpen"
+      :session-id="artifactsSessionId"
+    />
+
     <!-- Import historical sessions modal -->
     <a-modal v-model:open="showImport" title="导入历史会话" :footer="null" width="640px">
       <a-form layout="vertical">
@@ -416,7 +431,8 @@ import {
   RightOutlined,
   FolderOpenOutlined,
   PlusOutlined,
-  ExportOutlined
+  ExportOutlined,
+  FileTextOutlined
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
@@ -430,6 +446,7 @@ import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldBlockDuplicate
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { compactPaneSessionIds } from '../paneCompaction.js'
 import PaneHistory from '../components/PaneHistory.vue'
+import ArtifactDrawer from '../components/ArtifactDrawer.vue'
 import HostedWebSurface from '../components/HostedWebSurface.vue'
 import SessionConfigModal from '../components/SessionConfigModal.vue'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
@@ -1127,6 +1144,13 @@ async function openProjectDir(dir) {
   if (!dir) { message.warning('该项目未设置工作目录'); return }
   const result = await ipc.openPath(dir)
   if (result && result !== '') message.error('无法打开目录')
+}
+
+const artifactsOpen = ref(false)
+const artifactsSessionId = ref('')
+function openArtifacts(sessionId) {
+  artifactsSessionId.value = sessionId
+  artifactsOpen.value = true
 }
 
 // Import historical sessions
