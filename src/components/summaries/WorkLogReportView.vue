@@ -23,11 +23,17 @@
       v-html="safeHtml"
       @click="handleReportLink"
     />
-    <a-empty v-else-if="workLog.kind === 'html'" description="HTML 报告使用浏览器打开">
-      <template #extra>
-        <a-button type="primary" @click="$emit('open-html', workLog.path)">在浏览器中打开</a-button>
-      </template>
-    </a-empty>
+    <div v-else-if="content && workLog.kind === 'html'" class="html-preview">
+      <iframe
+        class="html-frame"
+        :srcdoc="htmlSafe"
+        sandbox="allow-same-origin"
+        title="HTML 预览"
+      ></iframe>
+      <div class="html-preview-actions">
+        <a-button type="primary" size="small" @click="$emit('open-html', workLog.path)">在浏览器中打开</a-button>
+      </div>
+    </div>
     <a-empty v-else description="报告内容尚未生成" />
   </a-card>
   <a-empty v-else description="请选择一份工作日志报告" />
@@ -47,11 +53,15 @@ const content = ref('')
 const loading = ref(false)
 const error = ref('')
 const safeHtml = computed(() => DOMPurify.sanitize(markdown.render(content.value || '')))
+const htmlSafe = computed(() =>
+  content.value && props.workLog?.kind === 'html'
+    ? DOMPurify.sanitize(content.value, { USE_PROFILES: { html: true } })
+    : '')
 
 watch(() => props.workLog, async (workLog) => {
   content.value = ''
   error.value = ''
-  if (!workLog || workLog.kind !== 'markdown') return
+  if (!workLog || (workLog.kind !== 'markdown' && workLog.kind !== 'html')) return
   loading.value = true
   try {
     const result = await ipc.readSummaryWorkLog(workLog.name)
@@ -72,4 +82,7 @@ function handleReportLink(event) { openSummaryReportLink(event, ipc.openExternal
 .markdown-body :deep(pre) { overflow: auto; padding: 12px; background: #f5f5f5; }
 .markdown-body :deep(table) { border-collapse: collapse; }
 .markdown-body :deep(td), .markdown-body :deep(th) { border: 1px solid #ddd; padding: 6px; }
+.html-preview { margin-top: 14px; }
+.html-frame { width: 100%; min-height: 420px; border: 1px solid #eee; border-radius: 6px; }
+.html-preview-actions { margin-top: 8px; }
 </style>
