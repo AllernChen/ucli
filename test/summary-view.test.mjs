@@ -204,6 +204,7 @@ test('a terminal event arriving after deletion does not surface a not-found erro
 
 test('summary workspace components cover generation, safe reading, history, retry, and export', () => {
   const files = [
+    '../src/components/SessionTerminal.vue',
     '../src/components/summaries/SummaryGenerateDialog.vue',
     '../src/components/summaries/SummaryReportView.vue',
     '../src/components/summaries/SummaryHistory.vue',
@@ -222,7 +223,12 @@ test('summary workspace components cover generation, safe reading, history, retr
     '取消生成', '确认继续', '打开总结 CLI', '可能产生费用',
     '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试',
     '工作日志', '历史报告', 'listSummaryWorkLogs', 'readSummaryWorkLog',
-    '在浏览器中打开', 'open-html', 'openWorkLogHtml'
+    '在浏览器中打开', 'open-html', 'openWorkLogHtml',
+    // Embedded CLI: the summary page renders SessionTerminal and auto-sends the brief.
+    'SessionTerminal', 'startAdapter', 'sendTurn', 'session:terminal-output',
+    'activeSummarySessionId', 'summaryTerminal',
+    // HTML work logs preview inline in a sandboxed srcdoc iframe.
+    'srcdoc', 'sandbox', 'USE_PROFILES'
   ]) assert.match(all, new RegExp(text))
   assert.match(all, /exportingHtml\.value\s*=\s*true/)
   assert.match(all, /exportingHtml\.value\s*=\s*false/)
@@ -244,6 +250,16 @@ test('summary workspace components cover generation, safe reading, history, retr
   assert.match(all, /MarkdownIt\(\{\s*html:\s*false/)
   assert.match(all, /DOMPurify\.sanitize/)
   assert.match(all, /failed|interrupted/)
+  // The generate dialog hands the session off instead of navigating away.
+  assert.doesNotMatch(all, /pendingAssign|router\.push/)
+  // The embedded terminal forwards input and output over the session IPC surface.
+  assert.match(all, /ipc\.sendTerminalInput\s*\(props\.sessionId,\s*data\)/)
+  assert.match(all, /evt\.sessionId\s*===\s*props\.sessionId/)
+  assert.match(all, /ipc\.terminalResize\s*\(props\.sessionId/)
+  // The summary page waits for adapter readiness before auto-sending the brief.
+  assert.match(all, /await\s+ipc\.startAdapter\(sessionId\)/)
+  assert.match(all, /await\s+ipc\.sendTurn\(sessionId,\s*briefPrompt\)/)
+  assert.match(all, /@open="onSummaryOpen"/)
 })
 
 test('completed reports show bounded generation performance without renderer-sensitive fields', () => {
