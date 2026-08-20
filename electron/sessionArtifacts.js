@@ -115,7 +115,11 @@ export function assertInsideDirectory(root, candidate) {
   }
   const resolvedRoot = pathApi.resolve(root)
   const resolvedCandidate = pathApi.resolve(candidate)
-  const relative = pathApi.relative(resolvedRoot, resolvedCandidate)
+  // Windows paths are case-insensitive: compare a case-folded copy so a cwd
+  // that differs from the on-disk path only by letter case is still inside.
+  const compareRoot = pathApi === path.win32 ? resolvedRoot.toLowerCase() : resolvedRoot
+  const compareCandidate = pathApi === path.win32 ? resolvedCandidate.toLowerCase() : resolvedCandidate
+  const relative = pathApi.relative(compareRoot, compareCandidate)
   if (
     relative === '' ||
     relative === '..' ||

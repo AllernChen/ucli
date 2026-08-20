@@ -70,6 +70,14 @@ test('assertInsideDirectory accepts children and rejects traversal', () => {
   )
 })
 
+test('assertInsideDirectory accepts win32 paths that differ only by case', () => {
+  assert.equal(assertInsideDirectory('C:/Proj', 'c:/proj/a.md'), 'c:\\proj\\a.md')
+  assert.throws(
+    () => assertInsideDirectory('C:/Proj', 'c:/etc/passwd'),
+    { code: 'ARTIFACT_PATH_UNSAFE' }
+  )
+})
+
 test('resolveArtifactAbsolutePath handles win32/posix/relative/none', () => {
   assert.equal(resolveArtifactAbsolutePath('C:\\proj\\a.md', 'C:\\proj'), 'C:\\proj\\a.md')
   assert.equal(resolveArtifactAbsolutePath('/home/u/a.md', '/home/u'), '/home/u/a.md')
@@ -134,6 +142,26 @@ test('listArtifacts caches the OpenCode export across calls', async () => {
   assert.equal(exportCalls, 1)
   assert.equal(first.artifacts[0].name, 'x.txt')
   assert.equal(second.artifacts[0].absolutePath, 'C:\\proj\\x.txt')
+})
+
+test('listArtifacts canonicalizes the cwd via realpath so symlinked ancestors are accepted', async () => {
+  const service = createSessionArtifactsService({
+    resolveSession: () => ({ adapterId: 'claude', cwd: '/tmp/proj', cliSessionId: 's1' }),
+    resolveClaudeTranscript: () => '/tmp/proj/.claude/t.jsonl',
+    readFile: async () => '',
+    parseJsonl: async () => [
+      { message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: 'a.md' } }] } }
+    ],
+    realpathFile: async (p) => {
+      if (p === '/tmp/proj') return '/private/tmp/proj'
+      if (p === '/tmp/proj/a.md') return '/private/tmp/proj/a.md'
+      return p
+    },
+    statFile: async () => ({ isFile: () => true, size: 10, mtimeMs: 1 })
+  })
+  const result = await service.listArtifacts('s1')
+  assert.equal(result.artifacts.length, 1)
+  assert.equal(result.artifacts[0].absolutePath, '/private/tmp/proj/a.md')
 })
 
 test('readArtifact rejects symlink escaping cwd', async () => {

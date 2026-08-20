@@ -57,7 +57,8 @@ async function load() {
     error.value = e?.code === 'ARTIFACT_TOO_LARGE' ? '文件过大，无法预览'
       : e?.code === 'ARTIFACT_PATH_UNSAFE' ? '路径不安全，已拒绝预览'
         : e?.code === 'ARTIFACT_NOT_FOUND' ? '文件不存在'
-          : '预览失败：' + (e?.message || e)
+          : e?.code === 'ARTIFACT_SESSION_NOT_FOUND' ? '会话不存在，无法读取产物'
+            : '预览失败：' + (e?.message || e)
   } finally {
     loading.value = false
   }

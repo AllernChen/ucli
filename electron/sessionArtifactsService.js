@@ -65,6 +65,19 @@ export function createSessionArtifactsService({
     }
   }
 
+  // Canonicalize the session cwd (resolve symlinked ancestors on macOS/`/tmp`,
+  // restore on-disk case on Windows) so the containment check compares
+  // real-to-real. Falls back to the raw cwd when the directory no longer
+  // exists (no artifacts could resolve then anyway).
+  async function canonicalizeRoot(cwd) {
+    if (typeof cwd !== 'string' || !cwd.trim()) return cwd
+    try {
+      return await realpathFile(cwd)
+    } catch {
+      return cwd
+    }
+  }
+
   async function collectForSession(session) {
     if (session.adapterId === 'claude') {
       return parseClaudeArtifactPaths(await readTranscript(resolveClaudeTranscript(session)))
@@ -87,6 +100,7 @@ export function createSessionArtifactsService({
   async function listArtifacts(sessionId) {
     const session = resolveSession(sessionId)
     if (!session) return { artifacts: [], source: null, missing: true, truncated: false }
+    const root = await canonicalizeRoot(session.cwd)
 
     const currentTime = now()
     for (const [key, entry] of cache) {
@@ -120,7 +134,7 @@ export function createSessionArtifactsService({
       }
       let safe
       try {
-        safe = assertInsideDirectory(session.cwd, real)
+        safe = assertInsideDirectory(root, real)
       } catch {
         continue
       }
@@ -155,6 +169,7 @@ export function createSessionArtifactsService({
   async function readArtifact(sessionId, absolutePath, options = {}) {
     const session = resolveSession(sessionId)
     if (!session) throw artifactError('ARTIFACT_SESSION_NOT_FOUND')
+    const root = await canonicalizeRoot(session.cwd)
     const kind = options && typeof options.kind === 'string'
       ? options.kind
       : artifactKindFromPath(absolutePath)
@@ -167,7 +182,7 @@ export function createSessionArtifactsService({
     }
     let safe
     try {
-      safe = assertInsideDirectory(session.cwd, real)
+      safe = assertInsideDirectory(root, real)
     } catch {
       throw artifactError('ARTIFACT_PATH_UNSAFE')
     }
