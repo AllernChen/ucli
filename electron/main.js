@@ -37,6 +37,7 @@ if (!app.isPackaged) {
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null
+let previewWindow = null
 let tray = null
 let orchestrator = null
 let isQuitting = false
@@ -187,6 +188,42 @@ function createWindow() {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
+
+function openArtifactWindow(sessionId) {
+  const hash = `/preview?session=${encodeURIComponent(String(sessionId || ''))}`
+  if (previewWindow && !previewWindow.isDestroyed()) {
+    previewWindow.show()
+    previewWindow.focus()
+    if (process.env['ELECTRON_RENDERER_URL']) {
+      previewWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#${hash}`)
+    } else {
+      previewWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash })
+    }
+    return
+  }
+  previewWindow = new BrowserWindow({
+    width: 980, height: 720, minWidth: 480, minHeight: 360,
+    title: 'UCLI 产物预览', autoHideMenuBar: true,
+    icon: iconPath('ucli.png'),
+    backgroundColor: '#f0f2f5',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false, contextIsolation: true, nodeIntegration: false
+    }
+  })
+  previewWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  previewWindow.webContents.on('will-navigate', (event, url) => {
+    const currentUrl = previewWindow?.webContents.getURL() || ''
+    if (!isAllowedApplicationNavigation(currentUrl, url)) event.preventDefault()
+  })
+  previewWindow.on('closed', () => { previewWindow = null })
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    previewWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#${hash}`)
+  } else {
+    previewWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash })
+  }
+}
+ipcMain.handle('artifact:open-window', (_event, sessionId) => openArtifactWindow(String(sessionId || '')))
 
 function fallbackUpdateState() {
   return {

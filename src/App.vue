@@ -1,5 +1,5 @@
 <template>
-  <a-layout class="app-layout">
+  <a-layout v-if="!isPreviewRoute" class="app-layout">
     <a-layout-sider
       width="184"
       :collapsed-width="64"
@@ -80,6 +80,7 @@
       </a-layout-content>
     </a-layout>
   </a-layout>
+  <router-view v-else />
 </template>
 
 <script setup>
@@ -110,6 +111,7 @@ const navCollapsed = ref(false)
 watch(navCollapsed, (v) => sessions.setNavCollapsed(v))
 const appVersion = __UCLI_VERSION__
 const isWorkbenchRoute = computed(() => route.path.startsWith('/session'))
+const isPreviewRoute = computed(() => route.name === 'preview')
 
 const selectedKeys = ref([route.path])
 watch(() => route.path, (p) => {
@@ -134,6 +136,7 @@ function onMenuClick({ key }) {
 
 let stopSessionFocus = null
 onMounted(async () => {
+  if (route.name === 'preview') return
   void updates.initialize()
   // Load persisted workbench state to decide initial route
   await sessions.init()

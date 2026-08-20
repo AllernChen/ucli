@@ -6,6 +6,7 @@ import Rules from './views/Rules.vue'
 import Settings from './views/Settings.vue'
 import ProfileCenter from './views/ProfileCenter.vue'
 import SkillsCenter from './views/SkillsCenter.vue'
+import ArtifactPreviewWindow from './views/ArtifactPreviewWindow.vue'
 
 const routes = [
   { path: '/', name: 'workbench', component: Workbench },
@@ -14,7 +15,8 @@ const routes = [
   { path: '/rules', name: 'rules', component: Rules },
   { path: '/profiles', name: 'profiles', component: ProfileCenter },
   { path: '/skills', name: 'skills', component: SkillsCenter },
-  { path: '/settings', name: 'settings', component: Settings }
+  { path: '/settings', name: 'settings', component: Settings },
+  { path: '/preview', name: 'preview', component: ArtifactPreviewWindow }
 ]
 
 export default createRouter({
