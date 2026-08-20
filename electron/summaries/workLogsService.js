@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 
 import { collectSummaryEvidence } from './evidenceCollector.js'
 import { commonPolicy } from './promptBuilder.js'
@@ -15,6 +15,11 @@ const STATUS_LABELS = {
   completed: '已完成',
   unclear: '不明确'
 }
+
+// Working files the prepare step writes; they are never generated reports.
+const WORKLOGS_EXCLUDED = new Set(['data.json', 'template.md', 'README.md'])
+const REPORT_EXTENSION = /\.(md|html)$/i
+const HTML_EXTENSION = /\.html$/i
 
 function workLogsError(code, message) {
   return Object.assign(new Error(message), { code })
@@ -184,6 +189,69 @@ export function createWorkLogsService({
   }
 
   return {
+    // Lists generated reports written by the interactive AI CLI. Only
+    // `*.md`/`*.html` files surface, never the working files prepare wrote.
+    // Each entry resolves through the containment check so no name can escape
+    // the workLogs root. Sorted by modification time, newest first.
+    async listReports() {
+      let entries
+      try {
+        entries = await readdir(workLogsRoot, { withFileTypes: true })
+      } catch (error) {
+        if (error?.code === 'ENOENT') return []
+        throw error
+      }
+      const reports = []
+      for (const entry of entries) {
+        if (!entry.isFile()) continue
+        if (WORKLOGS_EXCLUDED.has(entry.name) || !REPORT_EXTENSION.test(entry.name)) continue
+        let safePath
+        try {
+          safePath = resolveWorkLogsFile(workLogsRoot, entry.name)
+        } catch {
+          continue
+        }
+        let mtime
+        try {
+          mtime = (await stat(safePath)).mtimeMs
+        } catch {
+          continue
+        }
+        reports.push({
+          name: entry.name,
+          path: safePath,
+          kind: HTML_EXTENSION.test(entry.name) ? 'html' : 'markdown',
+          mtime
+        })
+      }
+      reports.sort((a, b) => b.mtime - a.mtime)
+      return reports
+    },
+
+    // Reads a single generated report file, refusing working files and any
+    // name that could escape the workLogs root.
+    async readReport(fileName) {
+      if (typeof fileName !== 'string' || WORKLOGS_EXCLUDED.has(fileName)) {
+        throw workLogsError('SUMMARY_WORKLOG_NOT_FOUND', 'Work log not found')
+      }
+      const safePath = resolveWorkLogsFile(workLogsRoot, fileName)
+      let content
+      try {
+        content = await readFile(safePath, 'utf8')
+      } catch (error) {
+        if (error?.code === 'ENOENT') {
+          throw workLogsError('SUMMARY_WORKLOG_NOT_FOUND', 'Work log not found')
+        }
+        throw error
+      }
+      return {
+        name: fileName,
+        path: safePath,
+        kind: HTML_EXTENSION.test(fileName) ? 'html' : 'markdown',
+        content
+      }
+    },
+
     async prepare(input) {
       const request = validatePrepareInput(input, defaultTimezone)
       await mkdir(workLogsRoot, { recursive: true })

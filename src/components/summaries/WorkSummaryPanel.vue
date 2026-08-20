@@ -2,12 +2,21 @@
   <div class="work-summary-panel">
     <div class="toolbar">
       <a-space>
-        <a-select v-model:value="summaries.filters.periodType" allow-clear placeholder="全部周期" :options="periodOptions" @change="reload" />
+        <a-segmented v-model:value="listMode" :options="listModes" @change="onListModeChange" />
+        <a-select
+          v-if="listMode === 'history'"
+          v-model:value="summaries.filters.periodType"
+          allow-clear
+          placeholder="全部周期"
+          :options="periodOptions"
+          @change="reload"
+        />
         <a-button @click="reload">刷新</a-button>
         <a-button type="primary" @click="dialogOpen = true">生成总结</a-button>
       </a-space>
     </div>
     <a-alert v-if="summaries.error" type="error" show-icon :message="summaries.error.message" />
+    <a-alert v-if="workLogsError" type="error" show-icon :message="workLogsError" />
     <a-alert
       v-if="exportMessage"
       style="margin-bottom:12px"
@@ -15,20 +24,43 @@
       show-icon
       :message="exportMessage"
     />
-    <a-spin :spinning="summaries.loading">
+    <a-spin :spinning="summaries.loading || workLogsLoading">
       <a-row :gutter="14">
         <a-col :span="7">
-          <a-list bordered :data-source="summaries.reports" class="report-list">
+          <a-list
+            v-if="listMode === 'worklogs'"
+            bordered
+            :data-source="workLogs"
+            class="report-list"
+          >
             <template #renderItem="{ item }">
-              <a-list-item @click="selectReport(item.id)">
-                <a-list-item-meta :title="`${item.periodType} · v${item.version}`" :description="`${item.status} · ${new Date(item.periodStart).toLocaleDateString()}`" />
+              <a-list-item @click="selectWorkLog(item)">
+                <a-list-item-meta
+                  :title="item.name"
+                  :description="`${kindLabel(item.kind)} · ${new Date(item.mtime).toLocaleString()}`"
+                />
               </a-list-item>
             </template>
           </a-list>
-          <SummaryHistory :versions="summaries.versions" @select="selectReport" @set-current="setCurrent" @retry="retry" @delete-report="deleteReport" />
+          <template v-else>
+            <a-list bordered :data-source="summaries.reports" class="report-list">
+              <template #renderItem="{ item }">
+                <a-list-item @click="selectReport(item.id)">
+                  <a-list-item-meta :title="`${item.periodType} · v${item.version}`" :description="`${item.status} · ${new Date(item.periodStart).toLocaleDateString()}`" />
+                </a-list-item>
+              </template>
+            </a-list>
+            <SummaryHistory :versions="summaries.versions" @select="selectReport" @set-current="setCurrent" @retry="retry" @delete-report="deleteReport" />
+          </template>
         </a-col>
         <a-col :span="17">
+          <WorkLogReportView
+            v-if="listMode === 'worklogs'"
+            :work-log="selectedWorkLog"
+            @open-html="openWorkLogHtml"
+          />
           <SummaryReportView
+            v-else
             :report="summaries.selectedReport"
             :progress="summaries.progress[summaries.selectedReport?.id]"
             :html-exporting="exportingHtml"
@@ -53,10 +85,12 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useSummariesStore } from '../../stores/summaries.js'
+import ipc from '../../ipc.js'
 import SummaryGenerateDialog from './SummaryGenerateDialog.vue'
 import SummaryHtmlStyleDialog from './SummaryHtmlStyleDialog.vue'
 import SummaryHistory from './SummaryHistory.vue'
 import SummaryReportView from './SummaryReportView.vue'
+import WorkLogReportView from './WorkLogReportView.vue'
 
 const summaries = useSummariesStore()
 const dialogOpen = ref(false)
@@ -68,7 +102,18 @@ const periodOptions = [
   { label: '日', value: 'day' }, { label: '周', value: 'week' }, { label: '月', value: 'month' },
   { label: '季度', value: 'quarter' }, { label: '年', value: 'year' }
 ]
+const listModes = [
+  { label: '工作日志', value: 'worklogs' },
+  { label: '历史报告', value: 'history' }
+]
+const listMode = ref('worklogs')
+const workLogs = ref([])
+const workLogsLoading = ref(false)
+const workLogsError = ref('')
+const selectedWorkLog = ref(null)
+
 onMounted(async () => {
+  loadWorkLogs()
   try {
     await summaries.init()
     const current = summaries.reports.find(report => report.isCurrent) || summaries.reports[0]
@@ -76,11 +121,47 @@ onMounted(async () => {
   } catch (error) { summaries.error = error }
 })
 onUnmounted(() => summaries.dispose())
+
+async function loadWorkLogs() {
+  workLogsLoading.value = true
+  workLogsError.value = ''
+  try {
+    workLogs.value = await ipc.listSummaryWorkLogs()
+  } catch (error) {
+    workLogsError.value = error?.message || '无法读取工作日志'
+  } finally {
+    workLogsLoading.value = false
+  }
+}
+
+function kindLabel(kind) {
+  return kind === 'html' ? 'HTML 报告' : 'Markdown 报告'
+}
+
+function selectWorkLog(item) {
+  selectedWorkLog.value = item
+}
+
+function openWorkLogHtml(path) {
+  return ipc.openPath(path)
+}
+
+function onListModeChange() {
+  if (listMode.value === 'worklogs') {
+    loadWorkLogs()
+  } else {
+    reload()
+  }
+}
+
 async function safely(operation) {
   try { summaries.error = null; return await operation() }
   catch (error) { summaries.error = error; return null }
 }
-function reload() { return safely(() => summaries.loadReports()) }
+function reload() {
+  if (listMode.value === 'worklogs') return loadWorkLogs()
+  return safely(() => summaries.loadReports())
+}
 function selectReport(reportId) { return safely(() => summaries.selectReport(reportId)) }
 function setCurrent(reportId) { return safely(() => summaries.setCurrent(reportId)) }
 function retry(report) { return safely(() => summaries.retry(report)) }

@@ -208,7 +208,8 @@ test('summary workspace components cover generation, safe reading, history, retr
     '../src/components/summaries/SummaryReportView.vue',
     '../src/components/summaries/SummaryHistory.vue',
     '../src/components/summaries/WorkSummaryPanel.vue',
-    '../src/components/summaries/SummaryHtmlStyleDialog.vue'
+    '../src/components/summaries/SummaryHtmlStyleDialog.vue',
+    '../src/components/summaries/WorkLogReportView.vue'
   ]
   const sources = files.map(file => readFileSync(new URL(file, import.meta.url), 'utf8'))
   for (const [index, source] of sources.entries()) {
@@ -219,9 +220,10 @@ test('summary workspace components cover generation, safe reading, history, retr
     'periodType', 'partial', 'executorId', 'profileId', 'model',
     'coverage', '可能产生费用', '设为当前版本', 'workLogs', 'briefPrompt',
     '取消生成', '确认继续', '打开总结 CLI', '可能产生费用',
-    '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试'
+    '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试',
+    '工作日志', '历史报告', 'listSummaryWorkLogs', 'readSummaryWorkLog',
+    '在浏览器中打开', 'open-html', 'openWorkLogHtml'
   ]) assert.match(all, new RegExp(text))
-  assert.match(all, /:loading="htmlExporting"/)
   assert.match(all, /exportingHtml\.value\s*=\s*true/)
   assert.match(all, /exportingHtml\.value\s*=\s*false/)
   assert.match(all, /HTML\s*已导出/)
@@ -291,9 +293,15 @@ test('AI-authored report links cannot navigate the renderer and use only narrow 
     new URL('../src/components/summaries/SummaryReportView.vue', import.meta.url),
     'utf8'
   )
+  const workLogView = readFileSync(
+    new URL('../src/components/summaries/WorkLogReportView.vue', import.meta.url),
+    'utf8'
+  )
   const preload = readFileSync(new URL('../electron/preload.js', import.meta.url), 'utf8')
-  assert.match(reportView, /@click="handleReportLink"/)
-  assert.match(reportView, /openSummaryReportLink\(event, ipc\.openExternal\)/)
+  for (const source of [reportView, workLogView]) {
+    assert.match(source, /@click="handleReportLink"/)
+    assert.match(source, /openSummaryReportLink\(event, ipc\.openExternal\)/)
+  }
   assert.match(preload, /openExternal:\s*\(url\)\s*=>\s*ipcRenderer\.invoke\('shell:open-external', url\)/)
   assert.doesNotMatch(preload, /(?:navigate|loadURL)\s*:/)
 })

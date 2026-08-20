@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -155,4 +155,66 @@ test('prepare writes only working files and never the per-period report', async 
       reportFile
     )
   }
+})
+
+test('listReports returns generated reports newest-first and hides working files', async (t) => {
+  const workLogsRoot = await createTempRoot()
+  t.after(() => rm(workLogsRoot, { recursive: true, force: true }))
+  const service = createService(workLogsRoot)
+  const base = Date.UTC(2026, 7, 10)
+
+  await service.prepare({ periodType: 'week', start: START, endExclusive: END, timezone: 'Asia/Shanghai' })
+  await writeFile(join(workLogsRoot, '2026-W33-summary.md'), '# 周报', 'utf8')
+  await writeFile(join(workLogsRoot, '2026-W33-summary.html'), '<h1>周报</h1>', 'utf8')
+  await writeFile(join(workLogsRoot, '2026-W34-summary.md'), '# 次周报', 'utf8')
+  await utimes(join(workLogsRoot, '2026-W33-summary.md'), new Date(base), new Date(base))
+  await utimes(join(workLogsRoot, '2026-W33-summary.html'), new Date(base + 2000), new Date(base + 2000))
+  await utimes(join(workLogsRoot, '2026-W34-summary.md'), new Date(base + 4000), new Date(base + 4000))
+
+  const reports = await service.listReports()
+  assert.deepEqual(reports.map(r => r.name), ['2026-W34-summary.md', '2026-W33-summary.html', '2026-W33-summary.md'])
+  assert.equal(reports[0].kind, 'markdown')
+  assert.equal(reports[1].kind, 'html')
+  assert.equal(reports[2].kind, 'markdown')
+  for (const report of reports) {
+    assert.equal(typeof report.mtime, 'number')
+    assert.ok(report.path.startsWith(workLogsRoot))
+    assert.ok(!['data.json', 'template.md', 'README.md'].includes(report.name))
+  }
+})
+
+test('listReports returns an empty list when the workLogs directory does not exist', async (t) => {
+  const workLogsRoot = join(tmpdir(), `missing-worklogs-${Date.now()}`)
+  t.after(() => rm(workLogsRoot, { recursive: true, force: true }))
+  const service = createService(workLogsRoot)
+  assert.deepEqual(await service.listReports(), [])
+})
+
+test('readReport returns the report content and refuses working or escaping names', async (t) => {
+  const workLogsRoot = await createTempRoot()
+  t.after(() => rm(workLogsRoot, { recursive: true, force: true }))
+  const service = createService(workLogsRoot)
+
+  await service.prepare({ periodType: 'week', start: START, endExclusive: END, timezone: 'Asia/Shanghai' })
+  await writeFile(join(workLogsRoot, '2026-W33-summary.md'), '# 周报正文', 'utf8')
+  await writeFile(join(workLogsRoot, '2026-W33-summary.html'), '<h1>周报正文</h1>', 'utf8')
+
+  const read = await service.readReport('2026-W33-summary.md')
+  assert.equal(read.name, '2026-W33-summary.md')
+  assert.equal(read.kind, 'markdown')
+  assert.equal(read.content, '# 周报正文')
+  assert.ok(read.path.startsWith(workLogsRoot))
+
+  const readHtml = await service.readReport('2026-W33-summary.html')
+  assert.equal(readHtml.kind, 'html')
+  assert.equal(readHtml.content, '<h1>周报正文</h1>')
+
+  for (const name of ['template.md', 'README.md', 'data.json', '../escape.md', '..\\escape.md', 'a/b.md', '.hidden.md']) {
+    await assert.rejects(
+      () => service.readReport(name),
+      error => ['SUMMARY_WORKLOG_NOT_FOUND', 'SUMMARY_STORAGE_PATH_UNSAFE'].includes(error?.code),
+      name
+    )
+  }
+  await assert.rejects(() => service.readReport('missing.md'), error => error?.code === 'SUMMARY_WORKLOG_NOT_FOUND')
 })

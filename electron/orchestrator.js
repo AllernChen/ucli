@@ -160,7 +160,9 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   SUMMARY_EXECUTOR_UNSAFE: 'Selected AI CLI cannot guarantee tool-free summary execution',
   SUMMARY_PROFILE_UNAVAILABLE: 'Select an available default AI CLI profile',
   SUMMARY_DISCLOSURE_REQUIRED: 'Automatic summaries require disclosure acceptance',
-  SUMMARY_PREPARE_INVALID: 'Invalid summary period'
+  SUMMARY_PREPARE_INVALID: 'Invalid summary period',
+  SUMMARY_WORKLOG_NOT_FOUND: 'Work log was not found',
+  SUMMARY_STORAGE_PATH_UNSAFE: 'Invalid summary work log name'
 })
 
 const STORAGE_CATEGORY_ID_SET = new Set(STORAGE_CATEGORY_IDS)
@@ -376,6 +378,11 @@ function validateSummaryPrepare(value) {
   return result
 }
 
+function validateSummaryWorkLogName(value) {
+  if (typeof value !== 'string' || !value || value.length > 128) throw invalidSummaryIpc()
+  return value
+}
+
 function validateSummaryExport(value, { html = false } = {}) {
   const fields = html ? SUMMARY_EXPORT_FIELDS : new Set(['reportId'])
   const result = { ...summaryObject(value, fields), reportId: validateSummaryId(value.reportId) }
@@ -540,6 +547,8 @@ export function registerSummaryIpc({ ipcMain, service }) {
   ipcMain.handle('summary:get-report', safeSummaryEnvelope((_event, value) => service.getReport(validateSummaryId(value))))
   ipcMain.handle('summary:generate', safeSummaryEnvelope((_event, value) => service.generate(validateSummaryGenerate(value))))
   ipcMain.handle('summary:prepare', safeSummaryEnvelope((_event, value) => service.prepare(validateSummaryPrepare(value))))
+  ipcMain.handle('summary:list-worklogs', safeSummaryEnvelope(() => service.listWorkLogs()))
+  ipcMain.handle('summary:read-worklog', safeSummaryEnvelope((_event, value) => service.readWorkLog(validateSummaryWorkLogName(value))))
   ipcMain.handle('summary:cancel', safeSummaryEnvelope((_event, value) => service.cancel(validateSummaryId(value))))
   ipcMain.handle('summary:set-current', safeSummaryEnvelope((_event, value) => service.setCurrent(validateSummaryId(value))))
   ipcMain.handle('summary:delete', safeSummaryEnvelope((_event, value) => service.deleteReport(validateSummaryId(value))))
@@ -2782,6 +2791,14 @@ export function createOrchestrator() {
         prepare: input => {
           if (!workLogsService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
           return workLogsService.prepare(input)
+        },
+        listWorkLogs: () => {
+          if (!workLogsService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          return workLogsService.listReports()
+        },
+        readWorkLog: fileName => {
+          if (!workLogsService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          return workLogsService.readReport(fileName)
         },
         cancel: reportId => {
           if (!summaryJobService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
