@@ -9,6 +9,7 @@ import {
   assertInsideDirectory,
   resolveArtifactAbsolutePath
 } from '../electron/sessionArtifacts.js'
+import { createSessionArtifactsService } from '../electron/sessionArtifactsService.js'
 
 test('parseClaudeArtifactPaths extracts tool_use file_path and ignores non-file tools', () => {
   const records = [{
@@ -75,4 +76,112 @@ test('resolveArtifactAbsolutePath handles win32/posix/relative/none', () => {
   assert.equal(resolveArtifactAbsolutePath('rel.md', 'C:\\proj'), 'C:\\proj\\rel.md')
   assert.equal(resolveArtifactAbsolutePath('rel.md', '/home/u'), '/home/u/rel.md')
   assert.equal(resolveArtifactAbsolutePath('rel.md', ''), null)
+})
+
+test('assertInsideDirectory rejects non-absolute and non-string inputs', () => {
+  assert.throws(() => assertInsideDirectory('C:/proj', 'a.md'), { code: 'ARTIFACT_PATH_UNSAFE' })
+  assert.throws(() => assertInsideDirectory('proj', 'C:/proj/a.md'), { code: 'ARTIFACT_PATH_UNSAFE' })
+  assert.throws(() => assertInsideDirectory('C:/proj', '  '), { code: 'ARTIFACT_PATH_UNSAFE' })
+  assert.throws(() => assertInsideDirectory('C:/proj', 42), { code: 'ARTIFACT_PATH_UNSAFE' })
+})
+
+test('resolveArtifactAbsolutePath returns null for empty value', () => {
+  assert.equal(resolveArtifactAbsolutePath('', 'C:/proj'), null)
+})
+
+test('listArtifacts filters non-files, dedupes, and marks deepseek-harness missing', async () => {
+  const claude = createSessionArtifactsService({
+    resolveSession: () => ({ adapterId: 'claude', cwd: 'C:\\proj', cliSessionId: 's1' }),
+    resolveClaudeTranscript: () => 'C:\\proj\\.claude\\t.jsonl',
+    readFile: async () => '',
+    parseJsonl: async () => [
+      { message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: 'a.md' } }] } },
+      { message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: 'a.md' } }] } },
+      { message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: 'sub\\dir' } }] } }
+    ],
+    realpathFile: async (p) => p,
+    statFile: async (p) => ({ isFile: () => !p.endsWith('dir'), size: 10, mtimeMs: 1 })
+  })
+  const result = await claude.listArtifacts('s1')
+  assert.equal(result.missing, false)
+  assert.equal(result.artifacts.length, 1)
+  assert.equal(result.artifacts[0].absolutePath, 'C:\\proj\\a.md')
+  assert.equal(result.artifacts[0].name, 'a.md')
+  assert.equal(result.artifacts[0].kind, 'markdown')
+
+  const dsh = createSessionArtifactsService({
+    resolveSession: () => ({ adapterId: 'deepseek-harness', cwd: 'C:\\proj', cliSessionId: 's2' })
+  })
+  const dshResult = await dsh.listArtifacts('s2')
+  assert.equal(dshResult.missing, true)
+  assert.deepEqual(dshResult.artifacts, [])
+})
+
+test('listArtifacts caches the OpenCode export across calls', async () => {
+  let exportCalls = 0
+  const service = createSessionArtifactsService({
+    resolveSession: () => ({ adapterId: 'opencode', cwd: 'C:\\proj', cliSessionId: 's1' }),
+    exportOpenCode: async () => {
+      exportCalls += 1
+      return { messages: [{ parts: [{ type: 'tool', tool: 'write', state: { input: { filePath: 'x.txt' } } }] }] }
+    },
+    realpathFile: async (p) => p,
+    statFile: async () => ({ isFile: () => true, size: 10, mtimeMs: 1 }),
+    now: () => 0
+  })
+  const first = await service.listArtifacts('s1')
+  const second = await service.listArtifacts('s1')
+  assert.equal(exportCalls, 1)
+  assert.equal(first.artifacts[0].name, 'x.txt')
+  assert.equal(second.artifacts[0].absolutePath, 'C:\\proj\\x.txt')
+})
+
+test('readArtifact rejects symlink escaping cwd', async () => {
+  const service = createSessionArtifactsService({
+    resolveSession: () => ({ adapterId: 'claude', cwd: 'C:\\proj', cliSessionId: 's1' }),
+    realpathFile: async () => 'C:\\etc\\passwd',
+    statFile: async () => ({ isFile: () => true, size: 10 }),
+    readFile: async () => 'secret'
+  })
+  await assert.rejects(
+    () => service.readArtifact('s1', 'C:\\proj\\link', { kind: 'text' }),
+    { code: 'ARTIFACT_PATH_UNSAFE' }
+  )
+})
+
+test('readArtifact rejects oversized files', async () => {
+  const service = createSessionArtifactsService({
+    resolveSession: () => ({ adapterId: 'claude', cwd: 'C:\\proj', cliSessionId: 's1' }),
+    realpathFile: async (p) => p,
+    statFile: async () => ({ isFile: () => true, size: 11 * 1024 * 1024 })
+  })
+  await assert.rejects(
+    () => service.readArtifact('s1', 'C:\\proj\\big.txt', { kind: 'text' }),
+    { code: 'ARTIFACT_TOO_LARGE' }
+  )
+})
+
+test('readArtifact returns text for markdown and base64 for images', async () => {
+  const service = createSessionArtifactsService({
+    resolveSession: () => ({ adapterId: 'claude', cwd: 'C:\\proj', cliSessionId: 's1' }),
+    realpathFile: async (p) => p,
+    statFile: async () => ({ isFile: () => true, size: 10 }),
+    readFile: async (p, enc) => (enc ? '# hi' : Buffer.from([1, 2, 3]))
+  })
+  const text = await service.readArtifact('s1', 'C:\\proj\\a.md', { kind: 'markdown' })
+  assert.deepEqual(text, { kind: 'markdown', text: '# hi', truncated: false })
+  const image = await service.readArtifact('s1', 'C:\\proj\\a.png', { kind: 'image' })
+  assert.equal(image.kind, 'image')
+  assert.equal(image.base64, Buffer.from([1, 2, 3]).toString('base64'))
+  assert.equal(image.mimeType, 'image/png')
+})
+
+test('readArtifact throws ARTIFACT_SESSION_NOT_FOUND for unknown session', async () => {
+  const service = createSessionArtifactsService({
+    resolveSession: () => null
+  })
+  await assert.rejects(
+    () => service.readArtifact('nope', 'C:\\proj\\a.md', { kind: 'text' }),
+    { code: 'ARTIFACT_SESSION_NOT_FOUND' }
+  )
 })
