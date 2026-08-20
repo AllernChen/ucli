@@ -136,6 +136,12 @@ function onMenuClick({ key }) {
 
 let stopSessionFocus = null
 onMounted(async () => {
+  // Wait for the initial navigation to resolve before checking the route.
+  // The artifact preview window loads with a `#/preview` hash, but at mount
+  // time the router has not yet navigated there (route.name is still the
+  // START_LOCATION), so a synchronous check would run the main-app init and
+  // possibly router.replace('/session') away from the preview page.
+  await router.isReady()
   if (route.name === 'preview') return
   void updates.initialize()
   // Load persisted workbench state to decide initial route

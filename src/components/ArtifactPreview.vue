@@ -16,7 +16,13 @@
         v-html="markdownHtml"
         @click="onLinkClick"
       ></div>
-      <div v-else class="markdown-body" v-html="htmlSafe" @click="onLinkClick"></div>
+      <iframe
+        v-else
+        class="html-frame"
+        :srcdoc="htmlSafe"
+        sandbox="allow-same-origin"
+        title="HTML 预览"
+      ></iframe>
     </template>
     <div v-else class="artifact-state">暂无内容</div>
   </div>
@@ -77,4 +83,5 @@ watch(() => [props.sessionId, props.artifact?.absolutePath], load, { immediate: 
 .artifact-text { white-space: pre-wrap; word-break: break-all; font-family: monospace; font-size: 12px; }
 .markdown-body { line-height: 1.75; }
 .markdown-body :deep(pre) { overflow: auto; padding: 12px; background: #f5f5f5; }
+.html-frame { width: 100%; height: 100%; min-height: 420px; border: 0; }
 </style>
