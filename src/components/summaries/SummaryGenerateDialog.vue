@@ -46,17 +46,14 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
 import { ipc } from '../../ipc.js'
 import { useSessionsStore } from '../../stores/sessions.js'
 import { useSummariesStore } from '../../stores/summaries.js'
 
 const SUMMARY_CLI_IDS = ['claude', 'codex', 'opencode', 'ucode']
-const SUMMARY_TUI_ADAPTERS = ['opencode', 'ucode']
 
 const props = defineProps({ open: Boolean })
-const emit = defineEmits(['update:open'])
-const router = useRouter()
+const emit = defineEmits(['update:open', 'open'])
 const summaries = useSummariesStore()
 const sessions = useSessionsStore()
 const tools = ref([])
@@ -140,21 +137,6 @@ function periodRange(periodType, partial) {
 function clearExecutorDefaults() { form.profileId = null; form.model = null }
 function close() { emit('update:open', false) }
 
-function waitForReady(sessionId, timeoutMs = 60_000) {
-  return new Promise((resolve) => {
-    if (sessions.byId(sessionId)?.lastActivity === '已就绪') { resolve(); return }
-    let timer = null
-    const off = ipc.on('session:event', (evt) => {
-      if (evt.sessionId === sessionId && evt.type === 'ready') {
-        off()
-        if (timer) clearTimeout(timer)
-        resolve()
-      }
-    })
-    timer = setTimeout(() => { off(); resolve() }, timeoutMs)
-  })
-}
-
 async function submit() {
   const executorId = selectedExecutor.value
   if (!executorId) return
@@ -176,17 +158,11 @@ async function submit() {
       profileId: selectedProfile.value || undefined,
       model: selectedModel.value || undefined
     })
-    // SessionDetail owns startAdapter (via pendingAssign) so the adapter boots
-    // exactly once; we inject the brief prompt once the CLI reports ready.
-    sessions.pendingAssign = sessionId
-    router.push('/session')
+    // The work summary panel owns adapter startup (via the embedded terminal)
+    // and auto-sends the brief prompt once the CLI reports ready; this dialog
+    // only hands the session off so the user stays on the summary page.
+    emit('open', { sessionId, adapterId: executorId, briefPrompt: prepared.briefPrompt, periodLabel })
     close()
-    waitForReady(sessionId).then(() => {
-      if (SUMMARY_TUI_ADAPTERS.includes(executorId)) {
-        return ipc.sendTerminalInput(sessionId, prepared.briefPrompt + '\r')
-      }
-      return ipc.sendTurn(sessionId, prepared.briefPrompt)
-    }).catch((error) => { summaries.error = error })
   } catch (error) {
     summaries.error = error
   } finally { submitting.value = false }

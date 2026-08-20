@@ -26,7 +26,7 @@
     />
     <a-spin :spinning="summaries.loading || workLogsLoading">
       <a-row :gutter="14">
-        <a-col :span="7">
+        <a-col :span="6">
           <a-list
             v-if="listMode === 'worklogs'"
             bordered
@@ -53,7 +53,21 @@
             <SummaryHistory :versions="summaries.versions" @select="selectReport" @set-current="setCurrent" @retry="retry" @delete-report="deleteReport" />
           </template>
         </a-col>
-        <a-col :span="17">
+        <a-col :span="12">
+          <div v-if="activeSummarySessionId" class="summary-cli">
+            <div class="summary-cli-header">
+              <a-tag color="blue">{{ activeSummaryMeta?.periodLabel }}</a-tag>
+              <span class="summary-cli-adapter">{{ activeSummaryMeta?.adapterId }} · 内嵌 CLI</span>
+            </div>
+            <SessionTerminal
+              :key="activeSummarySessionId"
+              ref="summaryTerminal"
+              :session-id="activeSummarySessionId"
+            />
+          </div>
+          <a-empty v-else description="生成总结后，AI CLI 将在此处打开" />
+        </a-col>
+        <a-col :span="6">
           <WorkLogReportView
             v-if="listMode === 'worklogs'"
             :work-log="selectedWorkLog"
@@ -73,7 +87,7 @@
         </a-col>
       </a-row>
     </a-spin>
-    <SummaryGenerateDialog v-model:open="dialogOpen" />
+    <SummaryGenerateDialog v-model:open="dialogOpen" @open="onSummaryOpen" />
     <SummaryHtmlStyleDialog
       v-model:open="htmlStyleOpen"
       :confirm-loading="exportingHtml"
@@ -83,9 +97,11 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useSummariesStore } from '../../stores/summaries.js'
+import { useSessionsStore } from '../../stores/sessions.js'
 import ipc from '../../ipc.js'
+import SessionTerminal from '../SessionTerminal.vue'
 import SummaryGenerateDialog from './SummaryGenerateDialog.vue'
 import SummaryHtmlStyleDialog from './SummaryHtmlStyleDialog.vue'
 import SummaryHistory from './SummaryHistory.vue'
@@ -93,6 +109,7 @@ import SummaryReportView from './SummaryReportView.vue'
 import WorkLogReportView from './WorkLogReportView.vue'
 
 const summaries = useSummariesStore()
+const sessions = useSessionsStore()
 const dialogOpen = ref(false)
 const exportingHtml = ref(false)
 const exportMessage = ref('')
@@ -111,6 +128,10 @@ const workLogs = ref([])
 const workLogsLoading = ref(false)
 const workLogsError = ref('')
 const selectedWorkLog = ref(null)
+const activeSummarySessionId = ref(null)
+const activeSummaryMeta = ref(null)
+const summaryTerminal = ref(null)
+let workLogPollTimer = null
 
 onMounted(async () => {
   loadWorkLogs()
@@ -120,7 +141,10 @@ onMounted(async () => {
     if (current) await summaries.selectReport(current.id)
   } catch (error) { summaries.error = error }
 })
-onUnmounted(() => summaries.dispose())
+onUnmounted(() => {
+  stopWorkLogPolling()
+  summaries.dispose()
+})
 
 async function loadWorkLogs() {
   workLogsLoading.value = true
@@ -151,6 +175,63 @@ function onListModeChange() {
     loadWorkLogs()
   } else {
     reload()
+  }
+}
+
+// --- Embedded summary CLI ---
+async function onSummaryOpen(payload) {
+  const { sessionId, adapterId, briefPrompt, periodLabel } = payload
+  activeSummarySessionId.value = sessionId
+  activeSummaryMeta.value = { adapterId, periodLabel }
+  // Ensure SessionTerminal has mounted and subscribed to terminal output
+  // before the adapter boots, so early output is not lost.
+  await nextTick()
+  startSummarySession(sessionId, briefPrompt)
+}
+
+async function startSummarySession(sessionId, briefPrompt) {
+  try {
+    await ipc.startAdapter(sessionId)
+    await waitForReady(sessionId)
+    await ipc.sendTurn(sessionId, briefPrompt)
+    startWorkLogPolling()
+  } catch (error) {
+    summaries.error = error
+  }
+}
+
+function waitForReady(sessionId, timeoutMs = 60_000) {
+  return new Promise((resolve) => {
+    if (sessions.byId(sessionId)?.lastActivity === '已就绪') { resolve(); return }
+    let timer = null
+    const off = ipc.on('session:event', (evt) => {
+      if (evt.sessionId === sessionId && evt.type === 'ready') {
+        off()
+        if (timer) clearTimeout(timer)
+        resolve()
+      }
+    })
+    timer = setTimeout(() => { off(); resolve() }, timeoutMs)
+  })
+}
+
+// While the summary CLI is alive, refresh the work log list so reports the CLI
+// writes land in the left column without a manual refresh.
+function startWorkLogPolling() {
+  stopWorkLogPolling()
+  workLogPollTimer = setInterval(() => {
+    const sessionId = activeSummarySessionId.value
+    if (!sessionId) { stopWorkLogPolling(); return }
+    const status = sessions.byId(sessionId)?.status
+    if (status === 'exited' || status === 'offline') { stopWorkLogPolling(); return }
+    loadWorkLogs()
+  }, 3000)
+}
+
+function stopWorkLogPolling() {
+  if (workLogPollTimer) {
+    clearInterval(workLogPollTimer)
+    workLogPollTimer = null
   }
 }
 
@@ -197,4 +278,4 @@ async function exportHtml(style) {
   }
 }
 </script>
-<style scoped>.toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}.report-list{margin-bottom:12px;max-height:360px;overflow:auto}.report-list :deep(.ant-list-item){cursor:pointer}</style>
+<style scoped>.toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}.report-list{margin-bottom:12px;max-height:360px;overflow:auto}.report-list :deep(.ant-list-item){cursor:pointer}.summary-cli{display:flex;flex-direction:column;height:100%;min-height:420px}.summary-cli-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}.summary-cli-adapter{color:#8c8c8c;font-size:12px}.summary-cli .session-terminal{flex:1}</style>
