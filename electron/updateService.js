@@ -51,8 +51,12 @@ export function createUpdateService({
   let initialTimer = null
   let periodicTimer = null
   let installTimer = null
+  let retryTimer = null
+  let retryScheduled = false
+  let firstCheckPending = false
   let started = false
   let intervalMs = 21600000
+  let retryDelayMs = 60000
 
   function snapshot() { return { ...state } }
 
@@ -88,11 +92,27 @@ export function createUpdateService({
   }
 
   function clearTimer(name) {
-    const id = name === 'initial' ? initialTimer : name === 'periodic' ? periodicTimer : installTimer
+    const id = name === 'initial' ? initialTimer
+      : name === 'periodic' ? periodicTimer
+      : name === 'retry' ? retryTimer
+      : installTimer
     if (id != null) cancelSchedule(id)
     if (name === 'initial') initialTimer = null
     else if (name === 'periodic') periodicTimer = null
+    else if (name === 'retry') retryTimer = null
     else installTimer = null
+  }
+
+  // A transient failure on the very first startup check should not leave the
+  // footer stuck for six hours. Re-check once shortly after, then fall back to
+  // the long periodic interval. Only the first failure of the session re-arms.
+  function scheduleSoonRetry() {
+    if (!started || retryTimer != null || retryScheduled || !firstCheckPending) return
+    retryScheduled = true
+    retryTimer = schedule(async () => {
+      retryTimer = null
+      if (PERIODIC_STATUSES.has(state.status)) await check()
+    }, retryDelayMs)
   }
 
   function schedulePeriodic() {
@@ -158,6 +178,7 @@ export function createUpdateService({
   updater.on('error', (error) => {
     console.error('[update] update check failed:', error?.message || error)
     fail('更新检查失败')
+    scheduleSoonRetry()
   })
 
   function check() {
@@ -183,11 +204,16 @@ export function createUpdateService({
       } catch (error) {
         console.error('[update] update check failed:', error?.message || error)
         fail('更新检查失败')
+        scheduleSoonRetry()
       }
       emit({ checkedAt: safeInteger(now()) })
       return snapshot()
     })().finally(() => {
       checkPromise = null
+      if (state.status !== 'error') {
+        firstCheckPending = false
+        retryScheduled = false
+      }
       if (started) {
         if (PERIODIC_STATUSES.has(state.status)) schedulePeriodic()
         else clearTimer('periodic')
@@ -227,9 +253,13 @@ export function createUpdateService({
     const config = typeof options === 'number' ? { initialDelayMs: options } : options
     const initialDelayMs = safeInteger(config.initialDelayMs, 3000)
     intervalMs = safeInteger(config.intervalMs, 21600000)
+    retryDelayMs = safeInteger(config.retryDelayMs, 60000)
     started = true
+    firstCheckPending = true
+    retryScheduled = false
     clearTimer('initial')
     clearTimer('periodic')
+    clearTimer('retry')
     initialTimer = schedule(async () => {
       initialTimer = null
       if (PERIODIC_STATUSES.has(state.status)) await check()
@@ -242,6 +272,7 @@ export function createUpdateService({
     started = false
     clearTimer('initial')
     clearTimer('periodic')
+    clearTimer('retry')
     clearTimer('install')
   }
 
