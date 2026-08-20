@@ -76,8 +76,9 @@ import { createReportExportService } from './summaries/reportExportService.js'
 import { createSummaryJobService } from './summaries/summaryJobService.js'
 import { createSummaryRunner } from './summaries/summaryRunner.js'
 import { createSummaryCacheService } from './summaries/summaryCacheService.js'
-import { resolveSummaryStorageRoot, resolveSummaryChild } from './summaries/summaryStoragePaths.js'
+import { resolveSummaryStorageRoot, resolveSummaryChild, resolveSummaryWorkLogsRoot } from './summaries/summaryStoragePaths.js'
 import { createSummaryWorkspaceService } from './summaries/summaryWorkspaceService.js'
+import { createWorkLogsService } from './summaries/workLogsService.js'
 import { runSummaryMaintenance, runSummaryStartupLifecycle, safeStartupFailure } from './startupLifecycle.js'
 import { SUMMARY_THEME_IDS } from './summaries/summaryThemeCatalog.js'
 import {
@@ -136,6 +137,7 @@ const SUMMARY_GENERATE_FIELDS = new Set([
   'periodType', 'start', 'endExclusive', 'timezone', 'partial',
   'executorId', 'profileId', 'model'
 ])
+const SUMMARY_PREPARE_FIELDS = new Set(['periodType', 'start', 'endExclusive', 'timezone'])
 const SUMMARY_CONFIRM_FIELDS = new Set(['reportId', 'confirm', 'confirmationCallLimit'])
 const SUMMARY_EXPORT_FIELDS = new Set(['reportId', 'style', 'executorId', 'profileId', 'model'])
 const SUMMARY_STYLE_FIELDS = new Set(['mode', 'themeId', 'requirement'])
@@ -157,7 +159,8 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   SUMMARY_EXECUTOR_AUTH_UNAVAILABLE: 'Selected AI CLI requires an isolated summary credential',
   SUMMARY_EXECUTOR_UNSAFE: 'Selected AI CLI cannot guarantee tool-free summary execution',
   SUMMARY_PROFILE_UNAVAILABLE: 'Select an available default AI CLI profile',
-  SUMMARY_DISCLOSURE_REQUIRED: 'Automatic summaries require disclosure acceptance'
+  SUMMARY_DISCLOSURE_REQUIRED: 'Automatic summaries require disclosure acceptance',
+  SUMMARY_PREPARE_INVALID: 'Invalid summary period'
 })
 
 const STORAGE_CATEGORY_ID_SET = new Set(STORAGE_CATEGORY_IDS)
@@ -363,6 +366,16 @@ function validateSummaryGenerate(value) {
   return { action: 'generate', ...result }
 }
 
+function validateSummaryPrepare(value) {
+  const result = { ...summaryObject(value, SUMMARY_PREPARE_FIELDS) }
+  if (!SUMMARY_PERIODS.has(result.periodType) || !Number.isInteger(result.start) ||
+    !Number.isInteger(result.endExclusive) || result.start >= result.endExclusive) {
+    throw invalidSummaryIpc()
+  }
+  result.timezone = validateSummaryTimezone(result.timezone)
+  return result
+}
+
 function validateSummaryExport(value, { html = false } = {}) {
   const fields = html ? SUMMARY_EXPORT_FIELDS : new Set(['reportId'])
   const result = { ...summaryObject(value, fields), reportId: validateSummaryId(value.reportId) }
@@ -526,6 +539,7 @@ export function registerSummaryIpc({ ipcMain, service }) {
   ipcMain.handle('summary:list-reports', safeSummaryEnvelope((_event, value = {}) => service.listReports(validateSummaryFilters(value))))
   ipcMain.handle('summary:get-report', safeSummaryEnvelope((_event, value) => service.getReport(validateSummaryId(value))))
   ipcMain.handle('summary:generate', safeSummaryEnvelope((_event, value) => service.generate(validateSummaryGenerate(value))))
+  ipcMain.handle('summary:prepare', safeSummaryEnvelope((_event, value) => service.prepare(validateSummaryPrepare(value))))
   ipcMain.handle('summary:cancel', safeSummaryEnvelope((_event, value) => service.cancel(validateSummaryId(value))))
   ipcMain.handle('summary:set-current', safeSummaryEnvelope((_event, value) => service.setCurrent(validateSummaryId(value))))
   ipcMain.handle('summary:delete', safeSummaryEnvelope((_event, value) => service.deleteReport(validateSummaryId(value))))
@@ -700,6 +714,7 @@ export function createOrchestrator() {
   let summaryExportService = null
   let summaryWorkspaceService = null
   let summaryCacheService = null
+  let workLogsService = null
   let storageService = null
   let dshProfileManager = null
   let dshRuntimeManager = null
@@ -921,20 +936,31 @@ export function createOrchestrator() {
         }).run(options)
       }
     }
+    const snapshotSummaryUsage = ({ periodType, start, endExclusive, timezone }) =>
+      usageQueryService.queryUsage({
+        granularity: summaryUsageGranularity(periodType),
+        start,
+        endExclusive,
+        timeZone: timezone
+      })
     summaryJobService = createSummaryJobService({
       repository: summaryRepository,
       evidenceCollector: createEvidenceCollector({ historyService }),
-      snapshotUsage: ({ periodType, start, endExclusive, timezone }) =>
-        usageQueryService.queryUsage({
-          granularity: summaryUsageGranularity(periodType),
-          start,
-          endExclusive,
-          timeZone: timezone
-        }),
+      snapshotUsage: snapshotSummaryUsage,
       pipeline,
       workspaceService: summaryWorkspaceService,
       listSessions,
       defaultTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    })
+    workLogsService = createWorkLogsService({
+      workLogsRoot: resolveSummaryWorkLogsRoot({
+        platform: process.platform,
+        env: process.env,
+        homeDirectory: homedir()
+      }),
+      historyService,
+      listSessions,
+      snapshotUsage: snapshotSummaryUsage
     })
     summaryJobService.subscribe((report, pipelineProgress) => {
       log('summary-operation', createSummaryOperationalLogEntry(report, pipelineProgress))
@@ -2747,6 +2773,10 @@ export function createOrchestrator() {
           })
           const { reportId } = summaryJobService.generate({ ...validated, generatedBy: 'manual' })
           return { reportId }
+        },
+        prepare: input => {
+          if (!workLogsService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          return workLogsService.prepare(input)
         },
         cancel: reportId => {
           if (!summaryJobService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })

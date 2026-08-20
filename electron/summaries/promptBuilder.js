@@ -1,4 +1,7 @@
-function commonPolicy({ period, usage, coverage }) {
+// Shared policy line set for every analysis prompt. Exported so the workLogs
+// service can reuse the same constraints (including the untrusted-data rule)
+// when it hands a template to an interactive AI CLI.
+export function commonPolicy({ period, usage, coverage }) {
   return [
     '请使用中文撰写分析，但必须原样保留项目路径、模型名、命令、API 名称和其他 identifier。',
     `精确周期：start=${period?.start}；endExclusive=${period?.endExclusive}；timezone=${period?.timezone}。`,

@@ -169,6 +169,7 @@ const api = {
   listSummaryReports: (filters) => invokeSummary('summary:list-reports', filters || {}),
   getSummaryReport: (reportId) => invokeSummary('summary:get-report', reportId),
   generateSummary: (value) => invokeSummary('summary:generate', value),
+  prepareSummary: (value) => invokeSummary('summary:prepare', value),
   confirmSummary: (reportId, confirmationCallLimit) => invokeSummary('summary:generate', {
     reportId, confirm: true, confirmationCallLimit
   }),
