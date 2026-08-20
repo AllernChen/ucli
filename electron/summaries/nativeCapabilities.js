@@ -1,3 +1,8 @@
+// LEGACY. Work summaries no longer run in a headless isolated runner: UCLI
+// prepares data/template in the workLogs directory and opens an interactive AI
+// CLI there (see workLogsService.js), so the capability matrix below no longer
+// gates anything. Kept for the deprecated headless generate/export fallback and
+// CLI metadata; do not extend it for new flows.
 const capability = (value) => Object.freeze(value)
 
 export const NATIVE_CAPABILITY_MATRIX = Object.freeze({

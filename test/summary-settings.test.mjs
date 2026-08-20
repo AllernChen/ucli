@@ -119,11 +119,12 @@ test('renderer settings expose automatic cadence, default CLI/profile/model, and
     assert.match(view, new RegExp(`value="${period}"`))
   }
   assert.match(view, /onSummaryAutoChange/)
-  assert.match(view, /managedSummaryProfile/)
-  assert.match(view, /summaryExecutorUsable/)
+  assert.match(view, /onSummaryExecutorChange/)
+  assert.match(view, /SUMMARY_CLI_IDS/)
+  // Enablement is a reminder toggle: no executor is required, so the headless
+  // capability matrix is gone from both the settings view and the dialog.
+  assert.doesNotMatch(view, /managedSummaryProfile|summaryExecutorUsable|safeForSummary|summaryExecutorAvailable/)
   const dialog = readFileSync(new URL('../src/components/summaries/SummaryGenerateDialog.vue', import.meta.url), 'utf8')
-  // The dialog opens an interactive CLI in the workLogs directory and no
-  // longer applies the headless-run capability matrix.
   assert.doesNotMatch(dialog, /managedSummaryProfile/)
   assert.doesNotMatch(dialog, /summaryExecutorUsable/)
   assert.match(view, /会话材料/)
