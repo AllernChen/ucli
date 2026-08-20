@@ -14,6 +14,7 @@ test('renderMarkdown wires markdown-it with html disabled and DOMPurify sanitize
 test('ArtifactPreview sanitizes html and image src uses data: URL', () => {
   const source = readFileSync(new URL('../src/components/ArtifactPreview.vue', import.meta.url), 'utf8')
   assert.match(source, /DOMPurify\.sanitize/)
+  assert.match(source, /USE_PROFILES:\s*\{\s*html:\s*true\s*\}/)
   assert.match(source, /data:\$\{.*mimeType.*\};base64/)
   assert.match(source, /openSafeLink/)
 })

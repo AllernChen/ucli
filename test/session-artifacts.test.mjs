@@ -9,7 +9,7 @@ import {
   assertInsideDirectory,
   resolveArtifactAbsolutePath
 } from '../electron/sessionArtifacts.js'
-import { createSessionArtifactsService } from '../electron/sessionArtifactsService.js'
+import { createSessionArtifactsService, registerSessionArtifactsIpc } from '../electron/sessionArtifactsService.js'
 
 test('parseClaudeArtifactPaths extracts tool_use file_path and ignores non-file tools', () => {
   const records = [{
@@ -184,4 +184,27 @@ test('readArtifact throws ARTIFACT_SESSION_NOT_FOUND for unknown session', async
     () => service.readArtifact('nope', 'C:\\proj\\a.md', { kind: 'text' }),
     { code: 'ARTIFACT_SESSION_NOT_FOUND' }
   )
+})
+
+test('registerSessionArtifactsIpc wraps thrown errors in an ok/error envelope', async () => {
+  const handlers = {}
+  const ipcMain = { handle: (channel, fn) => { handlers[channel] = fn } }
+  const service = createSessionArtifactsService({
+    resolveSession: () => ({ adapterId: 'claude', cwd: 'C:\\proj', cliSessionId: 's1' }),
+    resolveClaudeTranscript: () => null,
+    realpathFile: async () => { throw new Error('boom') }
+  })
+  registerSessionArtifactsIpc(ipcMain, service)
+
+  const read = await handlers['session:read-artifact'](null, 's1', 'C:\\proj\\gone.md', { kind: 'text' })
+  assert.deepEqual(read, {
+    ok: false,
+    error: { code: 'ARTIFACT_NOT_FOUND', message: 'ARTIFACT_NOT_FOUND' }
+  })
+
+  const list = await handlers['session:list-artifacts'](null, 's1')
+  assert.equal(list.ok, true)
+  assert.deepEqual(list.value, {
+    artifacts: [], source: 'claude', missing: false, truncated: false
+  })
 })

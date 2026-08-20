@@ -2,11 +2,14 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
 
-test('preload exposes session artifact IPC methods', () => {
+test('preload exposes session artifact IPC methods and preserves error codes', () => {
   const src = readFileSync(new URL('../electron/preload.js', import.meta.url), 'utf8')
-  assert.match(src, /listArtifacts:\s*\(sessionId\)\s*=>\s*ipcRenderer\.invoke\('session:list-artifacts', sessionId\)/)
-  assert.match(src, /readArtifact:\s*\(sessionId, absolutePath, options\)\s*=>/)
+  assert.match(src, /listArtifacts:\s*async\s*\(sessionId\)\s*=>/)
+  assert.match(src, /ipcRenderer\.invoke\('session:list-artifacts', sessionId\)/)
+  assert.match(src, /readArtifact:\s*async\s*\(sessionId, absolutePath, options\)\s*=>/)
   assert.match(src, /ipcRenderer\.invoke\('session:read-artifact', sessionId, absolutePath, options\)/)
+  assert.match(src, /if \(response\?\.ok\) return response\.value/)
+  assert.match(src, /code: payload\.code/)
   assert.match(src, /openArtifactWindow:\s*\(sessionId\)\s*=>\s*ipcRenderer\.invoke\('artifact:open-window', sessionId\)/)
 })
 

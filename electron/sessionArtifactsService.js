@@ -201,9 +201,19 @@ export function createSessionArtifactsService({
   return { listArtifacts, readArtifact, invalidate }
 }
 
+function envelope(handler) {
+  return async (...args) => {
+    try {
+      return { ok: true, value: await handler(...args) }
+    } catch (error) {
+      return { ok: false, error: { code: error.code || 'ARTIFACT_FAILED', message: error.message } }
+    }
+  }
+}
+
 export function registerSessionArtifactsIpc(ipcMain, artifactsService) {
-  ipcMain.handle('session:list-artifacts', (_event, sessionId) =>
-    artifactsService.listArtifacts(sessionId))
-  ipcMain.handle('session:read-artifact', (_event, sessionId, absolutePath, options) =>
-    artifactsService.readArtifact(sessionId, absolutePath, options))
+  ipcMain.handle('session:list-artifacts', envelope((_event, sessionId) =>
+    artifactsService.listArtifacts(sessionId)))
+  ipcMain.handle('session:read-artifact', envelope((_event, sessionId, absolutePath, options) =>
+    artifactsService.readArtifact(sessionId, absolutePath, options)))
 }
