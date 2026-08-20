@@ -41,7 +41,7 @@
         </a-col>
       </a-row>
     </a-spin>
-    <SummaryGenerateDialog v-model:open="dialogOpen" @generated="onGenerated" />
+    <SummaryGenerateDialog v-model:open="dialogOpen" />
     <SummaryHtmlStyleDialog
       v-model:open="htmlStyleOpen"
       :confirm-loading="exportingHtml"
@@ -76,12 +76,6 @@ onMounted(async () => {
   } catch (error) { summaries.error = error }
 })
 onUnmounted(() => summaries.dispose())
-function onGenerated(reportId) {
-  return safely(async () => {
-    await summaries.refreshReport(reportId)
-    await summaries.selectReport(reportId)
-  })
-}
 async function safely(operation) {
   try { summaries.error = null; return await operation() }
   catch (error) { summaries.error = error; return null }

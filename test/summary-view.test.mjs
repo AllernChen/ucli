@@ -217,8 +217,8 @@ test('summary workspace components cover generation, safe reading, history, retr
   const all = sources.join('\n')
   for (const text of [
     'periodType', 'partial', 'executorId', 'profileId', 'model',
-    'estimatedCalls', 'coverage', '可能产生费用', '设为当前版本',
-    '取消生成', '确认继续', '预计调用', '可能产生费用',
+    'coverage', '可能产生费用', '设为当前版本', 'workLogs', 'briefPrompt',
+    '取消生成', '确认继续', '打开总结 CLI', '可能产生费用',
     '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试'
   ]) assert.match(all, new RegExp(text))
   assert.match(all, /:loading="htmlExporting"/)

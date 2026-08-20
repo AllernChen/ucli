@@ -106,6 +106,7 @@ export const ipc = {
   listSummaryReports: (filters) => u.listSummaryReports(filters),
   getSummaryReport: (reportId) => u.getSummaryReport(reportId),
   generateSummary: (value) => u.generateSummary(value),
+  prepareSummary: (value) => u.prepareSummary(value),
   confirmSummary: (reportId, confirmationCallLimit) => u.confirmSummary(reportId, confirmationCallLimit),
   cancelSummary: (reportId) => u.cancelSummary(reportId),
   setCurrentSummary: (reportId) => u.setCurrentSummary(reportId),

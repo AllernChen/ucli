@@ -197,8 +197,10 @@ test('renderer settings expose automatic cadence, default CLI/profile/model, and
   assert.match(view, /managedSummaryProfile/)
   assert.match(view, /summaryExecutorUsable/)
   const dialog = readFileSync(new URL('../src/components/summaries/SummaryGenerateDialog.vue', import.meta.url), 'utf8')
-  assert.match(dialog, /managedSummaryProfile/)
-  assert.match(dialog, /summaryExecutorUsable/)
+  // The dialog opens an interactive CLI in the workLogs directory and no
+  // longer applies the headless-run capability matrix.
+  assert.doesNotMatch(dialog, /managedSummaryProfile/)
+  assert.doesNotMatch(dialog, /summaryExecutorUsable/)
   assert.match(view, /会话材料/)
   assert.match(view, /配置的 CLI\/Provider/)
   assert.match(view, /可能产生费用/)

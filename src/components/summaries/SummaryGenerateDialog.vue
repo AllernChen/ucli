@@ -1,5 +1,13 @@
 <template>
-  <a-modal :open="open" title="生成工作总结" :confirm-loading="submitting" :ok-button-props="{ disabled: !canGenerate }" @ok="submit" @cancel="close">
+  <a-modal
+    :open="open"
+    title="生成工作总结"
+    ok-text="打开总结 CLI"
+    :confirm-loading="submitting"
+    :ok-button-props="{ disabled: !canOpen }"
+    @ok="submit"
+    @cancel="close"
+  >
     <a-form layout="vertical">
       <a-form-item label="总结周期">
         <a-segmented v-model:value="form.periodType" :options="periodOptions" />
@@ -28,31 +36,29 @@
           <a-input v-model:value="form.model" allow-clear placeholder="可选：使用 CLI 默认模型" />
         </a-form-item>
       </template>
-      <a-descriptions size="small" :column="2" bordered>
-        <a-descriptions-item label="预计分块">{{ estimatedChunks }}</a-descriptions-item>
-        <a-descriptions-item label="预计调用">{{ estimatedCalls }}</a-descriptions-item>
-        <a-descriptions-item label="coverage" :span="2">{{ coveragePreview }}</a-descriptions-item>
-      </a-descriptions>
+      <div class="hint">将在工作总结（workLogs）目录打开所选 AI CLI。UCLI 已准备好 <code>data.json</code> 与 <code>template.md</code>，CLI 分析后直接把 Markdown 与 HTML 写入该目录。</div>
+      <div class="hint">{{ coveragePreview }}</div>
       <a-alert style="margin-top:12px" type="warning" show-icon message="可能产生费用" description="材料将通过所选 CLI/Provider 发送给 AI 服务；实际费用由对应服务商决定。" />
-      <a-alert v-if="!canGenerate" style="margin-top:12px" type="error" show-icon message="所选 executable/profile 当前不可用" />
+      <a-alert v-if="!hasCli" style="margin-top:12px" type="error" show-icon message="未检测到已安装的 AI CLI" description="请先在「设置」中安装 Claude Code、Codex、OpenCode 或 U-Code。" />
     </a-form>
   </a-modal>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ipc } from '../../ipc.js'
-import {
-  managedSummaryProfile,
-  selectSummaryExecution,
-  summaryExecutorUsable as isSummaryExecutorUsable,
-  summaryProfileUsable
-} from '../../summaryExecutionSelection.js'
+import { useSessionsStore } from '../../stores/sessions.js'
 import { useSummariesStore } from '../../stores/summaries.js'
 
+const SUMMARY_CLI_IDS = ['claude', 'codex', 'opencode', 'ucode']
+const SUMMARY_TUI_ADAPTERS = ['opencode', 'ucode']
+
 const props = defineProps({ open: Boolean })
-const emit = defineEmits(['update:open', 'generated'])
+const emit = defineEmits(['update:open'])
+const router = useRouter()
 const summaries = useSummariesStore()
+const sessions = useSessionsStore()
 const tools = ref([])
 const profiles = ref([])
 const sessionCount = ref(0)
@@ -64,36 +70,42 @@ const periodOptions = [
   { label: '每季度', value: 'quarter' }, { label: '每年', value: 'year' }
 ]
 
-const selectedExecutor = computed(() => useDefaults.value ? summaries.settings?.defaultExecutorId : form.executorId)
-const selectedProfile = computed(() => useDefaults.value ? summaries.settings?.defaultProfileId : form.profileId)
-const selectedModel = computed(() => useDefaults.value ? summaries.settings?.defaultModel : form.model)
-const summaryExecutorUsable = (tool, profileId = null, allowAnyManaged = false) => {
-  return isSummaryExecutorUsable(tool, profileId, profiles.value, allowAnyManaged)
-}
-const executorOptions = computed(() => tools.value
-  .filter(tool => summaryExecutorUsable(tool, null, true))
-  .map(tool => ({ label: tool.displayName, value: tool.id })))
-const profileOptions = computed(() => profiles.value
-  .filter(profile => summaryProfileUsable(
-    profile,
-    tools.value.find(tool => tool.id === selectedExecutor.value)
-  ))
-  .map(profile => ({ label: profile.name, value: profile.id })))
-const canGenerate = computed(() => {
-  const executable = tools.value.find(tool => tool.id === selectedExecutor.value)
-  return summaryExecutorUsable(executable, selectedProfile.value)
+const installedTools = computed(() => tools.value
+  .filter(tool => SUMMARY_CLI_IDS.includes(tool.id) && tool.installed))
+// 「使用全局默认」＝使用设置里的默认 CLI；未安装则回退到第一个已安装 CLI。
+const defaultExecutorId = computed(() => {
+  const preferred = summaries.settings?.defaultExecutorId
+  if (preferred && installedTools.value.some(tool => tool.id === preferred)) return preferred
+  return installedTools.value[0]?.id || null
 })
-const estimatedChunks = computed(() => Math.max(1, sessionCount.value))
-const estimatedCalls = computed(() => estimatedChunks.value * 2 + 1)
+const selectedExecutor = computed(() => useDefaults.value ? defaultExecutorId.value : form.executorId)
+const executorOptions = computed(() => installedTools.value.map(tool => ({ label: tool.displayName, value: tool.id })))
+const profileOptions = computed(() => profiles.value
+  .filter(profile => profile.adapterId === selectedExecutor.value && profile.status === 'ready')
+  .map(profile => ({ label: profile.name, value: profile.id })))
+const selectedProfile = computed(() => {
+  const id = useDefaults.value ? summaries.settings?.defaultProfileId : form.profileId
+  if (!id) return null
+  const profile = profiles.value.find(candidate => candidate.id === id)
+  return profile?.adapterId === selectedExecutor.value && profile?.status === 'ready' ? id : null
+})
+const selectedModel = computed(() => useDefaults.value ? summaries.settings?.defaultModel : form.model)
+const hasCli = computed(() => installedTools.value.length > 0)
+const canOpen = computed(() => hasCli.value && !!selectedExecutor.value)
 const coveragePreview = computed(() => `预计覆盖 ${sessionCount.value} 个会话；最终 coverage 以采集结果为准`)
 const range = computed(() => periodRange(form.periodType, form.partial))
 const rangeLabel = computed(() => `${new Date(range.value.start).toLocaleString()} — ${new Date(range.value.endExclusive).toLocaleString()}${form.partial ? '（当前未完成周期）' : ''}`)
 
 onMounted(async () => {
-  const [inventory, profileState, sessions] = await Promise.all([ipc.listCliTools(), ipc.getAiCliProfileState(), ipc.listSessions()])
+  await sessions.init()
+  const [inventory, profileState, list] = await Promise.all([
+    ipc.listCliTools(),
+    ipc.getAiCliProfileState(),
+    ipc.listSessions()
+  ])
   tools.value = inventory
   profiles.value = profileState?.profiles || []
-  sessionCount.value = sessions.length
+  sessionCount.value = list.length
   if (props.open) applyExecutionSelection()
 })
 watch(() => props.open, value => {
@@ -102,15 +114,10 @@ watch(() => props.open, value => {
 })
 
 function applyExecutionSelection() {
-  const selection = selectSummaryExecution({
-    settings: summaries.settings || {},
-    tools: tools.value,
-    profiles: profiles.value
-  })
-  useDefaults.value = selection.useDefaults
-  form.executorId = selection.executorId
-  form.profileId = selection.profileId
-  form.model = selection.model
+  useDefaults.value = true
+  form.executorId = defaultExecutorId.value
+  form.profileId = summaries.settings?.defaultProfileId || null
+  form.model = summaries.settings?.defaultModel || null
 }
 
 function periodRange(periodType, partial) {
@@ -132,25 +139,62 @@ function periodRange(periodType, partial) {
 }
 function clearExecutorDefaults() { form.profileId = null; form.model = null }
 function close() { emit('update:open', false) }
+
+function waitForReady(sessionId, timeoutMs = 60_000) {
+  return new Promise((resolve) => {
+    if (sessions.byId(sessionId)?.lastActivity === '已就绪') { resolve(); return }
+    let timer = null
+    const off = ipc.on('session:event', (evt) => {
+      if (evt.sessionId === sessionId && evt.type === 'ready') {
+        off()
+        if (timer) clearTimeout(timer)
+        resolve()
+      }
+    })
+    timer = setTimeout(() => { off(); resolve() }, timeoutMs)
+  })
+}
+
 async function submit() {
-  if (!canGenerate.value) return
+  const executorId = selectedExecutor.value
+  if (!executorId) return
   submitting.value = true
   try {
     const selectedRange = periodRange(form.periodType, form.partial)
-    const result = await summaries.generate({
-      periodType: form.periodType, ...selectedRange,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-      partial: form.partial,
-      executorId: selectedExecutor.value,
-      profileId: selectedProfile.value || null,
-      model: selectedModel.value || null
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    const prepared = await ipc.prepareSummary({
+      periodType: form.periodType,
+      start: selectedRange.start,
+      endExclusive: selectedRange.endExclusive,
+      timezone
     })
-    emit('generated', result.reportId)
+    const periodLabel = periodOptions.find(option => option.value === form.periodType)?.label || form.periodType
+    const sessionId = await sessions.createSession({
+      adapterId: executorId,
+      cwd: prepared.workLogsDir,
+      name: `工作总结（${periodLabel}）`,
+      profileId: selectedProfile.value || undefined,
+      model: selectedModel.value || undefined
+    })
+    // SessionDetail owns startAdapter (via pendingAssign) so the adapter boots
+    // exactly once; we inject the brief prompt once the CLI reports ready.
+    sessions.pendingAssign = sessionId
+    router.push('/session')
     close()
+    waitForReady(sessionId).then(() => {
+      if (SUMMARY_TUI_ADAPTERS.includes(executorId)) {
+        return ipc.sendTerminalInput(sessionId, prepared.briefPrompt + '\r')
+      }
+      return ipc.sendTurn(sessionId, prepared.briefPrompt)
+    }).catch((error) => { summaries.error = error })
   } catch (error) {
     summaries.error = error
   } finally { submitting.value = false }
 }
 </script>
 
-<style scoped>.muted { color:#8c8c8c; margin-top:6px; font-size:12px; }</style>
+<style scoped>
+.muted { color:#8c8c8c; margin-top:6px; font-size:12px; }
+.hint { color:#8c8c8c; margin-top:8px; font-size:12px; line-height:1.6; }
+.hint code { background:#f5f5f5; padding:0 4px; border-radius:3px; }
+</style>
