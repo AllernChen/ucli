@@ -63,6 +63,7 @@ import { registerSkillsIpc } from './skills/ipc.js'
 import { listUCodeSkills } from './skills/ucodeDiscovery.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
+import { createSessionArtifactsService, registerSessionArtifactsIpc } from './sessionArtifactsService.js'
 import { createUsageRecorder, normalizeAdapterStatsEvent } from './usage/usageRecorder.js'
 import { aggregateOwnedModelStats, sessionUsesUcliStats } from './usage/statsOwnership.js'
 import { assertUsageQuery } from './usage/contracts.js'
@@ -820,6 +821,22 @@ export function createOrchestrator() {
       })
     },
     exportDshHistory
+  })
+  const artifactsService = createSessionArtifactsService({
+    resolveSession: (sessionId) => {
+      const entry = sessions.get(sessionId)
+      return entry ? entry.session : null
+    },
+    exportOpenCode: (nativeSessionId, adapterId = 'opencode') => {
+      const resolveLaunch = adapters.get(adapterId)?.resolveLaunch
+      if (!resolveLaunch) throw new Error('history provider unsupported')
+      const launch = resolveLaunch()
+      return exportOpenCodeSession(nativeSessionId, {
+        executable: launch.file,
+        prefixArgs: launch.prefixArgs,
+        sanitize: false
+      })
+    }
   })
 
   // ---- DB init (async — callers must await) ----
@@ -2819,6 +2836,7 @@ export function createOrchestrator() {
       codexConfigWatcher?.getSnapshot() || readCodexRuntimeSnapshot(getCodexHome())
     )
     registerSessionHistoryIpc(ipcMain, historyService)
+    registerSessionArtifactsIpc(ipcMain, artifactsService)
     registerSessionDiagnosticsIpc(ipcMain, sessionDiagnostics)
 
     ipcMain.handle('dialog:pick-directory', async () => {

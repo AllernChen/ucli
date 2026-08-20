@@ -101,6 +101,10 @@ const api = {
   attachTerminal: (sessionId) => ipcRenderer.invoke('session:attach-terminal', sessionId),
   getSessionHistory: (sessionId, options) =>
     ipcRenderer.invoke('session:get-history', sessionId, options),
+  listArtifacts: (sessionId) => ipcRenderer.invoke('session:list-artifacts', sessionId),
+  readArtifact: (sessionId, absolutePath, options) =>
+    ipcRenderer.invoke('session:read-artifact', sessionId, absolutePath, options),
+  openArtifactWindow: (sessionId) => ipcRenderer.invoke('artifact:open-window', sessionId),
   getSessionDiagnostics: (sessionId) =>
     ipcRenderer.invoke('session:get-diagnostics', sessionId),
   repairSessionBinding: (sessionId) =>

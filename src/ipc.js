@@ -71,6 +71,10 @@ export const ipc = {
   terminalResize: (sessionId, cols, rows) => u.terminalResize(sessionId, cols, rows),
   attachTerminal: (sessionId) => u.attachTerminal(sessionId),
   getSessionHistory: (sessionId, options) => u.getSessionHistory(sessionId, options),
+  // session artifacts
+  listArtifacts: (sessionId) => u.listArtifacts(sessionId),
+  readArtifact: (sessionId, absolutePath, options) => u.readArtifact(sessionId, absolutePath, options),
+  openArtifactWindow: (sessionId) => u.openArtifactWindow(sessionId),
   getSessionDiagnostics: (sessionId) => u.getSessionDiagnostics(sessionId),
   repairSessionBinding: (sessionId) => u.repairSessionBinding(sessionId),
   resumeSession: (sessionId, cliSessionId) => u.resumeSession(sessionId, cliSessionId),
