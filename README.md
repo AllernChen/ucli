@@ -4,11 +4,11 @@
 
 # UCLI
 
-UCLI 是一个支持 macOS 与 Windows 的本地 AI CLI 工作台。它在用户与已安装的 Claude Code、Codex、OpenCode、U-Code 之间转发终端输入输出，保留原生 CLI 交互，同时提供多会话编排、安全确认、历史恢复和使用统计。
+UCLI 是一个支持 macOS 与 Windows 的本地 AI CLI 工作台。它在用户与已安装的 Claude Code、Codex、OpenCode、U-Code、DeepSeek Harness 之间协调原生界面，保留 CLI 交互，同时提供多会话编排、安全确认、历史恢复和使用统计。
 
 ## 主要功能
 
-- 原生终端代理：不重做 Claude Code、Codex、OpenCode、U-Code 的交互界面。
+- 原生界面代理：不重做 Claude Code、Codex、OpenCode、U-Code 或 DeepSeek Harness 的交互界面。
 - 会话发现：按工作目录发现并导入 Claude Code、Codex、OpenCode、U-Code 历史会话。
 - 多会话工作台：支持 1、2、4 窗格、导航收缩、会话列表隐藏、单窗格/分屏整体全屏，以及 `Tab`/`Shift+Tab` 切换会话。
 - 完整历史视图：每个窗格可独立切换原生终端与只读历史，支持分页、文本选择和滚动查看最早对话，切回终端时保留原生 TUI 状态。
@@ -23,6 +23,17 @@ UCLI 是一个支持 macOS 与 Windows 的本地 AI CLI 工作台。它在用户
 - 桌面体验：单实例、关闭到托盘、后台审批/任务完成提醒、托盘恢复和退出清理；macOS 终端支持 `Command+C`/`Command+V`。
 
 当前适配 Claude Code、Codex、OpenCode 和 [U-Code](https://github.com/AllernChen/U-Code)。OpenCode 与 U-Code 均支持原生 TUI、新建/恢复会话、按目录发现历史、完整历史视图、三档权限映射，以及逐会话模型、Token、轮次统计；CLI 导出未提供费用时会显示“不可用”，不会误报为 `$0`。两者的可执行文件、配置环境和原生会话数据彼此隔离。
+
+## DeepSeek Harness
+
+0.11.0 适配 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，固定兼容已发布的 `@deepseek-ai/dsh@0.1.0-rc.6`。UCLI 提供两种本地界面：
+
+- **桥接 TUI**：用户必须已经拥有兼容的 DSH profile 和其中提供的 TUI。`dsh --profile <name>` 启动的是 profile 提供的界面；UCLI 和被检查的 deepseek-harness 开源仓库都不捆绑、下载或分发 `turtle-ui`。“配置档案 → DeepSeek Harness”可以初始化仅含基础 bundle 的原生 profile，并将 `ucli-dsh-bridge-0.11.0.tgz` 加入所选 profile；初始化不会安装 TUI。bridge 失败时只回滚 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml` 与 `cordis.patch.yml` 元数据。
+- **本地 Web 回退**：UCLI 以固定参数启动 `dsh web --host 127.0.0.1 --port 0`，只接受严格的 loopback URL，并在沙箱 iframe 中显示。Web 的权限、历史和统计均由 DSH 原生管理；UCLI 不提供审批、历史、用量或 Gateway 控件。
+
+桥接 TUI 将 PTY 字节与语义控制分成两个平面：PTY 只负责原生全屏交互；认证 bridge 负责会话 ID、已提交回复、工具、权限、统计和 Gateway 事件。每个会话使用独立的 endpoint 与随机 token，二者只存在于主进程和子进程环境，不写入数据库、日志或 renderer IPC。桥断开时会话立即停止接受输入和远程任务。
+
+DSH Skills 不建立第二份目录：DSH 只读项目级 `.agents/skills`，与 Codex 的项目投影共享同一物理来源；用户级 DSH Skills 仍由 DSH 自己管理。
 
 ## 使用趋势与工作总结
 
@@ -65,7 +76,7 @@ Windows 与 macOS 版本均可从 [GitHub Releases](https://github.com/AllernChe
 ## 快速开始
 
 1. 安装并启动 UCLI。
-2. 在“设置”页面检测本机 AI CLI；OpenCode 使用 `npm install -g opencode-ai` 安装和升级，U-Code 使用 `npm install -g @allenchen77/ucode-cli` 安装和升级。
+2. 在“设置”页面检测本机 AI CLI；OpenCode 使用 `npm install -g opencode-ai` 安装和升级，U-Code 使用 `npm install -g @allenchen77/ucode-cli` 安装和升级。DeepSeek Harness 只检测本机已安装的精确兼容版本，不由 UCLI 安装。
 3. 在“会话”页面新建会话并选择工作目录。
 4. UCLI 会扫描该目录对应的原生历史会话，可选择导入或新建。
 5. 在工作台选择 1、2、4 窗格管理多个会话。
@@ -87,11 +98,11 @@ macOS:  ~/Library/Application Support/ucli/ucli.db
 Windows: %APPDATA%\ucli\ucli.db
 ```
 
-开发版使用同一系统数据根目录下独立的 `ucli-dev` 目录，不会与安装版争用单实例锁或数据库。UCLI 不会删除 Claude Code、Codex、OpenCode、U-Code 自己保存的原生会话。
+开发版使用同一系统数据根目录下独立的 `ucli-dev` 目录，不会与安装版争用单实例锁或数据库。UCLI 不会删除 Claude Code、Codex、OpenCode、U-Code 或 DeepSeek Harness 自己保存的原生会话。
 
 ## 本地开发
 
-要求 Node.js 与 npm。macOS 请在目标架构的 Mac 上构建；Windows 建议在 Windows 10/11 x64 环境构建。
+要求 Node.js 22.12.0 或更高版本与 npm；发布 CI 固定使用 Node.js 24。macOS 请在目标架构的 Mac 上构建；Windows 建议在 Windows 10/11 x64 环境构建。
 
 ```sh
 npm install
@@ -111,7 +122,7 @@ npm run verify:release
 
 ## Skills 管理
 
-0.9.0 新增一级“Skills”页面，统一管理 Claude Code、Codex、OpenCode 和 U-Code 的 Agent Skills：
+0.9.0 新增一级“Skills”页面，统一管理 Claude Code、Codex、OpenCode 和 U-Code 的 Agent Skills；0.11.0 将 DeepSeek Harness 作为项目 `.agents/skills` 的只读兼容目标展示：
 
 - 可从本地目录、ZIP、GitHub 或 GitLab 仓库安装，支持用户级和项目级范围；私有 GitHub/GitLab 仓库复用本机 Git 登录状态，UCLI 不保存令牌。
 - UCLI 保存独立受管原件，并根据四个 CLI 的兼容发现规则选择最少投放目录；页面会区分直接投放与兼容继承。

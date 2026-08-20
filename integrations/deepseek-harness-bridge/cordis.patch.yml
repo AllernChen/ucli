@@ -1,0 +1,3 @@
+- insert:
+    - id: ucli-bridge
+      name: '@ucli/dsh-bridge'

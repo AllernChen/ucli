@@ -13,6 +13,14 @@ export const ipc = {
   listAdapters: () => u.listAdapters(),
   listCliTools: () => u.listCliTools(),
   runCliToolAction: (id, action) => u.runCliToolAction(id, action),
+  getDshState: () => u.getDshState(),
+  listDshProfiles: () => u.listDshProfiles(),
+  initializeDshProfile: (profileName) => u.initializeDshProfile(profileName),
+  installDshRuntime: () => u.installDshRuntime(),
+  upgradeDshRuntime: () => u.upgradeDshRuntime(),
+  repairDshRuntime: () => u.repairDshRuntime(),
+  removeDshRuntime: () => u.removeDshRuntime(),
+  removeDshLegacyBridge: (profileName) => u.removeDshLegacyBridge(profileName),
   getUpdateState: () => u.getUpdateState(),
   checkForUpdates: () => u.checkForUpdates(),
   downloadUpdate: () => u.downloadUpdate(),
@@ -63,6 +71,10 @@ export const ipc = {
   terminalResize: (sessionId, cols, rows) => u.terminalResize(sessionId, cols, rows),
   attachTerminal: (sessionId) => u.attachTerminal(sessionId),
   getSessionHistory: (sessionId, options) => u.getSessionHistory(sessionId, options),
+  // session artifacts
+  listArtifacts: (sessionId) => u.listArtifacts(sessionId),
+  readArtifact: (sessionId, absolutePath, options) => u.readArtifact(sessionId, absolutePath, options),
+  openArtifactWindow: (sessionId) => u.openArtifactWindow(sessionId),
   getSessionDiagnostics: (sessionId) => u.getSessionDiagnostics(sessionId),
   repairSessionBinding: (sessionId) => u.repairSessionBinding(sessionId),
   resumeSession: (sessionId, cliSessionId) => u.resumeSession(sessionId, cliSessionId),
@@ -123,6 +135,7 @@ export const ipc = {
   saveWorkbench: (state) => u.saveWorkbench(state),
   // shell
   openExternal: (url) => u.openExternal(url),
+  openPath: (path) => u.openPath(path),
   // events
   on: (channel, handler) => u.on(channel, handler)
 }

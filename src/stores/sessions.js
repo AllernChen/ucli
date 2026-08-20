@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { DSH_UNAVAILABLE_CAPABILITIES } from '../../electron/adapters/adapterCapabilities.js'
 import { ipc } from '../ipc.js'
 
 let unsub = null
@@ -8,6 +9,39 @@ const MAX_ACTIVITIES = 200 // keep DOM light — older events are trimmed from t
 function newActId() {
   actCounter += 1
   return `a${Date.now()}_${actCounter}`
+}
+
+function normalizeRendererCapabilities(value) {
+  if (
+    !value || typeof value !== 'object' || Array.isArray(value) ||
+    !['terminal', 'web', 'unavailable'].includes(value.surface) ||
+    !['ucli', 'native'].includes(value.permissionOwner) ||
+    !['ucli', 'native'].includes(value.historyOwner) ||
+    !['ucli', 'native'].includes(value.statsOwner) ||
+    typeof value.gateway !== 'boolean' || typeof value.bridge !== 'boolean'
+  ) return null
+  return {
+    surface: value.surface,
+    permissionOwner: value.permissionOwner,
+    historyOwner: value.historyOwner,
+    statsOwner: value.statsOwner,
+    gateway: value.gateway,
+    bridge: value.bridge
+  }
+}
+
+function rendererSessionCapabilities(adapterId, value, descriptor) {
+  const candidate = value ?? (adapterId === 'deepseek-harness' ? null : descriptor?.capabilities)
+  const normalized = normalizeRendererCapabilities(candidate)
+  if (adapterId !== 'deepseek-harness') return normalized
+  if (!normalized) return DSH_UNAVAILABLE_CAPABILITIES
+  const nativeWeb = normalized.surface === 'web' &&
+    normalized.permissionOwner === 'native' && normalized.historyOwner === 'native' &&
+    normalized.gateway === false && normalized.bridge === false
+  const unavailable = normalized.surface === 'unavailable' &&
+    normalized.permissionOwner === 'native' && normalized.historyOwner === 'native' &&
+    normalized.statsOwner === 'native' && normalized.gateway === false && normalized.bridge === false
+  return nativeWeb || unavailable ? normalized : DSH_UNAVAILABLE_CAPABILITIES
 }
 
 export const useSessionsStore = defineStore('sessions', {
@@ -51,7 +85,8 @@ export const useSessionsStore = defineStore('sessions', {
     },
 
     async createSession(config) {
-      const { sessionId } = await ipc.createSession(config)
+      const created = await ipc.createSession(config)
+      const { sessionId } = created
       const adapter = this.adapters.find((a) => a.id === (config.adapterId || 'claude'))
       const isImport = !!config.cliSessionId
       const summary = {
@@ -80,7 +115,10 @@ export const useSessionsStore = defineStore('sessions', {
         startedAt: config.startedAt || null,
         stats: { tokens: { input: 0, output: 0 }, costUsd: 0, turns: 0, approvals: { autoAllowed: 0, confirmed: 0, denied: 0 } },
         cliSessionId: config.cliSessionId || null,
-        startedAt: config.startedAt || null,
+        nativeSessionId: config.cliSessionId || null,
+        adapterConfig: created.adapterConfig || {},
+        capabilities: rendererSessionCapabilities(config.adapterId || 'claude', created.capabilities, adapter),
+        surfaceState: created.surfaceState || null,
         lastActivity: isImport ? ('📋 已恢复 · ' + fmtShort(config.startedAt)) : '启动中…',
         lastActivityTs: Date.now(),
         taskNote: '',
@@ -221,6 +259,10 @@ export const useSessionsStore = defineStore('sessions', {
           id: s.id, adapterId: s.adapterId, displayName,
           icon: adapter?.icon || '•', cwd: s.cwd, model: s.model, tier: s.tier, status: s.status,
           stats: s.stats, cliSessionId: s.cliSessionId || s.nativeSessionId || null,
+          nativeSessionId: s.nativeSessionId || s.cliSessionId || null,
+          adapterConfig: s.adapterConfig || {},
+          capabilities: rendererSessionCapabilities(s.adapterId, s.capabilities, adapter),
+          surfaceState: s.surfaceState || null,
           provider: s.provider || null, sourceProvider: s.sourceProvider || null,
           providerPolicy: s.providerPolicy || null, explicitProvider: s.explicitProvider || null,
           providerWarning: s.providerWarning || null, pendingProvider: s.pendingProvider || null,
@@ -242,6 +284,12 @@ export const useSessionsStore = defineStore('sessions', {
         row.status = s.status
         row.stats = s.stats
         if (s.cliSessionId) row.cliSessionId = s.cliSessionId
+        if (s.nativeSessionId) row.nativeSessionId = s.nativeSessionId
+        if (s.adapterConfig !== undefined) row.adapterConfig = s.adapterConfig
+        if (s.capabilities !== undefined) {
+          row.capabilities = rendererSessionCapabilities(s.adapterId, s.capabilities, adapter)
+        }
+        if (s.surfaceState !== undefined) row.surfaceState = s.surfaceState
         if (s.lastActivity) row.lastActivity = s.lastActivity
         if (s.taskNote != null) row.taskNote = s.taskNote
         if (s.provider != null) row.provider = s.provider
@@ -269,16 +317,22 @@ export const useSessionsStore = defineStore('sessions', {
 
     _onEvent(evt) {
       const row = this.sessions.find((s) => s.id === evt.sessionId)
+      if (evt.type === 'stats_update' && row?.capabilities?.statsOwner !== 'ucli') return
       if (row) {
         if (evt.status) row.status = evt.status
         if (evt.type === 'ready') {
           row.lastActivity = '已就绪'
         } else if (evt.type === 'init') {
-          if (evt.cliSessionId) row.cliSessionId = evt.cliSessionId
+          if (evt.cliSessionId) {
+            row.cliSessionId = evt.cliSessionId
+            row.nativeSessionId = evt.cliSessionId
+          }
         } else if (evt.type === 'exit') {
           row.lastActivity = `进程退出 (${evt.code})`
         } else if (evt.type === 'error') {
           row.lastActivity = `错误: ${evt.message}`
+        } else if (evt.type === 'surface_state') {
+          if (evt.surfaceState?.kind === 'web') row.surfaceState = evt.surfaceState
         } else if (evt.type === 'codex-runtime') {
           if (evt.provider != null) row.provider = evt.provider
           if (evt.providerPolicy != null) row.providerPolicy = evt.providerPolicy
@@ -330,9 +384,10 @@ export const useSessionsStore = defineStore('sessions', {
     },
 
     _onApprovalRequest(req) {
+      const row = this.sessions.find((s) => s.id === req.sessionId)
+      if (row?.capabilities?.permissionOwner !== 'ucli') return
       if (!this.pendingApprovals[req.sessionId]) this.pendingApprovals[req.sessionId] = []
       this.pendingApprovals[req.sessionId].push(req)
-      const row = this.sessions.find((s) => s.id === req.sessionId)
       if (row) row.status = 'waiting'
     },
     _onApprovalResolved(req) {

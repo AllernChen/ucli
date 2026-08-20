@@ -33,6 +33,28 @@ function readBuilderSectionValue(content, section, key) {
   return undefined
 }
 
+function readBuilderSection(content, section) {
+  const lines = content.split(/\r?\n/)
+  const start = lines.findIndex((line) => line === `${section}:`)
+  if (start < 0) return ''
+  const body = []
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^[A-Za-z][\w-]*:\s*$/.test(lines[index])) break
+    body.push(lines[index])
+  }
+  return body.join('\n')
+}
+
+function validateBundledResources(builderContent) {
+  const files = readBuilderSection(builderContent, 'files')
+  const extraResources = readBuilderSection(builderContent, 'extraResources')
+  const resourcesInFiles = /^\s*-\s+resources\/\*\*\/\*\s*$/m.test(files)
+  const resourcesInExtra = /^\s*-\s+from:\s+resources\/?\s*$/m.test(extraResources)
+  if (resourcesInFiles && resourcesInExtra) {
+    throw new Error('electron-builder.yml duplicates resources through files and extraResources.')
+  }
+}
+
 function validateWindowsBuilderConfig(builderContent) {
   if (!hasBuilderTarget(builderContent, 'portable')) {
     throw new Error('electron-builder.yml does not configure the portable target.')
@@ -104,6 +126,7 @@ export async function verifyReleaseArtifacts({
 }) {
   const version = await readPackageVersion(rootDir)
   const builderContent = await readFile(path.join(rootDir, 'electron-builder.yml'), 'utf8')
+  validateBundledResources(builderContent)
   if (platform === 'win32') validateWindowsBuilderConfig(builderContent)
   else if (platform === 'darwin') validateMacBuilderConfig(builderContent)
 

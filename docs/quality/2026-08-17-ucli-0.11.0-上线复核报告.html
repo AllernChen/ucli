@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<meta name="report-source" content="2026-08-17-ucli-0.11.0-上线复核报告.md">
+<title>UCLI 0.11.0 上线复核报告</title>
+<style>
+:root { color-scheme: light; --bg:#f4f7fb; --panel:#fff; --text:#1d2939; --muted:#667085; --line:#dbe3ee; --brand:#1769aa; --brand-soft:#eaf4ff; --good:#067647; --warn:#b54708; --sidebar:310px; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; }
+body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif; line-height:1.7; }
+.layout { min-height:100vh; display:grid; grid-template-columns:var(--sidebar) minmax(0,1fr); }
+.sidebar { position:sticky; top:0; height:100vh; overflow:auto; padding:24px 18px; background:var(--panel); border-right:1px solid var(--line); }
+.sidebar-header { padding:0 8px 18px; border-bottom:1px solid var(--line); }
+.sidebar-header strong { display:block; color:var(--brand); font-size:17px; line-height:1.4; }
+.sidebar-header small { display:block; margin-top:8px; color:var(--muted); overflow-wrap:anywhere; }
+.sidebar-nav { display:grid; gap:3px; padding:16px 0 40px; }
+.sidebar-nav a { display:block; padding:7px 10px; border-left:3px solid transparent; border-radius:0 6px 6px 0; color:#344054; text-decoration:none; font-size:13px; line-height:1.4; }
+.sidebar-nav a.level-3 { padding-left:24px; color:var(--muted); }
+.sidebar-nav a.level-4 { padding-left:38px; color:var(--muted); font-size:12px; }
+.sidebar-nav a:hover,.sidebar-nav a.active { color:var(--brand); background:var(--brand-soft); border-left-color:var(--brand); }
+.menu-button { display:none; position:fixed; right:16px; bottom:16px; z-index:20; border:0; border-radius:999px; padding:11px 15px; color:#fff; background:var(--brand); box-shadow:0 8px 24px #1769aa44; }
+main { min-width:0; padding:42px 46px 90px; }
+.report { max-width:1120px; margin:0 auto; padding:34px 44px 72px; background:var(--panel); border:1px solid var(--line); border-radius:12px; box-shadow:0 12px 34px #1018280d; }
+h1 { margin:0 0 28px; padding-bottom:18px; border-bottom:2px solid var(--brand); font-size:30px; line-height:1.3; }
+h2 { margin:34px 0 16px; padding-bottom:8px; border-bottom:1px solid var(--line); font-size:22px; }
+h3 { margin:26px 0 12px; font-size:18px; } h4 { margin:22px 0 10px; font-size:16px; }
+p { margin:0 0 14px; } ul,ol { margin:0 0 16px; padding-left:26px; } li { margin:4px 0; }
+a { color:var(--brand); } code { padding:2px 5px; border-radius:4px; background:#f2f4f7; color:#b42318; font-family:Consolas,"SFMono-Regular",monospace; overflow-wrap:anywhere; word-break:break-word; }
+pre { overflow:auto; padding:16px; border-radius:8px; background:#101828; color:#f2f4f7; } pre code { padding:0; background:transparent; color:inherit; }
+blockquote { margin:16px 0; padding:10px 16px; border-left:4px solid var(--brand); background:#f6faff; color:#475467; }
+.table-wrap { max-width:100%; overflow:auto; margin:14px 0 22px; } table { width:100%; border-collapse:collapse; font-size:13px; table-layout:auto; } th,td { padding:9px 11px; border:1px solid var(--line); text-align:left; vertical-align:top; overflow-wrap:anywhere; word-break:break-word; } th { background:#f2f6fa; } tr:nth-child(even) td { background:#fbfcfe; }
+hr { margin:30px 0; border:0; border-top:1px solid var(--line); } .empty-nav { padding:10px; color:var(--muted); font-size:13px; }
+@media (max-width:900px) { .layout { display:block; } .sidebar { position:fixed; inset:0 auto 0 0; z-index:15; width:min(86vw,var(--sidebar)); transform:translateX(-105%); transition:transform .2s ease; box-shadow:10px 0 28px #10182822; } body.menu-open .sidebar { transform:translateX(0); } .menu-button { display:block; } main { padding:18px 12px 72px; } .report { padding:24px 18px 56px; border-radius:8px; } }
+@media print { body { background:#fff; } .sidebar,.menu-button { display:none; } .layout { display:block; } main { padding:0; } .report { max-width:none; padding:0; border:0; box-shadow:none; } }
+</style>
+</head>
+<body>
+<button class="menu-button" type="button" aria-label="打开或关闭目录">目录</button>
+<div class="layout">
+<aside class="sidebar">
+  <div class="sidebar-header"><strong>UCLI 0.11.0 上线复核报告</strong><small>来源：2026-08-17-ucli-0.11.0-上线复核报告.md</small></div>
+  <nav class="sidebar-nav" aria-label="报告目录"><a class="level-2" href="#1-报告信息">1. 报告信息</a>
+<a class="level-2" href="#2-版本与环境">2. 版本与环境</a>
+<a class="level-2" href="#3-总体结论">3. 总体结论</a>
+<a class="level-3" href="#结论依据">结论依据</a>
+<a class="level-2" href="#4-范围-材料与限制">4. 范围、材料与限制</a>
+<a class="level-3" href="#本次范围">本次范围</a>
+<a class="level-3" href="#不在本次范围">不在本次范围</a>
+<a class="level-3" href="#缺失材料">缺失材料</a>
+<a class="level-2" href="#5-项目画像">5. 项目画像</a>
+<a class="level-2" href="#6-质量门禁">6. 质量门禁</a>
+<a class="level-2" href="#7-检查覆盖">7. 检查覆盖</a>
+<a class="level-2" href="#8-构建与启动">8. 构建与启动</a>
+<a class="level-2" href="#9-核心业务链路">9. 核心业务链路</a>
+<a class="level-2" href="#10-外部依赖与-mock">10. 外部依赖与 Mock</a>
+<a class="level-2" href="#11-根因问题清单">11. 根因问题清单</a>
+<a class="level-3" href="#q-001-发布依赖漏洞与工具链兼容">Q-001 发布依赖漏洞与工具链兼容</a>
+<a class="level-4" href="#已确认事实">已确认事实</a>
+<a class="level-4" href="#根因判断">根因判断</a>
+<a class="level-4" href="#位置与证据">位置与证据</a>
+<a class="level-4" href="#影响与风险">影响与风险</a>
+<a class="level-4" href="#整改与复测">整改与复测</a>
+<a class="level-2" href="#12-已验证通过项">12. 已验证通过项</a>
+<a class="level-2" href="#13-待验证与证据不足项">13. 待验证与证据不足项</a>
+<a class="level-2" href="#14-整改计划">14. 整改计划</a>
+<a class="level-2" href="#15-风险接受与例外">15. 风险接受与例外</a>
+<a class="level-2" href="#16-复测记录">16. 复测记录</a>
+<a class="level-2" href="#17-发布前最终门">17. 发布前最终门</a></nav>
+</aside>
+<main><article class="report"><h1 id="ucli-0-11-0-上线复核报告">UCLI 0.11.0 上线复核报告</h1>
+<blockquote>本 Markdown 是审计源文件；同名 HTML 为自包含浅色阅读版。</blockquote>
+<h2 id="1-报告信息">1. 报告信息</h2>
+<div class="table-wrap"><table><thead><tr><th>字段</th><th>内容</th></tr></thead><tbody><tr><td>项目名称</td><td>UCLI</td></tr><tr><td>项目负责人</td><td>项目维护者（待发布审批）</td></tr><tr><td>技术负责人</td><td>UCLI 维护团队</td></tr><tr><td>质检负责人</td><td>Codex 自动化复核 + 独立代码审查代理</td></tr><tr><td>质检日期</td><td>2026-08-17</td></tr><tr><td>质检类型</td><td>0.11.0 上线复核 / 整改复测</td></tr></tbody></table></div>
+<h2 id="2-版本与环境">2. 版本与环境</h2>
+<div class="table-wrap"><table><thead><tr><th>字段</th><th>内容</th></tr></thead><tbody><tr><td>代码仓库</td><td><code>AllernChen/ucli</code> 本地工作区 <code>F:\projects\ucli</code></td></tr><tr><td>分支</td><td><code>codex/v0.11.0-deepseek-harness</code></td></tr><tr><td>提交版本</td><td><code>527136045c5de760eda011d14e975d47209c0485</code></td></tr><tr><td>构建版本</td><td><code>0.11.0</code></td></tr><tr><td>运行时与操作系统</td><td>Windows 11 专业版 10.0.22621；Node.js 24.9.0；npm 11.6.0；Electron 43.4.0；Vite 7.3.6</td></tr><tr><td>配置来源</td><td><code>package.json</code>、<code>package-lock.json</code>、<code>electron-builder.yml</code>、<code>.github/workflows/release.yml</code></td></tr><tr><td>数据来源</td><td>自动化测试、构建日志、npm 官方仓库审计、Windows 打包产物、解包运行冒烟、代码与配置审查</td></tr><tr><td>质检环境</td><td>Windows x64 本地发布候选环境；无 macOS 主机；无可用于本轮手工验收的真实 DSH TUI profile</td></tr></tbody></table></div>
+<h2 id="3-总体结论">3. 总体结论</h2>
+<div class="table-wrap"><table><thead><tr><th>项目</th><th>结果</th></tr></thead><tbody><tr><td>总体结论</td><td><strong>条件通过</strong></td></tr><tr><td>阻断项</td><td>0</td></tr><tr><td>高风险</td><td>0</td></tr><tr><td>中风险</td><td>0 个已确认未修复问题；2 项平台/集成证据待补</td></tr><tr><td>低风险</td><td>1 项已知工程债务（ESM 类型警告）</td></tr><tr><td>待验证或证据不足</td><td>3</td></tr></tbody></table></div>
+<h3 id="结论依据">结论依据</h3>
+<ul>
+<li><strong>已验证通过</strong>：提交 <code>5271360</code> 上 fresh <code>npm test</code> 共 1209 项，1199 通过、10 项平台跳过、0 失败；<code>npm run build</code> 成功。</li>
+<li><strong>已验证通过</strong>：<code>npm audit --registry=https://registry.npmjs.org --json</code> 检查 533 个依赖，漏洞总数为 0；整改前全量审计曾报告 20 个漏洞，已通过显式升级和精确 override 消除。</li>
+<li><strong>已验证通过</strong>：Windows Setup、Portable、更新元数据及内置 DSH bridge 均通过 <code>verify:release</code>；解包应用在隔离用户目录中完成约 8 秒多进程启动冒烟。</li>
+<li><strong>已验证通过</strong>：独立代码审查未发现 Critical/Important 遗留；审查指出的未跟踪 Windows ICO 已纳入提交，并增加打包契约测试。</li>
+<li><strong>部分验证</strong>：Windows 候选已具备自动化准入条件，但 macOS 原生构建与 Unix socket 权限、真实 DSH TUI 双会话隔离、完整安装/升级/Portable 手工流程尚未取得本版本证据，因此不得据此直接打标签发布。</li>
+</ul>
+<h2 id="4-范围-材料与限制">4. 范围、材料与限制</h2>
+<h3 id="本次范围">本次范围</h3>
+<ul>
+<li>0.11.0 版本、CI Node 版本、Electron/Vite/electron-builder 工具链与锁文件一致性。</li>
+<li>生产及开发依赖漏洞、敏感信息模式、Windows 打包配置与图标资源。</li>
+<li>DSH Profile Center 初始化与 bridge 安装事务、TUI/Web surface、权限、Gateway、恢复与清理的自动化回归。</li>
+<li>Claude/Codex/U-Code/OpenCode 等既有适配器回归，特别是多分屏恢复与 Claude 历史伪模型过滤。</li>
+<li>Windows Setup/Portable/update metadata/bridge tgz 产物一致性与解包运行冒烟。</li>
+</ul>
+<h3 id="不在本次范围">不在本次范围</h3>
+<ul>
+<li>外部生产账号、真实飞书租户、真实 API 密钥或远端发布操作。</li>
+<li>代码签名证书申请与公证；本轮未创建 Git tag、未 push、未创建 GitHub Release。</li>
+<li>大规模负载、长时间稳定性、SLA/RTO/RPO（项目未提供已批准指标）。</li>
+</ul>
+<h3 id="缺失材料">缺失材料</h3>
+<div class="table-wrap"><table><thead><tr><th>材料或权限</th><th>影响</th><th>证据状态</th><th>责任人</th><th>计划时间</th></tr></thead><tbody><tr><td>macOS arm64 构建机与签名/运行环境</td><td>无法验证 dmg/zip、node-pty 权限及真实 POSIX socket/symlink 门</td><td>待动态验证</td><td>发布负责人</td><td>打标签前</td></tr><tr><td>安装了兼容 bridge 的真实 DSH TUI profile</td><td>无法完成真实 TUI、双会话隔离、root/subagent/Code Mode 人工验收</td><td>待动态验证</td><td>DSH 集成负责人</td><td>打标签前</td></tr><tr><td>干净 Windows 安装/旧版升级/Portable 手工环境</td><td>当前仅验证打包、元数据和解包运行，未覆盖完整用户安装路径</td><td>部分验证</td><td>发布测试负责人</td><td>打标签前</td></tr></tbody></table></div>
+<h2 id="5-项目画像">5. 项目画像</h2>
+<div class="table-wrap"><table><thead><tr><th>项目</th><th>内容</th></tr></thead><tbody><tr><td>系统目标</td><td>在统一 Electron 工作台中管理 Codex、Claude、U-Code、OpenCode 和 DeepSeek Harness 会话、档案、权限、统计及 Gateway</td></tr><tr><td>用户和角色</td><td>本机开发者；本机 UCLI 主进程为安全边界；远程 Gateway 操作者受会话选择和权限决策约束</td></tr><tr><td>核心正向流程</td><td>创建/恢复 AI CLI 会话；初始化 DSH profile 并安装 bridge；启动 TUI/Web；多分屏交互；远程 Gateway 投递与决策</td></tr><tr><td>核心逆向流程</td><td>停止/重启/删除会话；权限拒绝/取消；bridge 断线；安装失败回滚；Gateway disable/route invalidation</td></tr><tr><td>技术栈</td><td>Electron 43、Vue 3、Vite 7、Node.js 24、sql.js、node-pty、electron-builder 26</td></tr><tr><td>服务与数据</td><td>本机 SQLite/SQL.js 数据、OS safeStorage、PTY 子进程、named pipe/Unix socket bridge、本地 DSH profile 元数据</td></tr><tr><td>外部依赖</td><td>各 AI CLI、DSH 0.1.0-rc.6、飞书 SDK、npm/Git/GitHub/GitLab、操作系统进程与密钥服务</td></tr><tr><td>已批准质量目标</td><td>未发现正式 SLO/RTO/RPO；本报告只使用现有测试、发布脚本和验收清单作为准入基线</td></tr></tbody></table></div>
+<h2 id="6-质量门禁">6. 质量门禁</h2>
+<div class="table-wrap"><table><thead><tr><th>门禁</th><th>结论</th><th>证据</th><th>阻断问题</th></tr></thead><tbody><tr><td>G0 可交付与可运行</td><td>部分验证</td><td>全量测试、构建、Windows 打包/校验、解包冒烟通过；macOS 未运行</td><td>无当前代码阻断；发布前补 macOS 与安装验收</td></tr><tr><td>G1 核心业务闭环</td><td>部分验证</td><td>DSH/多 CLI/Gateway 自动化回归通过；真实 DSH TUI 与本版四分屏手工未复测</td><td>发布前补真实环境记录</td></tr><tr><td>G2 安全与数据保护</td><td>已验证通过</td><td>官方源全量 npm audit 为 0；secret pattern 扫描 0 命中；bridge/权限 fail-closed 测试通过</td><td>无</td></tr><tr><td>G3 稳定性与可恢复性</td><td>部分验证</td><td>事务回滚、断线、超时、generation race、进程树清理自动化通过；跨平台实机证据不完整</td><td>无当前代码阻断；发布前补平台门</td></tr></tbody></table></div>
+<h2 id="7-检查覆盖">7. 检查覆盖</h2>
+<div class="table-wrap"><table><thead><tr><th>检查域</th><th>通过</th><th>不符合</th><th>部分验证</th><th>待验证/证据不足</th><th>不适用</th></tr></thead><tbody><tr><td>可交付与环境</td><td>5</td><td>0</td><td>2</td><td>1</td><td>0</td></tr><tr><td>架构与依赖</td><td>5</td><td>0</td><td>0</td><td>0</td><td>0</td></tr><tr><td>业务闭环</td><td>4</td><td>0</td><td>2</td><td>1</td><td>0</td></tr><tr><td>代码与可靠性</td><td>7</td><td>0</td><td>1</td><td>0</td><td>0</td></tr><tr><td>数据与性能</td><td>5</td><td>0</td><td>1</td><td>1</td><td>0</td></tr><tr><td>安全与合规</td><td>7</td><td>0</td><td>1</td><td>0</td><td>0</td></tr><tr><td>易用与兼容</td><td>4</td><td>0</td><td>2</td><td>1</td><td>0</td></tr><tr><td>运维与可观测性</td><td>3</td><td>0</td><td>1</td><td>0</td><td>0</td></tr></tbody></table></div>
+<h2 id="8-构建与启动">8. 构建与启动</h2>
+<div class="table-wrap"><table><thead><tr><th>步骤</th><th>命令或操作</th><th>预期</th><th>实际</th><th>证据</th><th>状态</th></tr></thead><tbody><tr><td>依赖完整性</td><td><code>npm ls --depth=0</code></td><td>无缺失/无非法顶层依赖</td><td>干净</td><td>本地命令输出</td><td>已验证通过</td></tr><tr><td>安全审计</td><td><code>npm audit --registry=https://registry.npmjs.org --json</code></td><td>无已知漏洞</td><td>533 dependencies，0 vulnerabilities</td><td>官方 npm registry 返回</td><td>已验证通过</td></tr><tr><td>自动化测试</td><td><code>npm test</code></td><td>0 failure</td><td>1209 total / 1199 pass / 0 fail / 10 platform skip</td><td>2026-08-17 fresh 输出</td><td>已验证通过</td></tr><tr><td>生产构建</td><td><code>npm run build</code></td><td>main/preload/renderer 成功</td><td>Vite 7.3.6 构建成功</td><td>2026-08-17 fresh 输出</td><td>已验证通过</td></tr><tr><td>Windows 打包</td><td><code>npm run dist:win</code></td><td>Setup + Portable</td><td>两个产物生成</td><td><code>dist/</code> 产物与 builder 日志</td><td>已验证通过</td></tr><tr><td>Windows 发布校验</td><td><code>npm run verify:release -- --platform win32 --arch x64</code></td><td>元数据/架构/bridge 一致</td><td>通过</td><td>verify-release 输出</td><td>已验证通过</td></tr><tr><td>解包运行冒烟</td><td>隔离 <code>--user-data-dir</code> 启动 <code>dist/win-unpacked/UCLI.exe</code></td><td>主进程及 renderer 保持存活</td><td>约 8 秒存活并创建预期进程；随后仅终止该测试进程树</td><td>进程快照</td><td>已验证通过</td></tr><tr><td>macOS 打包/运行</td><td>CI <code>dist:mac</code> + verify + 手工启动</td><td>dmg/zip/权限均通过</td><td>Windows 主机不可执行</td><td>平台限制</td><td>待动态验证</td></tr></tbody></table></div>
+<h2 id="9-核心业务链路">9. 核心业务链路</h2>
+<div class="table-wrap"><table><thead><tr><th>编号</th><th>业务目标</th><th>角色</th><th>前端入口</th><th>接口与服务</th><th>数据</th><th>逆向流程</th><th>状态</th></tr></thead><tbody><tr><td>FLOW-01</td><td>初始化 DSH profile 并启用 UCLI bridge</td><td>本机开发者</td><td>设置 &gt; 档案管理</td><td>DSH profile IPC、固定 argv runner</td><td>profile 四元数据、bridge tgz</td><td>失败回滚原文件/模式、保留恢复备份</td><td>自动化已验证；真实 profile 待手工</td></tr><tr><td>FLOW-02</td><td>启动/恢复 DSH TUI 会话</td><td>本机开发者</td><td>工作台新会话</td><td>PTY、认证 bridge、permission RPC</td><td>native session ID、累计统计、Gateway 状态</td><td>断线 fail-closed、精确进程树清理、恢复 generation 隔离</td><td>自动化已验证；真实 TUI 待手工</td></tr><tr><td>FLOW-03</td><td>使用 DSH Web 回退表面</td><td>本机开发者</td><td>工作台 Web surface</td><td>loopback Web host、严格 URL、sandbox iframe</td><td>native-owned 状态，不接管权限/统计</td><td>stop/restart 整个 Web host、关闭后禁止交互</td><td>自动化已验证；Windows 解包冒烟未覆盖真实 Web UI</td></tr><tr><td>FLOW-04</td><td>1/2/4 分屏恢复多种 AI CLI 上下文</td><td>本机开发者</td><td>工作台</td><td>session store、pane lifecycle、各 CLI adapter</td><td>pane 布局、native session binding</td><td>单 pane 失败不阻断其他 pane、重启/重新分配</td><td>自动化已验证；用户此前手工验证过修复，工具链升级后待本版复测</td></tr><tr><td>FLOW-05</td><td>生成并交付 0.11.0 发布物</td><td>发布负责人</td><td>Git tag workflow</td><td>GitHub Actions、electron-builder、verify-release</td><td>Setup/Portable/dmg/zip/update metadata</td><td>校验失败不发布；已有 release 使用 clobber 幂等上传</td><td>Windows 已验证；macOS/真实发布待授权</td></tr></tbody></table></div>
+<h2 id="10-外部依赖与-mock">10. 外部依赖与 Mock</h2>
+<div class="table-wrap"><table><thead><tr><th>依赖</th><th>调用方</th><th>契约</th><th>超时/降级</th><th>本地替代</th><th>可用性</th><th>证据状态</th></tr></thead><tbody><tr><td>DeepSeek Harness 0.1.0-rc.6</td><td>Profile manager / TUI / Web</td><td>固定版本、固定 argv、bridge protocol v1</td><td>启动/握手/RPC 超时，断线 fail-closed；Web 回退</td><td>fake Cordis + 真实本地 socket/pipe 测试</td><td>本轮无真实 TUI profile</td><td>部分验证</td></tr><tr><td>Codex / Claude / U-Code / OpenCode</td><td>CLI adapters</td><td>PTY、resume、history、stats</td><td>各适配器安全解析与降级</td><td>fixture 与 fake process</td><td>本地部分 CLI 可用</td><td>已验证通过（自动化）</td></tr><tr><td>飞书 SDK</td><td>Gateway</td><td>WebSocket、schema 2.0 card、opaque actions</td><td>配置/连接错误稳定化、route/token 失效</td><td>fake channel/SDK tests</td><td>未连真实租户</td><td>部分验证</td></tr><tr><td>npm registry</td><td>安装与审计</td><td>lockfile + HTTPS registry</td><td>镜像 audit 404 后改用官方 registry</td><td>npm cache</td><td>官方审计可用</td><td>已验证通过</td></tr><tr><td>OS safeStorage / node-pty / process tree</td><td>Electron main</td><td>本机加密、PTY、进程所有权</td><td>unavailable 时拒绝明文；有界终止与重试</td><td>fake timers/processes</td><td>Windows 已实机；macOS 待验证</td><td>部分验证</td></tr></tbody></table></div>
+<h2 id="11-根因问题清单">11. 根因问题清单</h2>
+<div class="table-wrap"><table><thead><tr><th>编号</th><th>类型</th><th>根因标题</th><th>风险</th><th>准入处置</th><th>证据状态</th><th>影响链路</th><th>状态</th></tr></thead><tbody><tr><td>Q-001</td><td>安全 / 可交付</td><td>发布工具链和传递依赖存在已知漏洞，旧 builder 配置与升级后不兼容</td><td>高（整改前）</td><td>blocker，已整改并复测</td><td>已验证通过</td><td>FLOW-01 至 FLOW-05</td><td>已关闭</td></tr></tbody></table></div>
+<h3 id="q-001-发布依赖漏洞与工具链兼容">Q-001 发布依赖漏洞与工具链兼容</h3>
+<h4 id="已确认事实">已确认事实</h4>
+<ul>
+<li>整改前官方源生产审计包含 <code>adm-zip</code>、<code>nanoid</code>、<code>postcss</code>、<code>smol-toml</code> 风险；全量审计合计 20 个漏洞，其中含 critical/high。</li>
+<li>升级 Electron、electron-builder、Vite、TOML/ZIP 依赖后，builder 26 不再接受旧 <code>win.sign: false</code>，并且内存受限环境中的 PNG 转 ICO 转换失败。</li>
+<li><code>smol-toml</code> 1.8 的格式化变化会破坏 Codex profile byte-exact fixture。</li>
+</ul>
+<h4 id="根因判断">根因判断</h4>
+<ul>
+<li>根因状态：已确认。</li>
+<li>根因是旧发布工具链和未固定的传递依赖基线滞后，同时缺少 Windows icon/sign 配置的回归契约。</li>
+</ul>
+<h4 id="位置与证据">位置与证据</h4>
+<ul>
+<li>文件：<code>package.json</code>、<code>package-lock.json</code>、<code>electron-builder.yml</code>、<code>build/icon.ico</code>、<code>electron/aiCliProfiles/codexProfileFile.js</code>、<code>test/release-workflow.test.mjs</code>。</li>
+<li>复现：整改前运行官方 <code>npm audit</code>；升级后运行 Codex profile focused tests 和 Windows builder。</li>
+<li>证据：初始审计 20 漏洞；TOML fixture 2 项 RED；builder schema 和 PNG 转换各一次 RED；最终全量审计 0、测试/构建/Windows 打包 GREEN。</li>
+</ul>
+<h4 id="影响与风险">影响与风险</h4>
+<ul>
+<li>发生条件：解析恶意 ZIP/受影响依赖路径，或在干净发布机执行旧配置。</li>
+<li>业务影响：潜在拒绝服务/依赖漏洞暴露；Windows 发布失败或图标缺失；Codex 档案产生无关字节漂移。</li>
+<li>数据或安全影响：整改前存在供应链与输入处理风险；未发现已利用证据。</li>
+<li>可恢复性：通过显式升级、精确 override、配置迁移和兼容 serializer 恢复。</li>
+</ul>
+<h4 id="整改与复测">整改与复测</h4>
+<ul>
+<li>临时止血：无；直接完成根因修复。</li>
+<li>永久修复：Node 24 CI；Electron 43 / builder 26 / Vite 7；精确安全 override；提交预生成 ICO；Codex TOML 边界兼容；发布配置契约测试。</li>
+<li>回归用例：全量测试 1209 项；release workflow 6/6；Codex ZIP/TOML focused 25/25；官方 audit、build、dist:win、verify:release。</li>
+<li>残余风险：锁文件仍含 45 个历史 <code>registry.npmmirror.com</code> URL，本次未引入；建议后续独立规范化，避免把大规模锁文件来源变更混入当前发布。</li>
+<li>责任人和期限：维护团队；已于提交 <code>5271360</code> 关闭。</li>
+</ul>
+<h2 id="12-已验证通过项">12. 已验证通过项</h2>
+<div class="table-wrap"><table><thead><tr><th>检查项</th><th>范围</th><th>方法</th><th>证据</th><th>结论</th></tr></thead><tbody><tr><td>版本一致性</td><td>manifest、lock、产物</td><td>静态核对 + verify-release</td><td>均为 0.11.0</td><td>已验证通过</td></tr><tr><td>全量测试</td><td>main/preload/renderer/adapters/Gateway/DSH</td><td><code>npm test</code></td><td>1199 pass / 0 fail / 10 skip</td><td>已验证通过</td></tr><tr><td>生产构建</td><td>Electron main/preload/Vue renderer</td><td><code>npm run build</code></td><td>exit 0</td><td>已验证通过</td></tr><tr><td>依赖安全</td><td>prod + dev</td><td>npm 官方 registry audit</td><td>533 dependencies / 0 vulnerabilities</td><td>已验证通过</td></tr><tr><td>顶层依赖树</td><td>npm manifest/lock</td><td><code>npm ls --depth=0</code></td><td>clean</td><td>已验证通过</td></tr><tr><td>敏感信息模式</td><td>tracked production/config paths</td><td>allowlist scan</td><td>0 match</td><td>已验证通过</td></tr><tr><td>Windows 发布物</td><td>Setup/Portable/latest.yml/bridge</td><td>dist + verify-release + SHA256</td><td>结构与版本一致</td><td>已验证通过</td></tr><tr><td>Bridge 包边界</td><td>tgz</td><td>tar 内容检查</td><td>仅 package.json、cordis.patch.yml、framing.js、index.js</td><td>已验证通过</td></tr><tr><td>Windows 图标与签名契约</td><td>builder config + committed ICO</td><td>release workflow regression test</td><td>6/6 pass</td><td>已验证通过</td></tr><tr><td>独立代码复审</td><td>当前提交 diff</td><td>安全/配置/跨平台审查</td><td>Critical 0、Important 0（icon 问题已修）</td><td>已验证通过</td></tr></tbody></table></div>
+<h2 id="13-待验证与证据不足项">13. 待验证与证据不足项</h2>
+<div class="table-wrap"><table><thead><tr><th>检查项</th><th>原因</th><th>可能影响</th><th>所需条件</th><th>责任人</th><th>时间</th></tr></thead><tbody><tr><td>macOS arm64 原生构建与运行</td><td>当前仅有 Windows 主机</td><td>dmg/zip、node-pty 权限、Unix socket/symlink 行为可能与 Windows 不同</td><td>macOS CI 与实机验收</td><td>发布负责人</td><td>打标签前</td></tr><tr><td>真实 DSH TUI 集成</td><td>本轮没有可用兼容 profile</td><td>无法证明真实上游 profile、双会话、root/subagent/Code Mode 用户体验</td><td>rc6 profile + bridge + 两张会话卡</td><td>DSH 集成负责人</td><td>打标签前</td></tr><tr><td>安装/升级/Portable 完整手工流程</td><td>仅打包校验和解包启动</td><td>安装目录、旧版升级、卸载、Portable 迁移仍可能有环境问题</td><td>干净 VM 与旧版本安装样本</td><td>发布测试负责人</td><td>打标签前</td></tr></tbody></table></div>
+<h2 id="14-整改计划">14. 整改计划</h2>
+<div class="table-wrap"><table><thead><tr><th>问题编号</th><th>临时措施</th><th>永久方案</th><th>责任人</th><th>期限</th><th>状态</th><th>验证人</th></tr></thead><tbody><tr><td>Q-001</td><td>无</td><td>已升级并固定工具链/依赖，增加打包与 TOML 回归</td><td>维护团队</td><td>2026-08-17</td><td>已关闭</td><td>自动化 + 独立 reviewer</td></tr><tr><td>EV-001</td><td>禁止在缺少 macOS 证据时打标签</td><td>由 release workflow 的 macOS arm64 job 打包、校验并保存日志</td><td>发布负责人</td><td>打标签前</td><td>待验证</td><td>发布审批人</td></tr><tr><td>EV-002</td><td>禁止仅凭 fake bridge 宣称真实 TUI 验收完成</td><td>执行 release-acceptance 中真实 DSH 双会话与权限/Gateway checklist</td><td>DSH 集成负责人</td><td>打标签前</td><td>待验证</td><td>产品/发布负责人</td></tr><tr><td>EV-003</td><td>不将解包冒烟等同安装验收</td><td>在干净 VM 执行安装、旧版升级、Portable、卸载与数据保留检查</td><td>发布测试负责人</td><td>打标签前</td><td>待验证</td><td>发布审批人</td></tr></tbody></table></div>
+<h2 id="15-风险接受与例外">15. 风险接受与例外</h2>
+<div class="table-wrap"><table><thead><tr><th>问题编号</th><th>理由</th><th>残余风险</th><th>补救措施</th><th>有效期</th><th>批准人</th></tr></thead><tbody><tr><td>R-001 Windows 未签名</td><td>当前项目配置明确 <code>signExecutable: false</code>，本轮无签名证书授权</td><td>SmartScreen/来源信任提示，安装体验与供应链可信度降低</td><td>发布说明明确未签名；后续引入证书、签名与验证门</td><td>下次签名能力上线前</td><td>待项目负责人确认</td></tr><tr><td>R-002 <code>asar: false</code></td><td>现有发布结构，为运行时资源与原生模块兼容保留</td><td>应用源码更易被读取或篡改，不能作为防篡改边界</td><td>依赖签名/哈希/可信分发；后续单独评估 asar 迁移</td><td>下次发布架构评审前</td><td>待项目负责人确认</td></tr><tr><td>R-003 ESM 类型警告</td><td>当前 CommonJS/ESM 混合打包仍能正确运行</td><td>Node 测试产生 <code>MODULE_TYPELESS_PACKAGE_JSON</code> 性能/噪声警告</td><td>独立迁移方案，不在 0.11.0 临近发布时全局设置 <code>type: module</code></td><td>0.12.0 规划前</td><td>技术负责人待确认</td></tr></tbody></table></div>
+<h2 id="16-复测记录">16. 复测记录</h2>
+<div class="table-wrap"><table><thead><tr><th>日期</th><th>版本</th><th>范围</th><th>通过</th><th>未通过</th><th>待验证</th><th>结论</th></tr></thead><tbody><tr><td>2026-08-17</td><td><code>5271360</code> / 0.11.0</td><td>全量测试、构建、安全审计、Windows 打包/校验/解包冒烟、独立 review</td><td>10 类检查</td><td>0</td><td>3</td><td>条件通过</td></tr></tbody></table></div>
+<h2 id="17-发布前最终门">17. 发布前最终门</h2>
+<ol>
+<li>将当前分支推送并由 Windows + macOS release CI 在同一提交上完成测试、构建、打包和 <code>verify:release</code>。</li>
+<li>在 macOS arm64 上确认 node-pty helper 权限、DSH Unix socket 0700/0600、symlink 拒绝和应用启动。</li>
+<li>使用真实 DSH 0.1.0-rc.6 profile 完成 TUI 初始化、bridge 更新、两会话隔离、权限拒绝/允许、Gateway、resume、stop/restart。</li>
+<li>在干净 Windows VM 完成 Setup、旧版升级、Portable、卸载和用户数据保留检查。</li>
+<li>记录 R-001/R-002 的发布负责人接受意见后，才可创建并推送 <code>v0.11.0</code> 标签。</li>
+</ol></article></main>
+</div>
+<script>
+const body=document.body,button=document.querySelector('.menu-button'),links=[...document.querySelectorAll('.sidebar-nav a')];
+button.addEventListener('click',()=>body.classList.toggle('menu-open'));
+links.forEach(link=>link.addEventListener('click',()=>body.classList.remove('menu-open')));
+const targets=links.map(link=>document.getElementById(link.hash.slice(1))).filter(Boolean);
+if('IntersectionObserver' in window){const observer=new IntersectionObserver(entries=>{entries.filter(entry=>entry.isIntersecting).forEach(entry=>{links.forEach(link=>link.classList.toggle('active',link.hash==='#'+entry.target.id));});},{rootMargin:'-15% 0px -75% 0px'});targets.forEach(target=>observer.observe(target));}
+</script>
+</body>
+</html>

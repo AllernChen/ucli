@@ -11,6 +11,7 @@ import {
   inspectClaudeFileAuthentication,
   inspectOpenCodeAuthentication
 } from './summaries/runners/authBridge.js'
+import { inspectDshRuntime } from './adapters/deepSeekHarnessRuntime.js'
 
 const CLI_TOOLS = {
   claude: {
@@ -40,6 +41,13 @@ const CLI_TOOLS = {
     executable: 'ucode',
     installCommand: 'npm install -g @allenchen77/ucode-cli',
     upgradeCommand: 'npm install -g @allenchen77/ucode-cli'
+  },
+  'deepseek-harness': {
+    id: 'deepseek-harness',
+    displayName: 'DeepSeek Harness',
+    executable: 'dsh',
+    installCommand: 'npm install -g @deepseek-ai/dsh@0.1.0-rc.6',
+    upgradeCommand: 'npm install -g @deepseek-ai/dsh@0.1.0-rc.6'
   }
 }
 export function listCliToolDefinitions() {
@@ -114,6 +122,29 @@ async function inspectSummaryAuthentication(id, {
 
 export async function inspectCliTool(id, runner = runFixedCommand, options = {}) {
   const tool = requireTool(id)
+  if (id === 'deepseek-harness') {
+    const runtime = await (options.dshRuntimeInspector || inspectDshRuntime)({
+      env: options.env || process.env,
+      homeDirectory: options.homeDirectory
+    })
+    const version = typeof runtime.version === 'string' &&
+      runtime.version.length <= 64 &&
+      /^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/u.test(runtime.version)
+      ? runtime.version
+      : ''
+    const compatibilityReason = ['not-installed', 'version-unreadable', 'unsupported-version', ''].includes(runtime.reason)
+      ? runtime.reason
+      : 'version-unreadable'
+    return {
+      ...summaryCapability(tool),
+      installed: runtime.installed === true,
+      path: '',
+      version,
+      compatible: runtime.compatible === true,
+      compatibilityReason,
+      error: runtime.installed ? '' : 'not-installed'
+    }
+  }
   if (id === 'opencode' || id === 'ucode') {
     await prependNpmGlobalBinToPath(runner)
   }
@@ -148,20 +179,29 @@ export async function inspectCliTools(runner = runFixedCommand) {
   return Promise.all(Object.keys(CLI_TOOLS).map((id) => inspectCliTool(id, runner)))
 }
 
-export async function runCliToolAction(id, action, runner = runFixedCommand) {
+export async function runCliToolAction(id, action, runner = runFixedCommand, options = {}) {
   const tool = requireTool(id)
   if (action !== 'install' && action !== 'upgrade') {
     throw new Error(`unsupported CLI action: ${action}`)
   }
   const command = action === 'install' ? tool.installCommand : tool.upgradeCommand
   const result = await runner(command, 10 * 60_000)
+  const status = await inspectCliTool(id, runner, options)
+  if (id === 'deepseek-harness') {
+    return {
+      ok: result.code === 0,
+      command,
+      code: result.code,
+      status
+    }
+  }
   return {
     ok: result.code === 0,
     command,
     code: result.code,
     stdout: result.stdout,
     stderr: result.stderr,
-    status: await inspectCliTool(id, runner)
+    status
   }
 }
 

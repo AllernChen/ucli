@@ -30,6 +30,10 @@ export function isSafeClaudeModel(value) {
   return typeof value === 'string' && MODEL_PATTERN.test(value)
 }
 
+export function normalizeClaudeHistoryModel(value) {
+  return isSafeClaudeModel(value) ? value : null
+}
+
 export function normaliseClaudeProfileDraft(draft = {}) {
   if (!draft || typeof draft !== 'object' || Array.isArray(draft)) {
     throw claudeProfileError('INVALID_CLAUDE_PROFILE')

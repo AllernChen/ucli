@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import test from 'node:test'
@@ -7,7 +7,9 @@ import test from 'node:test'
 import { openDb } from '../electron/persistence/db.js'
 import { createSkillsService } from '../electron/skills/service.js'
 import { createSkillSourceLoader } from '../electron/skills/sourceLoader.js'
-import { inspectSkillDirectory } from '../electron/skills/fileOps.js'
+import {
+  copySkillDirectoryAtomic, inspectSkillDirectory, removeManagedSkillDirectory
+} from '../electron/skills/fileOps.js'
 
 function createSkill(root, description = 'Prepare release notes', name = 'release-notes') {
   mkdirSync(root, { recursive: true })
@@ -31,7 +33,7 @@ async function withService(work, overrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'ucli-skills-service-'))
   const db = await openDb(join(root, 'ucli.db'))
   const sourceLoader = createSkillSourceLoader({ stagingRoot: join(root, 'staging') })
-  const { flushFactory, ...serviceOverrides } = overrides
+  const { flushFactory, envFactory, ...serviceOverrides } = overrides
   const service = createSkillsService({
     db,
     userDataPath: join(root, 'user-data'),
@@ -43,6 +45,7 @@ async function withService(work, overrides = {}) {
       { id: 'claude-session', adapterId: 'claude', cwd: join(root, 'other'), status: 'offline' }
     ],
     ...serviceOverrides,
+    ...(envFactory ? { env: envFactory(root) } : {}),
     ...(flushFactory ? { flush: flushFactory(db) } : {})
   })
   try { await work({ root, db, service }) } finally {
@@ -644,7 +647,7 @@ test('discovery surfaces malformed SKILL.md files as invalid instead of hiding t
   })
 })
 
-test('agents root is Codex-owned and does not imply Claude visibility', async () => {
+test('user agents root is shared by Codex and DSH without implying Claude visibility', async () => {
   await withService(async ({ root, service }) => {
     const skillPath = join(root, 'home', '.agents', 'skills', 'diagnose')
     createSkill(skillPath, 'Diagnose bugs', 'diagnose')
@@ -657,6 +660,657 @@ test('agents root is Codex-owned and does not imply Claude visibility', async ()
     assert.equal(source.health, 'ready')
     assert.equal(source.visibility.codex.direct, true)
     assert.equal(source.visibility.claude.visible, false)
+    assert.deepEqual(source.visibility['deepseek-harness'], {
+      visible: true, direct: false, inheritedFrom: ['codex']
+    })
+  })
+})
+
+test('project scope is canonicalized to the nearest git root for reuse and affected sessions', async () => {
+  let repository
+  await withService(async ({ root, db, service }) => {
+    repository = join(root, 'repository')
+    const packageA = join(repository, 'packages', 'a')
+    const packageB = join(repository, 'packages', 'b')
+    mkdirSync(join(repository, '.git'), { recursive: true })
+    mkdirSync(packageA, { recursive: true })
+    mkdirSync(packageB, { recursive: true })
+    const source = join(root, 'source')
+    createSkill(source)
+
+    const first = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['codex'], scopeType: 'project', projectPath: packageA
+    })
+    const repeated = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['codex'], scopeType: 'project', projectPath: packageB
+    })
+
+    assert.equal(repeated.id, first.id)
+    assert.equal(db.listSkillPackages().length, 1)
+    assert.equal(db.listSkillInstallations().length, 1)
+    assert.equal(first.installations[0].scopeKey, process.platform === 'win32' ? repository.toLowerCase() : repository)
+    assert.deepEqual(service.getAffectedSessions([first.installations[0].id]).map((item) => item.id), ['same-repo'])
+  }, {
+    listSessions: () => [{
+      id: 'same-repo', adapterId: 'codex', cwd: join(repository, 'packages', 'b'), status: 'offline'
+    }]
+  })
+})
+
+test('ordinary CLI project scope remains nested across sibling packages in one repository', async () => {
+  let repository
+  await withService(async ({ root, db, service }) => {
+    repository = join(root, 'repository')
+    const packageA = join(repository, 'packages', 'a')
+    const packageB = join(repository, 'packages', 'b')
+    mkdirSync(join(repository, '.git'), { recursive: true })
+    mkdirSync(packageA, { recursive: true })
+    mkdirSync(packageB, { recursive: true })
+    const source = join(root, 'source')
+    createSkill(source)
+
+    const first = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['claude'], scopeType: 'project', projectPath: packageA
+    })
+    const second = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['claude'], scopeType: 'project', projectPath: packageB
+    })
+
+    assert.notEqual(second.id, first.id)
+    assert.equal(db.listSkillPackages().length, 2)
+    assert.equal(first.installations[0].scopeKey, process.platform === 'win32' ? packageA.toLowerCase() : packageA)
+    assert.deepEqual(service.getAffectedSessions([first.installations[0].id]), [])
+  }, {
+    listSessions: () => [{
+      id: 'sibling-claude', adapterId: 'claude', cwd: join(repository, 'packages', 'b'), status: 'offline'
+    }]
+  })
+})
+
+test('mixed project targets reject divergent git-root and nested scope semantics', async () => {
+  await withService(async ({ root, db, service }) => {
+    const repository = join(root, 'repository')
+    const nested = join(repository, 'packages', 'a')
+    const source = join(root, 'source')
+    mkdirSync(join(repository, '.git'), { recursive: true })
+    mkdirSync(nested, { recursive: true })
+    createSkill(source)
+
+    await assert.rejects(
+      service.install({
+        source: { type: 'local', path: source },
+        targetAdapterIds: ['claude', 'codex'], scopeType: 'project', projectPath: nested
+      }),
+      { code: 'SKILL_SCOPE_AMBIGUOUS' }
+    )
+    assert.equal(db.listSkillPackages().length, 0)
+    assert.equal(existsSync(join(repository, '.agents', 'skills', 'release-notes')), false)
+    assert.equal(existsSync(join(nested, '.claude', 'skills', 'release-notes')), false)
+  })
+})
+
+test('applying Codex to a nested ordinary-CLI package rejects divergent scope without writing', async () => {
+  await withService(async ({ root, db, service }) => {
+    const repository = join(root, 'repository')
+    const nested = join(repository, 'packages', 'a')
+    const source = join(root, 'source')
+    mkdirSync(join(repository, '.git'), { recursive: true })
+    mkdirSync(nested, { recursive: true })
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['claude'], scopeType: 'project', projectPath: nested
+    })
+
+    await assert.rejects(
+      service.applyToAdapter(installed.id, 'codex'),
+      { code: 'SKILL_SCOPE_AMBIGUOUS' }
+    )
+    const row = db.listSkillInstallations({ packageId: installed.id })[0]
+    assert.equal(row.targetAdapterId, 'claude')
+    assert.equal(row.scopeKey, process.platform === 'win32' ? nested.toLowerCase() : nested)
+    assert.equal(existsSync(join(repository, '.agents', 'skills', 'release-notes')), false)
+  })
+})
+
+test('DSH conflict groups describe the effective source while preserving shadowed sources', async () => {
+  await withService(async ({ root, service }) => {
+    createSkill(join(root, 'home', '.dsh', 'skills', 'diagnose'), 'DSH user winner', 'diagnose')
+    createSkill(join(root, 'home', '.agents', 'skills', 'diagnose'), 'Agents shadowed copy', 'diagnose')
+
+    const group = (await service.getState()).discovered.find((item) => item.name === 'diagnose')
+    const dshSources = group.sources.filter((item) => item.dshSource)
+
+    assert.equal(group.status, 'conflict')
+    assert.equal(group.description, 'DSH user winner')
+    assert.equal(dshSources.length, 2)
+    assert.deepEqual(dshSources.map((item) => [item.dshSource, item.effective, item.shadowedBy]), [
+      ['user-agents', false, 'user-dsh'],
+      ['user-dsh', true, null]
+    ])
+  })
+})
+
+test('Skills state reports custom DSH roots unsupported without a trusted profile source', async () => {
+  await withService(async ({ service }) => {
+    const state = await service.getState()
+    assert.deepEqual(state.dshRoots, {
+      custom: 'unsupported',
+      bundled: 'unconfigured'
+    })
+  })
+})
+
+test('trusted bundled DSH Skills are read-only when adopt is called directly', async () => {
+  await withService(async ({ root, service }) => {
+    const bundled = join(root, 'bundled', 'bundled-helper')
+    createSkill(bundled, 'Bundled helper', 'bundled-helper')
+
+    const source = findSource(await service.getState(), 'bundled-helper', 'deepseek-harness')
+    assert.equal(source?.manageable, false)
+    assert.equal(source?.readOnly, true)
+    await assert.rejects(
+      service.adopt({ path: bundled, targetAdapterId: 'deepseek-harness', scopeType: 'user' }),
+      { code: 'SKILL_SOURCE_READ_ONLY' }
+    )
+  }, { envFactory: (root) => ({ DSH_BUNDLED_SKILL_DIR: join(root, 'bundled') }) })
+})
+
+test('DSH-only install writes one native user projection under the DSH home', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['deepseek-harness'],
+      scopeType: 'user'
+    })
+
+    assert.deepEqual(installed.installations.map((item) => item.targetAdapterId), ['deepseek-harness'])
+    assert.equal(existsSync(join(root, 'home', '.dsh', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(installed.visibility['deepseek-harness'].direct, true)
+    assert.equal(db.listSkillInstallations().length, 1)
+  })
+})
+
+test('flat DSH Skills are read-only and reject adoption with a stable error', async () => {
+  await withService(async ({ root, service }) => {
+    const flat = join(root, 'home', '.dsh', 'skills', 'flat-helper.md')
+    mkdirSync(dirname(flat), { recursive: true })
+    writeFileSync(flat, '---\nname: flat-helper\ndescription: Flat helper\n---\n')
+    const source = (await service.getState()).discovered
+      .find((item) => item.name === 'flat-helper').sources[0]
+    assert.equal(source.manageable, false)
+    await assert.rejects(
+      service.adopt({ path: flat, targetAdapterId: 'deepseek-harness', scopeType: 'user' }),
+      { code: 'SKILL_FLAT_READ_ONLY' }
+    )
+  })
+})
+
+test('DSH install rejects non-portable Skill names before writing a projection', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source, 'Invalid for DSH', 'Release Notes')
+
+    await assert.rejects(
+      service.install({
+        source: { type: 'local', path: source },
+        targetAdapterIds: ['deepseek-harness'],
+        scopeType: 'user'
+      }),
+      { code: 'SKILL_INCOMPATIBLE' }
+    )
+
+    assert.equal(existsSync(join(root, 'home', '.dsh', 'skills', 'Release Notes')), false)
+    assert.equal(db.listSkillPackages().length, 0)
+  })
+})
+
+test('Codex and DSH targets share one project agents installation record', async () => {
+  await withService(async ({ root, service }) => {
+    const project = join(root, 'project')
+    const skillPath = join(project, '.agents', 'skills', 'diagnose')
+    createSkill(skillPath, 'Diagnose bugs', 'diagnose')
+
+    const state = await service.getState({ projectPath: project })
+    const sources = findSources(state, 'diagnose')
+    const source = sources.find((item) => item.adapterId === 'codex')
+
+    assert.equal(sources.filter((item) => item.entryPath === skillPath).length, 1)
+    assert.deepEqual(source.visibility['deepseek-harness'], {
+      visible: true, direct: false, inheritedFrom: ['codex']
+    })
+    assert.deepEqual(state.adapters.at(-1), {
+      id: 'deepseek-harness', displayName: 'DeepSeek Harness'
+    })
+    const managedSource = join(root, 'managed-source')
+    createSkill(managedSource, 'Prepare releases', 'release-notes')
+    const installed = await service.install({
+      source: { type: 'local', path: managedSource },
+      targetAdapterIds: ['codex', 'deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+    assert.deepEqual(installed.installations.map((item) => item.targetAdapterId), ['codex'])
+    assert.equal(existsSync(join(project, '.agents', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes')), false)
+  })
+})
+
+test('DSH_AGENTS_HOME prevents a user Codex projection from falsely covering DSH', async () => {
+  await withService(async ({ root, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['codex', 'deepseek-harness'], scopeType: 'user'
+    })
+
+    assert.deepEqual(installed.installations.map((item) => item.targetAdapterId), ['codex', 'deepseek-harness'])
+    assert.equal(existsSync(join(root, 'home', '.agents', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(existsSync(join(root, 'home', '.dsh', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.deepEqual(installed.visibility['deepseek-harness'], {
+      visible: true, direct: true, inheritedFrom: []
+    })
+  }, {
+    envFactory: (root) => ({ DSH_AGENTS_HOME: join(root, 'custom-agents') })
+  })
+})
+
+test('applying DSH to an existing Codex projection does not duplicate the shared Skill', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['codex'], scopeType: 'project', projectPath: project
+    })
+
+    const reused = await service.applyToAdapter(installed.id, 'deepseek-harness')
+
+    assert.equal(reused.installations.length, 1)
+    assert.equal(reused.installations[0].id, installed.installations[0].id)
+    assert.equal(reused.installations[0].targetAdapterId, 'codex')
+    assert.deepEqual(reused.installOutcome, {
+      kind: 'already_installed', matchType: 'shared_projection', appliedAdapterIds: []
+    })
+    assert.equal(db.listSkillInstallations({ packageId: installed.id }).length, 1)
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes')), false)
+  })
+})
+
+test('applying Codex to a DSH-only projection migrates the same installation to agents storage', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+    const installationId = installed.installations[0].id
+
+    const migrated = await service.applyToAdapter(installed.id, 'codex')
+
+    assert.equal(migrated.installations.length, 1)
+    assert.equal(migrated.installations[0].id, installationId)
+    assert.equal(migrated.installations[0].targetAdapterId, 'codex')
+    const sharedTarget = join(project, '.agents', 'skills', 'release-notes')
+    const actualTarget = realpathSync(migrated.installations[0].targetPath)
+    const expectedTarget = realpathSync(sharedTarget)
+    assert.equal(
+      process.platform === 'win32' ? actualTarget.toLowerCase() : actualTarget,
+      process.platform === 'win32' ? expectedTarget.toLowerCase() : expectedTarget
+    )
+    assert.equal(existsSync(join(sharedTarget, 'SKILL.md')), true)
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes')), false)
+    assert.equal(db.listSkillInstallations({ packageId: installed.id }).length, 1)
+  })
+})
+
+test('applying Codex replaces only the DSH projection when Claude and DSH are both installed', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['claude', 'deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+    const dshInstallationId = installed.installations
+      .find((item) => item.targetAdapterId === 'deepseek-harness').id
+
+    const migrated = await service.applyToAdapter(installed.id, 'codex')
+
+    assert.deepEqual(migrated.installations.map((item) => item.targetAdapterId), ['claude', 'codex'])
+    assert.equal(migrated.installations.find((item) => item.targetAdapterId === 'codex').id, dshInstallationId)
+    assert.equal(existsSync(join(project, '.claude', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(existsSync(join(project, '.agents', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes')), false)
+    assert.equal(db.listSkillInstallations({ packageId: installed.id }).length, 2)
+  })
+})
+
+test('DSH migration exposes committed cleanup state and a retry converges', async () => {
+  let failCleanup = true
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+
+    await assert.rejects(
+      service.applyToAdapter(installed.id, 'codex'),
+      { code: 'SKILL_PROJECTION_ROLLBACK_FAILED' }
+    )
+    let row = db.listSkillInstallations({ packageId: installed.id })[0]
+    assert.equal(row.targetAdapterId, 'codex')
+    assert.equal(row.status, 'cleanup_pending')
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(existsSync(join(project, '.agents', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.deepEqual((await service.getState({ projectPath: project })).packages[0].migrationRecovery, {
+      status: 'cleanup_pending', action: 'retry_apply_codex', targetAdapterId: 'codex'
+    })
+
+    failCleanup = false
+    const repaired = await service.applyToAdapter(installed.id, 'codex')
+    row = db.listSkillInstallations({ packageId: installed.id })[0]
+    assert.equal(repaired.installations.length, 1)
+    assert.equal(row.targetAdapterId, 'codex')
+    assert.equal(row.status, 'ready')
+    assert.equal(repaired.installOutcome.kind, 'recovered_migration')
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes')), false)
+    assert.equal(existsSync(join(project, '.agents', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal((await service.getState({ projectPath: project })).packages[0].migrationRecovery, null)
+  }, {
+    migrationFileOps: {
+      copy: copySkillDirectoryAtomic,
+      remove(target, sha) {
+        if (failCleanup && target.includes(`${join('.dsh', 'skills')}`)) throw new Error('injected old projection cleanup failure')
+        return removeManagedSkillDirectory(target, sha)
+      }
+    }
+  })
+})
+
+test('ordinary Codex installation never adopts or deletes an unrelated same-content DSH projection', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['codex'], scopeType: 'project', projectPath: project
+    })
+    const externalDsh = join(project, '.dsh', 'skills', 'release-notes')
+    createSkill(externalDsh)
+
+    await assert.rejects(
+      service.applyToAdapter(installed.id, 'codex'),
+      { code: 'SKILL_TARGET_EXISTS' }
+    )
+    assert.equal(existsSync(join(externalDsh, 'SKILL.md')), true)
+    assert.equal(db.listSkillInstallations({ packageId: installed.id })[0].status, 'ready')
+  })
+})
+
+test('DSH migration ignores a pre-positioned project journal junction and never touches its target', async () => {
+  await withService(async ({ root, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    const external = join(root, 'external-journal-target')
+    createSkill(source)
+    mkdirSync(external, { recursive: true })
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+    const journalRoot = join(project, '.dsh', '.ucli-skill-migrations')
+    symlinkSync(external, journalRoot, process.platform === 'win32' ? 'junction' : 'dir')
+
+    const migrated = await service.applyToAdapter(installed.id, 'codex')
+    assert.deepEqual(readdirSync(external), [])
+    assert.equal(migrated.installations[0].targetAdapterId, 'codex')
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes')), false)
+  })
+})
+
+test('DSH migration never invokes a project journal rename that can be swapped externally', async () => {
+  let renameCalls = 0
+  let external
+  let heldJournal
+  await withService(async ({ root, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    external = join(root, 'rename-swap-target')
+    heldJournal = join(project, '.dsh', '.ucli-skill-migrations-held')
+    createSkill(source)
+    mkdirSync(external, { recursive: true })
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+
+    await service.applyToAdapter(installed.id, 'codex').catch(() => null)
+
+    assert.equal(renameCalls, 0)
+    assert.deepEqual(readdirSync(external), [])
+  }, {
+    migrationFileOps: {
+      copy: copySkillDirectoryAtomic,
+      remove: removeManagedSkillDirectory,
+      rename(source, target) {
+        if (target.includes('.ucli-skill-migrations')) {
+          renameCalls += 1
+          const journalRoot = dirname(target)
+          renameSync(journalRoot, heldJournal)
+          symlinkSync(external, journalRoot, process.platform === 'win32' ? 'junction' : 'dir')
+        }
+        renameSync(source, target)
+      }
+    }
+  })
+})
+
+test('DSH migration detects a pre-DB crash and converges when apply is retried', async () => {
+  let failTargetCopy = true
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+
+    const error = await service.applyToAdapter(installed.id, 'codex').then(() => null, (caught) => caught)
+    assert.ok(error)
+    const row = db.listSkillInstallations({ packageId: installed.id })[0]
+    assert.equal(row.targetAdapterId, 'deepseek-harness')
+    assert.equal(existsSync(row.targetPath), true)
+    assert.equal(existsSync(join(project, '.agents', 'skills', 'release-notes')), false)
+    assert.equal((await service.getState({ projectPath: project })).packages[0].migrationRecovery, null)
+
+    failTargetCopy = false
+    await service.applyToAdapter(installed.id, 'codex')
+    const repaired = db.listSkillInstallations({ packageId: installed.id })[0]
+    assert.equal(repaired.targetAdapterId, 'codex')
+    assert.equal(existsSync(repaired.targetPath), true)
+    assert.equal((await service.getState({ projectPath: project })).packages[0].migrationRecovery, null)
+  }, {
+    migrationFileOps: {
+      copy(source, target, options) {
+        if (failTargetCopy && target.includes(`${join('.agents', 'skills')}`)) throw new Error('injected target copy crash')
+        return copySkillDirectoryAtomic(source, target, options)
+      },
+      remove: removeManagedSkillDirectory
+    }
+  })
+})
+
+test('DSH-to-Codex migration restores its original file and installation when persistence fails', async () => {
+  let failFlush = false
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+    const original = installed.installations[0]
+    failFlush = true
+
+    await assert.rejects(
+      service.applyToAdapter(installed.id, 'codex'),
+      { code: 'SKILL_PERSISTENCE_PENDING' }
+    )
+
+    const remaining = db.listSkillInstallations({ packageId: installed.id })
+    assert.equal(remaining.length, 1)
+    assert.equal(remaining[0].id, original.id)
+    assert.equal(remaining[0].targetAdapterId, 'deepseek-harness')
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(existsSync(join(project, '.agents', 'skills', 'release-notes')), false)
+  }, {
+    flushFactory: (db) => () => failFlush ? false : db.flush()
+  })
+})
+
+test('migration rollback never needs to recreate the retained DSH projection', async () => {
+  let failFlush = false
+  let oldRestoreCalls = 0
+  await withService(async ({ root, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+    failFlush = true
+    await assert.rejects(service.applyToAdapter(installed.id, 'codex'), { code: 'SKILL_PERSISTENCE_PENDING' })
+    assert.equal(oldRestoreCalls, 0)
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(existsSync(join(project, '.agents', 'skills', 'release-notes')), false)
+  }, {
+    flushFactory: (db) => () => failFlush ? false : db.flush(),
+    migrationFileOps: {
+      copy(source, target, options) {
+        if (failFlush && target.includes(`${join('.dsh', 'skills')}`)) {
+          oldRestoreCalls += 1
+          throw Object.assign(new Error('old restore failed'), { code: 'INJECTED_OLD_RESTORE_FAILED' })
+        }
+        return copySkillDirectoryAtomic(source, target, options)
+      },
+      remove: removeManagedSkillDirectory
+    }
+  })
+})
+
+test('migration reports rollback failure while DB still points to an existing projection when DB restore fails', async () => {
+  let failFlush = false
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+    const transaction = db.transaction.bind(db)
+    let migrationTransactions = 0
+    db.transaction = async (work) => {
+      migrationTransactions += 1
+      if (migrationTransactions === 2) throw new Error('injected DB restore failure')
+      return transaction(work)
+    }
+    failFlush = true
+
+    const error = await service.applyToAdapter(installed.id, 'codex').then(() => null, (caught) => caught)
+    assert.equal(error?.code, 'SKILL_PROJECTION_ROLLBACK_FAILED')
+    assert.equal(error?.recoveryAction, 'retry_apply_codex')
+    let row = db.listSkillInstallations({ packageId: installed.id })[0]
+    assert.equal(row.targetAdapterId, 'codex')
+    assert.equal(existsSync(row.targetPath), true)
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.deepEqual((await service.getState({ projectPath: project })).packages[0].migrationRecovery, {
+      status: 'cleanup_pending', action: 'retry_apply_codex', targetAdapterId: 'codex'
+    })
+
+    failFlush = false
+    const recovered = await service.applyToAdapter(installed.id, 'codex')
+    row = db.listSkillInstallations({ packageId: installed.id })[0]
+    assert.equal(recovered.installOutcome.kind, 'recovered_migration')
+    assert.equal(row.targetAdapterId, 'codex')
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes')), false)
+    assert.equal((await service.getState({ projectPath: project })).packages[0].migrationRecovery, null)
+  }, { flushFactory: (db) => () => failFlush ? false : db.flush() })
+})
+
+test('migration reports rollback failure but keeps the restored DB target when new projection removal fails', async () => {
+  let failFlush = false
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+    failFlush = true
+    await assert.rejects(
+      service.applyToAdapter(installed.id, 'codex'),
+      { code: 'SKILL_PROJECTION_ROLLBACK_FAILED' }
+    )
+    let row = db.listSkillInstallations({ packageId: installed.id })[0]
+    assert.equal(row.targetAdapterId, 'deepseek-harness')
+    assert.equal(existsSync(row.targetPath), true)
+    assert.equal(existsSync(join(project, '.agents', 'skills', 'release-notes')), true)
+
+    failFlush = false
+    await service.applyToAdapter(installed.id, 'codex')
+    row = db.listSkillInstallations({ packageId: installed.id })[0]
+    assert.equal(row.targetAdapterId, 'codex')
+    assert.equal(existsSync(join(project, '.dsh', 'skills', 'release-notes')), false)
+    assert.equal(existsSync(join(project, '.agents', 'skills', 'release-notes', 'SKILL.md')), true)
+  }, {
+    flushFactory: (db) => () => failFlush ? false : db.flush(),
+    migrationFileOps: {
+      copy: copySkillDirectoryAtomic,
+      remove(target, sha) {
+        if (failFlush && target.includes(`${join('.agents', 'skills')}`)) throw new Error('injected remove failure')
+        return removeManagedSkillDirectory(target, sha)
+      }
+    }
+  })
+})
+
+test('updating the effective DSH installation never overwrites a shadowed agents source', async () => {
+  await withService(async ({ root, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source, 'Initial managed DSH content')
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['deepseek-harness'], scopeType: 'project', projectPath: project
+    })
+    const shadowed = join(project, '.agents', 'skills', 'release-notes')
+    createSkill(shadowed, 'Independent agents content')
+
+    createSkill(source, 'Updated managed DSH content')
+    await service.update(installed.id)
+
+    assert.match(readFileSync(join(project, '.dsh', 'skills', 'release-notes', 'SKILL.md'), 'utf8'), /Updated managed DSH content/)
+    assert.match(readFileSync(join(shadowed, 'SKILL.md'), 'utf8'), /Independent agents content/)
   })
 })
 
@@ -685,6 +1339,7 @@ test('Codex system Skills are visible as read-only bundled entries', async () =>
     assert.equal(state.discovered[0].sources[0].adapterId, 'codex')
     assert.equal(state.discovered[0].sources[0].origin, 'bundled')
     assert.equal(state.discovered[0].sources[0].installationId, null)
+    assert.equal(state.discovered[0].sources[0].visibility['deepseek-harness'].visible, false)
   })
 })
 

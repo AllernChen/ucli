@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
@@ -8,12 +10,16 @@ import {
   sanitiseGitRemoteSource,
   sanitiseGitLabSource,
   sanitiseGitHubSource,
+  validateDshSkillName,
   validateSkillCompatibility
 } from '../electron/skills/contracts.js'
 import {
   buildSkillVisibility,
+  listSkillPresentationAdapters,
   planSkillProjections,
-  resolveSkillRoot
+  resolveDshAgentsRoot,
+  resolveSkillRoot,
+  SKILL_ADAPTERS
 } from '../electron/skills/adapters.js'
 
 test('skill manifest requires Agent Skills name and description', () => {
@@ -32,7 +38,8 @@ test('OpenCode compatibility rejects names outside its portable skill format', (
     claude: { compatible: true, reason: null },
     codex: { compatible: true, reason: null },
     opencode: { compatible: true, reason: null },
-    ucode: { compatible: true, reason: null }
+    ucode: { compatible: true, reason: null },
+    'deepseek-harness': { compatible: true, reason: null }
   })
   assert.equal(validateSkillCompatibility('Release Notes').opencode.compatible, false)
 })
@@ -118,6 +125,21 @@ test('skill roots resolve user and project scopes for all adapters', () => {
   assert.equal(resolveSkillRoot({ adapterId: 'opencode', scopeType: 'project', projectPath: project }), join(project, '.opencode', 'skills'))
   assert.equal(resolveSkillRoot({ adapterId: 'ucode', scopeType: 'project', projectPath: project }), join(project, '.ucode', 'skills'))
   assert.equal(resolveSkillRoot({
+    adapterId: 'deepseek-harness', scopeType: 'project', projectPath: project
+  }), join(project, '.dsh', 'skills'))
+  assert.equal(resolveSkillRoot({
+    adapterId: 'deepseek-harness', scopeType: 'user', home,
+    env: { DSH_HOME: join(home, 'custom-dsh') }
+  }), join(home, 'custom-dsh', 'skills'))
+  assert.equal(resolveSkillRoot({
+    adapterId: 'deepseek-harness', scopeType: 'user', home,
+    env: { DSH_HOME: '  relative-dsh  ' }
+  }), join(resolve(process.cwd(), '  relative-dsh  '), 'skills'))
+  assert.equal(resolveSkillRoot({
+    adapterId: 'deepseek-harness', scopeType: 'user', home,
+    env: { DSH_HOME: '   ' }
+  }), join(home, '.dsh', 'skills'))
+  assert.equal(resolveSkillRoot({
     adapterId: 'ucode', scopeType: 'user', home,
     env: { UCODE_HOME: join(home, 'custom-ucode') }
   }), join(home, 'custom-ucode', 'config', 'skills'))
@@ -134,6 +156,56 @@ test('projection planner uses compatible roots and reports inherited visibility'
     claude: { visible: false, direct: false, inheritedFrom: [] },
     codex: { visible: true, direct: true, inheritedFrom: [] },
     opencode: { visible: true, direct: false, inheritedFrom: ['codex'] },
-    ucode: { visible: true, direct: false, inheritedFrom: ['codex'] }
+    ucode: { visible: true, direct: false, inheritedFrom: ['codex'] },
+    'deepseek-harness': { visible: true, direct: false, inheritedFrom: ['codex'] }
   })
+})
+
+test('DSH Skill names use the portable root-entry format', () => {
+  assert.equal(validateDshSkillName('release-notes'), 'release-notes')
+  assert.throws(
+    () => validateDshSkillName('Release Notes'),
+    { code: 'SKILL_MANIFEST_INVALID' }
+  )
+})
+
+test('DeepSeek Harness uses a direct root alone and one shared projection with Codex', () => {
+  assert.equal(Object.hasOwn(SKILL_ADAPTERS, 'deepseek-harness'), true)
+  assert.deepEqual(planSkillProjections(['deepseek-harness']), ['deepseek-harness'])
+  assert.deepEqual(planSkillProjections(['codex', 'deepseek-harness']), ['codex'])
+  const adapters = listSkillPresentationAdapters()
+  assert.deepEqual(adapters.at(-1), {
+    id: 'deepseek-harness', displayName: 'DeepSeek Harness'
+  })
+  assert.deepEqual(buildSkillVisibility(['codex'], { scopeType: 'user' })['deepseek-harness'], {
+    visible: true, direct: false, inheritedFrom: ['codex']
+  })
+  assert.deepEqual(buildSkillVisibility(['deepseek-harness'], { scopeType: 'user' })['deepseek-harness'], {
+    visible: true, direct: true, inheritedFrom: []
+  })
+})
+
+test('DSH project roots follow the nearest git ancestor and DSH_AGENTS_HOME controls user sharing', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-dsh-skill-roots-'))
+  try {
+    const repository = join(root, 'repository')
+    const nested = join(repository, 'packages', 'app')
+    mkdirSync(join(repository, '.git'), { recursive: true })
+    mkdirSync(nested, { recursive: true })
+    assert.equal(resolveSkillRoot({
+      adapterId: 'deepseek-harness', scopeType: 'project', projectPath: nested
+    }), join(repository, '.dsh', 'skills'))
+    assert.equal(resolveSkillRoot({
+      adapterId: 'codex', scopeType: 'project', projectPath: nested
+    }), join(repository, '.agents', 'skills'))
+
+    const home = join(root, 'home')
+    const customAgents = join(root, 'custom-agents')
+    assert.equal(resolveDshAgentsRoot({ home, env: { DSH_AGENTS_HOME: customAgents } }), join(customAgents, 'skills'))
+    assert.deepEqual(planSkillProjections(['codex', 'deepseek-harness'], {
+      scopeType: 'user', home, env: { DSH_AGENTS_HOME: customAgents }
+    }), ['codex', 'deepseek-harness'])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

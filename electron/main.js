@@ -37,6 +37,8 @@ if (!app.isPackaged) {
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null
+/** @type {BrowserWindow | null} */
+let previewWindow = null
 let tray = null
 let orchestrator = null
 let isQuitting = false
@@ -187,6 +189,50 @@ function createWindow() {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
+
+function openArtifactWindow(sessionId) {
+  const hash = `/preview?session=${encodeURIComponent(String(sessionId || ''))}`
+  if (previewWindow && !previewWindow.isDestroyed()) {
+    if (previewWindow.isMinimized()) previewWindow.restore()
+    previewWindow.show()
+    previewWindow.focus()
+    if (process.env['ELECTRON_RENDERER_URL']) {
+      previewWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#${hash}`)
+    } else {
+      previewWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash })
+    }
+    return
+  }
+  const win = new BrowserWindow({
+    width: 980, height: 720, minWidth: 480, minHeight: 360,
+    title: 'UCLI 产物预览', autoHideMenuBar: true,
+    icon: iconPath('ucli.png'),
+    backgroundColor: '#f0f2f5',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false, contextIsolation: true, nodeIntegration: false
+    }
+  })
+  previewWindow = win
+  // External http(s) links inside rendered artifacts are opened via shell by
+  // openSafeLink in the renderer; deny window.open to keep preview sandboxed.
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  win.webContents.on('will-navigate', (event, url) => {
+    const currentUrl = win.webContents.getURL() || ''
+    if (!isAllowedApplicationNavigation(currentUrl, url)) event.preventDefault()
+  })
+  win.webContents.on('page-title-updated', (event) => {
+    event.preventDefault()
+    win.setTitle('UCLI 产物预览')
+  })
+  win.on('closed', () => { if (previewWindow === win) previewWindow = null })
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#${hash}`)
+  } else {
+    win.loadFile(join(__dirname, '../renderer/index.html'), { hash })
+  }
+}
+ipcMain.handle('artifact:open-window', (_event, sessionId) => openArtifactWindow(String(sessionId || '')))
 
 function fallbackUpdateState() {
   return {

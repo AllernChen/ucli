@@ -5,7 +5,7 @@
         <h2>配置档案</h2>
         <p>为不同项目和会话选择独立的 AI CLI 配置。UCLI 不接管全局登录状态。</p>
       </div>
-      <a-button :loading="profiles.loading" @click="reload">重新读取</a-button>
+      <a-button :loading="pageLoading" @click="reload">重新读取</a-button>
     </div>
 
     <div class="profile-cli-grid">
@@ -14,17 +14,94 @@
         :key="cli.id"
         type="button"
         :class="['profile-cli-card', { active: selectedCli === cli.id }]"
-        @click="selectedCli = cli.id"
+        @click="selectCli(cli.id)"
       >
         <span class="profile-cli-name">{{ cli.name }}</span>
         <a-tag :color="cli.installed ? 'green' : 'default'">{{ cli.installed ? '已安装' : '未检测到' }}</a-tag>
         <span class="profile-cli-version">{{ cli.version || '版本未知' }}</span>
-        <span>{{ ['codex', 'claude'].includes(cli.id) ? '支持配置档案' : `${appVersion} 沿用系统配置` }}</span>
+        <span>{{ cliProfileSupportLabel(cli.id) }}</span>
       </button>
     </div>
 
+    <template v-if="selectedCli === 'deepseek-harness'">
+      <a-card class="profile-runtime-card dsh-profile-management" :bordered="false">
+        <div class="profile-runtime-row">
+          <div>
+            <strong>DeepSeek Harness 运行时</strong>
+            <p>{{ dshRuntimeView.label }}</p>
+            <span>受支持版本：{{ dshRuntimeView.supportedVersion || '未知' }}</span>
+          </div>
+          <a-space>
+            <a-button
+              v-if="dshRuntimeView.action"
+              :danger="dshRuntimeView.action.danger"
+              :loading="dshAction === dshRuntimeView.action.method"
+              :disabled="Boolean(dshAction)"
+              @click="confirmDshRuntimeAction(dshRuntimeView.action)"
+            >{{ dshRuntimeView.action.label }}</a-button>
+            <a-button :loading="dshLoading" @click="loadDshProfiles">刷新状态</a-button>
+          </a-space>
+        </div>
+        <a-descriptions size="small" :column="1" bordered class="dsh-runtime-sources">
+          <a-descriptions-item v-for="row in dshRuntimeView.rows" :key="row.source" :label="row.label">
+            <a-tag :color="row.selected ? 'green' : 'default'">{{ row.selected ? '当前选用' : '未选用' }}</a-tag>
+            {{ runtimeRowLabel(row) }}
+          </a-descriptions-item>
+        </a-descriptions>
+        <a-alert type="info" show-icon message="Web 会话不需要 profile" description="profile 只用于 DSH 原生配置；初始化仅创建官方基础结构。" />
+        <div class="dsh-profile-create-row">
+          <a-input
+            v-model:value="newDshProfileName"
+            :maxlength="128"
+            placeholder="输入新 profile 名"
+            @press-enter="initializeDshProfile"
+          />
+          <a-button
+            type="primary"
+            :loading="dshAction === 'initialize'"
+            :disabled="!canInitializeDshProfile"
+            @click="initializeDshProfile"
+          >初始化基础 profile</a-button>
+        </div>
+      </a-card>
+
+      <a-spin :spinning="dshLoading">
+        <div v-if="dshProfiles.length" class="profile-card-grid">
+          <a-card v-for="profile in dshProfiles" :key="profile.profileName" class="profile-card">
+            <template #title>
+              <div class="profile-card-title">
+                <span>{{ profile.profileName }}</span>
+                <a-tag :color="profile.profileReady ? 'green' : 'red'">
+                  {{ profile.profileReady ? '结构有效' : '结构无效' }}
+                </a-tag>
+              </div>
+            </template>
+            <div class="profile-card-body">
+              <div class="profile-kind">DSH 原生 profile</div>
+              <div><span>类型</span><strong>{{ dshProfileSurfaceLabel(profile.surface) }}</strong></div>
+              <div><span>旧 bridge</span><strong>{{ dshLegacyBridgeLabel(profile) }}</strong></div>
+            </div>
+            <div class="profile-card-actions">
+              <a-button
+                v-if="profile.profileReady && profile.legacyBridgeInstalled"
+                danger
+                size="small"
+                :loading="dshAction === `removeLegacyBridge:${profile.profileName}`"
+                :disabled="Boolean(dshAction)"
+                @click="confirmRemoveDshLegacyBridge(profile)"
+              >移除旧 bridge</a-button>
+              <a-tag v-else color="green">无旧 bridge</a-tag>
+            </div>
+          </a-card>
+        </div>
+        <a-empty v-else description="还没有 DeepSeek Harness profile">
+          <span>输入名称初始化官方基础 profile。</span>
+        </a-empty>
+      </a-spin>
+    </template>
+
     <a-alert
-      v-if="!profileCapableCli"
+      v-else-if="!profileCapableCli"
       type="info"
       show-icon
       :message="`${selectedEntry.name} 在 ${appVersion} 沿用系统配置`"
@@ -158,10 +235,15 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
+import { useRoute, useRouter } from 'vue-router'
 
 import CodexProfileDrawer from '../components/profiles/CodexProfileDrawer.vue'
 import ClaudeProfileDrawer from '../components/profiles/ClaudeProfileDrawer.vue'
 import ProfileRevisionDrawer from '../components/profiles/ProfileRevisionDrawer.vue'
+import {
+  createDshManagementController,
+  presentDshManagement
+} from '../dshManagementPresentation.js'
 import { ipc } from '../ipc.js'
 import {
   claudeConnectionModePresentation,
@@ -175,7 +257,10 @@ import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 
 const appVersion = __UCLI_VERSION__
 const profiles = useAiCliProfilesStore()
-const selectedCli = ref('codex')
+const route = useRoute()
+const router = useRouter()
+const supportedCliIds = ['codex', 'claude', 'opencode', 'ucode', 'deepseek-harness']
+const selectedCli = ref(supportedCliIds.includes(route.query.cli) ? route.query.cli : 'codex')
 const projectPath = ref('')
 const editorOpen = ref(false)
 const editorMode = ref('create')
@@ -183,9 +268,26 @@ const editorSeed = ref(null)
 const activeProfile = ref(null)
 const revisionOpen = ref(false)
 const rollingBackId = ref('')
+const dshProfileState = ref({ profiles: [] })
+const dshRuntimeView = ref(presentDshManagement(null))
+const dshLoading = ref(false)
+const dshAction = ref('')
+const newDshProfileName = ref('')
+let dshProfileReadRevision = 0
 
-const names = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', ucode: 'U-Code' }
-const cliEntries = computed(() => ['codex', 'claude', 'opencode', 'ucode'].map((id) => ({
+const dshRuntimeController = createDshManagementController({
+  getState: () => ipc.getDshState(),
+  actions: {
+    installRuntime: () => ipc.installDshRuntime(),
+    upgradeRuntime: () => ipc.upgradeDshRuntime(),
+    repairRuntime: () => ipc.repairDshRuntime(),
+    removeRuntime: () => ipc.removeDshRuntime()
+  },
+  onState: (next) => { dshRuntimeView.value = next }
+})
+
+const names = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', ucode: 'U-Code', 'deepseek-harness': 'DeepSeek Harness' }
+const cliEntries = computed(() => supportedCliIds.map((id) => ({
   id,
   name: names[id],
   ...profiles.cliById(id)
@@ -193,6 +295,17 @@ const cliEntries = computed(() => ['codex', 'claude', 'opencode', 'ucode'].map((
 const selectedEntry = computed(() => cliEntries.value.find((item) => item.id === selectedCli.value) || cliEntries.value[0])
 const profileCapableCli = computed(() => ['codex', 'claude'].includes(selectedCli.value))
 const visibleProfiles = computed(() => profiles.profiles.filter((profile) => profile.adapterId === selectedCli.value))
+const dshProfiles = computed(() => dshProfileState.value.profiles)
+const canInitializeDshProfile = computed(() => {
+  const name = newDshProfileName.value.trim()
+  return ['managed', 'system'].includes(dshRuntimeView.value.selected) &&
+    dshRuntimeView.value.status === 'healthy' &&
+    !dshLoading.value &&
+    !dshAction.value &&
+    name.length > 0 &&
+    !dshProfiles.value.some(profile => profile.profileName === name)
+})
+const pageLoading = computed(() => profiles.loading || dshLoading.value)
 const runtimePath = computed(() => selectedCli.value === 'claude'
   ? (profiles.claudeRuntime?.configDir || selectedEntry.value.path || '配置路径未知')
   : (profiles.codexRuntime?.configPath || selectedEntry.value.path || '配置路径未知'))
@@ -210,8 +323,147 @@ const profileServiceLabel = (profile) => {
   return profile.kind === 'managed' ? profileEndpointLabel(profile.baseUrl) : profile.providerId
 }
 
+const cliProfileSupportLabel = (adapterId) => {
+  if (['codex', 'claude'].includes(adapterId)) return '支持 UCLI 配置档案'
+  if (adapterId === 'deepseek-harness') return '管理 DSH 原生 profile 与 UCLI bridge'
+  return `${appVersion} 沿用系统配置`
+}
+
 async function reload() {
-  await profiles.load(projectPath.value)
+  await Promise.all([profiles.load(projectPath.value), loadDshProfiles()])
+}
+
+function selectCli(adapterId) {
+  selectedCli.value = adapterId
+  router.replace({ name: 'profiles', query: { ...route.query, cli: adapterId } })
+}
+
+async function loadDshProfiles() {
+  const readRevision = ++dshProfileReadRevision
+  dshLoading.value = true
+  try {
+    const [, state] = await Promise.all([
+      dshRuntimeController.refresh(),
+      ipc.listDshProfiles()
+    ])
+    if (readRevision === dshProfileReadRevision) {
+      dshProfileState.value = {
+        profiles: Array.isArray(state?.profiles) ? state.profiles : []
+      }
+    }
+    return state
+  } catch {
+    if (readRevision === dshProfileReadRevision) dshProfileState.value = { profiles: [] }
+    message.error('读取 DeepSeek Harness 状态失败')
+    return null
+  } finally {
+    if (readRevision === dshProfileReadRevision) dshLoading.value = false
+  }
+}
+
+async function refreshDshProfilesOnly() {
+  const readRevision = ++dshProfileReadRevision
+  const state = await ipc.listDshProfiles()
+  if (readRevision === dshProfileReadRevision) {
+    dshProfileState.value = {
+      profiles: Array.isArray(state?.profiles) ? state.profiles : []
+    }
+  }
+}
+
+function confirmDshRuntimeAction(action) {
+  if (!action?.method || dshAction.value) return
+  Modal.confirm({
+    title: action.label,
+    content: action.confirmText,
+    okText: action.label,
+    okType: action.danger ? 'danger' : 'primary',
+    cancelText: '取消',
+    async onOk() {
+      dshAction.value = action.method
+      try {
+        await dshRuntimeController.mutate(action.method)
+        await refreshDshProfilesOnly()
+        message.success('DSH 运行时状态已更新')
+      } catch {
+        message.error('DSH 运行时操作失败')
+      } finally {
+        dshAction.value = ''
+      }
+    }
+  })
+}
+
+async function initializeDshProfile() {
+  newDshProfileName.value = newDshProfileName.value.trim()
+  if (!canInitializeDshProfile.value) return
+  dshAction.value = 'initialize'
+  try {
+    const result = await ipc.initializeDshProfile(newDshProfileName.value)
+    if (!result?.ok) throw Object.assign(new Error(result?.errorCode), { code: result?.errorCode })
+    message.success('基础 profile 已初始化')
+    newDshProfileName.value = ''
+    await refreshDshProfilesOnly()
+  } catch (error) {
+    message.error(dshErrorLabel(error?.code, '初始化 DeepSeek Harness profile 失败'))
+  } finally {
+    dshAction.value = ''
+  }
+}
+
+function confirmRemoveDshLegacyBridge(profile) {
+  if (!profile?.profileName || dshAction.value) return
+  Modal.confirm({
+    title: `移除“${profile.profileName}”中的旧 bridge？`,
+    content: '仅移除旧版 UCLI bridge 元数据；DSH profile 的其他配置保持不变。',
+    okText: '移除旧 bridge',
+    okType: 'danger',
+    cancelText: '取消',
+    async onOk() {
+      dshAction.value = `removeLegacyBridge:${profile.profileName}`
+      try {
+        const result = await ipc.removeDshLegacyBridge(profile.profileName)
+        if (!result?.ok) throw Object.assign(new Error(result?.errorCode), { code: result?.errorCode })
+        message.success('旧 bridge 已移除')
+        await refreshDshProfilesOnly()
+      } catch (error) {
+        message.error(dshErrorLabel(error?.code, '移除旧 bridge 失败'))
+      } finally {
+        dshAction.value = ''
+      }
+    }
+  })
+}
+
+function dshLegacyBridgeLabel(profile) {
+  if (!profile?.profileReady) return 'profile 结构无效'
+  if (!profile.legacyBridgeInstalled) return '无'
+  return `待移除${profile.legacyBridgeVersion ? `（${profile.legacyBridgeVersion}）` : ''}`
+}
+
+function dshProfileSurfaceLabel(surface) {
+  return ({ web: 'Web', headless: 'Headless', custom: '自定义' })[surface] || '未知'
+}
+
+function runtimeRowLabel(row) {
+  if (!row.installed) return '未安装'
+  if (!row.compatible) return `${row.version || '未知版本'} · 不兼容`
+  return `${row.version || '未知版本'} · ${row.health === 'healthy' ? '正常' : '需要修复'}`
+}
+
+function dshErrorLabel(code, fallback) {
+  return ({
+    DSH_NOT_INSTALLED: '未检测到 DeepSeek Harness',
+    DSH_VERSION_UNREADABLE: '无法读取 DeepSeek Harness 版本',
+    DSH_VERSION_UNSUPPORTED: 'DeepSeek Harness 版本不兼容',
+    DSH_PROFILE_INVALID: 'profile 名称或结构无效',
+    DSH_PROFILE_ALREADY_EXISTS: '同名 profile 已存在',
+    DSH_PROFILE_INITIALIZE_FAILED: '基础 profile 初始化失败',
+    DSH_PROFILE_NOT_READY: 'profile 结构无效',
+    DSH_BRIDGE_VERSION_UNSUPPORTED: 'UCLI bridge 版本不兼容',
+    DSH_BRIDGE_INSTALL_FAILED: 'UCLI bridge 操作失败',
+    DSH_BRIDGE_ROLLBACK_FAILED: 'UCLI bridge 回滚失败'
+  })[code] || fallback
 }
 
 async function chooseProject() {

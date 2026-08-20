@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
-import { buildSkillVisibility, planSkillProjections, resolveSkillRoot, SKILL_ADAPTERS } from './adapters.js'
-import { sanitiseGitHubSource, sanitiseSkillError } from './contracts.js'
+import {
+  buildSkillVisibility, listSkillPresentationAdapters, planSkillProjections,
+  resolveDshAgentsRoot, resolveProjectScopeRoot, resolveSkillRoot, SKILL_ADAPTERS
+} from './adapters.js'
+import { sanitiseGitHubSource, sanitiseSkillError, validateSkillCompatibility } from './contracts.js'
 import { createSkillDiscovery } from './discovery.js'
 import { copySkillDirectoryAtomic, diffSkillDirectories, inspectSkillDirectory, removeManagedSkillDirectory } from './fileOps.js'
 
@@ -15,6 +18,11 @@ function serviceError(message, code) {
 function normalizedPath(path) {
   const value = resolve(String(path || '.'))
   return process.platform === 'win32' ? value.toLowerCase() : value
+}
+
+function pathIsWithin(root, candidate) {
+  const value = relative(resolve(root), resolve(candidate))
+  return value === '' || (value !== '..' && !value.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(value))
 }
 
 function sourceForPackage(pkg) {
@@ -96,6 +104,7 @@ export function createSkillsService({
   listSessions = () => [],
   restartSession = async () => true,
   discoverUCodeSkills = () => [],
+  migrationFileOps = {},
   uuid = randomUUID,
   now = Date.now
 }) {
@@ -106,6 +115,31 @@ export function createSkillsService({
   let ucodeDiscoveryCache = { key: null, checkedAt: 0, items: [] }
   mkdirSync(packagesRoot, { recursive: true })
   mkdirSync(updateStagingRoot, { recursive: true })
+  const migrationCopy = migrationFileOps.copy || copySkillDirectoryAtomic
+  const migrationRemove = migrationFileOps.remove || removeManagedSkillDirectory
+
+  const projectionOptions = (scopeType, projectPath) => ({
+    scopeType, projectPath, home: skillHome, env
+  })
+  const projectionScopeKey = (adapterId, scopeType, projectPath) => {
+    if (scopeType !== 'project') return '*'
+    return ['codex', 'deepseek-harness'].includes(adapterId)
+      ? normalizedPath(resolveProjectScopeRoot(projectPath))
+      : normalizedPath(projectPath)
+  }
+  const serviceVisibility = (projectionIds, scopeType) => {
+    const visibility = buildSkillVisibility(projectionIds, { scopeType })
+    if (scopeType === 'user' && projectionIds.includes('codex')) {
+      const codexRoot = resolveSkillRoot({ adapterId: 'codex', scopeType: 'user', home: skillHome, env })
+      const dshAgentsRoot = resolveDshAgentsRoot({ home: skillHome, env })
+      if (normalizedPath(codexRoot) !== normalizedPath(dshAgentsRoot)) {
+        const dsh = visibility['deepseek-harness']
+        dsh.inheritedFrom = dsh.inheritedFrom.filter((adapterId) => adapterId !== 'codex')
+        dsh.visible = dsh.direct || dsh.inheritedFrom.length > 0
+      }
+    }
+    return visibility
+  }
 
   const userSourceProjects = () => new Map([
     ...readSkillSourceProjects(skillHome),
@@ -124,16 +158,16 @@ export function createSkillsService({
   }
 
   function inspectInstallation(item) {
-    if (!item.enabled) return { ...item, status: 'disabled', visibility: buildSkillVisibility([]) }
-    if (!existsSync(item.targetPath)) return { ...item, status: 'missing', visibility: buildSkillVisibility([]) }
+    if (!item.enabled) return { ...item, status: 'disabled', visibility: serviceVisibility([], item.scopeType) }
+    if (!existsSync(item.targetPath)) return { ...item, status: 'missing', visibility: serviceVisibility([], item.scopeType) }
     try {
       const inspection = inspectSkillDirectory(item.targetPath)
       const status = inspection.contentSha256 === item.deployedSha256
-        ? (item.status === 'update_available' ? 'update_available' : 'ready')
+        ? (['update_available', 'cleanup_pending'].includes(item.status) ? item.status : 'ready')
         : 'drifted'
-      return { ...item, status, visibility: buildSkillVisibility([item.targetAdapterId]) }
+      return { ...item, status, visibility: serviceVisibility([item.targetAdapterId], item.scopeType) }
     } catch {
-      return { ...item, status: 'invalid', visibility: buildSkillVisibility([]) }
+      return { ...item, status: 'invalid', visibility: serviceVisibility([], item.scopeType) }
     }
   }
 
@@ -147,18 +181,20 @@ export function createSkillsService({
     const visibleProjections = installations
       .filter((item) => item.enabled && !['missing', 'invalid'].includes(item.status))
       .map((item) => item.targetAdapterId)
+    const recoveryInstallation = installations.find((item) =>
+      ['codex', 'deepseek-harness'].includes(item.targetAdapterId)
+    )
+    const migrationRecovery = recoveryInstallation
+      ? migrationRecoveryState(pkg, recoveryInstallation)
+      : null
     return {
       ...pkg,
       fileList: canonical?.fileList || [],
       totalBytes: canonical?.totalBytes || 0,
       installations,
-      compatibility: Object.fromEntries(Object.keys(SKILL_ADAPTERS).map((adapterId) => [adapterId, {
-        compatible: adapterId !== 'opencode' || /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(pkg.name),
-        reason: adapterId === 'opencode' && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(pkg.name)
-          ? 'OpenCode requires a lowercase hyphenated skill name'
-          : null
-      }])),
-      visibility: buildSkillVisibility(visibleProjections)
+      migrationRecovery,
+      compatibility: validateSkillCompatibility(pkg.name),
+      visibility: serviceVisibility(visibleProjections, installations[0]?.scopeType)
     }
   }
 
@@ -189,7 +225,7 @@ export function createSkillsService({
   function inspectTargetMatches(preview, context = {}) {
     if (!Array.isArray(context.targetAdapterIds) || !context.targetAdapterIds.length) return []
     if (!['user', 'project'].includes(context.scopeType)) return []
-    const projectionIds = planSkillProjections(context.targetAdapterIds)
+    const projectionIds = planSkillProjections(context.targetAdapterIds, projectionOptions(context.scopeType, context.projectPath))
     return projectionIds.flatMap((adapterId) => {
       let targetPath
       try {
@@ -228,7 +264,8 @@ export function createSkillsService({
     }
     let view = packageView(pkg)
     const missingAdapterIds = targetAdapterIds.filter((adapterId) => !view.visibility[adapterId]?.visible)
-    const projectionIds = planSkillProjections(missingAdapterIds)
+    const scope = view.installations[0]
+    const projectionIds = planSkillProjections(missingAdapterIds, projectionOptions(scope?.scopeType, scope?.scopeKey))
     const appliedAdapterIds = []
     for (const adapterId of projectionIds) {
       const existing = view.installations.find((item) => item.targetAdapterId === adapterId)
@@ -263,7 +300,8 @@ export function createSkillsService({
   function discover(projectPath) {
     const installations = db.listSkillInstallations()
     const sourceProjects = userSourceProjects()
-    const projectSourceProjects = projectPath ? readSkillSourceProjects(resolve(projectPath)) : new Map()
+    const canonicalProject = projectPath ? resolveProjectScopeRoot(projectPath) : null
+    const projectSourceProjects = canonicalProject ? readSkillSourceProjects(canonicalProject) : new Map()
     const occurrences = skillDiscovery.discover({
       projectPath,
       managedInstallations: installations,
@@ -327,9 +365,10 @@ export function createSkillsService({
       const allBroken = sources.every((source) => source.status === 'broken_link')
       const allInvalid = sources.every((source) => source.status === 'invalid')
       const allHashed = sources.every((source) => Boolean(source.contentSha256))
+      const effectiveSource = sources.find((source) => source.effective) || sources[0]
       return {
         name,
-        description: sources[0].description,
+        description: effectiveSource.description,
         status: allBroken
           ? 'broken_link'
           : allInvalid ? 'invalid'
@@ -345,16 +384,23 @@ export function createSkillsService({
       throw serviceError('At least one valid CLI target is required', 'SKILL_TARGET_INVALID')
     }
     const scopeType = request.scopeType
-    const scopeKey = scopeType === 'project' ? normalizedPath(request.projectPath) : '*'
     if (!['user', 'project'].includes(scopeType)) throw serviceError('Skill scope is invalid', 'SKILL_SCOPE_INVALID')
-    return { targetAdapterIds, scopeType, scopeKey }
+    const projectionIds = planSkillProjections(targetAdapterIds, projectionOptions(scopeType, request.projectPath))
+    const scopeKeys = new Set(projectionIds.map((adapterId) =>
+      projectionScopeKey(adapterId, scopeType, request.projectPath)
+    ))
+    if (scopeKeys.size !== 1) {
+      throw serviceError('Selected CLIs use different project scope roots', 'SKILL_SCOPE_AMBIGUOUS')
+    }
+    return { targetAdapterIds, projectionIds, scopeType, scopeKey: [...scopeKeys][0] }
   }
 
   async function installPrepared(request, prepared, validated) {
-      const { targetAdapterIds, scopeType, scopeKey } = validated
+      const { targetAdapterIds, projectionIds, scopeType, scopeKey } = validated
       const inspected = inspectSkillDirectory(prepared.workingDirectory)
-      if (targetAdapterIds.includes('opencode') && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(inspected.name)) {
-        throw serviceError('Skill name is incompatible with OpenCode', 'SKILL_INCOMPATIBLE')
+      const compatibility = validateSkillCompatibility(inspected.name)
+      if (targetAdapterIds.some((adapterId) => compatibility[adapterId]?.compatible === false)) {
+        throw serviceError('Skill name is incompatible with a selected CLI', 'SKILL_INCOMPATIBLE')
       }
       const packagesInScope = db.listSkillPackages().filter((pkg) => packageInScope(pkg, scopeType, scopeKey))
       const reusable = packagesInScope
@@ -370,7 +416,6 @@ export function createSkillsService({
       if (packagesInScope.some((pkg) => samePreparedSource(pkg, prepared.source))) {
         throw serviceError('The installed source has changed; preview and update the existing Skill', 'SKILL_SOURCE_CHANGED')
       }
-      const projectionIds = planSkillProjections(targetAdapterIds)
       const targets = projectionIds.map((targetAdapterId) => ({
         targetAdapterId,
         targetPath: join(resolveSkillRoot({
@@ -523,16 +568,168 @@ export function createSkillsService({
     })
   }
 
+  function dshProjectionPath(pkg, installation) {
+    const projectPath = installation.scopeType === 'project' ? installation.scopeKey : undefined
+    const dshRoot = resolveSkillRoot({
+      adapterId: 'deepseek-harness', scopeType: installation.scopeType,
+      projectPath, home: skillHome, env
+    })
+    return join(dshRoot, pkg.name)
+  }
+
+  function migrationRecoveryState(pkg, installation) {
+    if (installation.targetAdapterId !== 'codex' || installation.status !== 'cleanup_pending') return null
+    const oldTarget = dshProjectionPath(pkg, installation)
+    if (!existsSync(oldTarget)) {
+      return { status: 'finalize_pending', action: 'retry_apply_codex', targetAdapterId: 'codex' }
+    }
+    try {
+      const old = inspectSkillDirectory(oldTarget)
+      if (old.contentSha256 !== pkg.contentSha256) return {
+        status: 'cleanup_conflict', action: null, targetAdapterId: 'codex'
+      }
+    } catch {
+      return { status: 'cleanup_conflict', action: null, targetAdapterId: 'codex' }
+    }
+    return { status: 'cleanup_pending', action: 'retry_apply_codex', targetAdapterId: 'codex' }
+  }
+
+  function migrationRecoveryError(message = 'Skill projection rollback failed') {
+    const error = serviceError(message, 'SKILL_PROJECTION_ROLLBACK_FAILED')
+    error.recoveryAction = 'retry_apply_codex'
+    return error
+  }
+
+  async function recoverCommittedDshMigration(pkg, installation) {
+    if (installation.status !== 'cleanup_pending') return null
+    const oldTarget = dshProjectionPath(pkg, installation)
+    const current = inspectInstallation(installation)
+    if (!current.enabled || !['cleanup_pending', 'ready', 'update_available'].includes(current.status)) {
+      throw migrationRecoveryError('Codex projection requires repair before migration cleanup')
+    }
+    if (existsSync(oldTarget)) {
+      try {
+        const old = inspectSkillDirectory(oldTarget)
+        if (old.contentSha256 !== pkg.contentSha256) {
+          throw new Error('old projection content differs')
+        }
+        migrationRemove(oldTarget, pkg.contentSha256)
+      } catch {
+        throw migrationRecoveryError('Skill migration cleanup still requires recovery')
+      }
+    }
+    db.updateSkillInstallation(installation.id, { status: 'ready', updatedAt: now() })
+    await persistOrThrow()
+    return {
+      ...packageView(db.getSkillPackage(pkg.id)),
+      installOutcome: {
+        kind: 'recovered_migration', matchType: 'cleanup_recovered', appliedAdapterIds: []
+      }
+    }
+  }
+
+  async function migrateDshInstallationToCodex({ pkg, installation, targetPath, canonical }) {
+    const oldTarget = dshProjectionPath(pkg, installation)
+    const current = inspectInstallation(installation)
+    if (!current.enabled || !['ready', 'update_available'].includes(current.status)) {
+      throw serviceError('DSH projection must be healthy before migration', 'SKILL_DRIFTED')
+    }
+
+    let deployed = canonical
+    let createdTarget = false
+    let recordMigrated = false
+    try {
+      if (existsSync(targetPath)) {
+        const existing = inspectSkillDirectory(targetPath)
+        if (existing.contentSha256 !== canonical.contentSha256) {
+          throw serviceError('A different skill already exists at the shared target', 'SKILL_TARGET_CONFLICT')
+        }
+        deployed = existing
+      } else {
+        deployed = migrationCopy(packageDirectory(pkg.id), targetPath)
+        createdTarget = true
+      }
+
+      const migrated = {
+        ...installation,
+        targetAdapterId: 'codex',
+        targetPath,
+        deployedSha256: deployed.contentSha256,
+        status: 'cleanup_pending',
+        updatedAt: now()
+      }
+      await db.transaction(async () => {
+        db.deleteSkillInstallation(installation.id)
+        db.insertSkillInstallation(migrated)
+      })
+      recordMigrated = true
+      await persistOrThrow()
+    } catch (error) {
+      const rollbackFailures = []
+      if (recordMigrated) {
+        try {
+          await db.transaction(async () => {
+            if (db.getSkillInstallation(installation.id)) db.deleteSkillInstallation(installation.id)
+            db.insertSkillInstallation(installation)
+          })
+          if (error?.code === 'SKILL_PERSISTENCE_PENDING') await flush()
+          else await persistOrThrow()
+        } catch {
+          rollbackFailures.push('database')
+        }
+      }
+
+      if (!rollbackFailures.length && createdTarget) {
+        try { migrationRemove(targetPath, deployed.contentSha256) } catch { rollbackFailures.push('target') }
+      }
+      const stored = db.getSkillInstallation(installation.id)
+      if (!stored || !existsSync(stored.targetPath)) rollbackFailures.push('consistency')
+      if (rollbackFailures.length) {
+        throw migrationRecoveryError()
+      }
+      throw error
+    }
+
+    try {
+      const old = inspectSkillDirectory(oldTarget)
+      if (old.contentSha256 !== installation.deployedSha256) throw new Error('old projection content differs')
+      migrationRemove(oldTarget, installation.deployedSha256)
+    } catch {
+      throw migrationRecoveryError('Codex migration committed; retry apply to finish old projection cleanup')
+    }
+    db.updateSkillInstallation(installation.id, { status: 'ready', updatedAt: now() })
+    await persistOrThrow()
+    return packageView(db.getSkillPackage(pkg.id))
+  }
+
   async function applyToAdapter(packageId, targetAdapterId) {
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
     if (!SKILL_ADAPTERS[targetAdapterId]) throw serviceError('Skill adapter is unavailable', 'SKILL_ADAPTER_UNAVAILABLE')
-    if (targetAdapterId === 'opencode' && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(pkg.name)) {
-      throw serviceError('Skill name is incompatible with OpenCode', 'SKILL_INCOMPATIBLE')
+    if (validateSkillCompatibility(pkg.name)[targetAdapterId]?.compatible === false) {
+      throw serviceError('Skill name is incompatible with this CLI', 'SKILL_INCOMPATIBLE')
     }
 
     const installations = db.listSkillInstallations({ packageId })
     if (!installations.length) throw serviceError('Skill package has no installation scope', 'SKILL_SCOPE_INVALID')
+    if (targetAdapterId === 'codex') {
+      const codexInstallation = installations.find((item) => item.targetAdapterId === 'codex')
+      if (codexInstallation) {
+        const recovered = await recoverCommittedDshMigration(pkg, codexInstallation)
+        if (recovered) return recovered
+      }
+    }
+    if (targetAdapterId === 'deepseek-harness') {
+      const currentView = packageView(pkg)
+      if (currentView.visibility['deepseek-harness'].visible) {
+        return {
+          ...currentView,
+          installOutcome: {
+            kind: 'already_installed', matchType: 'shared_projection', appliedAdapterIds: []
+          }
+        }
+      }
+    }
     if (installations.some((item) => item.targetAdapterId === targetAdapterId)) {
       throw serviceError('Skill is already applied to this CLI', 'SKILL_TARGET_EXISTS')
     }
@@ -540,6 +737,14 @@ export function createSkillsService({
     if (scopes.size !== 1) throw serviceError('Skill package has multiple installation scopes', 'SKILL_SCOPE_AMBIGUOUS')
     const scope = installations[0]
     if (!['user', 'project'].includes(scope.scopeType)) throw serviceError('Skill scope is invalid', 'SKILL_SCOPE_INVALID')
+    const targetScopeKey = projectionScopeKey(
+      targetAdapterId,
+      scope.scopeType,
+      scope.scopeType === 'project' ? scope.scopeKey : undefined
+    )
+    if (normalizedPath(targetScopeKey) !== normalizedPath(scope.scopeKey)) {
+      throw serviceError('Target CLI uses a different project scope root', 'SKILL_SCOPE_AMBIGUOUS')
+    }
 
     const canonical = inspectSkillDirectory(packageDirectory(pkg.id))
     if (canonical.contentSha256 !== pkg.contentSha256) {
@@ -555,6 +760,15 @@ export function createSkillsService({
     const managedTarget = db.listSkillInstallations()
       .find((item) => normalizedPath(item.targetPath) === normalizedPath(targetPath))
     if (managedTarget) throw serviceError('Skill target is already managed', 'SKILL_TARGET_EXISTS')
+
+    const dshInstallation = installations.find((item) => item.targetAdapterId === 'deepseek-harness')
+    const sharedCodexDshRoot = planSkillProjections(
+      ['codex', 'deepseek-harness'],
+      projectionOptions(scope.scopeType, scope.scopeType === 'project' ? scope.scopeKey : undefined)
+    ).length === 1
+    if (targetAdapterId === 'codex' && dshInstallation && sharedCodexDshRoot) {
+      return migrateDshInstallationToCodex({ pkg, installation: dshInstallation, targetPath, canonical })
+    }
 
     let deployed = canonical
     let created = false
@@ -730,6 +944,22 @@ export function createSkillsService({
 
   async function adopt(request = {}) {
     const path = resolve(String(request.path || ''))
+    const bundledRoot = typeof env.DSH_BUNDLED_SKILL_DIR === 'string' && isAbsolute(env.DSH_BUNDLED_SKILL_DIR)
+      ? resolve(env.DSH_BUNDLED_SKILL_DIR)
+      : null
+    if (bundledRoot && (pathIsWithin(bundledRoot, path) || (
+      existsSync(bundledRoot) && existsSync(path) &&
+      pathIsWithin(realpathSync(bundledRoot), realpathSync(path))
+    ))) {
+      throw serviceError('Bundled DSH Skills are read-only', 'SKILL_SOURCE_READ_ONLY')
+    }
+    try {
+      if (statSync(path).isFile() && path.toLowerCase().endsWith('.md')) {
+        throw serviceError('Flat DSH Skills are read-only', 'SKILL_FLAT_READ_ONLY')
+      }
+    } catch (error) {
+      if (error?.code === 'SKILL_FLAT_READ_ONLY') throw error
+    }
     if (db.listSkillInstallations().some((item) => normalizedPath(item.targetPath) === normalizedPath(path))) {
       throw serviceError('Skill is already managed by UCLI', 'SKILL_ALREADY_MANAGED')
     }
@@ -737,7 +967,7 @@ export function createSkillsService({
     const packageId = uuid()
     const timestamp = now()
     const canonical = copySkillDirectoryAtomic(path, packageDirectory(packageId))
-    const scopeKey = request.scopeType === 'project' ? normalizedPath(request.projectPath) : '*'
+    const scopeKey = projectionScopeKey(request.targetAdapterId, request.scopeType, request.projectPath)
     const scopeFilter = request.scopeType === 'project'
       ? { scopeType: 'project', scopeKey }
       : { scopeType: 'user', scopeKey: '*' }
@@ -907,10 +1137,12 @@ export function createSkillsService({
   function getAffectedSessions(installationIds = []) {
     const selected = installationIds.map((id) => db.getSkillInstallation(id)).filter(Boolean)
     return listSessions().filter((session) => selected.some((item) => {
-      const visibility = buildSkillVisibility([item.targetAdapterId])
+      const visibility = serviceVisibility([item.targetAdapterId], item.scopeType)
       if (!visibility[session.adapterId]?.visible) return false
       if (item.scopeType === 'user') return true
-      return normalizedPath(session.cwd || session.projectPath) === normalizedPath(item.scopeKey)
+      const sessionProject = session.cwd || session.projectPath
+      if (!sessionProject) return false
+      return projectionScopeKey(item.targetAdapterId, 'project', sessionProject) === normalizedPath(item.scopeKey)
     }))
   }
 
@@ -963,7 +1195,13 @@ export function createSkillsService({
       const discovered = discover(projectPath)
       const conflicts = discovered.filter((item) => item.status === 'conflict').length
       return {
-        adapters: Object.values(SKILL_ADAPTERS).map(({ id, displayName }) => ({ id, displayName })),
+        adapters: listSkillPresentationAdapters(),
+        dshRoots: {
+          custom: 'unsupported',
+          bundled: typeof env.DSH_BUNDLED_SKILL_DIR === 'string' && isAbsolute(env.DSH_BUNDLED_SKILL_DIR)
+            ? 'configured'
+            : 'unconfigured'
+        },
         projects: db.listProjects(),
         packages,
         discovered,

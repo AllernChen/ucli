@@ -53,7 +53,9 @@ function sourceSignature(session) {
 }
 
 function historySourceKind(adapterId) {
-  return adapterId === 'opencode' || adapterId === 'ucode' ? 'export' : 'transcript'
+  return adapterId === 'opencode' || adapterId === 'ucode' || adapterId === 'deepseek-harness'
+    ? 'export'
+    : 'transcript'
 }
 
 function digestText(value) {
@@ -240,6 +242,7 @@ export function createSessionHistoryService({
   resolveSession,
   readFile: readHistoryFile = readFile,
   exportOpenCode = (sessionId) => exportOpenCodeSession(sessionId, { sanitize: false }),
+  exportDshHistory = null,
   resolveClaudeTranscript = (session) =>
     findClaudeTranscriptFile(defaultHome(), session.cwd, session.cliSessionId),
   resolveCodexTranscript = (session) =>
@@ -262,7 +265,13 @@ export function createSessionHistoryService({
     }
   }
 
-  async function loadProviderHistory(session) {
+  async function loadProviderHistory(session, range) {
+    if (session.adapterId === 'deepseek-harness') {
+      if (typeof exportDshHistory !== 'function') throw new Error('history provider unsupported')
+      const history = await exportDshHistory(session, range)
+      if (!history?.items) throw new Error('history source unavailable')
+      return history
+    }
     if (!session.cliSessionId) throw new Error('history source unavailable')
     if (session.adapterId === 'claude') {
       return {
@@ -366,11 +375,14 @@ export function createSessionHistoryService({
       nativeDigest: null,
       metadata: { itemsAvailable: 0, itemsReturned: 0, bytesReturned: 0 }
     })
-    if (!session || !isSafeNativeSessionId(session.cliSessionId)) return missing()
+    const isDsh = session?.adapterId === 'deepseek-harness'
+    if (!session || (!isDsh && !isSafeNativeSessionId(session.cliSessionId))) return missing()
 
     let history
     try {
-      history = await providerHistory(sessionId, session)
+      history = isDsh
+        ? await loadProviderHistory(session, { start, endExclusive })
+        : await providerHistory(sessionId, session)
     } catch {
       return missing()
     }

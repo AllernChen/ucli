@@ -589,8 +589,27 @@ test('orchestrator records ledger observations beside legacy cumulative stats', 
   assert.match(source, /onApprovalResolved\(req\)[\s\S]*usageRecorder\.recordApproval\([\s\S]*approvalId:\s*req\.requestId/)
 })
 
-test('adapter startup zeroes stay visible but are marked synthetic before ledger recording', () => {
-  for (const file of ['claudeAdapter.js', 'codexAdapter.js', 'openCodeAdapter.js']) {
+test('orchestrator drops native-owned stats before mutating or recording session state', () => {
+  // Normalize CRLF so Windows checkouts (git autocrlf) still match the source
+  // line patterns; the regex below anchors on literal \n line endings.
+  const source = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
+    .replace(/\r\n/g, '\n')
+  const handler = source.match(/async function handleAdapterEvent[\s\S]*?\n  }\n/)?.[0] || ''
+  const ownershipGate = handler.indexOf("evt?.type === 'stats_update' && !sessionUsesUcliStats(entry.session)")
+
+  assert.ok(ownershipGate >= 0)
+  assert.ok(ownershipGate < handler.indexOf('entry.updatedAt ='))
+  assert.ok(ownershipGate < handler.indexOf('await usageRecorder.observe('))
+  assert.ok(ownershipGate < handler.indexOf('db.upsertStats(sessionId,'))
+  assert.ok(ownershipGate < handler.indexOf("send('session:event'"))
+})
+
+test('UCLI-owned adapter startup zeroes are synthetic while native DSH emits no stats', () => {
+  for (const file of [
+    'claudeAdapter.js',
+    'codexAdapter.js',
+    'openCodeAdapter.js'
+  ]) {
     const source = readFileSync(new URL(`../electron/adapters/${file}`, import.meta.url), 'utf8')
     assert.match(
       source,
@@ -598,6 +617,11 @@ test('adapter startup zeroes stay visible but are marked synthetic before ledger
       file
     )
   }
+  const dshSource = readFileSync(
+    new URL('../electron/adapters/deepSeekHarnessAdapter.js', import.meta.url),
+    'utf8'
+  )
+  assert.doesNotMatch(dshSource, /type:\s*'stats_update'/)
   const orchestrator = readFileSync(
     new URL('../electron/orchestrator.js', import.meta.url),
     'utf8'

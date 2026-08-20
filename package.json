@@ -1,20 +1,35 @@
 {
   "name": "ucli",
-  "version": "0.10.2",
+  "version": "0.11.4",
   "description": "UCLI — 多 CLI 编排工作台 GUI（Claude Code / Codex 等的卡片式编排与权限管控）",
   "author": "ucli",
   "license": "MIT",
   "main": "out/main/index.js",
+  "allowScripts": {
+    "electron": true,
+    "node-pty": true,
+    "esbuild": true,
+    "vue-demi": true,
+    "protobufjs": true,
+    "core-js": true,
+    "electron-winstaller": true
+  },
   "scripts": {
     "postinstall": "node scripts/fix-node-pty-permissions.cjs",
+    "package:dsh-bridge": "node scripts/package-dsh-bridge.mjs",
+    "predev": "npm run package:dsh-bridge",
     "dev": "electron-vite dev",
+    "prebuild": "npm run package:dsh-bridge",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "pretest": "node --test test/feishu-cards.test.mjs test/feishu-channel.test.mjs test/gateway-config.test.mjs test/gateway-binding.test.mjs test/gateway-db-migration.test.mjs test/gateway-route-store.test.mjs test/gateway-secret-store.test.mjs test/gateway-task-queue.test.mjs test/gateway-decision-registry.test.mjs test/gateway-snapshots.test.mjs test/gateway-redaction.test.mjs test/gateway-runtime-state.test.mjs test/gateway-session-routing.test.mjs test/gateway-root-lifecycle.test.mjs test/gateway-reconnect.test.mjs test/gateway-decision-flow.test.mjs test/gateway-queue-flow.test.mjs test/gateway-orchestrator.test.mjs test/gateway-startup.test.mjs test/gateway-ipc.test.mjs test/gateway-presentation.test.mjs test/gateway-header-template.test.mjs test/gateway-settings-template.test.mjs test/gateway-relay-presentation.test.mjs test/gateway-relay-template.test.mjs test/gateway-diagnostics.test.mjs test/gateway-e2e.test.mjs",
     "test": "node scripts/run-tests.cjs",
     "verify:release": "node scripts/verify-release.mjs",
+    "predist": "npm run package:dsh-bridge",
     "dist": "electron-vite build && electron-builder --publish never",
+    "predist:win": "npm run package:dsh-bridge",
     "dist:win": "electron-vite build && electron-builder --win --publish never",
+    "predist:mac": "npm run package:dsh-bridge",
     "dist:mac": "electron-vite build && electron-builder --mac --publish never",
     "schema:codex": "codex app-server generate-json-schema --out .codex-schema",
     "audit:skills": "node scripts/audit-skill-discovery.mjs",
@@ -29,29 +44,39 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/xterm": "^6.0.0",
-    "adm-zip": "^0.5.18",
+    "adm-zip": "^0.6.0",
     "ant-design-vue": "^4.2.3",
     "dayjs": "^1.11.13",
     "dompurify": "^3.4.13",
     "electron-updater": "^6.8.9",
+    "fflate": "^0.8.3",
     "js-yaml": "^4.3.1",
     "markdown-it": "^15.0.0",
     "node-pty": "^1.1.0",
     "parse5": "^8.0.1",
     "pinia": "^2.2.4",
-    "smol-toml": "1.4.2",
+    "smol-toml": "1.8.0",
     "sql.js": "^1.14.1",
     "vue": "^3.5.12",
     "vue-router": "^4.4.5"
   },
   "devDependencies": {
     "@electron/packager": "^20.0.2",
-    "@vitejs/plugin-vue": "^5.1.4",
+    "@vitejs/plugin-vue": "^6.0.8",
     "@vue/compiler-dom": "^3.5.40",
     "@vue/compiler-sfc": "^3.5.40",
-    "electron": "^32.1.2",
-    "electron-builder": "^25.0.5",
-    "electron-vite": "^2.3.0",
-    "vite": "^5.4.8"
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "vite": "^7.3.6"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "overrides": {
+    "brace-expansion@5.0.8": "5.0.9",
+    "nanoid": "3.3.18",
+    "postcss": "8.5.26",
+    "undici@7.28.0": "7.29.0"
   }
 }

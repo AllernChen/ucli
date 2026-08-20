@@ -7,19 +7,20 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { verifyReleaseArtifacts as verifyReleaseArtifactsForPlatform } from '../scripts/releaseVerification.mjs'
+import { verifyDshReleaseResources } from '../scripts/verify-release.mjs'
 
 function verifyReleaseArtifacts({ rootDir }) {
   return verifyReleaseArtifactsForPlatform({ rootDir, platform: 'win32', arch: 'x64' })
 }
 
-test('0.10.2 release package and acceptance documentation agree', async () => {
+test('app release package and acceptance documentation agree', async () => {
   const [packageSource, readme, changelog, acceptance] = await Promise.all([
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../README.md', import.meta.url), 'utf8'),
     readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8'),
     readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8')
   ])
-  assert.equal(JSON.parse(packageSource).version, '0.10.2')
+  assert.equal(JSON.parse(packageSource).version, '0.11.4')
   assert.match(readme, /配置档案/)
   assert.match(readme, /CC Switch/)
   assert.match(readme, /Claude 登录态/)
@@ -30,7 +31,7 @@ test('0.10.2 release package and acceptance documentation agree', async () => {
   assert.doesNotMatch(changelog, /\uFFFD/)
   assert.match(readme, /Skills 管理/)
   assert.match(readme, /GitLab/)
-  assert.match(changelog, /## \[0\.10\.2\] - 2026-08-13/)
+  assert.match(changelog, /## \[0\.11\.1\] - 2026-08-18/)
   for (const anchor of [
     'settings-section-navigation',
     'settings-section-deep-link',
@@ -92,6 +93,50 @@ test('0.10.2 release package and acceptance documentation agree', async () => {
   assert.match(acceptance, /prompt-injection 文本与假密钥/)
 })
 
+test('0.11.1 documents DSH Web-only remediation, managed runtime and native acceptance gates', async () => {
+  const [protocol, acceptance, changelog] = await Promise.all([
+    readFile(new URL('../docs/protocol-reference.md', import.meta.url), 'utf8'),
+    readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8'),
+    readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
+  ])
+
+  for (const source of [protocol, acceptance, changelog]) {
+    assert.doesNotMatch(source, /\uFFFD/)
+  }
+  assert.match(changelog, /0\.11\.0.*错误的上游假设/s)
+  assert.match(changelog, /0\.11\.1.*Web-only/s)
+  assert.match(changelog, /保留.*DSH_HOME/s)
+  assert.match(protocol, /没有 CLI TUI/)
+  assert.match(protocol, /Runtime manager/)
+  assert.match(protocol, /legacy bridge.*隔离/is)
+  assert.match(protocol, /100.*\.dsh\/skills/s)
+  assert.match(protocol, /200.*项目.*\.agents\/skills/s)
+  assert.match(protocol, /400.*\$DSH_HOME\/skills/s)
+  assert.match(protocol, /500.*用户.*\.agents\/skills/s)
+  assert.match(protocol, /600.*内置/s)
+  assert.match(protocol, /DSH_RUNTIME_INSTALL_FAILED/)
+  assert.match(protocol, /DSH_TUI_UNAVAILABLE/)
+  assert.match(protocol, /DSH_WEB_GATEWAY_UNSUPPORTED/)
+  for (const anchor of [
+    'dsh-managed-install',
+    'dsh-install-interruption-rollback',
+    'dsh-managed-repair',
+    'dsh-web-lifecycle',
+    'dsh-legacy-session-migration',
+    'dsh-legacy-bridge-removal-rollback',
+    'dsh-skills-four-roots',
+    'dsh-shared-projection-dedupe',
+    'dsh-runtime-uninstall-preserves-home',
+    'dsh-windows-native-acceptance',
+    'dsh-macos-native-acceptance'
+  ]) assert.match(acceptance, new RegExp(`\\b${anchor}\\b`))
+  const dshAcceptance = acceptance.slice(acceptance.indexOf('## 12.'))
+  assert.doesNotMatch(dshAcceptance, /- \[ \].*(?:启动|恢复|运行).*(?:DSH )?TUI/mu)
+  assert.doesNotMatch(dshAcceptance, /- \[ \].*PTY/mu)
+  assert.doesNotMatch(dshAcceptance, /- \[ \].*(?:bridge.*权限|权限.*bridge|DSH.*Gateway|Gateway.*DSH)/imu)
+  assert.match(dshAcceptance, /legacy TUI unavailable/iu)
+})
+
 test('Gateway release acceptance documents every required Feishu prerequisite', async () => {
   const acceptance = await import('node:fs/promises')
     .then(({ readFile }) => readFile(
@@ -120,15 +165,81 @@ test('Gateway release acceptance documents every required Feishu prerequisite', 
 async function createReleaseFixture() {
   const rootDir = await mkdtemp(path.join(os.tmpdir(), 'ucli-release-'))
   const distDir = path.join(rootDir, 'dist')
+  const resourceDir = path.join(rootDir, 'resources', 'deepseek-harness')
+  const integrationDir = path.join(rootDir, 'integrations', 'deepseek-harness-bridge')
   await mkdir(distDir)
+  await mkdir(resourceDir, { recursive: true })
+  await mkdir(integrationDir, { recursive: true })
   await writeFile(path.join(rootDir, 'package.json'), JSON.stringify({ version: '0.2.0' }))
   await writeFile(
     path.join(rootDir, 'electron-builder.yml'),
     'productName: UCLI\nwin:\n  target:\n    - nsis\n    - portable\nnsis:\n  artifactName: ${productName}-Setup-${version}-${arch}.${ext}\nportable:\n  artifactName: ${productName}-Portable-${version}-${arch}.${ext}\n'
   )
+  await writeFile(path.join(resourceDir, 'ucli-dsh-bridge-0.11.0.tgz'), 'legacy cleanup resource')
+  await writeFile(path.join(integrationDir, 'package.json'), JSON.stringify({
+    name: '@ucli/dsh-bridge',
+    version: '0.11.0'
+  }))
   await writeFile(path.join(rootDir, 'placeholder'), '')
   return { rootDir, distDir }
 }
+
+test('release verification retains only the quarantined 0.11.0 bridge resource', async (t) => {
+  const fixture = await createReleaseFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+
+  const result = await verifyDshReleaseResources({ rootDir: fixture.rootDir })
+
+  assert.deepEqual(result, {
+    resourceNames: ['resources/deepseek-harness/ucli-dsh-bridge-0.11.0.tgz']
+  })
+})
+
+test('release verification rejects a missing quarantined bridge resource', async (t) => {
+  const fixture = await createReleaseFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  await rm(path.join(
+    fixture.rootDir,
+    'resources',
+    'deepseek-harness',
+    'ucli-dsh-bridge-0.11.0.tgz'
+  ))
+
+  await assert.rejects(
+    () => verifyDshReleaseResources({ rootDir: fixture.rootDir }),
+    /legacy DSH bridge resource is missing/
+  )
+})
+
+test('release verification rejects a bridge manifest version other than 0.11.0', async (t) => {
+  const fixture = await createReleaseFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  await writeFile(
+    path.join(fixture.rootDir, 'integrations', 'deepseek-harness-bridge', 'package.json'),
+    JSON.stringify({ name: '@ucli/dsh-bridge', version: '0.11.1' })
+  )
+
+  await assert.rejects(
+    () => verifyDshReleaseResources({ rootDir: fixture.rootDir }),
+    /legacy DSH bridge manifest must remain @ucli\/dsh-bridge@0\.11\.0/
+  )
+})
+
+test('release verification rejects a DSH TUI package or source', async (t) => {
+  const fixture = await createReleaseFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  const tuiPackage = path.join(fixture.rootDir, 'integrations', 'deepseek-harness-tui')
+  await mkdir(tuiPackage, { recursive: true })
+  await writeFile(path.join(tuiPackage, 'package.json'), JSON.stringify({
+    name: '@ucli/deepseek-harness-tui',
+    version: '0.11.1'
+  }))
+
+  await assert.rejects(
+    () => verifyDshReleaseResources({ rootDir: fixture.rootDir }),
+    /DSH TUI release content is forbidden/
+  )
+})
 
 test('release verification rejects a missing portable artifact', async (t) => {
   const fixture = await createReleaseFixture()
@@ -262,6 +373,20 @@ test('release verification rejects a build configuration without the portable ta
   await assert.rejects(
     () => verifyReleaseArtifacts({ rootDir: fixture.rootDir }),
     /electron-builder\.yml does not configure the portable target/
+  )
+})
+
+test('release verification rejects packaging resources through both files and extraResources', async (t) => {
+  const fixture = await createReleaseFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  await writeFile(
+    path.join(fixture.rootDir, 'electron-builder.yml'),
+    'productName: UCLI\nfiles:\n  - out/**/*\n  - resources/**/*\nextraResources:\n  - from: resources/\n    to: resources/\nwin:\n  target:\n    - nsis\n    - portable\nnsis:\n  artifactName: ${productName}-Setup-${version}-${arch}.${ext}\nportable:\n  artifactName: ${productName}-Portable-${version}-${arch}.${ext}\n'
+  )
+
+  await assert.rejects(
+    () => verifyReleaseArtifacts({ rootDir: fixture.rootDir }),
+    /electron-builder\.yml duplicates resources through files and extraResources/
   )
 })
 

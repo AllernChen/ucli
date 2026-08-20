@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import { ipc } from '../ipc.js'
+import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
+import { useSessionsStore } from './sessions.js'
 
 let unsub = null
 let refreshTimer = null
@@ -95,6 +97,8 @@ export const useStatsStore = defineStore('stats', {
       if (unsub) return
       unsub = ipc.on('session:event', (evt) => {
         if (evt.type !== 'stats_update') return
+        const session = useSessionsStore().byId(evt.sessionId)
+        if (!deriveSessionCapabilityState(session || {}).ucliStats) return
         const existing = this.perSession[evt.sessionId] || {
           adapterId: null,
           model: null,

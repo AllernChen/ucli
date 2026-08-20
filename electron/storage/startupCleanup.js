@@ -99,7 +99,12 @@ function targetFor(categoryId, roots) {
 async function rejectLink(target) {
   try {
     const stats = await lstat(target)
-    if (stats.isSymbolicLink()) throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
+    // A symlink directly under the filesystem root is a fixed OS alias (macOS
+    // /var -> /private/var, /tmp -> /private/tmp), not a redirection attack;
+    // deeper symlinks in the cleanup chain are rejected.
+    if (stats.isSymbolicLink() && path.dirname(target) !== path.parse(target).root) {
+      throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
+    }
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error
   }
@@ -112,7 +117,9 @@ async function rejectConfiguredLinks(parent, target) {
 
 function rejectLinkSync(target) {
   try {
-    if (lstatSync(target).isSymbolicLink()) throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
+    if (lstatSync(target).isSymbolicLink() && path.dirname(target) !== path.parse(target).root) {
+      throw cleanupError('STORAGE_CLEANUP_TARGET_UNSAFE')
+    }
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error
   }

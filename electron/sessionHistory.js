@@ -358,6 +358,52 @@ export function parseOpenCodeHistory(source) {
   return items
 }
 
+function dshContentText(content) {
+  if (typeof content === 'string') return approvedText(content)
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((part) => {
+      if (!part || typeof part !== 'object') return ''
+      if (typeof part.text === 'string') return approvedText(part.text)
+      if (typeof part.content === 'string') return approvedText(part.content)
+      if (Array.isArray(part.content)) return dshContentText(part.content)
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
+function dshMessageText(data) {
+  const message = data?.message ?? data
+  if (!message || typeof message !== 'object') return ''
+  if (typeof message.content === 'string') return approvedText(message.content)
+  return dshContentText(message.content)
+}
+
+export function parseDshHistory(lines = []) {
+  const items = []
+  for (const [index, line] of Array.from(lines).entries()) {
+    const record = parseRecord(line)
+    if (!record || typeof record !== 'object' || typeof record.type !== 'string') continue
+    const id = record.seq ?? index
+    const time = record.time
+    let role = null
+    let text = ''
+    if (record.type === 'user/message') {
+      role = 'user'
+      text = dshMessageText(record.data)
+    } else if (record.type === 'assistant/message') {
+      role = 'assistant'
+      text = dshMessageText(record.data)
+    } else if (record.type === 'tool/result') {
+      role = 'tool'
+      text = dshMessageText(record.data)
+    }
+    if (role) addItem(items, { id, role, text, timestamp: time })
+  }
+  return items
+}
+
 export function historyPage(items, { before = null, limit = 100 } = {}) {
   const safeItems = Array.isArray(items) ? items : []
   const numericLimit = Number(limit)

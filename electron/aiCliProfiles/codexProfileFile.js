@@ -75,6 +75,14 @@ function sanitiseInspectedConfig(config) {
   return result
 }
 
+function stringifyCodexProfileConfig(config) {
+  let rendered = stringify(config).trimEnd()
+  if (config.model_providers && !/^\[model_providers\]$/m.test(rendered)) {
+    rendered = rendered.replace(/^\[model_providers\./m, '[model_providers]\n$&')
+  }
+  return `${rendered}\n`
+}
+
 export function codexNativeProfileName(profileId) {
   return `ucli-${assertProfileId(profileId).replaceAll('-', '')}`
 }
@@ -126,7 +134,7 @@ export function renderCodexProfileFile(profile) {
     config.model_provider = normalised.providerId
   }
 
-  return `# ucli-profile-id: ${profileId}\n${stringify(config)}\n`
+  return `# ucli-profile-id: ${profileId}\n${stringifyCodexProfileConfig(config)}`
 }
 
 export function inspectCodexProfileFile(path) {

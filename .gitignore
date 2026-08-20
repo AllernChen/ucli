@@ -11,3 +11,4 @@ stats-diag.json
 .scratch/
 data/*.zip
 scripts/ucli-db-diagnosis-*.txt
+resources/deepseek-harness/*.tgz

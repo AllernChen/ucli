@@ -66,6 +66,61 @@ test('Skills IPC forwards a valid apply-to-adapter request intact', async () => 
   assert.deepEqual(calls, [['package-1', 'ucode']])
 })
 
+test('Skills IPC preserves only the trusted migration recovery action', async () => {
+  const { handlers, ipcMain } = registry()
+  registerSkillsIpc({
+    ipcMain,
+    service: {
+      applyToAdapter() {
+        throw Object.assign(new Error('Migration recovery is required'), {
+          code: 'SKILL_PROJECTION_ROLLBACK_FAILED',
+          recoveryAction: 'retry_apply_codex',
+          recoveryPath: 'F:\\secret\\projection'
+        })
+      }
+    }
+  })
+
+  const error = await handlers.get('skills:apply-to-adapter')({}, {
+    packageId: 'package-1', targetAdapterId: 'codex'
+  }).then(() => null, (caught) => caught)
+  assert.equal(error?.code, 'SKILL_PROJECTION_ROLLBACK_FAILED')
+  assert.equal(error?.recoveryAction, 'retry_apply_codex')
+  assert.equal(error?.recoveryPath, undefined)
+})
+
+test('Skills IPC allows DSH targets without forwarding renderer-controlled roots', async () => {
+  const { handlers, ipcMain } = registry()
+  const calls = []
+  registerSkillsIpc({
+    ipcMain,
+    service: {
+      install(request) { calls.push(['install', request]); return 'installed' },
+      applyToAdapter(packageId, adapterId) { calls.push(['apply', packageId, adapterId]); return 'applied' }
+    }
+  })
+
+  await handlers.get('skills:install')({}, {
+    source: { type: 'local', path: 'F:\\skills\\demo' },
+    targetAdapterIds: ['deepseek-harness'],
+    scopeType: 'user',
+    root: 'F:\\attacker-root',
+    targetPath: 'F:\\attacker-target',
+    DSH_HOME: 'F:\\attacker-home'
+  })
+  await handlers.get('skills:apply-to-adapter')({}, {
+    packageId: 'package-1', targetAdapterId: 'deepseek-harness', root: 'F:\\attacker-root'
+  })
+
+  assert.deepEqual(calls, [
+    ['install', {
+      source: { type: 'local', path: 'F:\\skills\\demo' },
+      targetAdapterIds: ['deepseek-harness'], scopeType: 'user', projectPath: ''
+    }],
+    ['apply', 'package-1', 'deepseek-harness']
+  ])
+})
+
 test('Skills IPC validates install scope before invoking the service', async () => {
   const { handlers, ipcMain } = registry()
   let invoked = false

@@ -122,6 +122,33 @@
           <pre v-if="lastCliOutput" class="result-output">{{ lastCliOutput }}</pre>
         </template>
       </a-alert>
+      <a-divider />
+      <div class="dsh-profile-management">
+        <div class="cli-toolbar">
+          <div>
+            <strong>DeepSeek Harness 本地集成</strong>
+            <div class="muted">固定兼容 DSH 0.1.0-rc.6</div>
+          </div>
+          <a-button size="small" :loading="dshRuntimeLoading" @click="loadDshRuntime">刷新状态</a-button>
+        </div>
+        <a-alert
+          type="info"
+          show-icon
+          message="DSH 会话使用 Web 界面"
+          description="运行时安装、修复、卸载及原生 profile 管理统一在档案管理中完成。"
+        />
+        <a-descriptions size="small" :column="1" bordered class="dsh-statuses">
+          <a-descriptions-item v-for="row in dshRuntimeView.rows" :key="row.source" :label="row.label">
+            <a-tag :color="row.selected ? 'green' : 'default'">{{ row.selected ? '当前选用' : '未选用' }}</a-tag>
+            {{ settingsRuntimeRowLabel(row) }}
+          </a-descriptions-item>
+          <a-descriptions-item label="受支持版本">{{ dshRuntimeView.supportedVersion || '未知' }}</a-descriptions-item>
+        </a-descriptions>
+        <a-button
+          type="primary"
+          @click="router.push({ name: 'profiles', query: { cli: 'deepseek-harness' } })"
+        >前往档案管理</a-button>
+      </div>
     </a-card>
       </section>
 
@@ -271,6 +298,7 @@ import SettingsSectionNav from '../components/settings/SettingsSectionNav.vue'
 import SoftwareUpdatePanel from '../components/settings/SoftwareUpdatePanel.vue'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
+import { presentDshManagement } from '../dshManagementPresentation.js'
 import { normalizeSettingsSection } from '../settingsSections.js'
 import { formatCliDiagnosticSummary, persistenceStatusLabel, profileDiagnosticSummary } from '../diagnosticsPresentation.js'
 import {
@@ -312,9 +340,12 @@ const diagnosticsLoading = ref(false)
 const diagnosticsExporting = ref(false)
 const profileRechecking = ref(false)
 const codexRuntime = ref(null)
+const dshRuntimeView = ref(presentDshManagement(null))
+const dshRuntimeLoading = ref(false)
 let stopCodexRuntimeListener = null
 let sectionObserver = null
 let programmaticSection = null
+let dshRuntimeRequest = 0
 const lastCliOutput = computed(() => {
   const result = lastCliResult.value
   if (!result) return ''
@@ -358,10 +389,9 @@ const summaryModelOptions = computed(() => {
   const adapter = adapters.value.find(item => item.id === local.value.defaultExecutorId)
   return Array.isArray(adapter?.models) ? adapter.models.map(item => typeof item === 'string' ? item : item.id).filter(Boolean) : []
 })
-
 onMounted(async () => {
   stopCodexRuntimeListener = ipc.onCodexRuntime((snapshot) => { codexRuntime.value = snapshot })
-  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadSummaryProfiles(), loadDiagnostics(), loadCodexRuntime()])
+  await Promise.all([settings.load(), sessions.init(), gateway.init(), loadCliTools(), loadDshRuntime(), loadSummaryProfiles(), loadDiagnostics(), loadCodexRuntime()])
   adapters.value = sessions.adapters
   local.value = { ...local.value, ...settings.$state }
   observeSections()
@@ -462,6 +492,30 @@ async function loadSummaryProfiles() {
   } catch {
     summaryProfiles.value = []
   }
+}
+
+async function loadDshRuntime() {
+  const request = ++dshRuntimeRequest
+  dshRuntimeLoading.value = true
+  try {
+    const state = await ipc.getDshState()
+    if (request !== dshRuntimeRequest) return null
+    const next = presentDshManagement(state)
+    if (next.revision >= dshRuntimeView.value.revision) dshRuntimeView.value = next
+    return state
+  } catch {
+    if (request !== dshRuntimeRequest) return null
+    message.error('读取 DeepSeek Harness 状态失败')
+    return null
+  } finally {
+    if (request === dshRuntimeRequest) dshRuntimeLoading.value = false
+  }
+}
+
+function settingsRuntimeRowLabel(row) {
+  if (!row.installed) return '未安装'
+  if (!row.compatible) return `${row.version || '未知版本'} · 不兼容`
+  return `${row.version || '未知版本'} · ${row.health === 'healthy' ? '正常' : '需要修复'}`
 }
 
 async function loadDiagnostics() {

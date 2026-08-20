@@ -65,3 +65,28 @@ test('a runtime-ready route is actively forwarding when Gateway is connected', (
     pending: false
   }).state, 'forwarding')
 })
+
+test('DeepSeek unavailable surfaces expose stable non-forwarding relay states', () => {
+  assert.deepEqual(deriveGatewayRelayControl({
+    session: session({
+      relayEnabled: false,
+      gatewayEligible: false,
+      gatewayReason: 'DSH_WEB_GATEWAY_UNSUPPORTED'
+    }),
+    gatewayPhase: 'connected',
+    pending: false
+  }), {
+    selected: false,
+    effective: false,
+    state: 'dsh_web_unsupported',
+    label: 'DSH Web 暂不支持 Gateway',
+    tooltip: '请选择已安装 UCLI bridge 的 DSH TUI 会话',
+    tone: 'orange',
+    nextEnabled: false
+  })
+  assert.equal(deriveGatewayRelayControl({
+    session: session({ gatewayEligible: false, gatewayReason: 'DSH_BRIDGE_DISCONNECTED' }),
+    gatewayPhase: 'connected',
+    pending: false
+  }).state, 'dsh_bridge_disconnected')
+})

@@ -16,7 +16,6 @@ npmRebuild: false
 afterPack: scripts/fix-node-pty-permissions.cjs
 files:
   - out/**/*
-  - resources/**/*
   # sql.js (pure WASM — must be available at runtime for the main process)
   - node_modules/sql.js/**
   # node-pty (native module for terminal PTY support)
@@ -26,11 +25,11 @@ extraResources:
   - from: resources/
     to: resources/
 win:
-  icon: resources/icons/ucli.png
+  icon: build/icon.ico
   target:
     - nsis
     - portable
-  sign: false
+  signExecutable: false
   forceCodeSigning: false
 mac:
   icon: resources/icons/ucli.png

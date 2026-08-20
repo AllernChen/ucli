@@ -33,6 +33,14 @@ const api = {
   listAdapters: () => ipcRenderer.invoke('adapters:list'),
   listCliTools: () => ipcRenderer.invoke('cli-tools:list'),
   runCliToolAction: (id, action) => ipcRenderer.invoke('cli-tools:run', id, action),
+  getDshState: () => ipcRenderer.invoke('dsh:getState'),
+  listDshProfiles: () => ipcRenderer.invoke('dsh:listProfiles'),
+  initializeDshProfile: (profileName) => ipcRenderer.invoke('dsh:initializeProfile', profileName),
+  installDshRuntime: () => ipcRenderer.invoke('dsh:installRuntime'),
+  upgradeDshRuntime: () => ipcRenderer.invoke('dsh:upgradeRuntime'),
+  repairDshRuntime: () => ipcRenderer.invoke('dsh:repairRuntime'),
+  removeDshRuntime: () => ipcRenderer.invoke('dsh:removeRuntime'),
+  removeDshLegacyBridge: (profileName) => ipcRenderer.invoke('dsh:removeLegacyBridge', profileName),
   getUpdateState: () => ipcRenderer.invoke('update:get-state'),
   checkForUpdates: () => ipcRenderer.invoke('update:check'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
@@ -93,6 +101,19 @@ const api = {
   attachTerminal: (sessionId) => ipcRenderer.invoke('session:attach-terminal', sessionId),
   getSessionHistory: (sessionId, options) =>
     ipcRenderer.invoke('session:get-history', sessionId, options),
+  listArtifacts: async (sessionId) => {
+    const response = await ipcRenderer.invoke('session:list-artifacts', sessionId)
+    if (response?.ok) return response.value
+    const payload = response?.error || { code: 'ARTIFACT_FAILED', message: 'Unable to list artifacts' }
+    throw Object.assign(new Error(payload.message), { code: payload.code })
+  },
+  readArtifact: async (sessionId, absolutePath, options) => {
+    const response = await ipcRenderer.invoke('session:read-artifact', sessionId, absolutePath, options)
+    if (response?.ok) return response.value
+    const payload = response?.error || { code: 'ARTIFACT_FAILED', message: 'Unable to read artifact' }
+    throw Object.assign(new Error(payload.message), { code: payload.code })
+  },
+  openArtifactWindow: (sessionId) => ipcRenderer.invoke('artifact:open-window', sessionId),
   getSessionDiagnostics: (sessionId) =>
     ipcRenderer.invoke('session:get-diagnostics', sessionId),
   repairSessionBinding: (sessionId) =>
@@ -200,6 +221,7 @@ const api = {
 
   // ---- shell ----
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
+  openPath: (path) => ipcRenderer.invoke('shell:open-path', path),
 
   // ---- events ----
   on: (channel, handler) => {

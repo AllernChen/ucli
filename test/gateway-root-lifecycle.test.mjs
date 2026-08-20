@@ -95,3 +95,56 @@ test('stopping a session clears transient work but retains selection and root', 
   assert.equal(routes.routes[0].rootMessageId, rootMessageId)
   assert.ok(channel.rootUpdates.length > 0)
 })
+
+test('stopping a disconnected selected session never creates a missing root', async () => {
+  const value = session('session-stopped', {
+    adapterId: 'deepseek-harness',
+    status: 'offline',
+    gatewayEligible: false,
+    gatewayReason: 'DSH_TUI_UNAVAILABLE'
+  })
+  const port = createPort([value])
+  const routes = new MemoryRouteStore()
+  const channel = new FakeGatewayChannel()
+  const runtime = new GatewayRuntime({ port, routeStore: routes })
+  await runtime.attachConnectedChannel({
+    channel, config: FEISHU_CONFIG, fingerprint: 'fingerprint-1'
+  })
+  routes.upsertSessionRoute({ sessionId: value.id, relayEnabled: true })
+
+  await runtime.handleGatewayEvent({ type: 'session_stopped', sessionId: value.id })
+
+  assert.equal(channel.roots.length, 0)
+  assert.equal(routes.routes[0].rootMessageId, null)
+})
+
+test('a root created by an old generation stays inert after stop and restart', async () => {
+  let resolveRoot
+  const rootSent = new Promise(resolve => { resolveRoot = resolve })
+  const value = session('session-root-race', {
+    adapterId: 'deepseek-harness', gatewayEligible: true, gatewayReason: null
+  })
+  const port = createPort([value])
+  const routes = new MemoryRouteStore()
+  const channel = new FakeGatewayChannel()
+  const runtime = new GatewayRuntime({ port, routeStore: routes })
+  await runtime.attachConnectedChannel({
+    channel, config: FEISHU_CONFIG, fingerprint: 'fingerprint-1'
+  })
+  channel.sendSessionRoot = () => rootSent
+  routes.upsertSessionRoute({ sessionId: value.id, relayEnabled: true })
+  const syncing = runtime.resyncSession(value.id)
+  await new Promise(resolve => setImmediate(resolve))
+  port.sessions.set(value.id, {
+    ...value, status: 'offline', gatewayEligible: false,
+    gatewayReason: 'DSH_TUI_UNAVAILABLE'
+  })
+  await runtime.handleGatewayEvent({ type: 'session_stopped', sessionId: value.id })
+  port.sessions.set(value.id, { ...value, status: 'idle', gatewayEligible: true })
+  resolveRoot({ messageId: 'old-root', threadId: 'old-thread' })
+  await syncing
+
+  assert.equal(routes.routes[0].rootMessageId, null)
+  assert.equal(routes.messageRoutes.length, 0)
+  assert.equal(channel.threadStarters.length, 0)
+})

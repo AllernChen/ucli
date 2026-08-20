@@ -3,6 +3,7 @@ import { FeishuChannel } from './channels/feishuChannel.js'
 import { GatewayRouteStore } from './routeStore.js'
 import { GatewayRuntime } from './runtime.js'
 import { SecretStore } from './secretStore.js'
+import { describeGatewaySessionEligibility } from './orchestratorPort.js'
 
 const DESIRED_ENABLED_KEY = 'gateway.desiredEnabled'
 const APPLIED_CONFIG_KEY = 'gateway.config'
@@ -161,12 +162,15 @@ export class GatewayManager {
     return this.port.listSessions().map((session) => {
       const route = routes.get(session.id)
       const relay = this.runtime.getSessionRelayState(session.id)
+      const eligibility = describeGatewaySessionEligibility(session)
       return {
         id: session.id,
         name: session.name || null,
         adapterId: session.adapterId,
         provider: session.provider || null,
         status: session.status,
+        gatewayEligible: eligibility.eligible,
+        gatewayReason: eligibility.reason,
         relayEnabled: Boolean(route?.relayEnabled),
         routeStatus: route?.routeStatus || 'waiting',
         queueCount: relay.queueCount
@@ -175,15 +179,27 @@ export class GatewayManager {
   }
 
   async setSessionRelayEnabled(sessionId, enabled) {
-    if (!this.port.getSession(sessionId)) {
+    const session = this.port.getSession(sessionId)
+    if (!session) {
       return { accepted: false, reason: 'session_not_found' }
+    }
+    if (enabled) {
+      const eligibility = describeGatewaySessionEligibility(session)
+      if (!eligibility.eligible) {
+        return { accepted: false, reason: eligibility.reason }
+      }
     }
     return this.runtime.setSessionRelayEnabled(sessionId, enabled)
   }
 
   async resyncSession(sessionId) {
-    if (!this.port.getSession(sessionId)) {
+    const session = this.port.getSession(sessionId)
+    if (!session) {
       return { accepted: false, reason: 'session_not_found' }
+    }
+    const eligibility = describeGatewaySessionEligibility(session)
+    if (!eligibility.eligible) {
+      return { accepted: false, reason: eligibility.reason }
     }
     await this.runtime.resyncSession(sessionId)
     return { accepted: true }

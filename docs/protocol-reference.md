@@ -123,6 +123,65 @@ npm 安装生成的 `opencode.cmd` 在 `cmd.exe` + ConPTY 链路中会无输出�
 ## 统一适配器事件（归一化）
 `init` `message`(partial/final) `reasoning` `tool_call` `tool_result` `command_output` `file_diff` `token_usage`(cumulative) `turn_complete` `error` `exit`。适配器把上述原生消息翻译成这套形状，UI 渲染器只认这套。
 
+## DeepSeek Harness 0.11.1 管理协议
+
+### Web-only 界面与旧会话
+
+DeepSeek Harness 的公开项目和 `@deepseek-ai/dsh@0.1.0-rc.6` 没有 CLI TUI。UCLI 0.11.1 因此只创建 `surfacePreference: "web"` 会话，不启动 DSH TUI、PTY、bridge server、Unix socket 或 named pipe。历史 `tui` / `legacy-tui` 配置稳定返回 `DSH_TUI_UNAVAILABLE`；用户确认后只能以相同 cwd 新建一条独立的 DSH Web 会话，原记录和原生数据不做原地转换。
+
+Web 会话不进入通信 Gateway；任何历史 generation 也会在恢复时清除旧 route、queue、decision 和 action token。公开结果固定为 `DSH_WEB_GATEWAY_UNSUPPORTED` 或 `DSH_LEGACY_GATEWAY_UNAVAILABLE`。
+
+### Runtime manager
+
+Runtime manager 管理由 UCLI 拥有的 `<userData>/runtimes/deepseek-harness/current`，并与 DSH_HOME 做 lexical、canonical 双重隔离。运行时固定为 `@deepseek-ai/dsh@0.1.0-rc.6`，包 integrity 必须匹配官方 npm metadata；只接受同一可信 Node 安装旁的 npm 与 pnpm `10.30.3`。renderer 的 install、upgrade、repair、remove 均为零参数固定 IPC，不能提交路径、版本、registry、package 或 command。
+
+安装、升级与修复先写入带不可猜所有权标记的 staging，验证 root、关键目录、manifest、entry、lock、realpath containment 和无 symlink/junction 后才原子提升。已有 current 只在 exact owner 匹配时可替换；失败时恢复原 Runtime，回滚或 backup cleanup 未确认时保留可重试的内部状态。每次破坏性操作先停止并确认所有被拥有的 DSH Web 进程树；卸载只删除 exact owned Runtime，绝不删除 DSH_HOME。
+
+公开状态只包含 `revision`、`supportedVersion`、managed/system 的 bounded 版本与健康状态、`selected`、唯一 `action`、`busy` 和稳定 `errorCode`。不会包含安装路径、DSH_HOME、registry 输出、命令、stdout/stderr 或原始异常；renderer 只接受 revision 更新较新的 canonical state。
+
+### Profile 与 legacy bridge 隔离
+
+profile 是 DSH 原生配置对象，不是 UCLI 会话 surface。UCLI 只用固定 argv 初始化官方 base profile，并在完成后重新验证 exact base/custom/noninteractive 且没有任何 legacy bridge dependency、bundle、patch 或 manifest 残留。
+
+`@ucli/dsh-bridge@0.11.0` 和 `resources/deepseek-harness/ucli-dsh-bridge-0.11.0.tgz` 仅为 legacy bridge 隔离与清理兼容而保留：0.11.1 不加载、不安装、不升级它。用户明确确认“移除旧 bridge”后，主进程使用固定 argv，并只在 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml` 四项的事务边界内修改；失败恢复原 bytes、mode 与原缺失状态，清理失败保留内部重试状态。profile、插件、`node_modules`、凭据、sessions 和 DSH_HOME 均不得被递归删除。
+
+### Web 生命周期
+
+Web 以固定 argv `dsh web --host 127.0.0.1 --port 0` 启动，不注入任何 `UCLI_DSH_BRIDGE_*` 环境。readiness 只接受一条完整的 exact `http://127.0.0.1:<port>` loopback 行；启动流总预算为 16 KiB，超时为 60 秒。iframe 使用固定 CSP、最小 sandbox 和 `no-referrer`；权限、历史和统计只归 DSH 原生界面。
+
+stop、restart、remove 和应用退出先停用界面，再确认同一 owned process tree 完整退出。两个并发 Web 会话必须使用不同动态端口和独立生命周期；root 退出但子进程仍在时保持 stopping，不复用 controller，也不报告假成功。
+
+### Loopback HTTP API
+
+DSH Web 在 `http://127.0.0.1:<port>` 暴露 JSON-RPC 风格 API。UCLI 的 `dshWebClient` 通过 `POST /api/<method>`（body 为 `{type:"client-request", rpcId, method, payload}`）读取数据，每个方法都先做 loopback origin 校验，失败返回稳定空值而非抛错：
+
+- `session.list`：返回各 native session 的 `sessionId`、`updatedAt` 与 `tokenUsage`（`uncachedInputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens`）；轮询器每 10 秒聚合为 `{input, output}` 写入 `session.stats.tokens`。
+- `session.export?sessionId=<id>`：GET，返回 ZIP 归档，内含 `session.jsonl`（逐事件日志）；summary 时解压读取转录，并按 native session 的 `updatedAt` 落在时间范围过滤。
+
+DSH API 不暴露费用数字，`costAvailable` 保持 false；本次只做 token 数量。
+
+### DSH Skills 来源与优先级
+
+同名 Skill 以较小 rank 为优先，保留所有来源并标记“生效”或“被来源遮蔽”：
+
+| rank | 物理来源 | 展示 |
+| ---: | --- | --- |
+| 100 | 项目 `.dsh/skills` | DSH 项目专属 |
+| 200 | 项目 `.agents/skills` | Codex / DSH 项目共享 |
+| 400 | `$DSH_HOME/skills` | DSH 用户专属 |
+| 500 | 用户 `.agents/skills` | Codex / DSH 用户共享 |
+| 600 | UCLI 随包内置来源 | 内置（只读） |
+
+项目范围规范化到最近的 Git root；Codex 与 DSH 同时选择项目 `.agents/skills` 时只建立一条安装记录和一个物理副本。DSH direct root、共享 root、flat Markdown 与内置来源都执行 regular-file、大小、portable name、realpath 和 link containment 校验；自定义/内置报告来源只读，不允许 adopt、update 或 remove。
+
+### 稳定错误
+
+Runtime manager 公开：`DSH_RUNTIME_ACTION_INVALID`、`DSH_RUNTIME_BUSY`、`DSH_RUNTIME_PATH_UNSAFE`、`DSH_RUNTIME_PATH_CONFLICT`、`DSH_NPM_UNAVAILABLE`、`DSH_RUNTIME_INSTALL_FAILED`、`DSH_RUNTIME_ROLLBACK_FAILED`、`DSH_RUNTIME_BACKUP_CLEANUP_FAILED`、`DSH_RUNTIME_REMOVE_REJECTED`、`DSH_RUNTIME_REMOVE_FAILED`。
+
+profile 与迁移公开：`DSH_PROFILE_INVALID`、`DSH_PROFILE_NOT_READY`、`DSH_PROFILE_INITIALIZE_FAILED`、`DSH_PROFILE_ROLLBACK_FAILED`、`DSH_BRIDGE_NOT_INSTALLED`、`DSH_BRIDGE_REMOVE_FAILED`、`DSH_BRIDGE_ROLLBACK_FAILED`、`DSH_TUI_UNAVAILABLE`。
+
+Web 公开：`DSH_WEB_START_TIMEOUT`、`DSH_WEB_READY_URL_INVALID`、`DSH_WEB_GATEWAY_UNSUPPORTED`、`DSH_LEGACY_GATEWAY_UNAVAILABLE`。所有错误只返回 allowlist code 和 bounded 状态，不附带路径、stdout/stderr、命令或 provider 数据。
+
 ## 通信 Gateway 协议
 
 ### 架构与边界

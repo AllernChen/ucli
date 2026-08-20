@@ -17,7 +17,7 @@
       <GatewayHeaderControl />
       <a-space size="small">
         <a-button size="small" @click="showImport = true">📥 导入</a-button>
-        <a-button size="small" @click="$router.push('/')">➕ 新建</a-button>
+        <a-button size="small" @click="openNew">➕ 新建</a-button>
         <span v-if="assignedPaneCount > 1" class="shortcut-hint"><kbd>Tab</kbd> 切换会话</span>
         <a-radio-group v-model:value="splitCount" size="small" button-style="solid">
           <a-radio-button :value="1">1</a-radio-button>
@@ -67,7 +67,14 @@
         </div>
         <div class="session-list">
           <section v-for="project in groupedSessions" :key="project.key" class="sidebar-project">
-            <button type="button" class="sidebar-project-header" @click="toggleProjectGroup(project.key)">
+            <div
+              class="sidebar-project-header"
+              role="button"
+              tabindex="0"
+              @click="toggleProjectGroup(project.key)"
+              @keydown.enter.self.prevent="toggleProjectGroup(project.key)"
+              @keydown.space.self.prevent="toggleProjectGroup(project.key)"
+            >
               <DownOutlined v-if="!collapsedProjects.has(project.key)" />
               <RightOutlined v-else />
               <FolderOpenOutlined class="sidebar-project-icon" />
@@ -75,24 +82,52 @@
                 <span class="sidebar-project-name">{{ project.name }}</span>
                 <span class="sidebar-project-path" :title="project.path">{{ project.path || '未设置工作目录' }}</span>
               </span>
+              <a-button
+                size="small"
+                type="text"
+                class="sidebar-open-dir"
+                title="打开目录"
+                aria-label="打开目录"
+                @click.stop="openProjectDir(project.path)"
+              >
+                <ExportOutlined />
+              </a-button>
               <span class="sidebar-count">{{ project.count }}</span>
-            </button>
+            </div>
 
             <div v-show="!collapsedProjects.has(project.key)" class="sidebar-project-content">
               <section v-for="cli in project.cliGroups" :key="cli.key" class="sidebar-cli">
-                <button type="button" class="sidebar-cli-header" @click="toggleCliGroup(cli.key)">
+                <div
+                  class="sidebar-cli-header"
+                  role="button"
+                  tabindex="0"
+                  @click="toggleCliGroup(cli.key)"
+                  @keydown.enter.self.prevent="toggleCliGroup(cli.key)"
+                  @keydown.space.self.prevent="toggleCliGroup(cli.key)"
+                >
                   <DownOutlined v-if="!collapsedClis.has(cli.key)" />
                   <RightOutlined v-else />
                   <span>{{ cli.icon }}</span>
                   <span class="sidebar-cli-name">{{ cli.displayName }}</span>
+                  <a-button
+                    size="small"
+                    type="text"
+                    class="sidebar-quick-add"
+                    :title="`新建 ${cli.displayName} 会话`"
+                    aria-label="新建会话"
+                    @click.stop="openQuickNew(project.path, cli.id)"
+                  >
+                    <PlusOutlined />
+                  </a-button>
                   <span class="sidebar-count">{{ cli.count }}</span>
-                </button>
+                </div>
 
                 <div v-show="!collapsedClis.has(cli.key)">
                   <div
                     v-for="s in cli.sessions"
                     :key="s.id"
-                    :class="['session-item', activePane !== null && panes[activePane]?.sessionId === s.id ? 'assigned' : '']"
+                    :data-session-id="s.id"
+                    :class="['session-item', activePane !== null && panes[activePane]?.sessionId === s.id ? 'assigned' : '', locatingId === s.id ? 'locating' : '']"
                     @click="handleSessionClick(s.id, $event)"
                     @dblclick="openInNewPane(s.id)"
                   >
@@ -112,6 +147,7 @@
                       <span :class="['status-dot', s.status]"></span>
                     </div>
                     <span
+                      v-if="sessionCapabilityState(s).gateway"
                       :class="['session-relay-state', `tone-${relayView(s).tone}`]"
                       role="status"
                       :aria-label="`飞书转发：${relayView(s).label}`"
@@ -123,7 +159,7 @@
                       <span class="item-id">{{ s.id.slice(0,8) }}</span>
                       <span class="item-time">{{ fmtTime(s.createdAt || s.startedAt) }}</span>
                     </div>
-                    <div class="item-stats" v-if="s.stats">
+                    <div class="item-stats" v-if="sessionCapabilityState(s).ucliStats && s.stats">
                       ↑{{ fmtNum(s.stats.tokens.input) }} ↓{{ fmtNum(s.stats.tokens.output) }}
                       <span v-if="s.stats.turns"> · {{ s.stats.turns }}轮</span>
                     </div>
@@ -164,7 +200,27 @@
             </span>
             <span v-else class="pane-session empty">点击左侧会话卡片分配到此窗口</span>
             <a-space size="small">
-              <a-badge v-if="pane.sessionId" :dot="sessionConfigNeedsAttention(pane.sessionId)" status="warning">
+              <a-button
+                v-if="pane.sessionId"
+                size="small"
+                type="text"
+                aria-label="在工作台定位"
+                title="在工作台定位"
+                @click.stop="locateSession(pane.sessionId)"
+              >
+                <AimOutlined />
+              </a-button>
+              <a-button
+                v-if="pane.sessionId && !isLegacyDshSession(paneSession(i))"
+                size="small"
+                type="text"
+                aria-label="会话产物"
+                title="会话产物"
+                @click.stop="openArtifacts(pane.sessionId)"
+              >
+                <FileTextOutlined />
+              </a-button>
+              <a-badge v-if="pane.sessionId && !isLegacyDshSession(paneSession(i))" :dot="sessionConfigNeedsAttention(pane.sessionId)" status="warning">
                 <a-button
                   size="small"
                   type="text"
@@ -176,7 +232,7 @@
                 </a-button>
               </a-badge>
               <a-button
-                v-if="pane.sessionId"
+                v-if="paneCapabilityState(i).ucliHistory"
                 size="small"
                 type="text"
                 @click.stop="togglePaneHistory(i)"
@@ -197,7 +253,7 @@
                 <FullscreenOutlined v-else />
               </a-button>
               <SessionMaintenanceActions
-                v-if="pane.sessionId"
+                v-if="pane.sessionId && !isLegacyDshSession(paneSession(i))"
                 :session-id="pane.sessionId"
                 @removed="handleConfiguredSessionRemoved"
               />
@@ -211,8 +267,24 @@
               >关闭</a-button>
             </a-space>
           </div>
+          <div
+            v-if="isLegacyDshSession(paneSession(i))"
+            class="legacy-dsh-migration"
+            role="status"
+          >
+            <strong>旧版 DSH TUI 会话已停用</strong>
+            <span>名称：{{ legacyDshSummary(paneSession(i)).name }}</span>
+            <span>目录：{{ legacyDshSummary(paneSession(i)).cwd }}</span>
+            <span>档案：{{ legacyDshSummary(paneSession(i)).profile }}</span>
+            <a-button
+              size="small"
+              type="primary"
+              :disabled="!legacyDshMigrationCwd(paneSession(i))"
+              @click.stop="openLegacyDshWeb(paneSession(i))"
+            >新建 DSH Web（同工作目录）</a-button>
+          </div>
           <!-- Pane info bar -->
-          <div v-if="pane.sessionId" class="pane-info">
+          <div v-if="paneCapabilityState(i).ucliStats" class="pane-info">
             <span
               v-if="sessions.byId(pane.sessionId)?.actualModel && sessions.byId(pane.sessionId)?.actualModel !== sessions.byId(pane.sessionId)?.model"
               class="pi-item provider-warning"
@@ -225,11 +297,22 @@
           </div>
           <!-- Terminal container -->
           <div
+            v-if="paneCapabilityState(i).terminal"
             v-show="pane.viewMode !== 'history'"
             :ref="el => setPaneRef(i, el)"
             class="pane-terminal"
           ></div>
+          <HostedWebSurface
+            v-if="paneCapabilityState(i).web"
+            :state="paneSession(i)?.surfaceState || { kind: 'web', status: 'starting', url: null, errorCode: null }"
+            class="pane-web-surface"
+          />
+          <a-empty
+            v-if="pane.sessionId && !paneCapabilityState(i).known && !isLegacyDshSession(paneSession(i))"
+            description="该会话缺少可验证的界面能力，已安全停用交互"
+          />
           <PaneHistory
+            v-if="paneCapabilityState(i).ucliHistory"
             v-show="pane.viewMode === 'history'"
             :session-id="pane.sessionId || ''"
             :active="pane.viewMode === 'history'"
@@ -241,6 +324,13 @@
     <SessionConfigModal
       v-model:open="sessionConfig.open"
       :session-id="sessionConfig.sessionId"
+    />
+
+    <NewSessionDialog v-model:open="showNewSession" :initial-cwd="quickNew.cwd" :initial-adapter-id="quickNew.adapterId" />
+
+    <ArtifactDrawer
+      v-model:open="artifactsOpen"
+      :session-id="artifactsSessionId"
     />
 
     <!-- Import historical sessions modal -->
@@ -336,9 +426,13 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   SettingOutlined,
+  AimOutlined,
   DownOutlined,
   RightOutlined,
-  FolderOpenOutlined
+  FolderOpenOutlined,
+  PlusOutlined,
+  ExportOutlined,
+  FileTextOutlined
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
@@ -348,19 +442,26 @@ import { matchesBinding } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { groupSessionsByProject } from '../sessionGrouping.js'
 import { nextSessionPaneIndex, targetPaneForSessionAddition } from '../workbenchKeyboard.js'
-import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldBlockDuplicateClipboardPaste, shouldHandleTerminalPaste } from '../terminalKeybindings.js'
+import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldBlockDuplicateClipboardPaste, shouldHandleTerminalPaste, shouldSendClipboardPaste } from '../terminalKeybindings.js'
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { compactPaneSessionIds } from '../paneCompaction.js'
 import PaneHistory from '../components/PaneHistory.vue'
+import ArtifactDrawer from '../components/ArtifactDrawer.vue'
+import HostedWebSurface from '../components/HostedWebSurface.vue'
 import SessionConfigModal from '../components/SessionConfigModal.vue'
+import NewSessionDialog from '../components/NewSessionDialog.vue'
 import SessionMaintenanceActions from '../components/SessionMaintenanceActions.vue'
 import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
 import GatewayChannelIcon from '../components/gateway/GatewayChannelIcon.vue'
 import { deriveGatewayRelayControl } from '../gatewayRelayPresentation.js'
 import { deriveSessionConfigState } from '../sessionConfigPresentation.js'
+import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
 import { terminalSizeChanged } from '../terminalResize.js'
 import {
+  activatePaneSession,
+  createPaneAssignmentGuard,
   reconcileSessionPanes,
+  releaseChangedPaneTerminalBinding,
   restoreAssignedPaneSessions,
   resolveSessionFocusPane,
   resolveWorkbenchFullscreenTarget,
@@ -379,6 +480,101 @@ const sessions = useSessionsStore()
 const settings = useSettingsStore()
 const gateway = useGatewayStore()
 const aiProfiles = useAiCliProfilesStore()
+
+function sessionCapabilityState(session) {
+  return deriveSessionCapabilityState(session || {})
+}
+
+function paneSession(i) {
+  return sessions.byId(panes.value[i]?.sessionId) || null
+}
+
+function paneCapabilityState(i) {
+  return sessionCapabilityState(paneSession(i))
+}
+
+function isLegacyDshSession(session) {
+  return Boolean(
+    session?.adapterId === 'deepseek-harness' &&
+    session?.adapterConfig?.surfacePreference !== 'web' &&
+    session?.capabilities?.surface !== 'web'
+  )
+}
+
+function boundedLegacyDshText(value, fallback, maxLength) {
+  if (typeof value !== 'string') return fallback
+  const normalized = value
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .normalize('NFC')
+    .trim()
+  return normalized
+    ? Array.from(normalized).slice(0, maxLength).join('')
+    : fallback
+}
+
+function legacyDshSummary(session) {
+  return {
+    name: boundedLegacyDshText(
+      session?.displayName || session?.name,
+      '未命名会话',
+      80
+    ),
+    cwd: boundedLegacyDshText(session?.cwd, '未记录工作目录', 180),
+    profile: boundedLegacyDshText(
+      session?.adapterConfig?.profileName || session?.profileName,
+      '旧版 TUI',
+      80
+    )
+  }
+}
+
+function legacyDshMigrationCwd(session) {
+  if (typeof session?.cwd !== 'string') return ''
+  return Array.from(session.cwd
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .normalize('NFC')
+    .trim()).slice(0, 4096).join('')
+}
+
+function openLegacyDshWeb(session) {
+  const cwd = legacyDshMigrationCwd(session)
+  if (!isLegacyDshSession(session) || !cwd) return
+  router.push({
+    path: '/',
+    query: { createDshWeb: '1', cwd }
+  })
+}
+
+function findSessionGroups(sessionId) {
+  for (const project of groupedSessions.value) {
+    for (const cli of project.cliGroups) {
+      if (cli.sessions.some((s) => s.id === sessionId)) {
+        return { projectKey: project.key, cliKey: cli.key }
+      }
+    }
+  }
+  return null
+}
+
+async function locateSession(sessionId) {
+  if (!sessionId || !sessions.byId(sessionId)) return
+  const groups = findSessionGroups(sessionId)
+  if (!groups) return
+  collapsedProjects.value = new Set(
+    [...collapsedProjects.value].filter((k) => k !== groups.projectKey)
+  )
+  collapsedClis.value = new Set(
+    [...collapsedClis.value].filter((k) => k !== groups.cliKey)
+  )
+  locatingId.value = sessionId
+  await nextTick()
+  document
+    .querySelector(`[data-session-id="${CSS.escape(sessionId)}"]`)
+    ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  setTimeout(() => {
+    if (locatingId.value === sessionId) locatingId.value = null
+  }, 3000)
+}
 
 function relayView(session) {
   return deriveGatewayRelayControl({
@@ -438,6 +634,7 @@ function handleConfiguredSessionRemoved(sessionId) {
 // Refs storage for pane terminal containers
 const paneRefs = {}
 const paneRootRefs = {}
+const paneAssignmentGuard = createPaneAssignmentGuard()
 function setPaneRef(i, el) {
   if (el) paneRefs[i] = el
   else delete paneRefs[i]
@@ -471,6 +668,7 @@ const filteredSessions = computed(() => {
 const groupedSessions = computed(() => groupSessionsByProject(filteredSessions.value, sessions.adapters))
 const collapsedProjects = ref(new Set())
 const collapsedClis = ref(new Set())
+const locatingId = ref(null)
 
 function toggleProjectGroup(key) {
   const next = new Set(collapsedProjects.value)
@@ -523,16 +721,21 @@ function createPanes(count) {
   nextTick(async () => {
     const assignedPanes = []
     for (let i = 0; i < count; i++) {
-      const needsInit = !panes.value[i]?.term
-      if (needsInit) initPaneTerminal(i)
       const sessionId = panes.value[i]?.sessionId
+      const capabilities = paneCapabilityState(i)
+      if (!capabilities.terminal) {
+        destroyPaneTerminal(i)
+        unsubscribePane(i)
+      }
+      const needsInit = capabilities.terminal && !panes.value[i]?.term
+      if (needsInit) initPaneTerminal(i)
       const sessionChanged = previousSessionIds[i] !== sessionId
       if ((needsInit || sessionChanged) && sessionId) {
         if (sessionChanged) {
           unsubscribePane(i)
           panes.value[i]?.term?.clear()
         }
-        if (!unsubs[i]) subscribePaneTerminal(i, sessionId)
+        if (capabilities.terminal && !unsubs[i]) subscribePaneTerminal(i, sessionId)
         assignedPanes.push({ paneIndex: i, sessionId })
       } else {
         syncPaneTerminalSize(i)
@@ -542,6 +745,12 @@ function createPanes(count) {
       getSession: (sessionId) => sessions.byId(sessionId),
       restartSession: async (sessionId, paneIndex) => {
         await sessions.restart(sessionId)
+        if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
+        await nextTick()
+        syncPaneTerminalSize(paneIndex)
+      },
+      startSession: async (sessionId, paneIndex) => {
+        await ipc.startAdapter(sessionId)
         if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
         await nextTick()
         syncPaneTerminalSize(paneIndex)
@@ -559,6 +768,11 @@ function createPanes(count) {
 watch(splitCount, (n) => createPanes(n))
 
 function initPaneTerminal(i) {
+  const capabilities = paneCapabilityState(i)
+  if (!capabilities.terminal) {
+    destroyPaneTerminal(i)
+    return
+  }
   const el = paneRefs[i]
   if (!el || panes.value[i]?.term) return
   const term = new Terminal({
@@ -620,6 +834,14 @@ function initPaneTerminal(i) {
 
     // Paste via configurable binding
     if (shouldHandleTerminalPaste(e, matchesBinding('terminal.paste', e, overrides))) {
+      // xterm 6.x binds a native `paste` listener (handlePasteEvent) that fires for the
+      // browser's default Ctrl/Cmd+V action even after this handler returns false — the
+      // key handler only exits early, it does not call preventDefault. Suppress that
+      // native paste so the clipboard is forwarded exactly once (below, via sendToPane).
+      if (shouldSendClipboardPaste(e)) {
+        e.preventDefault()
+        e.stopPropagation()
+      }
       navigator.clipboard.readText().then(t => { if (t) sendToPane(i, t) }).catch(() => {})
       return false
     }
@@ -630,7 +852,7 @@ function initPaneTerminal(i) {
   // Forward input to PTY
   term.onData((data) => {
     const sid = panes.value[i]?.sessionId
-    if (sid) window.ucli.sendTerminalInput(sid, data)
+    if (sid && paneCapabilityState(i).terminal) window.ucli.sendTerminalInput(sid, data)
   })
 
   panes.value[i].term = term
@@ -674,7 +896,7 @@ function destroyPaneTerminal(i) {
 function sendPaneTerminalSize(i, nextSize) {
   const pane = panes.value[i]
   const sessionId = pane?.sessionId
-  if (!pane || !sessionId || !terminalSizeChanged(pane.lastPtySize, nextSize)) return false
+  if (!pane || !sessionId || !paneCapabilityState(i).terminal || !terminalSizeChanged(pane.lastPtySize, nextSize)) return false
   pane.lastPtySize = { cols: nextSize.cols, rows: nextSize.rows }
   ipc.terminalResize(sessionId, nextSize.cols, nextSize.rows).catch(() => {})
   return true
@@ -693,19 +915,19 @@ function syncAllPaneTerminalSizes() {
 
 function sendToPane(i, data) {
   const sid = panes.value[i]?.sessionId
-  if (sid) window.ucli.sendTerminalInput(sid, data)
+  if (sid && paneCapabilityState(i).terminal) window.ucli.sendTerminalInput(sid, data)
 }
 
 function activatePane(i) {
   activePane.value = i
-  if (panes.value[i]?.viewMode !== 'history') {
+  if (paneCapabilityState(i).terminal && panes.value[i]?.viewMode !== 'history') {
     nextTick(() => panes.value[i]?.term?.focus())
   }
 }
 
 function togglePaneHistory(i) {
   const pane = panes.value[i]
-  if (!pane?.sessionId) return
+  if (!pane?.sessionId || !paneCapabilityState(i).ucliHistory) return
   pane.viewMode = pane.viewMode === 'history' ? 'terminal' : 'history'
   activePane.value = i
   if (pane.viewMode === 'terminal') {
@@ -778,53 +1000,56 @@ function assignToPane(sessionId) {
   // If same session already in other pane, clear it
   for (let i = 0; i < panes.value.length; i++) {
     if (i !== activePane.value && panes.value[i].sessionId === sessionId) {
+      paneAssignmentGuard.invalidate(i)
       panes.value[i].sessionId = null
       panes.value[i].viewMode = 'terminal'
       panes.value[i].lastPtySize = null
       panes.value[i].term?.clear()
+      destroyPaneTerminal(i)
       sessions.setWorkbenchPane(i, null)
       unsubscribePane(i)
     }
   }
   const oldSid = panes.value[activePane.value].sessionId
-  if (oldSid !== sessionId) {
-    panes.value[activePane.value].term?.clear()
-  }
+  releaseChangedPaneTerminalBinding(oldSid, sessionId, {
+    clearTerminal: () => panes.value[activePane.value]?.term?.clear(),
+    unsubscribe: () => unsubscribePane(activePane.value)
+  })
   panes.value[activePane.value].sessionId = sessionId
   panes.value[activePane.value].viewMode = 'terminal'
   panes.value[activePane.value].lastPtySize = null
   sessions.setWorkbenchPane(activePane.value, sessionId)
   const paneIndex = activePane.value
-  nextTick(() => {
-    syncPaneTerminalSize(paneIndex)
-    panes.value[paneIndex]?.term?.focus()
-  })
-  // If session is offline, auto-restart; if running, attach terminal output
+  const assignment = paneAssignmentGuard.begin(paneIndex, sessionId)
   const s = sessions.byId(sessionId)
-  // Subscribe terminal output first so we don't miss startup output
-  subscribePaneTerminal(activePane.value, sessionId)
-  if (s?.status === 'offline') {
-    // Offline persisted session — restart (which calls start → replays history)
-    sessions.restart(sessionId)
-      .then(() => {
-        if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
-        nextTick(() => syncPaneTerminalSize(paneIndex))
-      })
-      .catch(e => message.error('重启失败：' + (e?.message || e)))
-  } else if (s?.status === 'starting') {
-    // Brand new session — start the adapter (terminal is already subscribed)
-    ipc.startAdapter(sessionId)
-      .then(() => {
-        if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
-        nextTick(() => syncPaneTerminalSize(paneIndex))
-      })
-      .catch(e => message.error('启动失败：' + (e?.message || e)))
-  } else {
-    // Already running/idle — replay history to this pane
-    ipc.attachTerminal(sessionId)
-      .then(() => nextTick(() => syncPaneTerminalSize(paneIndex)))
-      .catch(() => {})
+  const capabilities = sessionCapabilityState(s)
+  if (!capabilities.terminal) {
+    destroyPaneTerminal(paneIndex)
+    unsubscribePane(paneIndex)
   }
+  nextTick(async () => {
+    try {
+      if (!paneAssignmentGuard.isCurrent(assignment, panes.value)) return
+      if (capabilities.terminal) {
+        initPaneTerminal(paneIndex)
+        if (!unsubs[paneIndex]) subscribePaneTerminal(paneIndex, sessionId)
+      }
+      if (!paneAssignmentGuard.isCurrent(assignment, panes.value)) return
+      await activatePaneSession(s, paneIndex, {
+        restartSession: (id) => sessions.restart(id),
+        startSession: (id) => ipc.startAdapter(id),
+        attachSession: (id) => ipc.attachTerminal(id)
+      })
+      if (!paneAssignmentGuard.isCurrent(assignment, panes.value)) return
+      if (panes.value[paneIndex]) panes.value[paneIndex].lastPtySize = null
+      syncPaneTerminalSize(paneIndex)
+      if (capabilities.terminal) panes.value[paneIndex]?.term?.focus()
+    } catch (error) {
+      if (paneAssignmentGuard.isCurrent(assignment, panes.value)) {
+        message.error('会话启动失败：' + (error?.message || error))
+      }
+    }
+  })
 }
 
 function focusSessionFromNotification(sessionId) {
@@ -885,6 +1110,7 @@ function clearPane(i) {
 function compactPanes(omitIndex) {
   const next = compactPaneSessionIds(panes.value.map((pane) => pane.sessionId), omitIndex)
   for (let i = 0; i < panes.value.length; i++) {
+    paneAssignmentGuard.invalidate(i)
     unsubscribePane(i)
     destroyPaneTerminal(i)
   }
@@ -898,6 +1124,33 @@ function compactPanes(omitIndex) {
     viewMode: 'terminal'
   }))
   nextTick(() => createPanes(next.splitCount))
+}
+
+// New session dialog (opened in place)
+const showNewSession = ref(false)
+const quickNew = ref({ cwd: '', adapterId: '' })
+
+function openNew() {
+  quickNew.value = { cwd: '', adapterId: '' }
+  showNewSession.value = true
+}
+
+function openQuickNew(cwd, adapterId) {
+  quickNew.value = { cwd: cwd || '', adapterId: adapterId || '' }
+  showNewSession.value = true
+}
+
+async function openProjectDir(dir) {
+  if (!dir) { message.warning('该项目未设置工作目录'); return }
+  const result = await ipc.openPath(dir)
+  if (result && result !== '') message.error('无法打开目录')
+}
+
+const artifactsOpen = ref(false)
+const artifactsSessionId = ref('')
+function openArtifacts(sessionId) {
+  artifactsSessionId.value = sessionId
+  artifactsOpen.value = true
 }
 
 // Import historical sessions
@@ -1007,8 +1260,10 @@ function fmtTime(ts) {
 // --- Terminal output routing ---
 function subscribePaneTerminal(i, sessionId) {
   unsubscribePane(i)
+  const session = sessions.byId(sessionId)
+  if (!deriveSessionCapabilityState(session || {}).terminal) return
   unsubs[i] = ipc.on('session:terminal-output', (evt) => {
-    if (evt.sessionId === sessionId && panes.value[i]?.term) {
+    if (panes.value[i]?.sessionId === sessionId && evt.sessionId === sessionId && panes.value[i]?.term) {
       panes.value[i].term.write(evt.data)
     }
   })
@@ -1114,12 +1369,15 @@ onBeforeUnmount(() => {
 .sidebar-cli-header:hover .sidebar-cli-name { color: #1677ff; }
 .sidebar-cli-name { overflow: hidden; flex: 1; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-count { margin-left: auto; color: #bfbfbf; font-size: 10px; }
+.sidebar-open-dir, .sidebar-quick-add { flex-shrink: 0; color: #8c8c8c; }
+.sidebar-open-dir:hover, .sidebar-quick-add:hover { color: #1677ff; }
 .session-item {
   padding: 7px 8px 7px 19px; cursor: pointer; border-radius: 6px; margin-bottom: 2px;
   transition: background .12s; border: 1px solid transparent;
 }
 .session-item:hover { background: #f5f5f5; }
 .session-item.assigned { background: #e6f4ff; border-color: #1677ff; }
+.session-item.locating { background: #fff7e6; border-color: #faad14; }
 .item-head { display: flex; align-items: center; gap: 4px; }
 .item-name { flex: 1; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-relay-state { display: inline-flex; align-items: center; gap: 3px; margin-top: 2px; font-size: 10px; color: #8c8c8c; }
@@ -1176,6 +1434,13 @@ onBeforeUnmount(() => {
 }
 .pane-session { font-size: 12px; font-weight: 500; display: flex; align-items: center; gap: 4px; }
 .pane-session.empty { color: #bfbfbf; }
+.legacy-dsh-migration {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 7px;
+  margin: auto; max-width: min(520px, calc(100% - 32px)); padding: 18px;
+  border: 1px solid #ffe58f; border-radius: 8px; background: #fffbe6;
+  color: #595959; overflow-wrap: anywhere;
+}
+.legacy-dsh-migration strong { color: #ad6800; }
 
 .pane-info {
   display: flex; gap: 10px; padding: 2px 8px; background: #fff; font-size: 11px;
@@ -1185,6 +1450,7 @@ onBeforeUnmount(() => {
 .pi-item.sid { font-family: monospace; color: #bfbfbf; font-size: 10px; }
 .pane-terminal { flex: 1; min-height: 0; padding: 4px; background: #0b1021; }
 .pane-terminal :deep(.xterm) { height: 100%; }
+.pane-web-surface { flex: 1; min-height: 0; }
 
 /* Import modal */
 .section-label { font-weight: 600; font-size: 13px; margin-bottom: 8px; color: #262626; }

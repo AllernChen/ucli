@@ -1,4 +1,5 @@
 import { checkBlacklist } from './blacklist.js'
+import path from 'node:path'
 
 /**
  * User rule patterns. We support a Claude-inspired matcher syntax so rules
@@ -113,12 +114,12 @@ function matchOne(parsed, { tool, command, path, host }) {
 /**
  * Classify a tool call against the blacklist + a ruleset.
  *
- * @param {{ tool: string, command?: string, path?: string, host?: string }} input
+ * @param {{ tool: string, command?: string, path?: string, resolvedPath?: string, host?: string }} input
  * @param {{ deny?: string[], highRisk?: string[], allow?: string[] }} ruleset
  * @returns {{ classification: 'blacklist'|'deny'|'high-risk'|'allow'|'default', matched?: string }}
  */
 export function classify(input, ruleset = {}) {
-  const bl = checkBlacklist({ command: input.command, path: input.path })
+  const bl = checkBlacklist({ command: input.command, path: input.resolvedPath ?? input.path })
   if (bl.hit) return { classification: 'blacklist', matched: bl.pattern }
 
   const scan = (list) => {
@@ -143,13 +144,18 @@ export function classify(input, ruleset = {}) {
 }
 
 /** Normalize a raw adapter tool call into the classifier input shape. */
-export function toClassifierInput(tool, rawInput) {
+export function toClassifierInput(tool, rawInput, cwd) {
   const inp = rawInput || {}
   const out = { tool }
   if (typeof inp.command === 'string') out.command = inp.command
-  if (typeof inp.file_path === 'string') out.path = inp.file_path
-  else if (typeof inp.path === 'string') out.path = inp.path
-  else if (typeof inp.notebook_path === 'string') out.path = inp.notebook_path
+  let inputPath
+  if (typeof inp.file_path === 'string') inputPath = inp.file_path
+  else if (typeof inp.path === 'string') inputPath = inp.path
+  else if (typeof inp.notebook_path === 'string') inputPath = inp.notebook_path
+  if (inputPath !== undefined) {
+    out.path = inputPath
+    out.resolvedPath = resolveClassifierPath(inputPath, cwd)
+  }
   if (typeof inp.url === 'string') {
     try {
       out.host = new URL(inp.url).host
@@ -158,4 +164,13 @@ export function toClassifierInput(tool, rawInput) {
     }
   }
   return out
+}
+
+function resolveClassifierPath(value, cwd) {
+  if (value.startsWith('/')) return path.posix.normalize(value)
+  if (path.win32.isAbsolute(value)) return path.win32.normalize(value)
+  if (typeof cwd !== 'string' || cwd.length === 0) return value
+  if (cwd.startsWith('/')) return path.posix.resolve(cwd, value.replaceAll('\\', '/'))
+  if (path.win32.isAbsolute(cwd)) return path.win32.resolve(cwd, value)
+  return value
 }

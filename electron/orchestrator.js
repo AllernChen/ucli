@@ -1,7 +1,7 @@
 import { app, ipcMain, dialog, shell, Notification, safeStorage } from 'electron'
 import { join } from 'path'
 import { homedir } from 'os'
-import { readFileSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
+import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, existsSync, unlinkSync, statSync, writeFileSync } from 'fs'
 import { createHash, randomUUID } from 'crypto'
 import { openAllowedExternalUrl } from './externalLinks.js'
 import { PermissionEngine } from './permission/engine.js'
@@ -11,9 +11,31 @@ import { classify, toClassifierInput, parsePattern } from './permission/classifi
 import { DEFAULT_RULESET, upgradeDefaultRuleset } from './permission/defaultRules.js'
 import { createAdapterMap } from './adapterRegistry.js'
 import { TIER } from './adapters/cliAdapter.js'
+import {
+  normalizeAdapterCapabilities,
+  resolveAdapterCapabilities
+} from './adapters/adapterCapabilities.js'
+import {
+  normalizePersistedSessionConfig,
+  normalizeSessionConfig
+} from './adapters/adapterSessionConfig.js'
 import { openDb, getDb } from './persistence/db.js'
 import { initLogger, log, truncateLog } from './logger.js'
 import { inspectCliTools, runCliToolAction } from './cliTools.js'
+import {
+  SUPPORTED_DSH_VERSION,
+  inspectDshRuntime,
+  launchDshWebSurface,
+  normalizeDshWebSurfaceState,
+  resolveDshHome,
+  runResolvedProcess
+} from './adapters/deepSeekHarnessRuntime.js'
+import { parseDshHistory } from './sessionHistory.js'
+import { createDshProfileManager, registerDshProfileIpc } from './adapters/dshProfileManager.js'
+import { createDshRuntimeManager } from './adapters/dshRuntimeManager.js'
+import { createDshStatsPoller } from './adapters/dshStatsPoller.js'
+import { createDshWebClient } from './adapters/dshWebClient.js'
+import { createDshHistoryExporter } from './adapters/dshHistoryExporter.js'
 import { createDiagnosticsService } from './diagnosticsService.js'
 import { createSessionDiagnosticsService, registerSessionDiagnosticsIpc } from './sessionDiagnosticsService.js'
 import { annotateImportedSessions, isSafeNativeSessionId, isSafeProviderName, listClaudeTranscriptFiles, resolveCodexResumeProvider, resolveCodexTranscriptSessionInHome } from './sessionDiscovery.js'
@@ -27,6 +49,7 @@ import { createProfileService } from './aiCliProfiles/profileService.js'
 import { reconcileActiveProfile } from './aiCliProfiles/profileResolver.js'
 import {
   describeClaudeModelSelection,
+  normalizeClaudeHistoryModel,
   prepareClaudeProfileSession
 } from './aiCliProfiles/claudeProfileAdapter.js'
 import {
@@ -40,7 +63,9 @@ import { registerSkillsIpc } from './skills/ipc.js'
 import { listUCodeSkills } from './skills/ucodeDiscovery.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
 import { createSessionHistoryService, registerSessionHistoryIpc } from './sessionHistoryService.js'
+import { createSessionArtifactsService, registerSessionArtifactsIpc } from './sessionArtifactsService.js'
 import { createUsageRecorder, normalizeAdapterStatsEvent } from './usage/usageRecorder.js'
+import { aggregateOwnedModelStats, sessionUsesUcliStats } from './usage/statsOwnership.js'
 import { assertUsageQuery } from './usage/contracts.js'
 import { createUsageQueryService } from './usage/usageQueryService.js'
 import { completedPeriod, manualPeriod } from './usage/periods.js'
@@ -72,7 +97,11 @@ import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storage
 import { scanStorageCategories } from './storage/storageScanner.js'
 import { createStorageManagementService } from './storage/storageManagementService.js'
 import { GatewayManager } from './gateway/manager.js'
-import { createGatewayPort } from './gateway/orchestratorPort.js'
+import {
+  createGatewayPort,
+  createGatewaySessionOperations,
+  describeGatewaySessionEligibility
+} from './gateway/orchestratorPort.js'
 import { SessionSignalBus } from './gateway/sessionSignalBus.js'
 import {
   advanceSessionNotification,
@@ -613,6 +642,43 @@ export function createStatsQueryHandler(getUsageQueryService) {
   }
 }
 
+function assertDshSessionStartable(session) {
+  if (
+    session?.adapterId === 'deepseek-harness' &&
+    session.adapterConfig?.surfacePreference !== 'web'
+  ) {
+    throw Object.assign(new Error('DSH_TUI_UNAVAILABLE'), {
+      code: 'DSH_TUI_UNAVAILABLE'
+    })
+  }
+}
+
+export async function assertDshQuiescent(entries) {
+  const ownedWebEntries = [...entries.values()].filter(entry => (
+    entry?.adapter &&
+    entry.session?.adapterId === 'deepseek-harness' &&
+    (
+      entry.session?.capabilities?.surface === 'web' ||
+      entry.session?.adapterConfig?.surfacePreference === 'web'
+    )
+  ))
+  for (const entry of ownedWebEntries) entry.adapter._accepting = false
+  for (const entry of ownedWebEntries) {
+    const adapter = entry.adapter
+    try {
+      await adapter.dispose()
+    } catch {
+      throw Object.assign(new Error('DSH_RUNTIME_BUSY'), { code: 'DSH_RUNTIME_BUSY' })
+    }
+    if (entry.adapter === adapter) entry.adapter = null
+    entry.status = 'offline'
+    entry.surfaceState = normalizeDshWebSurfaceState({
+      status: 'stopped', url: null, errorCode: null
+    })
+  }
+  return true
+}
+
 export function createOrchestrator() {
   initLogger()
   log('createOrchestrator() — starting')
@@ -635,6 +701,9 @@ export function createOrchestrator() {
   let summaryWorkspaceService = null
   let summaryCacheService = null
   let storageService = null
+  let dshProfileManager = null
+  let dshRuntimeManager = null
+  let dshWebClient = null
   let summaryCacheLastPrunedAt = null
   let persistenceRecovery = null
   const storageRoots = resolveUcliStorageRoots({
@@ -719,6 +788,18 @@ export function createOrchestrator() {
       })
     }
   })
+  // DSH 历史导出：优先复用运行中的 web surface；否则临时拉起再导出后关闭。
+  // session.list 读 DSH_HOME 全局持久化，临时拉起无需注册 workspace 即可导出历史会话。
+  const exportDshHistory = createDshHistoryExporter({
+    getSessionUrl: (id) => sessions.get(id)?.surfaceState?.url ?? null,
+    dshClient: {
+      listSessions: (u) => getDshWebClient().listSessions(u),
+      exportSession: (u, id) => getDshWebClient().exportSession(u, id)
+    },
+    selectLaunch: () => getDshRuntimeManager().selectLaunch(),
+    launchWeb: (runtime, cwd) => launchDshWebSurface({ runtime, cwd, env: process.env, platform: process.platform }),
+    parseHistory: (text) => parseDshHistory(text)
+  })
   const historyService = createSessionHistoryService({
     resolveSession: (sessionId) => {
       const entry = sessions.get(sessionId)
@@ -728,6 +809,23 @@ export function createOrchestrator() {
             historyRevision: entry._lastCompletedTurns
           }
         : null
+    },
+    exportOpenCode: (nativeSessionId, adapterId = 'opencode') => {
+      const resolveLaunch = adapters.get(adapterId)?.resolveLaunch
+      if (!resolveLaunch) throw new Error('history provider unsupported')
+      const launch = resolveLaunch()
+      return exportOpenCodeSession(nativeSessionId, {
+        executable: launch.file,
+        prefixArgs: launch.prefixArgs,
+        sanitize: false
+      })
+    },
+    exportDshHistory
+  })
+  const artifactsService = createSessionArtifactsService({
+    resolveSession: (sessionId) => {
+      const entry = sessions.get(sessionId)
+      return entry ? entry.session : null
     },
     exportOpenCode: (nativeSessionId, adapterId = 'opencode') => {
       const resolveLaunch = adapters.get(adapterId)?.resolveLaunch
@@ -1134,8 +1232,8 @@ export function createOrchestrator() {
       }
     } catch { /* ignore */ }
 
-    const existingSessions = db.listSessions()
-    const shouldMigrateLegacyJson = !existingSessions.length && oldCfg
+    const existingSessionCount = db.countSessions()
+    const shouldMigrateLegacyJson = existingSessionCount === 0 && oldCfg
     if (shouldMigrateLegacyJson) {
       db.migrateFromJson(
         oldCfg.rulesets || null,
@@ -1237,6 +1335,9 @@ export function createOrchestrator() {
           providerPolicy = 'source'
         }
       }
+      const persistedSystemModel = s.adapterId === 'claude' && cliSessionId
+        ? normalizeClaudeHistoryModel(s.systemModel ?? s.model)
+        : s.systemModel ?? null
       const storedProfile = s.profileId
         ? profileService.listProfiles({ adapterId: s.adapterId }).find((profile) => profile.id === s.profileId) || null
         : null
@@ -1256,7 +1357,7 @@ export function createOrchestrator() {
         : s.adapterId === 'claude' && s.profileId
           ? {
               profileId: s.profileId,
-              model: storedProfile?.model ?? s.systemModel ?? null,
+              model: storedProfile?.model ?? persistedSystemModel,
               profileStatus: storedProfile?.status || 'missing_profile',
               canStart: storedProfile?.canStart === true,
               provider,
@@ -1281,13 +1382,18 @@ export function createOrchestrator() {
           explicit_provider: explicitProvider
         })
       }
+      const descriptor = adapters.get(s.adapterId) || {}
+      const adapterConfig = normalizePersistedSessionConfig(descriptor, s.adapterConfig)
+      const canStart = s.adapterId === 'deepseek-harness' && adapterConfig.surfacePreference !== 'web'
+        ? false
+        : restoredSession.canStart
       const entry = {
         adapter: null, // offline — CLI process not running
         session: {
           id: s.id, adapterId: s.adapterId,
           cwd: s.cwd || s.projectPath,
-          model: restoredSession.model ?? s.systemModel ?? null,
-          systemModel: s.systemModel ?? null,
+          model: restoredSession.model ?? persistedSystemModel,
+          systemModel: persistedSystemModel,
           tier: s.tier, rulesetId: 'default',
           provider,
           sourceProvider,
@@ -1309,12 +1415,17 @@ export function createOrchestrator() {
           profileRuntimeRevision: null,
           pendingProfileRuntimeRevision: null,
           restartRequired: false,
-          canStart: restoredSession.canStart,
+          canStart,
           cliSessionId,
           name: sessionName,
-          taskNote: s.taskNote || ''
+          taskNote: s.taskNote || '',
+          adapterConfig,
+          capabilities: resolveAdapterCapabilities(descriptor, adapterConfig)
         },
         status: 'offline',
+        surfaceState: adapterConfig.surfacePreference === 'web'
+          ? normalizeDshWebSurfaceState({ status: 'stopped', url: null, errorCode: null })
+          : null,
         stats: s.stats,
         lastActivity: '已离线',
         createdAt: s.createdAt || Date.now(),
@@ -1522,6 +1633,8 @@ export function createOrchestrator() {
     const descriptor = adapters.get(adapterId)
     if (!descriptor) throw new Error('unknown adapter: ' + adapterId)
     const cwd = config.cwd || settings.defaultCwd || process.cwd()
+    const adapterConfig = normalizeSessionConfig(descriptor, config.adapterConfig)
+    const capabilities = resolveAdapterCapabilities(descriptor, adapterConfig)
 
     let session = {
       id: sessionId, adapterId, cwd,
@@ -1534,7 +1647,9 @@ export function createOrchestrator() {
       explicitProvider: config.explicitProvider || null,
       cliSessionId: config.cliSessionId || null,
       name: config.name || null,
-      taskNote: ''
+      taskNote: '',
+      adapterConfig,
+      capabilities
     }
     let profileEnvironment = {}
     let profileLaunch = null
@@ -1566,12 +1681,21 @@ export function createOrchestrator() {
         ruleset: rulesets[rulesetId],
         codexHome: adapterId === 'codex' ? getCodexHome() : null,
         profileEnvironment,
-        profileLaunch
+        profileLaunch,
+        profileManager: adapterId === 'deepseek-harness' ? getDshProfileManager() : null,
+        initialStats: {
+          tokens: { input: 0, output: 0 },
+          turns: 0,
+          completedTurns: 0
+        }
       }
     })
     const costAvailable = descriptor.costAvailable !== false
     const entry = {
       adapter, session,
+      surfaceState: adapterConfig.surfacePreference === 'web'
+        ? normalizeDshWebSurfaceState({ status: 'starting', url: null, errorCode: null })
+        : null,
       status: 'starting', // not yet started — renderer calls start-adapter when pane is ready
       stats: {
         tokens: { input: 0, output: 0 },
@@ -1608,16 +1732,26 @@ export function createOrchestrator() {
         provider_policy: session.providerPolicy,
         explicit_provider: session.explicitProvider,
         profile_id: session.profileId || null,
+        adapter_config_json: JSON.stringify(session.adapterConfig),
         status: 'starting', created_at: entry.createdAt
       })
       db.flush()
     }
-    return { sessionId }
+    return {
+      sessionId,
+      adapterConfig: normalizePersistedSessionConfig(
+        adapters.get(entry.session.adapterId) || {},
+        entry.session.adapterConfig
+      ),
+      capabilities: normalizeAdapterCapabilities(entry.session.capabilities),
+      surfaceState: entry.surfaceState || null
+    }
   }
 
   async function handleAdapterEvent(sessionId, evt) {
     const entry = sessions.get(sessionId)
     if (!entry) return
+    if (evt?.type === 'stats_update' && !sessionUsesUcliStats(entry.session)) return
     entry.updatedAt = evt.ts || Date.now()
     switch (evt.type) {
       case 'ready':
@@ -1631,6 +1765,7 @@ export function createOrchestrator() {
           entry.session.cliSessionId = evt.cliSessionId
           const db = getDb()
           if (db) { db.updateSession(sessionId, { native_session_id: evt.cliSessionId }); db.flush() }
+          await gatewayManager?.resyncSession(sessionId)
         }
         break
       case 'exit':
@@ -1641,6 +1776,23 @@ export function createOrchestrator() {
         entry.status = 'error'
         entry.lastActivity = `错误: ${evt.message}`
         break
+      case 'status':
+        entry.status = evt.status
+        entry.lastActivity = evt.status === 'running' ? '运行中' : '已就绪'
+        break
+      case 'surface_state': {
+        const surfaceState = normalizeDshWebSurfaceState(evt)
+        if (!surfaceState) return
+        entry.surfaceState = surfaceState
+        send('session:event', {
+          sessionId,
+          type: 'surface_state',
+          surfaceState,
+          status: entry.status,
+          ts: evt.ts
+        })
+        return
+      }
       case 'terminal':
         send('session:terminal-output', { sessionId, data: evt.data })
         entry.status = 'running'
@@ -1778,9 +1930,43 @@ export function createOrchestrator() {
 
   /** Read the last ~16 KB of a transcript file and extract the last text-bearing
    *  message (user or assistant). Returns a short preview string or null. */
+  /** Read only the first `maxBytes` of a file without loading the whole file.
+   *  Transcripts can be many MB; metadata extraction only needs the head. */
+  function _readFileHead(path, maxBytes = 64 * 1024) {
+    let fd = null
+    try {
+      fd = openSync(path, 'r')
+      const buffer = Buffer.allocUnsafe(maxBytes)
+      const bytesRead = readSync(fd, buffer, 0, maxBytes, 0)
+      return buffer.toString('utf8', 0, bytesRead)
+    } catch {
+      return ''
+    } finally {
+      if (fd != null) { try { closeSync(fd) } catch { /* ignore */ } }
+    }
+  }
+
+  /** Read only the last `maxBytes` of a file without loading the whole file. */
+  function _readFileTail(path, maxBytes = 64 * 1024) {
+    let fd = null
+    try {
+      fd = openSync(path, 'r')
+      const { size } = fstatSync(fd)
+      if (!size) return ''
+      const length = Math.min(size, maxBytes)
+      const buffer = Buffer.allocUnsafe(length)
+      const bytesRead = readSync(fd, buffer, 0, length, size - length)
+      return buffer.toString('utf8', 0, bytesRead)
+    } catch {
+      return ''
+    } finally {
+      if (fd != null) { try { closeSync(fd) } catch { /* ignore */ } }
+    }
+  }
+
   function _extractLastText(jsonlPath) {
     try {
-      const content = readFileSync(jsonlPath, 'utf8')
+      const content = _readFileTail(jsonlPath)
       const tail = content.length > 16384 ? content.slice(-16384) : content
       const lines = tail.split('\n')
       for (let i = lines.length - 1; i >= 0; i--) {
@@ -1849,7 +2035,7 @@ export function createOrchestrator() {
         const sessionId = transcript.sessionId
         const meta = idx.get(sessionId) || {}
         const fullPath = transcript.fullPath
-        let model = meta.model || null
+        let model = normalizeClaudeHistoryModel(meta.model)
         let turns = 0
         try {
           const content = readFileSync(fullPath, 'utf8')
@@ -1857,7 +2043,9 @@ export function createOrchestrator() {
           for (const line of content.slice(0, 2048).split('\n').filter(Boolean)) {
             try {
               const obj = JSON.parse(line)
-              if (obj.type === 'system' && obj.subtype === 'init' && !model) model = obj.model
+              if (obj.type === 'system' && obj.subtype === 'init' && !model) {
+                model = normalizeClaudeHistoryModel(obj.model)
+              }
               if (obj.type === 'result' && obj.num_turns) turns = obj.num_turns
             } catch { /* skip */ }
           }
@@ -1876,7 +2064,7 @@ export function createOrchestrator() {
           sessionId,
           name: meta.name || null,
           startedAt: meta.startedAt || transcript.startedAt,
-          model: model || meta.model || null,
+          model,
           turns,
           lastMessage: _extractLastText(fullPath)
         })
@@ -1937,8 +2125,10 @@ export function createOrchestrator() {
               const fullPath = join(dayDir, f)
               let meta = null
               try {
-                // Codex session_meta lines can be large — read 64 KB for the first line
-                const head = readFileSync(fullPath, 'utf8').slice(0, 65536)
+                // Codex session_meta lines can be large. Read enough bytes to cover
+                // 65536 UTF-16 code units (UTF-8 max 4 bytes/unit) so CJK first lines
+                // are not truncated, then slice to the original code-unit bound.
+                const head = _readFileHead(fullPath, 65536 * 4).slice(0, 65536)
                 const nl = head.indexOf('\n')
                 if (nl > 0) {
                   const firstLine = head.slice(0, nl)
@@ -2037,6 +2227,12 @@ export function createOrchestrator() {
       nativeSessionId: e.session.cliSessionId || null,
       name: e.session.name || null,
       taskNote: e.session.taskNote || '',
+      adapterConfig: normalizePersistedSessionConfig(
+        adapters.get(e.session.adapterId) || {},
+        e.session.adapterConfig
+      ),
+      capabilities: normalizeAdapterCapabilities(e.session.capabilities),
+      surfaceState: e.surfaceState || null,
       contextWindow: e.session.contextWindow || null,
       lastActivity: e.lastActivity || '',
       startedAt: e.createdAt || null,
@@ -2048,13 +2244,24 @@ export function createOrchestrator() {
   function gatewaySessionView(sessionId) {
     const entry = sessions.get(sessionId)
     if (!entry) return null
-    return {
+    const view = {
       id: sessionId,
       name: entry.session.name || null,
       adapterId: entry.session.adapterId,
       provider: entry.session.provider || null,
       status: entry.status,
-      turnActive: entry._gatewayTurnActive === true
+      turnActive: entry._gatewayTurnActive === true,
+      adapterConfig: entry.session.adapterConfig || null,
+      capabilities: normalizeAdapterCapabilities(entry.session.capabilities),
+      bridgeLive: entry.session.adapterId === 'deepseek-harness'
+        ? entry.adapter?.isGatewayLive?.() === true
+        : false
+    }
+    const eligibility = describeGatewaySessionEligibility(view)
+    return {
+      ...view,
+      gatewayEligible: eligibility.eligible,
+      gatewayReason: eligibility.reason
     }
   }
 
@@ -2108,42 +2315,16 @@ export function createOrchestrator() {
       gatewayManager = createUnavailableGatewayManager()
       return gatewayManager.getState()
     }
+    const sessionOperations = createGatewaySessionOperations({
+      getEntry: sessionId => sessions.get(sessionId),
+      getSession: gatewaySessionView
+    })
     const gatewayPort = createGatewayPort({
       listSessions: () => [...sessions.keys()]
         .map(gatewaySessionView)
         .filter(Boolean),
       getSession: gatewaySessionView,
-      sendTurn: async (sessionId, text) => {
-        const entry = sessions.get(sessionId)
-        if (!entry?.adapter) {
-          return { accepted: false, reason: 'session_offline' }
-        }
-        entry.status = 'running'
-        entry._gatewayTurnActive = true
-        await entry.adapter.sendTurn(text)
-        return { accepted: true }
-      },
-      interrupt: async (sessionId) => {
-        const entry = sessions.get(sessionId)
-        if (!entry?.adapter) {
-          return { accepted: false, reason: 'session_offline' }
-        }
-        await entry.adapter.interrupt()
-        return { accepted: true }
-      },
-      respondDecision: async (sessionId, decisionId, response) => {
-        const entry = sessions.get(sessionId)
-        if (!entry?.adapter) {
-          return { accepted: false, reason: 'session_offline' }
-        }
-        return entry.adapter.respondDecision(decisionId, response)
-      },
-      getDecisionContext: (sessionId, decisionId) =>
-        sessions.get(sessionId)?.adapter?.getDecisionContext(decisionId) || null,
-      getLatestPlanSnapshot: (sessionId, decisionId) =>
-        sessions.get(sessionId)?.adapter?.getLatestPlanSnapshot(decisionId) || null,
-      getLatestResultSnapshot: (sessionId, turnId) =>
-        sessions.get(sessionId)?.adapter?.getLatestResultSnapshot(turnId) || null,
+      ...sessionOperations,
       subscribeGatewayEvents: (listener) => gatewaySignals.subscribe(listener)
     })
     gatewayManager = new GatewayManager({
@@ -2160,6 +2341,7 @@ export function createOrchestrator() {
   async function restartSession(sessionId) {
     const entry = sessions.get(sessionId)
     if (!entry) throw new Error('no session')
+    assertDshSessionStartable(entry.session)
     if (entry.adapter) throw new Error('session already running')
     const descriptor = adapters.get(entry.session.adapterId)
     if (!descriptor) throw new Error('unknown adapter: ' + entry.session.adapterId)
@@ -2218,7 +2400,15 @@ export function createOrchestrator() {
         ruleset: rulesets[entry.session.rulesetId],
         codexHome: entry.session.adapterId === 'codex' ? getCodexHome() : null,
         profileEnvironment,
-        profileLaunch
+        profileLaunch,
+        profileManager: entry.session.adapterId === 'deepseek-harness'
+          ? getDshProfileManager()
+          : null,
+        initialStats: {
+          tokens: { ...entry.stats.tokens },
+          turns: entry.stats.turns,
+          completedTurns: entry.stats.turns
+        }
       }
     })
     entry.adapter = adapter
@@ -2228,7 +2418,9 @@ export function createOrchestrator() {
       : null
     entry._dirtyStats = null
     entry._lastCumTokens = null
-    entry._lastCompletedTurns = entry.session.cliSessionId ? null : 0
+    entry._lastCompletedTurns = entry.session.adapterId === 'deepseek-harness'
+      ? entry.stats.turns
+      : entry.session.cliSessionId ? null : 0
     entry._lastNotification = null
     entry._gatewayTurnActive = false
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
@@ -2237,7 +2429,23 @@ export function createOrchestrator() {
     if (entry.session.adapterId === 'claude') {
       armClaudeSessionLaunch(entry)
     }
-    const started = await adapter.start()
+    let started
+    try {
+      started = await adapter.start()
+    } catch (error) {
+      let disposed = false
+      try {
+        await adapter.dispose()
+        disposed = true
+      } catch (cleanupError) {
+        error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
+      }
+      if (disposed) entry.adapter = null
+      entry.status = 'error'
+      const db = getDb()
+      if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+      throw error
+    }
     if (started === false) {
       entry.status = 'error'
       entry.adapter = null
@@ -2264,7 +2472,7 @@ export function createOrchestrator() {
     const entry = sessions.get(sessionId)
     if (!entry) throw new Error('no session')
     if (entry.adapter) {
-      entry.adapter.dispose()
+      await entry.adapter.dispose()
       entry.adapter = null
       entry.status = 'offline'
       const db = getDb()
@@ -2439,6 +2647,57 @@ export function createOrchestrator() {
   }
 
   // ---- IPC registration ----
+  function getDshProfileManager() {
+    if (dshProfileManager) return dshProfileManager
+    dshProfileManager = createDshProfileManager({
+      env: process.env,
+      homeDirectory: app.getPath('home'),
+      tempDirectory: join(app.getPath('temp'), 'ucli-dsh-profile-transactions'),
+      inspectRuntime: async options => {
+        const selected = await getDshRuntimeManager().selectLaunch()
+        if (selected?.source !== 'managed') return inspectDshRuntime(options)
+        return {
+          installed: true,
+          compatible: true,
+          version: SUPPORTED_DSH_VERSION,
+          reason: '',
+          pnpmAvailable: true,
+          launch: selected.launch,
+          home: selected.home
+        }
+      },
+      execute: runResolvedProcess
+    })
+    return dshProfileManager
+  }
+
+  function getDshRuntimeManager() {
+    if (dshRuntimeManager) return dshRuntimeManager
+    const homeDirectory = app.getPath('home')
+    dshRuntimeManager = createDshRuntimeManager({
+      runtimeDirectory: join(app.getPath('userData'), 'runtimes', 'deepseek-harness'),
+      dshHome: resolveDshHome({ env: process.env, homeDirectory }),
+      env: process.env,
+      assertQuiescent: () => assertDshQuiescent(sessions)
+    })
+    return dshRuntimeManager
+  }
+
+  function getDshWebClient() {
+    if (dshWebClient) return dshWebClient
+    dshWebClient = createDshWebClient()
+    return dshWebClient
+  }
+
+  const dshStatsPoller = createDshStatsPoller({
+    entries: () => sessions,
+    dshClient: { aggregateTokenUsage: (url) => getDshWebClient().aggregateTokenUsage(url) },
+    onStats: (sessionId, tokens) => handleAdapterEvent(sessionId, {
+      type: 'stats_update',
+      usage: { inputTokens: tokens.input, outputTokens: tokens.output }
+    })
+  })
+
   function registerIpc() {
     registerGatewayIpc({ ipcMain, manager: gatewayManager })
     registerAiCliProfileIpc({
@@ -2555,16 +2814,29 @@ export function createOrchestrator() {
       }
     })
     ipcMain.handle('adapters:list', () =>
-      Array.from(adapters.values()).map((d) => ({ id: d.id, displayName: d.displayName, icon: d.icon, models: d.models }))
+      Array.from(adapters.values()).map((d) => ({
+        id: d.id,
+        displayName: d.displayName,
+        icon: d.icon,
+        models: d.models,
+        costAvailable: d.costAvailable !== false,
+        capabilities: normalizeAdapterCapabilities(d.capabilities)
+      }))
     )
     ipcMain.handle('cli-tools:list', () => inspectCliTools())
     ipcMain.handle('cli-tools:run', (_e, id, action) => runCliToolAction(id, action))
+    registerDshProfileIpc({
+      ipcMain,
+      profileManager: getDshProfileManager(),
+      runtimeManager: getDshRuntimeManager()
+    })
     ipcMain.handle('diagnostics:get', () => diagnostics.getReport())
     ipcMain.handle('diagnostics:export', () => diagnostics.exportReport())
     ipcMain.handle('codex:runtime:get', () =>
       codexConfigWatcher?.getSnapshot() || readCodexRuntimeSnapshot(getCodexHome())
     )
     registerSessionHistoryIpc(ipcMain, historyService)
+    registerSessionArtifactsIpc(ipcMain, artifactsService)
     registerSessionDiagnosticsIpc(ipcMain, sessionDiagnostics)
 
     ipcMain.handle('dialog:pick-directory', async () => {
@@ -2612,13 +2884,13 @@ export function createOrchestrator() {
     })
 
     ipcMain.handle('session:create', (_e, config) => {
-      const { sessionId } = createSession(config)
-      return { sessionId }
+      return createSession(config)
     })
 
     // Renderer calls this after it has registered the terminal-output listener
     ipcMain.handle('session:start-adapter', async (_e, sessionId) => {
       const e = sessions.get(sessionId)
+      if (e) assertDshSessionStartable(e.session)
       if (!e || !e.adapter) return false
       if (e.session.adapterId === 'codex') {
         if (e.session.profileId) {
@@ -2653,7 +2925,23 @@ export function createOrchestrator() {
       if (e.session.adapterId === 'claude') {
         armClaudeSessionLaunch(e)
       }
-      const started = await e.adapter.start()
+      let started
+      try {
+        started = await e.adapter.start()
+      } catch (error) {
+        let disposed = false
+        try {
+          await e.adapter.dispose()
+          disposed = true
+        } catch (cleanupError) {
+          error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
+        }
+        if (disposed) e.adapter = null
+        e.status = 'error'
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+        throw error
+      }
       if (started === false) {
         e.status = 'error'
         const db = getDb()
@@ -2669,11 +2957,17 @@ export function createOrchestrator() {
         }
         publishProfileRuntime(sessionId, e.session)
       }
+      await gatewayManager?.resyncSession(sessionId)
       return true
     })
     ipcMain.handle('session:send-turn', (_e, sessionId, text) => {
       const e = sessions.get(sessionId)
       if (!e) throw new Error('no session')
+      if (e.session.capabilities.surface === 'web') {
+        throw Object.assign(new Error('DSH_WEB_NATIVE_OWNERSHIP'), {
+          code: 'DSH_WEB_NATIVE_OWNERSHIP'
+        })
+      }
       if (!e.adapter) throw new Error('会话已离线，请先重新启动')
       e.status = 'running'
       e._gatewayTurnActive = true
@@ -2681,6 +2975,7 @@ export function createOrchestrator() {
     })
     ipcMain.handle('session:send-terminal-input', async (_e, sessionId, data) => {
       const e = sessions.get(sessionId)
+      if (e?.session.capabilities.surface === 'web') return false
       if (e && e.adapter && typeof e.adapter.writeInput === 'function') {
         await gatewayManager?.respondDesktopInput(sessionId)
         return e.adapter.writeInput(data)
@@ -2689,34 +2984,49 @@ export function createOrchestrator() {
     })
     ipcMain.handle('session:terminal-resize', (_e, sessionId, cols, rows) => {
       const e = sessions.get(sessionId)
+      if (e?.session.capabilities.surface === 'web') return false
       if (e && e.adapter && typeof e.adapter.resize === 'function') {
-        e.adapter.resize(cols, rows)
+        return e.adapter.resize(cols, rows)
       }
+      return false
     })
     ipcMain.handle('session:attach-terminal', (_e, sessionId) => {
       const e = sessions.get(sessionId)
+      if (e?.session.capabilities.surface === 'web') return false
       if (e?.adapter && typeof e.adapter.replayHistory === 'function') {
         e.adapter.replayHistory()
       }
       return true
     })
     ipcMain.handle('session:respond-approval', async (_e, sessionId, requestId, verdict) => {
+      const e = sessions.get(sessionId)
+      if (e?.session.capabilities.permissionOwner === 'native') return false
       const gatewayResult = await gatewayManager?.respondDesktopDecision(
         sessionId,
         requestId,
         { action: verdict === 'allow' ? 'allow_once' : 'deny' }
       )
       if (gatewayResult?.accepted) return true
-      return engine.respondApproval(requestId, verdict)
+      return engine.respondApproval(sessionId, requestId, verdict)
     })
     ipcMain.handle('session:interrupt', (_e, sessionId) => {
       const e = sessions.get(sessionId)
+      if (e?.session.capabilities.surface === 'web') {
+        throw Object.assign(new Error('DSH_WEB_NATIVE_OWNERSHIP'), {
+          code: 'DSH_WEB_NATIVE_OWNERSHIP'
+        })
+      }
       if (!e || !e.adapter) throw new Error('会话已离线')
       return e.adapter.interrupt()
     })
     ipcMain.handle('session:resume', async (_e, sessionId, cliSessionId) => {
       const e = sessions.get(sessionId)
       if (!e) throw new Error('no session')
+      if (e.session.capabilities.surface === 'web') {
+        throw Object.assign(new Error('DSH_WEB_NATIVE_OWNERSHIP'), {
+          code: 'DSH_WEB_NATIVE_OWNERSHIP'
+        })
+      }
       if (!e.adapter) throw new Error('会话已离线，请先重新启动')
       if (!isSafeNativeSessionId(cliSessionId)) throw new Error('invalid native session id')
       if (e.session.adapterId === 'codex' && !e.session.profileId) {
@@ -2740,7 +3050,15 @@ export function createOrchestrator() {
           throw new Error('Codex configuration changed. Restart this session before resuming it.')
         }
       }
-      const result = await e.adapter.resume(cliSessionId)
+      let result
+      try {
+        result = await e.adapter.resume(cliSessionId)
+      } catch (error) {
+        e.status = 'error'
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+        throw error
+      }
       const resumedSessionId = e.session.cliSessionId || cliSessionId
       const db = getDb()
       if (db) { db.updateSession(sessionId, { native_session_id: resumedSessionId }); db.flush() }
@@ -2751,17 +3069,30 @@ export function createOrchestrator() {
     ipcMain.handle('session:set-profile', (_e, sessionId, profileId) =>
       setSessionProfile(sessionId, profileId)
     )
-    ipcMain.handle('session:stop', (_e, sessionId) => {
+    ipcMain.handle('session:stop', async (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (e) {
+        engine.removeSession(sessionId)
+        const cleanup = e.adapter?.dispose()
         gatewaySignals.publish({
           type: 'session_stopped',
           sessionId,
           occurredAt: Date.now()
         })
-        if (e.adapter) e.adapter.dispose()
+        await cleanup
         e.adapter = null
         e.status = 'offline'
+        if (e.session.capabilities.surface === 'web') {
+          e.surfaceState = normalizeDshWebSurfaceState({
+            status: 'stopped', url: null, errorCode: null
+          })
+          send('session:event', {
+            sessionId,
+            type: 'surface_state',
+            surfaceState: e.surfaceState,
+            status: e.status
+          })
+        }
         if (['codex', 'claude'].includes(e.session.adapterId)) {
           e.session.activeProfileId = null
           e.session.pendingProfileId = null
@@ -2774,15 +3105,17 @@ export function createOrchestrator() {
       }
       return true
     })
-    ipcMain.handle('session:delete', (_e, sessionId) => {
+    ipcMain.handle('session:delete', async (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (e) {
+        engine.removeSession(sessionId)
+        const cleanup = e.adapter?.dispose()
         gatewaySignals.publish({
           type: 'session_stopped',
           sessionId,
           occurredAt: Date.now()
         })
-        if (e.adapter) e.adapter.dispose()
+        await cleanup
         sessions.delete(sessionId)
         historyService.invalidate(sessionId)
         const db = getDb()
@@ -2826,7 +3159,7 @@ export function createOrchestrator() {
       for (const [id, e] of sessions) {
         // Persist full stats (tokens + approvals) to DB — upsertStats uses
         // absolute-value semantics, so pass the cumulative totals.
-        if (db) {
+        if (db && sessionUsesUcliStats(e.session)) {
           db.upsertStats(id, {
             inputTokens: e.stats.tokens.input,
             outputTokens: e.stats.tokens.output,
@@ -2843,14 +3176,28 @@ export function createOrchestrator() {
       // Statistics are historical records. Read removed sessions from the DB
       // as well, then overlay live in-memory entries with their latest state.
       const historical = db?.listSessions({ includeRemoved: true }) || []
-      const source = new Map(historical.map((s) => [s.id, {
-        adapterId: s.adapterId,
-        model: s.model,
-        cwd: s.cwd,
-        status: s.removedAt ? 'removed' : s.status,
-        ...s.stats
-      }]))
+      const source = new Map()
+      for (const s of historical) {
+        const descriptor = adapters.get(s.adapterId)
+        let capabilities = null
+        try {
+          const adapterConfig = normalizeSessionConfig(descriptor, s.adapterConfig)
+          capabilities = resolveAdapterCapabilities(descriptor, adapterConfig)
+        } catch {}
+        if (!sessionUsesUcliStats({ capabilities })) continue
+        source.set(s.id, {
+          adapterId: s.adapterId,
+          model: s.model,
+          cwd: s.cwd,
+          status: s.removedAt ? 'removed' : s.status,
+          ...s.stats
+        })
+      }
       for (const [id, e] of sessions) {
+        if (!sessionUsesUcliStats(e.session)) {
+          source.delete(id)
+          continue
+        }
         source.set(id, {
           adapterId: e.session.adapterId,
           model: e.session.model,
@@ -2871,7 +3218,13 @@ export function createOrchestrator() {
         for (const k of Object.keys(total.approvals)) total.approvals[k] += row.approvals[k] || 0
       }
       if (db) scheduleFlush()
-      const result = { total, perSession, modelStats: db?.getModelStats() || [] }
+      const ownedSessionIds = new Set(source.keys())
+      const modelRows = db?.listModelStatsRows() || []
+      const result = {
+        total,
+        perSession,
+        modelStats: aggregateOwnedModelStats(modelRows, ownedSessionIds)
+      }
       return result
     })
     ipcMain.handle('stats:query', createStatsQueryHandler(() => usageQueryService))
@@ -2926,6 +3279,15 @@ export function createOrchestrator() {
         return false
       }
     })
+
+    ipcMain.handle('shell:open-path', async (_e, path) => {
+      try {
+        return await shell.openPath(String(path || ''))
+      } catch (err) {
+        log('shell:open-path failed for', path, err)
+        return 'failed'
+      }
+    })
   }
 
   let shutdownPromise = null
@@ -2933,6 +3295,7 @@ export function createOrchestrator() {
     if (shutdownPromise) return shutdownPromise
     shutdownPromise = (async () => {
       log('shutdown() called')
+      dshStatsPoller.stop()
       if (flushTimer) {
         clearTimeout(flushTimer)
         flushTimer = null
@@ -2950,6 +3313,7 @@ export function createOrchestrator() {
       await gatewayManager?.shutdown()
       const db = getDb()
       for (const [id, entry] of sessions) {
+        engine.removeSession(id)
         if (entry.adapter) {
           try { await Promise.resolve(entry.adapter.dispose()) }
           catch (error) { console.error(`Failed to dispose session ${id}:`, error) }
@@ -2977,6 +3341,8 @@ export function createOrchestrator() {
     })()
     return shutdownPromise
   }
+
+  dshStatsPoller.start()
 
   return {
     registerIpc,

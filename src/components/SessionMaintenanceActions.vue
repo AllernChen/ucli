@@ -12,17 +12,17 @@
     </a-button>
     <template #overlay>
       <a-menu class="maintenance-menu" @click="handleAction">
-        <a-menu-item key="interrupt" :disabled="!view.canInterrupt || pendingAction !== ''">
+        <a-menu-item v-if="capabilities.terminal && capabilities.ucliPermission" key="interrupt" :disabled="!view.canInterrupt || pendingAction !== ''">
           <div class="action-title">中断当前任务</div>
           <div class="action-help">只中断当前任务，CLI 进程继续运行</div>
         </a-menu-item>
         <a-menu-item key="stop" :disabled="!view.canStop || pendingAction !== ''">
-          <div class="action-title">停止进程</div>
-          <div class="action-help">停止整个 CLI 进程，会话转为离线</div>
+          <div class="action-title">{{ copy.stopTitle }}</div>
+          <div class="action-help">{{ copy.stopHelp }}</div>
         </a-menu-item>
         <a-menu-item key="restart" :disabled="!view.canRestart || pendingAction !== ''">
-          <div class="action-title">重启会话</div>
-          <div class="action-help">停止现有进程后恢复同一会话</div>
+          <div class="action-title">{{ copy.restartTitle }}</div>
+          <div class="action-help">{{ copy.restartHelp }}</div>
         </a-menu-item>
         <a-menu-divider />
         <a-menu-item key="remove" danger :disabled="!view.canRemove || pendingAction !== ''">
@@ -39,7 +39,11 @@ import { computed, ref } from 'vue'
 import { MoreOutlined } from '@ant-design/icons-vue'
 import { message, Modal } from 'ant-design-vue'
 
-import { deriveSessionMaintenanceState } from '../sessionMaintenancePresentation.js'
+import {
+  deriveSessionCapabilityState,
+  deriveSessionMaintenanceCopy,
+  deriveSessionMaintenanceState
+} from '../sessionMaintenancePresentation.js'
 import { useSessionsStore } from '../stores/sessions.js'
 
 const props = defineProps({
@@ -50,6 +54,8 @@ const emit = defineEmits(['removed'])
 const sessions = useSessionsStore()
 const session = computed(() => sessions.byId(props.sessionId) || null)
 const view = computed(() => deriveSessionMaintenanceState(session.value || {}))
+const copy = computed(() => deriveSessionMaintenanceCopy(session.value || {}))
+const capabilities = computed(() => deriveSessionCapabilityState(session.value || {}))
 const pendingAction = ref('')
 
 async function runAction(action, operation, successText) {
@@ -68,8 +74,8 @@ async function runAction(action, operation, successText) {
 function actionLabel(action) {
   return ({
     interrupt: '中断任务',
-    stop: '停止进程',
-    restart: '重启会话',
+    stop: copy.value.stopTitle,
+    restart: copy.value.restartTitle,
     remove: '移除会话'
   })[action] || '会话操作'
 }
@@ -85,7 +91,7 @@ function interruptSession() {
 
 function stopSession() {
   if (!view.value.canStop) return
-  return runAction('stop', (sessionId) => sessions.stop(sessionId), '进程已停止，会话已离线')
+  return runAction('stop', (sessionId) => sessions.stop(sessionId), `${copy.value.stopTitle}已完成，会话已离线`)
 }
 
 function restartSession() {
@@ -94,7 +100,7 @@ function restartSession() {
   return runAction('restart', async (sessionId) => {
     if (shouldStopFirst) await sessions.stop(sessionId)
     await sessions.restart(sessionId)
-  }, '会话正在重启')
+  }, `${copy.value.restartTitle}正在进行`)
 }
 
 async function removeSession() {

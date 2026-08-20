@@ -11,9 +11,11 @@ async function hasLinkedPathComponent(path) {
   while (current !== root) {
     const stats = await lstat(current)
     // Node reports Windows symlinks and directory junctions (the reparse
-    // points that redirect path resolution) as symbolic links. The opened
-    // file is separately matched to this lstat identity below.
-    if (stats.isSymbolicLink()) return true
+    // points that redirect path resolution) as symbolic links. A symlink
+    // directly under the filesystem root is a fixed OS alias (macOS
+    // /var -> /private/var), not a redirection vector, and is allowed; the
+    // opened file is separately matched to this lstat identity below.
+    if (stats.isSymbolicLink() && dirname(current) !== root) return true
     current = dirname(current)
   }
   return false

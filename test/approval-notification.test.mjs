@@ -65,6 +65,18 @@ test('terminal attention notification includes operation type and session', () =
   assert.match(result.body, /操作：执行命令/)
 })
 
+test('DeepSeek Harness semantic attention uses the shared notification contract', () => {
+  const result = describeSessionAttentionNotification({
+    kind: 'approval',
+    operation: 'DSH tool execution'
+  }, {
+    name: 'DSH release task',
+    adapterId: 'deepseek-harness'
+  })
+  assert.match(result.body, /DSH release task/)
+  assert.match(result.body, /DSH tool execution/)
+})
+
 test('task completion observes a restored-session baseline before notifying', () => {
   assert.deepEqual(advanceTaskCompletion(null, 0), { turns: null, completed: false })
   assert.deepEqual(advanceTaskCompletion(null, 7), { turns: 7, completed: false })

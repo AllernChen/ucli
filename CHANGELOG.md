@@ -4,6 +4,82 @@
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-08-20
+
+- 会话产物：从 Claude / Codex / OpenCode / U-Code transcript 提取 AI 写入的文件路径，抽屉列出并支持内嵌预览（HTML / Markdown / 文本 / 图片）与系统程序打开，可弹出到独立原生窗口。
+
+## [0.11.3] - 2026-08-19
+
+### 修复
+
+- 修复 Ctrl+V 在终端中粘贴两次的问题：xterm 6.x 新增原生 paste 事件，keydown 时抑制默认行为，只粘贴一次。
+- 修复 ucode 会话 token 无数据的问题：ucode export 缺少会话级 info.tokens 时，改为逐消息求和回退。
+- 降低启动内存占用：读取大文件头/尾改为有界读取（64KB/256KB），并用 countSessions 替代 listSessions 判空。
+
+### 功能优化
+
+- 菜单栏折叠按钮移到侧栏顶部，更显眼。
+- 会话卡片新增「更多操作」下拉菜单（停止/重启/重命名/移除/配置），按维护状态门控。
+- 会话卡片支持多选，并提供批量删除、批量停止。
+- 新建对话框抽取为独立组件，SessionDetail 的新建按钮改为就地弹窗，不再跳转。
+- 新增快捷新建（项目/CLI 分组「+」按钮预填 cwd）与会话名称输入框。
+- 项目支持打开所在目录（调用系统文件管理器）。
+- 会话窗格新增「定位」按钮，点击后工作台滚动到对应卡片并高亮。
+
+## [0.11.2] - 2026-08-19
+
+### DeepSeek Harness 数据接入
+
+- DSH Web 会话现在纳入 UCLI 的 token 统计：capabilities 契约把 `statsOwner` 从 native 改为 ucli（权限/历史仍由 DSH 原生管理），新增 loopback API 客户端与每 10 秒的轮询器，把 DSH Web 的 token 用量聚合写入会话统计并在工作台/统计页展示。
+- DSH 会话接入 summary：`sessionHistoryService` 新增 DSH 分支，总结时从 DSH Web 导出会话转录（Web 未运行时临时拉起再导出、完成后回收），按时间范围过滤，执行器仍为 claude/opencode。
+- 引入 `fflate`（DSH 同款零依赖 ZIP 库）用于解压 DSH 的会话日志归档。
+
+## [0.11.1] - 2026-08-18
+
+### DeepSeek Harness 整改
+
+- 0.11.0 的 DSH TUI 适配建立在错误的上游假设上：公开的 `deepseek-harness` 包并不提供可由 UCLI 启动的 CLI TUI。0.11.1 因此改为 Web-only；所有新会话只启动 DSH 原生 Web，旧 TUI 会话稳定返回不可用并只提供“新建 DSH Web”迁移动作。
+- 新增 UCLI 托管 Runtime manager，固定安装并验证 `@deepseek-ai/dsh@0.1.0-rc.6`、pnpm `10.30.3` 和 npm integrity。安装、升级、修复、卸载使用 staging、原子提升、所有权标记、静默期门和失败回滚，renderer 不能提交路径、版本、registry、package 或 command。
+- 原生 profile 继续由 DSH 拥有。UCLI 只初始化官方基础 profile，并把 `@ucli/dsh-bridge@0.11.0` 识别为 legacy bridge：不会自动加载或安装，只允许用户确认后按四个元数据文件的事务边界移除并回滚。
+- DSH Skills 现在覆盖项目 `.dsh/skills`、项目 `.agents/skills`、`$DSH_HOME/skills`、用户 `.agents/skills` 及只读内置来源；按优先级选择生效来源，并让 Codex 与 DSH 的共享投影只保留一个物理副本。
+- 0.11.1 升级、迁移和 Runtime 卸载均保留 DSH_HOME、profiles、原生 sessions 与 Skills；不会因为停用旧 TUI/bridge 路径而删除用户数据。
+
+### 修复
+
+- 新建 DSH Web 会话时，通过 DSH loopback API 自动把选中目录注册为 workspace 并预开一个空白会话，Web 界面打开即定位到该目录，而非空工作台。
+- 修复移除 legacy bridge 失败：`pnpm remove` 不接受 `--ignore-scripts`，改用 `--config.ignore-scripts=true` 后按原四文件事务边界移除。
+- 修复托管 Runtime 安装失败：安装超时由 2 分钟放宽到 15 分钟，慢网环境下冷装 `@deepseek-ai/dsh` 不再被提前终止。
+- 修复新建会话面板中 DeepSeek Harness 出现两个入口的问题：通用「快速新建」与「发现历史会话」不再渲染 DSH，只保留专属「新建 DSH Web」。
+
+### 发布兼容
+
+- 应用与安装产物版本升级到 `0.11.1`；为识别并安全移除旧元数据，发布资源继续保留隔离的 `resources/deepseek-harness/ucli-dsh-bridge-0.11.0.tgz`，但不把它作为可启动界面或新安装依赖。
+- DSH Web 继续使用 exact loopback URL、受限 iframe 和被拥有的进程树清理；权限、历史和统计由 DSH 原生界面管理，Gateway 对 Web 与全部旧 TUI generation 均保持关闭。
+
+## [0.11.0] - 2026-08-14
+
+### DeepSeek Harness 适配
+
+- 新增 DeepSeek Harness 一等适配器，固定兼容 `@deepseek-ai/dsh@0.1.0-rc.6`，并提供桥接 TUI 与本地 Web 两种界面。
+- 桥接 TUI 使用独立 PTY 保留原生全屏交互，同时通过 `@ucli/dsh-bridge@0.11.0` 提供认证的会话、权限、统计、通知、快照和 Gateway 控制平面；支持原生 session ID 持久化与 `--resume`。
+- UCLI 不捆绑、下载或宣称提供 `turtle-ui`。TUI 必须由用户已有的兼容 DSH profile 提供；“配置档案”页可初始化基础 DSH profile，并显式安装或更新 UCLI bridge，bridge 失败时按元数据边界回滚。
+- 新增 `dsh web --host 127.0.0.1 --port 0` 本地 Web 回退；严格验证 loopback URL 并在窄权限 iframe 中显示。Web 的权限、历史和统计由 DSH 原生管理，UCLI Gateway 保持关闭。
+
+### 安全、生命周期与界面
+
+- bridge protocol v1 使用 4 字节大端长度帧、1 MiB 上限、随机 token、严格 hello/hello-ack、exact schema、双向 RPC 上限与超时；endpoint/token 不持久化、不进入日志或 renderer。
+- DSH 工具调用统一经过 fail-closed 权限门；root、subagent 与 Code Mode 叶子调用均独立检查，所有 bridged tier 固定保留 workspace-write sandbox，更宽的 `sandbox_permissions` 直接拒绝。
+- TUI bridge 断线与 Web 主机退出均立即停止接受新操作；stop/restart/delete 等待被拥有的 bridge、PTY 或 Web 进程树清理确认，清理失败保留所有权并允许重试。
+- Settings、Workbench、会话卡片、详情、统计、维护与 Gateway 改为 authoritative capability 驱动。DSH Web 不挂载终端、历史、审批、用量或 Gateway 控件；缺失能力默认安全停用。
+- DSH Skills 仅作为项目 `.agents/skills` 的只读虚拟可见目标，与 Codex 共享同一物理投影，不创建用户级 DSH 安装或重复来源。
+
+### 修复与发布基础
+
+- Claude Code 历史会话中的 `<synthetic>` 等内部伪模型不再作为 `--model` 传回 CLI；原生会话 ID 与上下文保持不变，异常分屏可直接重新启动恢复输入。
+- DSH bridge 冷启动握手窗口延长到 60 秒，避免 Windows 首次加载 rc6 插件树较慢时被误判为 hello 超时；hello 前 PTY 瞬时退出会在完整清理后自动重试一次，连续失败返回准确的进程启动错误，握手仍受随机 endpoint、token 与协议校验保护。
+- 修复工作台窗格切换会话时沿用旧终端输出订阅的问题，新会话会先释放旧绑定再回放上下文，无需先关闭窗格才能显示内容。
+- Electron 升级到 43.4.0，electron-builder 升级到 26.15.3，并更新 ZIP、TOML 与 Vite 构建链依赖；官方 npm 全依赖审计无已知漏洞，发布 CI 使用 Node.js 24。
+
 ## [0.10.2] - 2026-08-13
 
 ### 设置与应用空间管理

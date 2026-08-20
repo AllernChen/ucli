@@ -20,7 +20,7 @@ const ORIGINS = {
   system: 'CLI 系统'
 }
 
-const CLI_NAMES = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', ucode: 'U-Code' }
+const CLI_NAMES = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', ucode: 'U-Code', 'deepseek-harness': 'DeepSeek Harness' }
 const SOURCE_KINDS = {
   claude_user: 'Claude 用户目录',
   claude_project: 'Claude 项目目录',
@@ -30,8 +30,23 @@ const SOURCE_KINDS = {
   codex_builtin: 'CLI 内置',
   claude_builtin: 'CLI 内置',
   opencode_builtin: 'CLI 内置',
-  ucode_builtin: 'CLI 内置'
+  ucode_builtin: 'CLI 内置',
+  'deepseek-harness_project': 'DSH 项目目录',
+  'deepseek-harness_user': 'DSH 用户目录',
+  'deepseek-harness_project_agents': 'Codex / DSH 项目共享',
+  'deepseek-harness_project_agents_flat': 'Codex / DSH 项目共享',
+  'deepseek-harness_user_agents': 'Codex / DSH 用户共享',
+  'deepseek-harness_user_agents_flat': 'Codex / DSH 用户共享',
+  'deepseek-harness_bundled': 'DSH 内置'
 }
+const DSH_SOURCE_BADGES = Object.freeze({
+  'project-dsh': 'DSH 项目专属',
+  'project-agents': 'Codex / DSH 项目共享',
+  'user-dsh': 'DSH 用户专属',
+  'user-agents': 'Codex / DSH 用户共享',
+  custom: '自定义 / 内置（只读）',
+  bundled: '自定义 / 内置（只读）'
+})
 const BUILT_IN_ORIGINS = new Set(['bundled', 'system'])
 const INSTALLATION_STATUS_ORDER = ['drifted', 'broken_link', 'invalid', 'missing', 'update_available', 'ready', 'disabled']
 
@@ -211,6 +226,11 @@ export function aggregateSkillCatalog({ packages = [], discovered = [], includeB
         managedInstallation.resolvedPath = source.resolvedPath || source.path
         managedInstallation.link = source.link || null
         managedInstallation.health = source.health || source.status || 'ready'
+        if (source.dshSource) {
+          managedInstallation.dshSource = source.dshSource
+          managedInstallation.effective = source.effective === true
+          managedInstallation.shadowedBy = source.shadowedBy || null
+        }
         if (source.plugin) managedInstallation.plugin = source.plugin
         if (source.sourceProject) managedInstallation.sourceProject = source.sourceProject
         if (managedInstallation.health === 'broken_link') managedInstallation.status = 'broken_link'
@@ -307,8 +327,18 @@ const CLI_INSTALLATION_PRIORITY = {
 export function skillPackageApplyTargets(pkg = {}, adapters = []) {
   const directTargets = new Set((pkg.installations || []).map((item) => item.targetAdapterId))
   return adapters.filter((adapter) =>
-    !directTargets.has(adapter.id) && pkg.compatibility?.[adapter.id]?.compatible !== false
+    !adapter.virtual && !directTargets.has(adapter.id) && pkg.compatibility?.[adapter.id]?.compatible !== false
   )
+}
+
+export function dshSkillSourcePresentation(source = {}) {
+  const badge = DSH_SOURCE_BADGES[source.dshSource] || 'DSH 来源'
+  const shadowBadge = DSH_SOURCE_BADGES[source.shadowedBy] || '其他来源'
+  return {
+    badge,
+    status: source.effective === false ? `被 ${shadowBadge} 遮蔽` : '生效',
+    readOnly: ['custom', 'bundled'].includes(source.dshSource)
+  }
 }
 
 export function buildSkillCliMatrix(entry = {}, adapters = []) {
@@ -321,6 +351,27 @@ export function buildSkillCliMatrix(entry = {}, adapters = []) {
     : null
 
   return adapters.map((adapter) => {
+    if (adapter.virtual && adapter.id === 'deepseek-harness') {
+      const visibility = entry.visibility?.[adapter.id] || { visible: false, direct: false, inheritedFrom: [] }
+      return {
+        adapterId: adapter.id,
+        displayName: adapter.displayName || skillCliName(adapter.id),
+        state: visibility.visible ? 'inherited' : 'unavailable',
+        label: visibility.visible ? '项目 .agents/skills 可见' : CLI_USAGE_LABELS.unavailable,
+        visible: Boolean(visibility.visible),
+        direct: false,
+        inheritedFrom: visibility.inheritedFrom || [],
+        installation: null,
+        installations: [],
+        source: null,
+        copySource: null,
+        packageId: null,
+        packageOptions: [],
+        action: null,
+        actionLabel: '',
+        disabledReason: '由项目 .agents/skills 提供；DSH 用户级 Skill 由原生运行时管理'
+      }
+    }
     const pluginCopyCompatible = adapter.id !== 'opencode' || /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.name || '')
     const adapterInstallations = installations
       .filter((item) => item.targetAdapterId === adapter.id)

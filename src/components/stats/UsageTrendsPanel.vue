@@ -128,7 +128,8 @@ const cliLabels = Object.freeze({
   claude: 'Claude Code',
   codex: 'Codex',
   opencode: 'OpenCode',
-  ucode: 'U-Code'
+  ucode: 'U-Code',
+  'deepseek-harness': 'DeepSeek Harness'
 })
 
 function uniqueOptions(values, label = (value) => value) {

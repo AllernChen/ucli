@@ -1,7 +1,17 @@
 <template>
-  <a-card class="session-card" hoverable size="small" :class="{ waiting: isWaiting }" @click="$emit('open', session.id)">
+  <a-card
+    class="session-card"
+    hoverable
+    size="small"
+    :class="{ waiting: ucliWaiting, highlight }"
+    :data-session-id="session.id"
+    @click="onCardClick"
+  >
+    <div v-if="selectable" class="select-overlay" @click.stop>
+      <a-checkbox :checked="selected" @change="onSelect" />
+    </div>
     <template #title>
-      <div class="card-title">
+      <div class="card-title" :class="{ 'selectable-indent': selectable }">
         <span class="icon">{{ session.icon }}</span>
         <span class="name">{{ session.displayName }}</span>
         <span :class="['status-badge', statusCls]">{{ statusText }}</span>
@@ -19,7 +29,25 @@
           <SettingOutlined />
         </a-button>
       </a-badge>
-      <a-tag :color="tierColor">{{ tierLabel }}</a-tag>
+      <a-dropdown :trigger="['click']">
+        <a-button
+          type="text"
+          size="small"
+          aria-label="更多操作"
+          title="更多操作"
+          @click.stop
+        >
+          <MoreOutlined />
+        </a-button>
+        <template #overlay>
+          <a-menu @click="onMenuClick">
+            <a-menu-item v-for="item in actionItems" :key="item.key" :danger="item.danger">
+              {{ item.label }}
+            </a-menu-item>
+          </a-menu>
+        </template>
+      </a-dropdown>
+      <a-tag v-if="capabilities.ucliPermission" :color="tierColor">{{ tierLabel }}</a-tag>
     </template>
 
     <div class="cwd" :title="session.cwd">
@@ -29,34 +57,60 @@
     </div>
     <div class="last-activity">{{ session.lastActivity || '空闲' }}</div>
 
-    <div v-if="isWaiting" class="waiting-bar">
+    <div v-if="capabilities.ucliPermission && isWaiting" class="waiting-bar">
       <a-badge status="warning" /> 有操作待确认
     </div>
 
-    <div class="card-footer">
+    <div v-if="capabilities.ucliStats" class="card-footer">
       <span class="stat">↑{{ session.stats.tokens.input.toLocaleString() }}</span>
       <span class="stat">↓{{ session.stats.tokens.output.toLocaleString() }}</span>
       <span class="stat">{{ session.stats.turns }} 轮</span>
       <span v-if="session.stats.costAvailable === false" class="stat">费用不可用</span>
       <span v-else class="stat">${{ (session.stats.costUsd ?? 0).toFixed(4) }}</span>
     </div>
+    <div v-else-if="capabilities.web" class="native-owner">DSH 原生管理权限、历史与统计</div>
   </a-card>
 </template>
 
 <script setup>
 import { computed } from 'vue'
-import { FolderOpenOutlined, SettingOutlined } from '@ant-design/icons-vue'
+import { FolderOpenOutlined, MoreOutlined, SettingOutlined } from '@ant-design/icons-vue'
 import { deriveSessionConfigState } from '../sessionConfigPresentation.js'
+import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
+import { sessionCardActionItems } from '../sessionCardActions.js'
 
-const props = defineProps({ session: { type: Object, required: true } })
-const emit = defineEmits(['open', 'configure'])
+const props = defineProps({
+  session: { type: Object, required: true },
+  selectable: { type: Boolean, default: false },
+  selected: { type: Boolean, default: false },
+  highlight: { type: Boolean, default: false }
+})
+const emit = defineEmits(['open', 'configure', 'action', 'select'])
 const view = computed(() => deriveSessionConfigState(props.session))
+const capabilities = computed(() => deriveSessionCapabilityState(props.session))
+
+const actionItems = computed(() => sessionCardActionItems(props.session))
 
 function configure() {
   emit('configure', props.session.id)
 }
 
+function onSelect() {
+  emit('select', props.session.id)
+}
+
+function onCardClick() {
+  if (props.selectable) emit('select', props.session.id)
+  else emit('open', props.session.id)
+}
+
+function onMenuClick({ key, domEvent }) {
+  domEvent?.stopPropagation()
+  emit('action', props.session.id, key)
+}
+
 const isWaiting = computed(() => props.session.status === 'waiting')
+const ucliWaiting = computed(() => capabilities.value.ucliPermission && isWaiting.value)
 
 const statusCls = computed(() => {
   const m = { running: 'status-running', idle: 'status-idle', waiting: 'status-waiting', starting: 'status-running', error: 'status-error', exited: 'status-exited', offline: 'status-exited' }
@@ -82,9 +136,17 @@ function fmtShort(ts) {
 </script>
 
 <style scoped>
-.session-card { cursor: pointer; transition: box-shadow .15s; }
+.session-card { position: relative; cursor: pointer; transition: box-shadow .15s; }
+.select-overlay { position: absolute; top: 8px; left: 8px; z-index: 2; background: #fff; border-radius: 4px; padding: 2px 3px; line-height: 1; box-shadow: 0 1px 4px rgba(0, 0, 0, .15); }
 .session-card.waiting { border-color: #faad14; box-shadow: 0 0 0 2px rgba(250,173,20,.25); }
+.session-card.highlight { border-color: #1677ff; box-shadow: 0 0 0 2px rgba(22,119,255,.35); animation: locate-flash 2.4s ease; }
+@keyframes locate-flash {
+  0% { background: #e6f4ff; }
+  40% { background: #e6f4ff; }
+  100% { background: transparent; }
+}
 .card-title { display: flex; align-items: center; gap: 6px; }
+.card-title.selectable-indent { padding-left: 22px; }
 .card-title .icon { font-size: 16px; }
 .card-title .name { min-width: 0; overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .card-title .status-badge { margin-left: auto; }
@@ -95,4 +157,5 @@ function fmtShort(ts) {
 .waiting-bar { margin-top: 6px; padding: 3px 8px; background: #fffbe6; border-radius: 4px; font-size: 12px; color: #ad6800; }
 .card-footer { margin-top: 6px; display: flex; gap: 10px; }
 .stat { font-size: 11px; color: #8c8c8c; white-space: nowrap; }
+.native-owner { margin-top: 6px; color: #8c8c8c; font-size: 11px; }
 </style>

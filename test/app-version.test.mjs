@@ -8,11 +8,16 @@ const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8
 const profileCenterSource = readFileSync(new URL('../src/views/ProfileCenter.vue', import.meta.url), 'utf8')
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const packageLock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'))
+const bridgePackage = JSON.parse(readFileSync(
+  new URL('../integrations/deepseek-harness-bridge/package.json', import.meta.url),
+  'utf8'
+))
 
-test('release package metadata is consistently versioned as 0.10.2', () => {
-  assert.equal(packageJson.version, '0.10.2')
-  assert.equal(packageLock.version, '0.10.2')
-  assert.equal(packageLock.packages[''].version, '0.10.2')
+test('app metadata retains the quarantined 0.11.0 bridge package', () => {
+  assert.equal(packageJson.version, '0.11.4')
+  assert.equal(packageLock.version, '0.11.4')
+  assert.equal(packageLock.packages[''].version, '0.11.4')
+  assert.equal(bridgePackage.version, '0.11.0')
 })
 
 test('sidebar version is injected from the package version during renderer build', () => {
