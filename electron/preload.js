@@ -225,6 +225,7 @@ const api = {
   // ---- shell ----
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   openPath: (path) => ipcRenderer.invoke('shell:open-path', path),
+  showItemInFolder: (path) => ipcRenderer.invoke('shell:show-item-in-folder', path),
 
   // ---- events ----
   on: (channel, handler) => {

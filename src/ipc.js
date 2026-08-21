@@ -139,6 +139,7 @@ export const ipc = {
   // shell
   openExternal: (url) => u.openExternal(url),
   openPath: (path) => u.openPath(path),
+  showItemInFolder: (path) => u.showItemInFolder(path),
   // events
   on: (channel, handler) => u.on(channel, handler)
 }

@@ -3340,6 +3340,16 @@ export function createOrchestrator() {
         return 'failed'
       }
     })
+
+    ipcMain.handle('shell:show-item-in-folder', async (_e, path) => {
+      try {
+        shell.showItemInFolder(String(path || ''))
+        return true
+      } catch (err) {
+        log('shell:show-item-in-folder failed for', path, err)
+        return false
+      }
+    })
   }
 
   let shutdownPromise = null
