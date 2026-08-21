@@ -11,7 +11,7 @@
           :options="periodOptions"
           @change="reload"
         />
-        <a-button @click="reload">刷新</a-button>
+        <a-button @click="refreshCurrent">刷新</a-button>
         <a-button type="primary" @click="dialogOpen = true">生成总结</a-button>
       </a-space>
     </div>
@@ -24,11 +24,30 @@
       show-icon
       :message="exportMessage"
     />
-    <a-spin :spinning="summaries.loading || workLogsLoading">
+    <a-spin :spinning="summaries.loading || workLogsLoading || summaryTasks.loading">
       <a-row :gutter="14">
         <a-col :span="6">
+          <!-- 任务态：左栏是单次总结任务的卡片列表 -->
           <a-list
-            v-if="listMode === 'worklogs'"
+            v-if="listMode === 'tasks'"
+            :data-source="summaryTasks.tasks"
+            :loading="summaryTasks.loading"
+            :locale="{ emptyText: '还没有总结任务' }"
+            class="report-list"
+          >
+            <template #renderItem="{ item }">
+              <SummaryTaskCard
+                :task="item"
+                :active="item.sessionId === summaryTasks.selectedTaskId"
+                @select="summaryTasks.selectTask(item.sessionId)"
+                @open-chat="openChat(item)"
+                @remove="summaryTasks.removeTask(item.sessionId)"
+              />
+            </template>
+          </a-list>
+          <!-- 工作日志态：按文件列出产物 -->
+          <a-list
+            v-else-if="listMode === 'worklogs'"
             bordered
             :data-source="workLogs"
             class="report-list"
@@ -42,6 +61,7 @@
               </a-list-item>
             </template>
           </a-list>
+          <!-- 历史报告态：旧的按周期版本报告 -->
           <template v-else>
             <a-list bordered :data-source="summaries.reports" class="report-list">
               <template #renderItem="{ item }">
@@ -53,26 +73,20 @@
             <SummaryHistory :versions="summaries.versions" @select="selectReport" @set-current="setCurrent" @retry="retry" @delete-report="deleteReport" />
           </template>
         </a-col>
-        <a-col :span="12">
-          <div v-if="activeSummarySessionId" class="summary-cli">
-            <div class="summary-cli-header">
-              <a-tag color="blue">{{ activeSummaryMeta?.periodLabel }}</a-tag>
-              <span class="summary-cli-adapter">{{ activeSummaryMeta?.adapterId }} · 内嵌 CLI</span>
-            </div>
-            <SessionTerminal
-              :key="activeSummarySessionId"
-              ref="summaryTerminal"
-              :session-id="activeSummarySessionId"
-            />
-          </div>
-          <a-empty v-else description="生成总结后，AI CLI 将在此处打开" />
-        </a-col>
-        <a-col :span="6">
+        <a-col :span="18">
+          <!-- 任务态：选中任务的进度 / 产物预览 -->
+          <SummaryTaskDetail
+            v-if="listMode === 'tasks'"
+            :task="selectedTask"
+            @open-chat="openChat(selectedTask)"
+          />
+          <!-- 工作日志态：Markdown / HTML 产物预览 -->
           <WorkLogReportView
-            v-if="listMode === 'worklogs'"
+            v-else-if="listMode === 'worklogs'"
             :work-log="selectedWorkLog"
             @open-html="openWorkLogHtml"
           />
+          <!-- 历史报告态：旧的按周期报告视图 -->
           <SummaryReportView
             v-else
             :report="summaries.selectedReport"
@@ -87,6 +101,7 @@
         </a-col>
       </a-row>
     </a-spin>
+    <SummaryConversationDrawer v-model:open="drawerOpen" :task="chatTask" />
     <SummaryGenerateDialog v-model:open="dialogOpen" @open="onSummaryOpen" />
     <SummaryHtmlStyleDialog
       v-model:open="htmlStyleOpen"
@@ -97,19 +112,23 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useSummariesStore } from '../../stores/summaries.js'
 import { useSessionsStore } from '../../stores/sessions.js'
+import { useSummaryTasksStore } from '../../stores/summaryTasks.js'
 import ipc from '../../ipc.js'
-import SessionTerminal from '../SessionTerminal.vue'
 import SummaryGenerateDialog from './SummaryGenerateDialog.vue'
 import SummaryHtmlStyleDialog from './SummaryHtmlStyleDialog.vue'
 import SummaryHistory from './SummaryHistory.vue'
 import SummaryReportView from './SummaryReportView.vue'
+import SummaryTaskCard from './SummaryTaskCard.vue'
+import SummaryTaskDetail from './SummaryTaskDetail.vue'
+import SummaryConversationDrawer from './SummaryConversationDrawer.vue'
 import WorkLogReportView from './WorkLogReportView.vue'
 
 const summaries = useSummariesStore()
 const sessions = useSessionsStore()
+const summaryTasks = useSummaryTasksStore()
 const dialogOpen = ref(false)
 const exportingHtml = ref(false)
 const exportMessage = ref('')
@@ -120,20 +139,24 @@ const periodOptions = [
   { label: '季度', value: 'quarter' }, { label: '年', value: 'year' }
 ]
 const listModes = [
+  { label: '任务', value: 'tasks' },
   { label: '工作日志', value: 'worklogs' },
   { label: '历史报告', value: 'history' }
 ]
-const listMode = ref('worklogs')
+const listMode = ref('tasks')
 const workLogs = ref([])
 const workLogsLoading = ref(false)
 const workLogsError = ref('')
 const selectedWorkLog = ref(null)
-const activeSummarySessionId = ref(null)
-const activeSummaryMeta = ref(null)
-const summaryTerminal = ref(null)
+const drawerOpen = ref(false)
+const chatTask = ref(null)
 let workLogPollTimer = null
 
+const selectedTask = computed(() =>
+  summaryTasks.tasks.find((task) => task.sessionId === summaryTasks.selectedTaskId) || null)
+
 onMounted(async () => {
+  await summaryTasks.init()
   loadWorkLogs()
   try {
     await summaries.init()
@@ -144,6 +167,7 @@ onMounted(async () => {
 onUnmounted(() => {
   stopWorkLogPolling()
   summaries.dispose()
+  summaryTasks.dispose()
 })
 
 async function loadWorkLogs() {
@@ -158,6 +182,13 @@ async function loadWorkLogs() {
   }
 }
 
+function refreshCurrent() {
+  if (listMode.value === 'worklogs') return loadWorkLogs()
+  if (listMode.value === 'history') return reload()
+  // 任务态：刷新产物清单，帮助按产物文件还原任务状态。
+  return loadWorkLogs()
+}
+
 function kindLabel(kind) {
   return kind === 'html' ? 'HTML 报告' : 'Markdown 报告'
 }
@@ -170,33 +201,48 @@ function openWorkLogHtml(path) {
   return ipc.openPath(path)
 }
 
+function openChat(task) {
+  chatTask.value = task
+  drawerOpen.value = true
+}
+
 function onListModeChange() {
   if (listMode.value === 'worklogs') {
     loadWorkLogs()
-  } else {
+  } else if (listMode.value === 'history') {
     reload()
   }
 }
 
-// --- Embedded summary CLI ---
-async function onSummaryOpen(payload) {
-  const { sessionId, adapterId, briefPrompt, periodLabel } = payload
-  activeSummarySessionId.value = sessionId
-  activeSummaryMeta.value = { adapterId, periodLabel }
-  // Ensure SessionTerminal has mounted and subscribed to terminal output
-  // before the adapter boots, so early output is not lost.
-  await nextTick()
-  startSummarySession(sessionId, briefPrompt)
+// --- 总结任务自动运行 ---
+async function onSummaryOpen(p) {
+  const {
+    sessionId, adapterId, briefPrompt, periodLabel, periodType, suggestedFileName, workLogsDir
+  } = p
+  summaryTasks.addTask({ sessionId, adapterId, periodLabel, periodType, suggestedFileName, workLogsDir })
+  // 持久化任务↔产物文件名关联，供重启后从会话记录还原任务状态。
+  if (suggestedFileName) {
+    await ipc.updateSessionNote(sessionId, suggestedFileName).catch((error) => {
+      ipc.log('warn', 'updateSessionNote failed:', error?.message || String(error))
+    })
+  }
+  summaryTasks.selectTask(sessionId)
+  listMode.value = 'tasks'
+  runSummaryTask(sessionId, briefPrompt)
 }
 
-async function startSummarySession(sessionId, briefPrompt) {
+async function runSummaryTask(sessionId, briefPrompt) {
   try {
     await ipc.startAdapter(sessionId)
     await waitForReady(sessionId)
+    // CLI 就绪后 TUI 输入区可能尚未渲染完成，稍等片刻再注入任务。
+    await new Promise(resolve => setTimeout(resolve, 500))
     await ipc.sendTurn(sessionId, briefPrompt)
+    summaryTasks.setStatus(sessionId, 'running')
     startWorkLogPolling()
   } catch (error) {
-    summaries.error = error
+    summaryTasks.setError(sessionId, error)
+    stopWorkLogPolling()
   }
 }
 
@@ -215,17 +261,12 @@ function waitForReady(sessionId, timeoutMs = 60_000) {
   })
 }
 
-// While the summary CLI is alive, refresh the work log list so reports the CLI
-// writes land in the left column without a manual refresh.
+// 任务运行期间每 3 秒刷新一次产物清单：产物文件一出现即标记完成；
+// 会话退出且无产物则标记失败/中断。全部任务落定后停止轮询。
 function startWorkLogPolling() {
   stopWorkLogPolling()
-  workLogPollTimer = setInterval(() => {
-    const sessionId = activeSummarySessionId.value
-    if (!sessionId) { stopWorkLogPolling(); return }
-    const status = sessions.byId(sessionId)?.status
-    if (status === 'exited' || status === 'offline') { stopWorkLogPolling(); return }
-    loadWorkLogs()
-  }, 3000)
+  workLogPollTimer = setInterval(() => { void pollWorkLogs() }, 3000)
+  void pollWorkLogs()
 }
 
 function stopWorkLogPolling() {
@@ -233,6 +274,39 @@ function stopWorkLogPolling() {
     clearInterval(workLogPollTimer)
     workLogPollTimer = null
   }
+}
+
+async function pollWorkLogs() {
+  let reportList = []
+  try {
+    reportList = await ipc.listSummaryWorkLogs()
+    if (listMode.value === 'worklogs') workLogs.value = reportList
+  } catch (error) {
+    workLogsError.value = error?.message || '无法读取工作日志'
+    reportList = []
+  }
+  const reportNames = new Set(reportList.map((entry) => entry.name))
+  const activeTasks = summaryTasks.tasks.filter((task) =>
+    task.status === 'starting' || task.status === 'running')
+  let anyActive = false
+  for (const task of activeTasks) {
+    if (!task.suggestedFileName) {
+      anyActive = true
+      continue
+    }
+    const htmlFileName = task.suggestedFileName.replace(/\.md$/i, '.html')
+    if (reportNames.has(task.suggestedFileName) || reportNames.has(htmlFileName)) {
+      summaryTasks.setStatus(task.sessionId, 'completed')
+      continue
+    }
+    const session = sessions.byId(task.sessionId)
+    if (session && (session.status === 'exited' || session.status === 'offline')) {
+      summaryTasks.setStatus(task.sessionId, task.error ? 'failed' : 'interrupted')
+      continue
+    }
+    anyActive = true
+  }
+  if (!anyActive) stopWorkLogPolling()
 }
 
 async function safely(operation) {
@@ -278,4 +352,4 @@ async function exportHtml(style) {
   }
 }
 </script>
-<style scoped>.toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}.report-list{margin-bottom:12px;max-height:360px;overflow:auto}.report-list :deep(.ant-list-item){cursor:pointer}.summary-cli{display:flex;flex-direction:column;height:100%;min-height:420px}.summary-cli-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}.summary-cli-adapter{color:#8c8c8c;font-size:12px}.summary-cli .session-terminal{flex:1}</style>
+<style scoped>.toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}.report-list{margin-bottom:12px;max-height:520px;overflow:auto}</style>
