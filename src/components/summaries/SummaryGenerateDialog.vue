@@ -158,10 +158,19 @@ async function submit() {
       profileId: selectedProfile.value || undefined,
       model: selectedModel.value || undefined
     })
-    // The work summary panel owns adapter startup (via the embedded terminal)
-    // and auto-sends the brief prompt once the CLI reports ready; this dialog
-    // only hands the session off so the user stays on the summary page.
-    emit('open', { sessionId, adapterId: executorId, briefPrompt: prepared.briefPrompt, periodLabel })
+    // The work summary panel owns adapter startup and auto-sends the brief
+    // prompt once the CLI reports ready; this dialog only hands the full task
+    // metadata off so the panel can build a task card, persist the artifact
+    // filename, and auto-run without any manual send.
+    emit('open', {
+      sessionId,
+      adapterId: executorId,
+      briefPrompt: prepared.briefPrompt,
+      periodLabel,
+      periodType: form.periodType,
+      suggestedFileName: prepared.suggestedFileName,
+      workLogsDir: prepared.workLogsDir
+    })
     close()
   } catch (error) {
     summaries.error = error
