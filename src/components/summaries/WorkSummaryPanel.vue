@@ -66,7 +66,11 @@
               <a-space>
                 <a-button size="small" @click="openReport(selectedWorkLog)">打开</a-button>
                 <a-button size="small" @click="revealReport(selectedWorkLog)">在文件夹中显示</a-button>
+                <a-button size="small" :loading="isConverting(selectedWorkLog.name)" @click="convertFormat(selectedWorkLog)">
+                  {{ isConverting(selectedWorkLog.name) ? '转换中…' : '转换格式' }}
+                </a-button>
               </a-space>
+              <span v-if="conversionError" class="report-convert-error">{{ conversionError }}</span>
             </div>
             <WorkLogReportView :work-log="selectedWorkLog" @open-html="openWorkLogHtml" />
           </template>
@@ -84,6 +88,7 @@ import { useSummariesStore } from '../../stores/summaries.js'
 import { useSessionsStore } from '../../stores/sessions.js'
 import { useSummaryTasksStore } from '../../stores/summaryTasks.js'
 import ipc from '../../ipc.js'
+import { convertTargetFileName, dirnameOf, buildConversionPrompt } from './formatConversion.js'
 import SummaryGenerateDialog from './SummaryGenerateDialog.vue'
 import SummaryTaskCard from './SummaryTaskCard.vue'
 import SummaryTaskDetail from './SummaryTaskDetail.vue'
@@ -106,6 +111,9 @@ const selectedWorkLog = ref(null)
 const drawerOpen = ref(false)
 const chatTask = ref(null)
 let workLogPollTimer = null
+const conversions = ref({})   // key: sourceName -> { targetFileName, sessionId, status:'running'|'done'|'error', error }
+const conversionError = ref('')
+let conversionPollTimer = null
 
 const selectedTask = computed(() =>
   summaryTasks.tasks.find((task) => task.sessionId === summaryTasks.selectedTaskId) || null)
@@ -120,6 +128,7 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   stopWorkLogPolling()
+  stopConversionPolling()
   summaries.dispose()
   summaryTasks.dispose()
 })
@@ -154,6 +163,76 @@ function openReport(report) {
 
 function revealReport(report) {
   return ipc.showItemInFolder(report.path)
+}
+
+// --- 格式转换（调用 CLI，自动输入转换要求） ---
+const isConverting = (name) => conversions.value[name]?.status === 'running'
+
+async function convertFormat(report) {
+  const sourceName = report.name
+  const targetName = convertTargetFileName(sourceName)
+  if (!targetName || conversions.value[sourceName]?.status === 'running') return
+  conversionError.value = ''
+  conversions.value[sourceName] = { targetFileName: targetName, sessionId: null, status: 'running', error: null }
+  const executorId = summaries.settings?.defaultExecutorId || 'claude'
+  try {
+    const sessionId = await sessions.createSession({
+      adapterId: executorId,
+      cwd: dirnameOf(report.path),
+      name: `格式转换（${sourceName} → ${targetName}）`
+    })
+    conversions.value[sourceName].sessionId = sessionId
+    await ipc.startAdapter(sessionId)
+    await waitForReady(sessionId)
+    await new Promise(resolve => setTimeout(resolve, 500))
+    await ipc.sendTurn(sessionId, buildConversionPrompt(sourceName, targetName))
+    startConversionPolling()
+  } catch (error) {
+    conversions.value[sourceName].status = 'error'
+    conversions.value[sourceName].error = error
+    conversionError.value = error?.message || '格式转换失败'
+  }
+}
+
+// 转换进行期间每 3 秒刷新一次报告清单：目标文件一出现即标记完成；
+// 会话退出且无产物则标记失败。全部转换落定后停止轮询。
+function startConversionPolling() {
+  stopConversionPolling()
+  conversionPollTimer = setInterval(() => { void pollConversions() }, 3000)
+  void pollConversions()
+}
+
+function stopConversionPolling() {
+  if (conversionPollTimer) {
+    clearInterval(conversionPollTimer)
+    conversionPollTimer = null
+  }
+}
+
+async function pollConversions() {
+  let reportList = []
+  try {
+    reportList = await ipc.listSummaryWorkLogs()
+  } catch {
+    return
+  }
+  const names = new Set(reportList.map((entry) => entry.name))
+  for (const [sourceName, conv] of Object.entries(conversions.value)) {
+    if (conv.status !== 'running') continue
+    if (names.has(conv.targetFileName)) {
+      conv.status = 'done'
+      conversionError.value = ''
+      await loadWorkLogs()          // 刷新列表，显示新文件
+    } else {
+      const session = sessions.byId(conv.sessionId)
+      if (session && (session.status === 'exited' || session.status === 'offline')) {
+        conv.status = 'error'
+        conv.error = new Error('CLI 已退出，未生成目标文件')
+        conversionError.value = conv.error.message
+      }
+    }
+  }
+  if (!Object.values(conversions.value).some((c) => c.status === 'running')) stopConversionPolling()
 }
 
 function openWorkLogHtml(path) {
@@ -268,4 +347,5 @@ async function pollWorkLogs() {
 .toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}
 .report-list{margin-bottom:12px;max-height:520px;overflow:auto}
 .report-toolbar{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.report-convert-error{color:#ff4d4f;font-size:12px}
 </style>
