@@ -34,11 +34,18 @@ globalThis.window = {
       subscriptions += 1
       progressHandler = handler
       return () => { unsubscriptions += 1; progressHandler = null }
-    }
+    },
+    // summaryTasks store surface
+    listSessions: async () => [],
+    listSummaryWorkLogs: async () => [],
+    updateSessionNote: async () => true,
+    on: () => () => {},
+    log: () => {}
   }
 }
 
 const { useSummariesStore } = await import('../src/stores/summaries.js')
+const { useSummaryTasksStore } = await import('../src/stores/summaryTasks.js')
 
 function freshStore() {
   setActivePinia(createPinia())
@@ -210,13 +217,25 @@ test('summary workspace components cover generation, safe reading, history, retr
     '../src/components/summaries/SummaryHistory.vue',
     '../src/components/summaries/WorkSummaryPanel.vue',
     '../src/components/summaries/SummaryHtmlStyleDialog.vue',
-    '../src/components/summaries/WorkLogReportView.vue'
+    '../src/components/summaries/WorkLogReportView.vue',
+    '../src/components/summaries/SummaryTaskCard.vue',
+    '../src/components/summaries/SummaryTaskDetail.vue',
+    '../src/components/summaries/SummaryConversationDrawer.vue',
+    // The conversation drawer reuses the existing history pane for its
+    // 「历史记录」tab; its getSessionHistory contract is covered here.
+    '../src/components/PaneHistory.vue'
+  ]
+  const jsFiles = [
+    '../src/stores/summaryTasks.js',
+    '../src/components/summaries/summaryTaskStatus.js'
   ]
   const sources = files.map(file => readFileSync(new URL(file, import.meta.url), 'utf8'))
   for (const [index, source] of sources.entries()) {
     assert.deepEqual(parseSfc(source).errors, [], files[index])
   }
-  const all = sources.join('\n')
+  const all = sources.concat(
+    jsFiles.map(file => readFileSync(new URL(file, import.meta.url), 'utf8'))
+  ).join('\n')
   for (const text of [
     'periodType', 'partial', 'executorId', 'profileId', 'model',
     'coverage', '可能产生费用', '设为当前版本', 'workLogs', 'briefPrompt',
@@ -224,9 +243,13 @@ test('summary workspace components cover generation, safe reading, history, retr
     '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试',
     '工作日志', '历史报告', 'listSummaryWorkLogs', 'readSummaryWorkLog',
     '在浏览器中打开', 'open-html', 'openWorkLogHtml',
-    // Embedded CLI: the summary page renders SessionTerminal and auto-sends the brief.
+    // Embedded CLI lives in the conversation drawer: SessionTerminal + auto-send.
     'SessionTerminal', 'startAdapter', 'sendTurn', 'session:terminal-output',
-    'activeSummarySessionId', 'summaryTerminal',
+    // Task dashboard: cards, detail, and the right-hand conversation drawer.
+    'SummaryTaskCard', 'SummaryTaskDetail', 'SummaryConversationDrawer', 'summaryTaskStatus',
+    'attachTerminal', 'refit', 'getSessionHistory', 'updateSessionNote',
+    'suggestedFileName', 'summaryTasks.addTask', 'setStatus',
+    '正在准备材料并启动 CLI', 'AI 正在分析并撰写总结',
     // HTML work logs preview inline in a sandboxed srcdoc iframe.
     'srcdoc', 'sandbox', 'USE_PROFILES'
   ]) assert.match(all, new RegExp(text))
@@ -260,6 +283,93 @@ test('summary workspace components cover generation, safe reading, history, retr
   assert.match(all, /await\s+ipc\.startAdapter\(sessionId\)/)
   assert.match(all, /await\s+ipc\.sendTurn\(sessionId,\s*briefPrompt\)/)
   assert.match(all, /@open="onSummaryOpen"/)
+})
+
+test('summaryTasks store reconstructs tasks from persisted sessions and drives the state machine', async () => {
+  const originalListSessions = window.ucli.listSessions
+  const originalListWorkLogs = window.ucli.listSummaryWorkLogs
+  const originalOn = window.ucli.on
+  let eventHandler = null
+  let subscribeCount = 0
+  window.ucli.on = (channel, handler) => {
+    if (channel === 'session:event') {
+      eventHandler = handler
+      subscribeCount += 1
+    }
+    return () => { if (eventHandler === handler) eventHandler = null }
+  }
+  window.ucli.listSessions = async () => [
+    { id: 's-completed', name: '工作总结（每周）', adapterId: 'claude', cwd: 'C:/work',
+      taskNote: '2026-08-14-summary.md', status: 'exited', createdAt: 2000, updatedAt: 2100,
+      lastActivity: '进程退出 (0)' },
+    { id: 's-running', name: '工作总结（每月）', adapterId: 'codex', cwd: 'C:/work',
+      taskNote: null, status: 'running', createdAt: 1000, updatedAt: 1100, lastActivity: '运行中' },
+    { id: 's-interrupted', name: '工作总结（每日）', adapterId: 'opencode', cwd: 'C:/work',
+      taskNote: '2026-08-21-summary.md', status: 'exited', createdAt: 500, updatedAt: 600,
+      lastActivity: '进程退出 (1)' },
+    // 非总结会话必须被排除。
+    { id: 's-normal', name: '修复登录 bug', adapterId: 'claude', cwd: 'C:/app',
+      taskNote: null, status: 'exited', createdAt: 300, updatedAt: 400, lastActivity: '' }
+  ]
+  window.ucli.listSummaryWorkLogs = async () => [
+    { name: '2026-08-14-summary.md', path: 'C:/work/2026-08-14-summary.md', kind: 'markdown', mtime: 2100 },
+    { name: '2026-08-14-summary.html', path: 'C:/work/2026-08-14-summary.html', kind: 'html', mtime: 2100 }
+  ]
+  setActivePinia(createPinia())
+  const store = useSummaryTasksStore()
+  try {
+    await store.init()
+    assert.deepEqual(store.tasks.map(task => task.sessionId),
+      ['s-completed', 's-running', 's-interrupted'])
+    assert.equal(store.selectedTaskId, 's-completed')
+    const completed = store.tasks.find(task => task.sessionId === 's-completed')
+    assert.equal(completed.status, 'completed')
+    assert.equal(completed.periodLabel, '每周')
+    assert.equal(completed.suggestedFileName, '2026-08-14-summary.md')
+    assert.equal(store.tasks.find(task => task.sessionId === 's-running').status, 'running')
+    assert.equal(store.tasks.find(task => task.sessionId === 's-interrupted').status, 'interrupted')
+
+    // addTask → starting；setStatus → running；setError → failed。
+    store.addTask({ sessionId: 's-new', adapterId: 'codex', periodLabel: '每日',
+      periodType: 'day', suggestedFileName: '2026-08-21-summary.md', workLogsDir: 'C:/work' })
+    assert.equal(store.tasks[0].sessionId, 's-new')
+    assert.equal(store.tasks[0].status, 'starting')
+    store.setStatus('s-new', 'running')
+    assert.equal(store.tasks[0].status, 'running')
+    store.setError('s-new', new Error('CLI 启动失败'))
+    assert.equal(store.tasks[0].status, 'failed')
+    assert.equal(store.tasks[0].lastActivity, 'CLI 启动失败')
+
+    // session:event 事件驱动 lastActivity 与 token 统计。
+    store._onEvent({ sessionId: 's-new', type: 'ready', ts: 3000 })
+    assert.equal(store.tasks[0].lastActivity, '已就绪')
+    store._onEvent({ sessionId: 's-new', type: 'stats_update', ts: 3001,
+      usage: { inputTokens: 10, outputTokens: 20 }, costUsd: 0.5 })
+    assert.deepEqual(store.tasks[0].tokens, { input: 10, output: 20 })
+    assert.equal(store.tasks[0].costUsd, 0.5)
+
+    // removeTask 重选下一任务；addTask 对已存在 sessionId 就地更新（不产生重复卡）。
+    store.selectTask('s-new')
+    store.removeTask('s-new')
+    assert.equal(store.selectedTaskId, 's-completed')
+    store.addTask({ sessionId: 's-completed', adapterId: 'claude', periodLabel: '每周',
+      periodType: 'week', suggestedFileName: '2026-08-14-summary.md', workLogsDir: 'C:/work' })
+    assert.equal(store.tasks.filter(task => task.sessionId === 's-completed').length, 1)
+    assert.equal(store.tasks.find(task => task.sessionId === 's-completed').status, 'starting')
+
+    // 第二次 init 被 unsub 守卫跳过（不重复订阅），事件仍派发到同一 handler。
+    assert.equal(subscribeCount, 1)
+    await store.init()
+    assert.equal(subscribeCount, 1)
+    assert.equal(store.tasks.filter(task => task.sessionId === 's-completed').length, 1)
+    eventHandler({ sessionId: 's-running', type: 'exit', code: 0, ts: 4000 })
+    assert.equal(store.tasks.find(task => task.sessionId === 's-running').lastActivity, '进程退出 (0)')
+  } finally {
+    store.dispose()
+    window.ucli.listSessions = originalListSessions
+    window.ucli.listSummaryWorkLogs = originalListWorkLogs
+    window.ucli.on = originalOn
+  }
 })
 
 test('completed reports show bounded generation performance without renderer-sensitive fields', () => {
