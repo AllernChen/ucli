@@ -36,7 +36,7 @@
     </div>
     <a-empty v-else description="报告内容尚未生成" />
   </a-card>
-  <a-empty v-else description="请选择一份工作日志报告" />
+  <a-empty v-else description="请选择一份工作报告" />
 </template>
 
 <script setup>

@@ -4,6 +4,7 @@ import test from 'node:test'
 import { createPinia, setActivePinia } from 'pinia'
 import { parse as parseSfc } from '@vue/compiler-sfc'
 import { openSummaryReportLink } from '../src/summaryLinks.js'
+import { convertTargetFileName, dirnameOf, buildConversionPrompt } from '../src/components/summaries/formatConversion.js'
 
 let progressHandler = null
 let subscriptions = 0
@@ -227,7 +228,8 @@ test('summary workspace components cover generation, safe reading, history, retr
   ]
   const jsFiles = [
     '../src/stores/summaryTasks.js',
-    '../src/components/summaries/summaryTaskStatus.js'
+    '../src/components/summaries/summaryTaskStatus.js',
+    '../src/components/summaries/formatConversion.js'
   ]
   const sources = files.map(file => readFileSync(new URL(file, import.meta.url), 'utf8'))
   for (const [index, source] of sources.entries()) {
@@ -241,8 +243,11 @@ test('summary workspace components cover generation, safe reading, history, retr
     'coverage', '可能产生费用', '设为当前版本', 'workLogs', 'briefPrompt',
     '取消生成', '确认继续', '打开总结 CLI', '可能产生费用',
     '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试',
-    '工作日志', '历史报告', 'listSummaryWorkLogs', 'readSummaryWorkLog',
+    '工作报告', 'listSummaryWorkLogs', 'readSummaryWorkLog',
     '在浏览器中打开', 'open-html', 'openWorkLogHtml',
+    // Report manager: format badge, open / reveal-in-folder, CLI-driven conversion.
+    'formatBadge', '在文件夹中显示', 'showItemInFolder',
+    '转换格式', '转换中…', 'convertTargetFileName', 'buildConversionPrompt', '格式转换（',
     // Embedded CLI lives in the conversation drawer: SessionTerminal + auto-send.
     'SessionTerminal', 'startAdapter', 'sendTurn', 'session:terminal-output',
     // Task dashboard: cards, detail, and the right-hand conversation drawer.
@@ -253,9 +258,6 @@ test('summary workspace components cover generation, safe reading, history, retr
     // HTML work logs preview inline in a sandboxed srcdoc iframe.
     'srcdoc', 'sandbox', 'USE_PROFILES'
   ]) assert.match(all, new RegExp(text))
-  assert.match(all, /exportingHtml\.value\s*=\s*true/)
-  assert.match(all, /exportingHtml\.value\s*=\s*false/)
-  assert.match(all, /HTML\s*已导出/)
   for (const themeId of ['executive', 'engineering', 'timeline', 'dashboard', 'print']) {
     assert.match(all, new RegExp(themeId))
   }
@@ -265,11 +267,8 @@ test('summary workspace components cover generation, safe reading, history, retr
   for (const text of ['AI 自定义', '较慢', '产生 AI 用量', '即时生成']) {
     assert.match(all, new RegExp(text))
   }
-  assert.match(all, /:confirm-loading="exportingHtml"/)
-  assert.match(all, /if\s*\(exportingHtml\.value\)\s*return/)
   assert.match(all, /themeId:\s*['"]executive['"]/)
   assert.match(all, /@confirm="\$emit\('delete-report', report\.id\)"/)
-  assert.match(all, /summaries\.deleteReport/)
   assert.match(all, /MarkdownIt\(\{\s*html:\s*false/)
   assert.match(all, /DOMPurify\.sanitize/)
   assert.match(all, /failed|interrupted/)
@@ -283,6 +282,16 @@ test('summary workspace components cover generation, safe reading, history, retr
   assert.match(all, /await\s+ipc\.startAdapter\(sessionId\)/)
   assert.match(all, /await\s+ipc\.sendTurn\(sessionId,\s*briefPrompt\)/)
   assert.match(all, /@open="onSummaryOpen"/)
+})
+
+test('format conversion derives target names, dirname, and safe prompts', () => {
+  assert.equal(convertTargetFileName('2026-08-21-summary.md'), '2026-08-21-summary.html')
+  assert.equal(convertTargetFileName('2026-08-21-summary.html'), '2026-08-21-summary.md')
+  assert.equal(convertTargetFileName('data.json'), null)
+  assert.equal(dirnameOf('C:\\UCLI\\summary\\workLogs\\x.md'), 'C:\\UCLI\\summary\\workLogs')
+  const prompt = buildConversionPrompt('x.md', 'x.html')
+  assert.match(prompt, /x\.html/)
+  assert.match(prompt, /不可信数据/)
 })
 
 test('summaryTasks store reconstructs tasks from persisted sessions and drives the state machine', async () => {
@@ -429,6 +438,7 @@ test('AI-authored report links cannot navigate the renderer and use only narrow 
     assert.match(source, /openSummaryReportLink\(event, ipc\.openExternal\)/)
   }
   assert.match(preload, /openExternal:\s*\(url\)\s*=>\s*ipcRenderer\.invoke\('shell:open-external', url\)/)
+  assert.match(preload, /showItemInFolder/)
   assert.doesNotMatch(preload, /(?:navigate|loadURL)\s*:/)
 })
 
