@@ -7,6 +7,7 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import '@xterm/xterm/css/xterm.css'
 import ipc from '../ipc.js'
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
 import { terminalSizeChanged } from '../terminalResize.js'
@@ -43,6 +44,16 @@ function fitTerminal() {
   if (!term || !fitAddon) return
   try { fitAddon.fit() } catch { return }
   return sendSize({ cols: term.cols, rows: term.rows })
+}
+
+// Force a re-send of the fitted PTY size. Owners call this AFTER the adapter
+// has spawned the PTY — a resize sent before spawn is dropped by the adapter's
+// `if (this.ptyProc)` guard, leaving the PTY at its hardcoded 120×40 while xterm
+// is fitted to the actual column width. Clearing lastPtySize defeats the change
+// gate in terminalSizeChanged, so the same size is re-sent to the live PTY.
+function refit() {
+  lastPtySize = { cols: 0, rows: 0 }
+  fitTerminal()
 }
 
 onMounted(() => {
@@ -138,6 +149,7 @@ onBeforeUnmount(() => {
 defineExpose({
   focus: () => term?.focus(),
   fit: () => fitTerminal(),
+  refit: () => refit(),
   write: (data) => term?.write(data)
 })
 </script>
