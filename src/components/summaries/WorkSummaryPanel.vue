@@ -3,27 +3,12 @@
     <div class="toolbar">
       <a-space>
         <a-segmented v-model:value="listMode" :options="listModes" @change="onListModeChange" />
-        <a-select
-          v-if="listMode === 'history'"
-          v-model:value="summaries.filters.periodType"
-          allow-clear
-          placeholder="全部周期"
-          :options="periodOptions"
-          @change="reload"
-        />
         <a-button @click="refreshCurrent">刷新</a-button>
         <a-button type="primary" @click="dialogOpen = true">生成总结</a-button>
       </a-space>
     </div>
     <a-alert v-if="summaries.error" type="error" show-icon :message="summaries.error.message" />
     <a-alert v-if="workLogsError" type="error" show-icon :message="workLogsError" />
-    <a-alert
-      v-if="exportMessage"
-      style="margin-bottom:12px"
-      :type="exportingHtml ? 'info' : 'success'"
-      show-icon
-      :message="exportMessage"
-    />
     <a-spin :spinning="summaries.loading || workLogsLoading || summaryTasks.loading">
       <a-row :gutter="14">
         <a-col :span="6">
@@ -45,7 +30,7 @@
               />
             </template>
           </a-list>
-          <!-- 工作日志态：按文件列出产物 -->
+          <!-- 工作报告态：按文件列出生成的报告 -->
           <a-list
             v-else-if="listMode === 'worklogs'"
             bordered
@@ -54,24 +39,18 @@
           >
             <template #renderItem="{ item }">
               <a-list-item @click="selectWorkLog(item)">
-                <a-list-item-meta
-                  :title="item.name"
-                  :description="`${kindLabel(item.kind)} · ${new Date(item.mtime).toLocaleString()}`"
-                />
+                <a-list-item-meta>
+                  <template #title>
+                    <a-space size="small">
+                      <span>{{ item.name }}</span>
+                      <a-tag :color="item.kind === 'html' ? 'purple' : 'blue'">{{ formatBadge(item.kind) }}</a-tag>
+                    </a-space>
+                  </template>
+                  <template #description>{{ new Date(item.mtime).toLocaleString() }}</template>
+                </a-list-item-meta>
               </a-list-item>
             </template>
           </a-list>
-          <!-- 历史报告态：旧的按周期版本报告 -->
-          <template v-else>
-            <a-list bordered :data-source="summaries.reports" class="report-list">
-              <template #renderItem="{ item }">
-                <a-list-item @click="selectReport(item.id)">
-                  <a-list-item-meta :title="`${item.periodType} · v${item.version}`" :description="`${item.status} · ${new Date(item.periodStart).toLocaleDateString()}`" />
-                </a-list-item>
-              </template>
-            </a-list>
-            <SummaryHistory :versions="summaries.versions" @select="selectReport" @set-current="setCurrent" @retry="retry" @delete-report="deleteReport" />
-          </template>
         </a-col>
         <a-col :span="18">
           <!-- 任务态：选中任务的进度 / 产物预览 -->
@@ -80,34 +59,22 @@
             :task="selectedTask"
             @open-chat="openChat(selectedTask)"
           />
-          <!-- 工作日志态：Markdown / HTML 产物预览 -->
-          <WorkLogReportView
-            v-else-if="listMode === 'worklogs'"
-            :work-log="selectedWorkLog"
-            @open-html="openWorkLogHtml"
-          />
-          <!-- 历史报告态：旧的按周期报告视图 -->
-          <SummaryReportView
-            v-else
-            :report="summaries.selectedReport"
-            :progress="summaries.progress[summaries.selectedReport?.id]"
-            :html-exporting="exportingHtml"
-            @cancel="cancel"
-            @confirm="confirm"
-            @export-markdown="exportMarkdown"
-            @export-html="chooseHtmlStyle"
-            @delete-report="deleteReport"
-          />
+          <!-- 工作报告态：报告管理器（操作工具栏 + Markdown / HTML 预览） -->
+          <template v-else-if="listMode === 'worklogs'">
+            <div v-if="selectedWorkLog" class="report-toolbar">
+              <a-tag :color="selectedWorkLog.kind === 'html' ? 'purple' : 'blue'">{{ formatBadge(selectedWorkLog.kind) }}</a-tag>
+              <a-space>
+                <a-button size="small" @click="openReport(selectedWorkLog)">打开</a-button>
+                <a-button size="small" @click="revealReport(selectedWorkLog)">在文件夹中显示</a-button>
+              </a-space>
+            </div>
+            <WorkLogReportView :work-log="selectedWorkLog" @open-html="openWorkLogHtml" />
+          </template>
         </a-col>
       </a-row>
     </a-spin>
     <SummaryConversationDrawer v-model:open="drawerOpen" :task="chatTask" />
     <SummaryGenerateDialog v-model:open="dialogOpen" @open="onSummaryOpen" />
-    <SummaryHtmlStyleDialog
-      v-model:open="htmlStyleOpen"
-      :confirm-loading="exportingHtml"
-      @submit="exportHtml"
-    />
   </div>
 </template>
 
@@ -118,9 +85,6 @@ import { useSessionsStore } from '../../stores/sessions.js'
 import { useSummaryTasksStore } from '../../stores/summaryTasks.js'
 import ipc from '../../ipc.js'
 import SummaryGenerateDialog from './SummaryGenerateDialog.vue'
-import SummaryHtmlStyleDialog from './SummaryHtmlStyleDialog.vue'
-import SummaryHistory from './SummaryHistory.vue'
-import SummaryReportView from './SummaryReportView.vue'
 import SummaryTaskCard from './SummaryTaskCard.vue'
 import SummaryTaskDetail from './SummaryTaskDetail.vue'
 import SummaryConversationDrawer from './SummaryConversationDrawer.vue'
@@ -130,18 +94,9 @@ const summaries = useSummariesStore()
 const sessions = useSessionsStore()
 const summaryTasks = useSummaryTasksStore()
 const dialogOpen = ref(false)
-const exportingHtml = ref(false)
-const exportMessage = ref('')
-const htmlStyleOpen = ref(false)
-const htmlExportReportId = ref(null)
-const periodOptions = [
-  { label: '日', value: 'day' }, { label: '周', value: 'week' }, { label: '月', value: 'month' },
-  { label: '季度', value: 'quarter' }, { label: '年', value: 'year' }
-]
 const listModes = [
   { label: '任务', value: 'tasks' },
-  { label: '工作日志', value: 'worklogs' },
-  { label: '历史报告', value: 'history' }
+  { label: '工作报告', value: 'worklogs' }
 ]
 const listMode = ref('tasks')
 const workLogs = ref([])
@@ -158,10 +113,9 @@ const selectedTask = computed(() =>
 onMounted(async () => {
   await summaryTasks.init()
   loadWorkLogs()
+  // 初始化 summaries 以填充设置里的默认执行 CLI（供格式转换等使用）。
   try {
     await summaries.init()
-    const current = summaries.reports.find(report => report.isCurrent) || summaries.reports[0]
-    if (current) await summaries.selectReport(current.id)
   } catch (error) { summaries.error = error }
 })
 onUnmounted(() => {
@@ -176,25 +130,30 @@ async function loadWorkLogs() {
   try {
     workLogs.value = await ipc.listSummaryWorkLogs()
   } catch (error) {
-    workLogsError.value = error?.message || '无法读取工作日志'
+    workLogsError.value = error?.message || '无法读取工作报告'
   } finally {
     workLogsLoading.value = false
   }
 }
 
 function refreshCurrent() {
-  if (listMode.value === 'worklogs') return loadWorkLogs()
-  if (listMode.value === 'history') return reload()
-  // 任务态：刷新产物清单，帮助按产物文件还原任务状态。
   return loadWorkLogs()
 }
 
-function kindLabel(kind) {
-  return kind === 'html' ? 'HTML 报告' : 'Markdown 报告'
+function formatBadge(kind) {
+  return kind === 'html' ? 'HTML' : 'MD'
 }
 
 function selectWorkLog(item) {
   selectedWorkLog.value = item
+}
+
+function openReport(report) {
+  return ipc.openPath(report.path)
+}
+
+function revealReport(report) {
+  return ipc.showItemInFolder(report.path)
 }
 
 function openWorkLogHtml(path) {
@@ -207,11 +166,7 @@ function openChat(task) {
 }
 
 function onListModeChange() {
-  if (listMode.value === 'worklogs') {
-    loadWorkLogs()
-  } else if (listMode.value === 'history') {
-    reload()
-  }
+  if (listMode.value === 'worklogs') loadWorkLogs()
 }
 
 // --- 总结任务自动运行 ---
@@ -282,7 +237,7 @@ async function pollWorkLogs() {
     reportList = await ipc.listSummaryWorkLogs()
     if (listMode.value === 'worklogs') workLogs.value = reportList
   } catch (error) {
-    workLogsError.value = error?.message || '无法读取工作日志'
+    workLogsError.value = error?.message || '无法读取工作报告'
     reportList = []
   }
   const reportNames = new Set(reportList.map((entry) => entry.name))
@@ -308,48 +263,9 @@ async function pollWorkLogs() {
   }
   if (!anyActive) stopWorkLogPolling()
 }
-
-async function safely(operation) {
-  try { summaries.error = null; return await operation() }
-  catch (error) { summaries.error = error; return null }
-}
-function reload() {
-  if (listMode.value === 'worklogs') return loadWorkLogs()
-  return safely(() => summaries.loadReports())
-}
-function selectReport(reportId) { return safely(() => summaries.selectReport(reportId)) }
-function setCurrent(reportId) { return safely(() => summaries.setCurrent(reportId)) }
-function retry(report) { return safely(() => summaries.retry(report)) }
-function cancel(reportId) { return safely(() => summaries.cancel(reportId)) }
-function confirm(reportId) { return safely(() => summaries.confirm(reportId)) }
-function exportMarkdown(reportId) { return safely(() => summaries.exportMarkdown(reportId)) }
-function deleteReport(reportId) { return safely(() => summaries.deleteReport(reportId)) }
-function chooseHtmlStyle(reportId) {
-  if (exportingHtml.value) return
-  htmlExportReportId.value = reportId
-  htmlStyleOpen.value = true
-}
-async function exportHtml(style) {
-  if (exportingHtml.value) return null
-  const reportId = htmlExportReportId.value
-  if (!reportId || !style) return null
-  exportingHtml.value = true
-  exportMessage.value = style.mode === 'theme'
-    ? '正在生成 HTML，本地主题将即时完成。'
-    : '正在生成 HTML，将调用所选 AI CLI，完成后写入已选择的位置。'
-  try {
-    summaries.error = null
-    const result = await summaries.exportHtml(reportId, style)
-    exportMessage.value = result?.canceled ? '' : `HTML 已导出：${result.filePath}`
-    htmlStyleOpen.value = false
-    return result
-  } catch (error) {
-    exportMessage.value = ''
-    summaries.error = error
-    return null
-  } finally {
-    exportingHtml.value = false
-  }
-}
 </script>
-<style scoped>.toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}.report-list{margin-bottom:12px;max-height:520px;overflow:auto}</style>
+<style scoped>
+.toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}
+.report-list{margin-bottom:12px;max-height:520px;overflow:auto}
+.report-toolbar{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+</style>
