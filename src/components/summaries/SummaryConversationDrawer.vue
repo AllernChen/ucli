@@ -41,7 +41,7 @@ const tab = ref('history')
 const terminal = ref(null)
 const status = computed(() => taskStatusMeta(props.task?.status))
 const drawerTitle = computed(() =>
-  props.task ? `${props.task.periodLabel} 总结对话 · ${props.task.adapterId}` : '总结对话')
+  props.task ? `${props.task.displayName} · ${props.task.adapterId}` : '总结对话')
 
 // 每次打开都回到「历史记录」，实时终端（v-if 挂载）随之卸载，下次进入时
 // 以全新订阅重新挂载，避免跨打开残留旧输出。

@@ -84,6 +84,7 @@ export const ipc = {
   deleteSession: (sessionId) => u.deleteSession(sessionId),
   listSessions: () => u.listSessions(),
   updateSessionNote: (sessionId, note) => u.updateSessionNote(sessionId, note),
+  resetNativeSession: (sessionId) => u.resetNativeSession(sessionId),
   updateSessionName: (sessionId, name) => u.updateSessionName(sessionId, name),
   updateCodexProviderPolicy: (sessionId, policy) => u.updateCodexProviderPolicy(sessionId, policy),
   // rules

@@ -151,10 +151,12 @@ async function submit() {
       timezone
     })
     const periodLabel = periodOptions.find(option => option.value === form.periodType)?.label || form.periodType
-    const sessionId = await sessions.createSession({
+    // 一次生成 = 一张卡片，但同一周期的多次生成共用一个会话：复用同名同适配器的
+    // 既有 `工作总结（周期）` 会话，避免工作台会话列表随每次生成堆积。
+    const sessionId = await findOrCreateSummarySession({
       adapterId: executorId,
+      periodLabel,
       cwd: prepared.workLogsDir,
-      name: `工作总结（${periodLabel}）`,
       profileId: selectedProfile.value || undefined,
       model: selectedModel.value || undefined
     })
@@ -169,12 +171,29 @@ async function submit() {
       periodLabel,
       periodType: form.periodType,
       suggestedFileName: prepared.suggestedFileName,
-      workLogsDir: prepared.workLogsDir
+      workLogsDir: prepared.workLogsDir,
+      genTime: Date.now()
     })
     close()
   } catch (error) {
     summaries.error = error
   } finally { submitting.value = false }
+}
+
+// 按周期 + 执行 CLI 复用共享会话：同名且同适配器即视为共享会话（取最新一个）。
+async function findOrCreateSummarySession({ adapterId, periodLabel, cwd, profileId, model }) {
+  const list = await ipc.listSessions()
+  const shared = list
+    .filter(session => session.name === `工作总结（${periodLabel}）` && session.adapterId === adapterId)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0]
+  if (shared) return shared.id
+  return sessions.createSession({
+    adapterId,
+    cwd,
+    name: `工作总结（${periodLabel}）`,
+    profileId,
+    model
+  })
 }
 </script>
 

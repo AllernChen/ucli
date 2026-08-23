@@ -127,6 +127,7 @@ const api = {
   deleteSession: (sessionId) => ipcRenderer.invoke('session:delete', sessionId),
   listSessions: () => ipcRenderer.invoke('session:list'),
   updateSessionNote: (sessionId, note) => ipcRenderer.invoke('session:update-note', sessionId, note),
+  resetNativeSession: (sessionId) => ipcRenderer.invoke('session:reset-native', sessionId),
   updateSessionName: (sessionId, name) => ipcRenderer.invoke('session:update-name', sessionId, name),
   updateCodexProviderPolicy: (sessionId, policy) =>
     ipcRenderer.invoke('session:update-codex-provider-policy', sessionId, policy),

@@ -1,7 +1,7 @@
 <template>
   <div v-if="task" class="summary-task-detail">
     <div class="detail-header">
-      <a-tag color="blue">{{ task.periodLabel }}</a-tag>
+      <span class="detail-name" :title="task.displayName">{{ task.displayName }}</span>
       <span class="detail-adapter">{{ task.adapterId }}</span>
       <a-tag :color="status.color">{{ status.label }}</a-tag>
       <div class="detail-header-actions">
@@ -104,6 +104,10 @@ function openHtml(path) {
   gap: 8px;
   margin-bottom: 14px;
   flex-wrap: wrap;
+}
+.detail-name {
+  font-weight: 600;
+  font-size: 14px;
 }
 .detail-adapter {
   color: #8c8c8c;

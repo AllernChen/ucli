@@ -8,7 +8,7 @@
     @keydown.enter="emit('select')"
   >
     <div class="task-card-top">
-      <a-tag color="blue" class="task-card-period">{{ task.periodLabel }}</a-tag>
+      <span class="task-card-title" :title="task.displayName">{{ task.displayName }}</span>
       <span class="task-card-adapter">{{ task.adapterId }}</span>
     </div>
     <div class="task-card-status">
@@ -16,7 +16,6 @@
       <a-tag :color="status.color">{{ status.label }}</a-tag>
     </div>
     <div v-if="task.lastActivity" class="task-card-activity">{{ task.lastActivity }}</div>
-    <div class="task-card-time">{{ timeLabel }}</div>
     <div class="task-card-actions" @click.stop>
       <a-button size="small" type="link" @click="emit('open-chat')">查看对话</a-button>
       <a-popconfirm
@@ -42,8 +41,6 @@ const props = defineProps({
 const emit = defineEmits(['select', 'open-chat', 'remove'])
 
 const status = computed(() => taskStatusMeta(props.task.status))
-const timeLabel = computed(() =>
-  props.task.createdAt ? new Date(props.task.createdAt).toLocaleString() : '')
 </script>
 
 <style scoped>
@@ -69,12 +66,19 @@ const timeLabel = computed(() =>
   gap: 8px;
   margin-bottom: 6px;
 }
-.task-card-period {
-  margin: 0;
+.task-card-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .task-card-adapter {
   color: #8c8c8c;
   font-size: 12px;
+  flex-shrink: 0;
 }
 .task-card-status {
   display: flex;
@@ -92,10 +96,6 @@ const timeLabel = computed(() =>
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.task-card-time {
-  color: #bfbfbf;
-  font-size: 11px;
 }
 .task-card-actions {
   display: flex;

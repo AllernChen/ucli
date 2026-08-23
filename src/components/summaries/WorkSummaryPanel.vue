@@ -10,11 +10,10 @@
     <a-alert v-if="summaries.error" type="error" show-icon :message="summaries.error.message" />
     <a-alert v-if="workLogsError" type="error" show-icon :message="workLogsError" />
     <a-spin :spinning="summaries.loading || workLogsLoading || summaryTasks.loading">
-      <a-row :gutter="14">
+      <!-- 任务态：左栏任务卡片 + 右栏进度/产物预览 -->
+      <a-row v-if="listMode === 'tasks'" :gutter="14">
         <a-col :span="6">
-          <!-- 任务态：左栏是单次总结任务的卡片列表 -->
           <a-list
-            v-if="listMode === 'tasks'"
             :data-source="summaryTasks.tasks"
             :loading="summaryTasks.loading"
             :locale="{ emptyText: '还没有总结任务' }"
@@ -23,59 +22,68 @@
             <template #renderItem="{ item }">
               <SummaryTaskCard
                 :task="item"
-                :active="item.sessionId === summaryTasks.selectedTaskId"
-                @select="summaryTasks.selectTask(item.sessionId)"
+                :active="item.genId === summaryTasks.selectedTaskId"
+                @select="summaryTasks.selectTask(item.genId)"
                 @open-chat="openChat(item)"
-                @remove="summaryTasks.removeTask(item.sessionId)"
+                @remove="summaryTasks.removeTask(item.genId)"
               />
-            </template>
-          </a-list>
-          <!-- 工作报告态：按文件列出生成的报告 -->
-          <a-list
-            v-else-if="listMode === 'worklogs'"
-            bordered
-            :data-source="workLogs"
-            class="report-list"
-          >
-            <template #renderItem="{ item }">
-              <a-list-item @click="selectWorkLog(item)">
-                <a-list-item-meta>
-                  <template #title>
-                    <a-space size="small">
-                      <span>{{ item.name }}</span>
-                      <a-tag :color="item.kind === 'html' ? 'purple' : 'blue'">{{ formatBadge(item.kind) }}</a-tag>
-                    </a-space>
-                  </template>
-                  <template #description>{{ new Date(item.mtime).toLocaleString() }}</template>
-                </a-list-item-meta>
-              </a-list-item>
             </template>
           </a-list>
         </a-col>
         <a-col :span="18">
-          <!-- 任务态：选中任务的进度 / 产物预览 -->
           <SummaryTaskDetail
-            v-if="listMode === 'tasks'"
             :task="selectedTask"
             @open-chat="openChat(selectedTask)"
           />
-          <!-- 工作报告态：报告管理器（操作工具栏 + Markdown / HTML 预览） -->
-          <template v-else-if="listMode === 'worklogs'">
-            <div v-if="selectedWorkLog" class="report-toolbar">
-              <a-tag :color="selectedWorkLog.kind === 'html' ? 'purple' : 'blue'">{{ formatBadge(selectedWorkLog.kind) }}</a-tag>
-              <a-space>
-                <a-button size="small" @click="openReport(selectedWorkLog)">打开</a-button>
-                <a-button size="small" @click="revealReport(selectedWorkLog)">在文件夹中显示</a-button>
-                <a-button size="small" :loading="isConverting(selectedWorkLog.name)" @click="convertFormat(selectedWorkLog)">
-                  {{ isConverting(selectedWorkLog.name) ? '转换中…' : '转换格式' }}
-                </a-button>
-              </a-space>
-              <span v-if="conversionError" class="report-convert-error">{{ conversionError }}</span>
-            </div>
-            <WorkLogReportView :work-log="selectedWorkLog" @open-html="openWorkLogHtml" />
-          </template>
         </a-col>
       </a-row>
+      <!-- 工作报告态：列表管理页面（每行 = 报告 + 格式徽章 + 操作） -->
+      <template v-else>
+        <a-alert
+          v-if="conversionError"
+          type="error"
+          show-icon
+          class="report-convert-alert"
+          :message="conversionError"
+        />
+        <a-table
+          :data-source="workLogs"
+          :columns="reportColumns"
+          :loading="workLogsLoading"
+          row-key="name"
+          :pagination="false"
+          class="report-table"
+          :locale="{ emptyText: '还没有生成的工作总结' }"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.dataIndex === 'name'">
+              <a class="report-name" @click="previewReport(record)">{{ record.name }}</a>
+              <a-tag :color="record.kind === 'html' ? 'purple' : 'blue'">{{ formatBadge(record.kind) }}</a-tag>
+            </template>
+            <template v-else-if="column.dataIndex === 'mtime'">
+              {{ new Date(record.mtime).toLocaleString() }}
+            </template>
+            <template v-else-if="column.dataIndex === 'actions'">
+              <a-space>
+                <a-button size="small" type="link" @click="previewReport(record)">预览</a-button>
+                <a-button size="small" type="link" @click="openReport(record)">打开</a-button>
+                <a-button size="small" type="link" @click="revealReport(record)">在文件夹中显示</a-button>
+                <a-button size="small" type="link" :loading="isConverting(record.name)" @click="convertFormat(record)">
+                  {{ isConverting(record.name) ? '转换中…' : '转换格式' }}
+                </a-button>
+              </a-space>
+            </template>
+          </template>
+        </a-table>
+        <a-drawer
+          v-model:open="previewOpen"
+          :title="previewWorkLog?.name || '报告预览'"
+          width="70%"
+          destroy-on-close
+        >
+          <WorkLogReportView v-if="previewWorkLog" :work-log="previewWorkLog" @open-html="openWorkLogHtml" />
+        </a-drawer>
+      </template>
     </a-spin>
     <SummaryConversationDrawer v-model:open="drawerOpen" :task="chatTask" />
     <SummaryGenerateDialog v-model:open="dialogOpen" @open="onSummaryOpen" />
@@ -89,6 +97,7 @@ import { useSessionsStore } from '../../stores/sessions.js'
 import { useSummaryTasksStore } from '../../stores/summaryTasks.js'
 import ipc from '../../ipc.js'
 import { convertTargetFileName, dirnameOf, buildConversionPrompt } from './formatConversion.js'
+import { appendGeneration, reportProducedByRun } from './summaryTaskNote.js'
 import SummaryGenerateDialog from './SummaryGenerateDialog.vue'
 import SummaryTaskCard from './SummaryTaskCard.vue'
 import SummaryTaskDetail from './SummaryTaskDetail.vue'
@@ -107,7 +116,14 @@ const listMode = ref('tasks')
 const workLogs = ref([])
 const workLogsLoading = ref(false)
 const workLogsError = ref('')
-const selectedWorkLog = ref(null)
+// 工作报告：列表管理页的预览抽屉状态。
+const previewOpen = ref(false)
+const previewWorkLog = ref(null)
+const reportColumns = [
+  { title: '报告名称', dataIndex: 'name', key: 'name' },
+  { title: '修改时间', dataIndex: 'mtime', key: 'mtime', width: 180 },
+  { title: '操作', dataIndex: 'actions', key: 'actions', width: 330 }
+]
 const drawerOpen = ref(false)
 const chatTask = ref(null)
 let workLogPollTimer = null
@@ -116,7 +132,7 @@ const conversionError = ref('')
 let conversionPollTimer = null
 
 const selectedTask = computed(() =>
-  summaryTasks.tasks.find((task) => task.sessionId === summaryTasks.selectedTaskId) || null)
+  summaryTasks.tasks.find((task) => task.genId === summaryTasks.selectedTaskId) || null)
 
 onMounted(async () => {
   await summaryTasks.init()
@@ -153,8 +169,9 @@ function formatBadge(kind) {
   return kind === 'html' ? 'HTML' : 'MD'
 }
 
-function selectWorkLog(item) {
-  selectedWorkLog.value = item
+function previewReport(report) {
+  previewWorkLog.value = report
+  previewOpen.value = true
 }
 
 function openReport(report) {
@@ -251,33 +268,61 @@ function onListModeChange() {
 // --- 总结任务自动运行 ---
 async function onSummaryOpen(p) {
   const {
-    sessionId, adapterId, briefPrompt, periodLabel, periodType, suggestedFileName, workLogsDir
+    sessionId, adapterId, briefPrompt, periodLabel, periodType, suggestedFileName, workLogsDir, genTime
   } = p
-  summaryTasks.addTask({ sessionId, adapterId, periodLabel, periodType, suggestedFileName, workLogsDir })
-  // 持久化任务↔产物文件名关联，供重启后从会话记录还原任务状态。
-  if (suggestedFileName) {
-    await ipc.updateSessionNote(sessionId, suggestedFileName).catch((error) => {
-      ipc.log('warn', 'updateSessionNote failed:', error?.message || String(error))
-    })
+  const createdAt = genTime || Date.now()
+  const genId = `${sessionId}:${createdAt}`
+  // 共享会话一次只跑一轮：上一轮未结束前不注入新任务，避免往运行中的 CLI 塞第二条指令。
+  if (summaryTasks.tasks.some((t) =>
+    t.sessionId === sessionId && (t.status === 'starting' || t.status === 'running'))) {
+    summaries.error = new Error('上一轮总结仍在运行，请等待完成后再生成')
+    return
   }
-  summaryTasks.selectTask(sessionId)
+  // 持久化本次生成记录到会话 taskNote（JSON 数组），供重启后从会话记录还原卡片。
+  await sessions.updateNote(sessionId, appendGeneration(sessions.byId(sessionId)?.taskNote || '', {
+    t: createdAt, f: suggestedFileName, pt: periodType, a: adapterId
+  })).catch((error) => {
+    ipc.log('warn', 'updateSessionNote failed:', error?.message || String(error))
+  })
+  const task = summaryTasks.addTask({ genId, sessionId, adapterId, periodLabel, periodType, suggestedFileName, workLogsDir, createdAt })
+  summaryTasks.selectTask(genId)
   listMode.value = 'tasks'
-  runSummaryTask(sessionId, briefPrompt)
+  runSummaryTask(task, briefPrompt)
 }
 
-async function runSummaryTask(sessionId, briefPrompt) {
+async function runSummaryTask(task, briefPrompt) {
+  const sessionId = task.sessionId
   try {
-    await ipc.startAdapter(sessionId)
+    await ensureSessionRunable(sessionId)
     await waitForReady(sessionId)
     // CLI 就绪后 TUI 输入区可能尚未渲染完成，稍等片刻再注入任务。
     await new Promise(resolve => setTimeout(resolve, 500))
     await ipc.sendTurn(sessionId, briefPrompt)
-    summaryTasks.setStatus(sessionId, 'running')
+    summaryTasks.setStatus(task.genId, 'running')
     startWorkLogPolling()
   } catch (error) {
-    summaryTasks.setError(sessionId, error)
+    summaryTasks.setError(task.genId, error)
     stopWorkLogPolling()
   }
+}
+
+// 共享会话的二次运行：进程已退出/离线时，先清掉原生 CLI 会话 id（避免 codex 等
+// resume 旧线程），再重启成全新一轮；首次新建的会话直接启动；已在线则等待就绪。
+async function ensureSessionRunable(sessionId) {
+  const session = sessions.byId(sessionId)
+  const status = session?.status
+  if (status === 'starting') {
+    await ipc.startAdapter(sessionId)
+    return
+  }
+  if (['running', 'ready', 'waiting'].includes(status)) {
+    return
+  }
+  // 复用路径：清掉上一轮残留的「已就绪」标记，避免 waitForReady 的快捷判断
+  // 误命中旧状态而跳过对新一轮就绪的等待。
+  if (session) session.lastActivity = '启动中…'
+  await ipc.resetNativeSession(sessionId).catch(() => {})
+  await sessions.restart(sessionId)
 }
 
 function waitForReady(sessionId, timeoutMs = 60_000) {
@@ -319,7 +364,6 @@ async function pollWorkLogs() {
     workLogsError.value = error?.message || '无法读取工作报告'
     reportList = []
   }
-  const reportNames = new Set(reportList.map((entry) => entry.name))
   const activeTasks = summaryTasks.tasks.filter((task) =>
     task.status === 'starting' || task.status === 'running')
   let anyActive = false
@@ -328,14 +372,15 @@ async function pollWorkLogs() {
       anyActive = true
       continue
     }
-    const htmlFileName = task.suggestedFileName.replace(/\.md$/i, '.html')
-    if (reportNames.has(task.suggestedFileName) || reportNames.has(htmlFileName)) {
-      summaryTasks.setStatus(task.sessionId, 'completed')
+    // 只认「本次运行实际写出的」文件：同周期重新生成时磁盘上可能已有同名旧报告，
+    // 其 mtime 早于本次生成时间，须等 CLI 真正覆盖后才算完成，避免误标 completed。
+    if (reportProducedByRun(reportList, task)) {
+      summaryTasks.setStatus(task.genId, 'completed')
       continue
     }
     const session = sessions.byId(task.sessionId)
     if (session && (session.status === 'exited' || session.status === 'offline')) {
-      summaryTasks.setStatus(task.sessionId, task.error ? 'failed' : 'interrupted')
+      summaryTasks.setStatus(task.genId, task.error ? 'failed' : 'interrupted')
       continue
     }
     anyActive = true
@@ -346,6 +391,8 @@ async function pollWorkLogs() {
 <style scoped>
 .toolbar{display:flex;justify-content:flex-end;margin-bottom:12px}
 .report-list{margin-bottom:12px;max-height:520px;overflow:auto}
-.report-toolbar{display:flex;align-items:center;gap:12px;margin-bottom:12px}
-.report-convert-error{color:#ff4d4f;font-size:12px}
+.report-table{margin-top:4px}
+.report-convert-alert{margin-bottom:12px}
+.report-name{color:#1677ff;cursor:pointer;margin-right:8px}
+.report-name:hover{color:#4096ff}
 </style>

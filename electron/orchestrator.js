@@ -3181,6 +3181,17 @@ export function createOrchestrator() {
       if (e) { e.session.taskNote = note; const db = getDb(); if (db) { db.updateSession(sessionId, { task_note: note }); scheduleFlush() } }
       return true
     })
+    // 清除会话持有的原生 CLI 会话 id：复用共享会话重跑时，codex 等适配器会
+    // 因 `cliSessionId` 存在而 `resume` 旧线程，须先清空再重启成全新一轮。
+    ipcMain.handle('session:reset-native', (_e, sessionId) => {
+      const e = sessions.get(sessionId)
+      if (e) {
+        e.session.cliSessionId = null
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { native_session_id: null }); scheduleFlush() }
+      }
+      return true
+    })
     ipcMain.handle('session:update-name', (_e, sessionId, name) => {
       const e = sessions.get(sessionId)
       if (e) { e.session.name = name; const db = getDb(); if (db) { db.updateSession(sessionId, { name }); scheduleFlush() } }

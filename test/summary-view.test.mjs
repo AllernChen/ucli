@@ -5,6 +5,10 @@ import { createPinia, setActivePinia } from 'pinia'
 import { parse as parseSfc } from '@vue/compiler-sfc'
 import { openSummaryReportLink } from '../src/summaryLinks.js'
 import { convertTargetFileName, dirnameOf, buildConversionPrompt } from '../src/components/summaries/formatConversion.js'
+import {
+  parseTaskNote, serializeTaskNote, appendGeneration, dropGeneration, buildCardName,
+  reportProducedByRun
+} from '../src/components/summaries/summaryTaskNote.js'
 
 let progressHandler = null
 let subscriptions = 0
@@ -229,7 +233,8 @@ test('summary workspace components cover generation, safe reading, history, retr
   const jsFiles = [
     '../src/stores/summaryTasks.js',
     '../src/components/summaries/summaryTaskStatus.js',
-    '../src/components/summaries/formatConversion.js'
+    '../src/components/summaries/formatConversion.js',
+    '../src/components/summaries/summaryTaskNote.js'
   ]
   const sources = files.map(file => readFileSync(new URL(file, import.meta.url), 'utf8'))
   for (const [index, source] of sources.entries()) {
@@ -245,15 +250,22 @@ test('summary workspace components cover generation, safe reading, history, retr
     '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试',
     '工作报告', 'listSummaryWorkLogs', 'readSummaryWorkLog',
     '在浏览器中打开', 'open-html', 'openWorkLogHtml',
-    // Report manager: format badge, open / reveal-in-folder, CLI-driven conversion.
+    // Report manager: list-first management page — each row = report + format
+    // badge + actions (preview in a drawer / open / reveal-in-folder / convert).
     'formatBadge', '在文件夹中显示', 'showItemInFolder',
     '转换格式', '转换中…', 'convertTargetFileName', 'buildConversionPrompt', '格式转换（',
+    'previewWorkLog', 'previewOpen', 'a-drawer', 'report-table', '报告名称',
+    '还没有生成的工作总结', 'previewReport',
     // Embedded CLI lives in the conversation drawer: SessionTerminal + auto-send.
     'SessionTerminal', 'startAdapter', 'sendTurn', 'session:terminal-output',
     // Task dashboard: cards, detail, and the right-hand conversation drawer.
     'SummaryTaskCard', 'SummaryTaskDetail', 'SummaryConversationDrawer', 'summaryTaskStatus',
     'attachTerminal', 'refit', 'getSessionHistory', 'updateSessionNote',
     'suggestedFileName', 'summaryTasks.addTask', 'setStatus',
+    // Shared-session model: one generation = one card (genId keyed), all
+    // generations for a period reuse ONE session; records live in taskNote JSON.
+    'genId', 'displayName', 'summaryTaskNote', 'parseTaskNote', 'appendGeneration',
+    'buildCardName', 'ensureSessionRunable', 'resetNativeSession',
     '正在准备材料并启动 CLI', 'AI 正在分析并撰写总结',
     // HTML work logs preview inline in a sandboxed srcdoc iframe.
     'srcdoc', 'sandbox', 'USE_PROFILES'
@@ -294,6 +306,69 @@ test('format conversion derives target names, dirname, and safe prompts', () => 
   assert.match(prompt, /不可信数据/)
 })
 
+test('summary taskNote serializes shared-session generation records and stays legacy-compatible', () => {
+  // 旧格式：单文件名字符串 → 一张卡（t=0）；空 / 非法 → 无记录。
+  assert.deepEqual(parseTaskNote('2026-08-14-summary.md'), [
+    { t: 0, f: '2026-08-14-summary.md' }
+  ])
+  assert.deepEqual(parseTaskNote(null), [])
+  assert.deepEqual(parseTaskNote(''), [])
+  assert.deepEqual(parseTaskNote('[not json'), [])
+  // 新格式：JSON 数组；非法元素被过滤，缺省字段补空。
+  assert.deepEqual(parseTaskNote('[{"t":1000,"f":"a.md","pt":"week","a":"claude"}]'), [
+    { t: 1000, f: 'a.md', pt: 'week', a: 'claude' }
+  ])
+  assert.deepEqual(parseTaskNote('[{"t":1,"f":"ok.md"},{"x":1}]'), [
+    { t: 1, f: 'ok.md', pt: null, a: null }
+  ])
+
+  // append 追加并保留历史。
+  let note = appendGeneration(null, { t: 100, f: 'a.md', pt: 'week', a: 'codex' })
+  note = appendGeneration(note, { t: 200, f: 'b.md' })
+  assert.deepEqual(parseTaskNote(note).map(g => g.t), [100, 200])
+
+  // drop 摘除后保留其余；全部移除 → ''（清空 taskNote）。
+  note = dropGeneration(note, 's:100')
+  assert.deepEqual(parseTaskNote(note).map(g => g.t), [200])
+  note = dropGeneration(note, 's:200')
+  assert.equal(note, '')
+
+  // serializeTaskNote 透传序列化（规范化由 append/parse 负责）。
+  assert.equal(serializeTaskNote([{ t: 7, f: 'x.md', pt: 'week', a: 'codex' }]),
+    '[{"t":7,"f":"x.md","pt":"week","a":"codex"}]')
+
+  // 卡片命名：工作总结（周期）生成时间。
+  assert.equal(
+    buildCardName('每周', new Date(2026, 7, 21, 15, 30).getTime()),
+    '工作总结（每周）2026-08-21 15:30'
+  )
+  assert.equal(buildCardName('每周', 0), '工作总结（每周）')
+  assert.equal(buildCardName('每周', null), '工作总结（每周）')
+
+  // 完成判定只认「本次运行实际写出的」文件：同周期重新生成时磁盘上的同名旧报告
+  // mtime 早于本次生成时间，不得据此误判完成；CLI 真正覆盖后才算。
+  const gen = { suggestedFileName: '2026-W33-summary.md', createdAt: 1787296202855 }
+  assert.equal(
+    reportProducedByRun(
+      [{ name: '2026-W33-summary.md', mtime: 1787242791000 }], // 旧文件：00:19 < 15:10
+      gen),
+    false)
+  assert.equal(
+    reportProducedByRun(
+      [{ name: '2026-W33-summary.md', mtime: 1787296800000 }], // 覆盖后：晚于生成时间
+      gen),
+    true)
+  // HTML 孪生文件同样按 mtime 判定。
+  assert.equal(
+    reportProducedByRun(
+      [{ name: '2026-W33-summary.html', mtime: 1787296800000 }],
+      gen),
+    true)
+  // 文件不存在 / 缺建议文件名 → false。
+  assert.equal(reportProducedByRun([{ name: 'other.md', mtime: 9999999999999 }], gen), false)
+  assert.equal(reportProducedByRun([{ name: 'x.md', mtime: 9999999999999 }], { createdAt: 1 }), false)
+})
+
 test('summaryTasks store reconstructs tasks from persisted sessions and drives the state machine', async () => {
   const originalListSessions = window.ucli.listSessions
   const originalListWorkLogs = window.ucli.listSummaryWorkLogs
@@ -307,12 +382,15 @@ test('summaryTasks store reconstructs tasks from persisted sessions and drives t
     }
     return () => { if (eventHandler === handler) eventHandler = null }
   }
+  // 一次生成 = 一张卡（genId = sessionId:生成时间戳），生成记录持久化在 taskNote
+  // JSON 数组；旧格式单文件名字符串仍按一张卡解析（t=0 → 回落 session.createdAt）。
   window.ucli.listSessions = async () => [
     { id: 's-completed', name: '工作总结（每周）', adapterId: 'claude', cwd: 'C:/work',
       taskNote: '2026-08-14-summary.md', status: 'exited', createdAt: 2000, updatedAt: 2100,
       lastActivity: '进程退出 (0)' },
     { id: 's-running', name: '工作总结（每月）', adapterId: 'codex', cwd: 'C:/work',
-      taskNote: null, status: 'running', createdAt: 1000, updatedAt: 1100, lastActivity: '运行中' },
+      taskNote: JSON.stringify([{ t: 1000, f: '2026-08-21-summary.md', pt: 'month', a: 'codex' }]),
+      status: 'running', createdAt: 1000, updatedAt: 1100, lastActivity: '运行中' },
     { id: 's-interrupted', name: '工作总结（每日）', adapterId: 'opencode', cwd: 'C:/work',
       taskNote: '2026-08-21-summary.md', status: 'exited', createdAt: 500, updatedAt: 600,
       lastActivity: '进程退出 (1)' },
@@ -330,26 +408,28 @@ test('summaryTasks store reconstructs tasks from persisted sessions and drives t
     await store.init()
     assert.deepEqual(store.tasks.map(task => task.sessionId),
       ['s-completed', 's-running', 's-interrupted'])
-    assert.equal(store.selectedTaskId, 's-completed')
-    const completed = store.tasks.find(task => task.sessionId === 's-completed')
+    assert.equal(store.selectedTaskId, 's-completed:0')
+    const completed = store.tasks.find(task => task.genId === 's-completed:0')
     assert.equal(completed.status, 'completed')
     assert.equal(completed.periodLabel, '每周')
     assert.equal(completed.suggestedFileName, '2026-08-14-summary.md')
-    assert.equal(store.tasks.find(task => task.sessionId === 's-running').status, 'running')
-    assert.equal(store.tasks.find(task => task.sessionId === 's-interrupted').status, 'interrupted')
+    assert.match(completed.displayName, /^工作总结（每周）/)
+    assert.equal(store.tasks.find(task => task.genId === 's-running:1000').status, 'running')
+    assert.equal(store.tasks.find(task => task.genId === 's-interrupted:0').status, 'interrupted')
 
-    // addTask → starting；setStatus → running；setError → failed。
-    store.addTask({ sessionId: 's-new', adapterId: 'codex', periodLabel: '每日',
-      periodType: 'day', suggestedFileName: '2026-08-21-summary.md', workLogsDir: 'C:/work' })
+    // addTask → starting；setStatus → running；setError → failed（按 genId 键控）。
+    store.addTask({ genId: 's-new:9000', sessionId: 's-new', adapterId: 'codex', periodLabel: '每日',
+      periodType: 'day', suggestedFileName: '2026-08-21-summary.md', workLogsDir: 'C:/work', createdAt: 9000 })
     assert.equal(store.tasks[0].sessionId, 's-new')
+    assert.equal(store.tasks[0].genId, 's-new:9000')
     assert.equal(store.tasks[0].status, 'starting')
-    store.setStatus('s-new', 'running')
+    store.setStatus('s-new:9000', 'running')
     assert.equal(store.tasks[0].status, 'running')
-    store.setError('s-new', new Error('CLI 启动失败'))
+    store.setError('s-new:9000', new Error('CLI 启动失败'))
     assert.equal(store.tasks[0].status, 'failed')
     assert.equal(store.tasks[0].lastActivity, 'CLI 启动失败')
 
-    // session:event 事件驱动 lastActivity 与 token 统计。
+    // session:event 事件路由到该会话的活动卡；无活动卡时回落到候选第一张。
     store._onEvent({ sessionId: 's-new', type: 'ready', ts: 3000 })
     assert.equal(store.tasks[0].lastActivity, '已就绪')
     store._onEvent({ sessionId: 's-new', type: 'stats_update', ts: 3001,
@@ -357,11 +437,11 @@ test('summaryTasks store reconstructs tasks from persisted sessions and drives t
     assert.deepEqual(store.tasks[0].tokens, { input: 10, output: 20 })
     assert.equal(store.tasks[0].costUsd, 0.5)
 
-    // removeTask 重选下一任务；addTask 对已存在 sessionId 就地更新（不产生重复卡）。
-    store.selectTask('s-new')
-    store.removeTask('s-new')
-    assert.equal(store.selectedTaskId, 's-completed')
-    store.addTask({ sessionId: 's-completed', adapterId: 'claude', periodLabel: '每周',
+    // removeTask 重选下一任务；addTask 对已存在 genId 就地更新（不产生重复卡）。
+    store.selectTask('s-new:9000')
+    await store.removeTask('s-new:9000')
+    assert.equal(store.selectedTaskId, 's-completed:0')
+    store.addTask({ genId: 's-completed:0', sessionId: 's-completed', adapterId: 'claude', periodLabel: '每周',
       periodType: 'week', suggestedFileName: '2026-08-14-summary.md', workLogsDir: 'C:/work' })
     assert.equal(store.tasks.filter(task => task.sessionId === 's-completed').length, 1)
     assert.equal(store.tasks.find(task => task.sessionId === 's-completed').status, 'starting')
@@ -372,7 +452,45 @@ test('summaryTasks store reconstructs tasks from persisted sessions and drives t
     assert.equal(subscribeCount, 1)
     assert.equal(store.tasks.filter(task => task.sessionId === 's-completed').length, 1)
     eventHandler({ sessionId: 's-running', type: 'exit', code: 0, ts: 4000 })
-    assert.equal(store.tasks.find(task => task.sessionId === 's-running').lastActivity, '进程退出 (0)')
+    assert.equal(store.tasks.find(task => task.genId === 's-running:1000').lastActivity, '进程退出 (0)')
+  } finally {
+    store.dispose()
+    window.ucli.listSessions = originalListSessions
+    window.ucli.listSummaryWorkLogs = originalListWorkLogs
+    window.ucli.on = originalOn
+  }
+})
+
+test('repeated mount cycles (tab switches) do not duplicate reconstructed tasks', async () => {
+  const originalListSessions = window.ucli.listSessions
+  const originalListWorkLogs = window.ucli.listSummaryWorkLogs
+  const originalOn = window.ucli.on
+  window.ucli.on = () => () => {}
+  // 共享会话模型：一个会话（taskNote = 生成记录 JSON 数组）还原出多张卡。
+  window.ucli.listSessions = async () => [
+    { id: 'a', name: '工作总结（每周）', adapterId: 'claude', cwd: 'C:/work',
+      taskNote: JSON.stringify([
+        { t: 1000, f: '2026-W33-summary.md', pt: 'week', a: 'claude' },
+        { t: 2000, f: '2026-W33-2-summary.md', pt: 'week', a: 'claude' }
+      ]), status: 'exited', createdAt: 1000, updatedAt: 1100, lastActivity: '' }
+  ]
+  window.ucli.listSummaryWorkLogs = async () => []
+  setActivePinia(createPinia())
+  const store = useSummaryTasksStore()
+  try {
+    await store.init()
+    assert.equal(store.tasks.length, 2)
+    assert.equal(store.tasks.filter(task => task.sessionId === 'a').length, 2)
+    store.selectTask('a:2000')
+    // 面板在 tab 切换时卸载/重挂：dispose 重置订阅后 init 会重建。
+    // init 必须先清空旧列表，否则每切换一次任务卡就翻倍。
+    store.dispose()
+    await store.init()
+    assert.equal(store.tasks.length, 2)
+    assert.equal(store.selectedTaskId, 'a:2000')
+    store.dispose()
+    await store.init()
+    assert.equal(store.tasks.length, 2)
   } finally {
     store.dispose()
     window.ucli.listSessions = originalListSessions
