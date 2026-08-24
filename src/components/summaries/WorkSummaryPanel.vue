@@ -40,11 +40,12 @@ const dialogOpen = ref(false)
 const drawerOpen = ref(false)
 const conversationReport = ref(null)
 const selectedProgress = computed(() => summaries.progress[summaries.selectedReportId] || null)
+const owner = Symbol('work-summary-panel')
 let alive = true
 
 onMounted(async () => {
   try {
-    await summaries.init()
+    await summaries.init(owner)
     if (!alive) return
     const initial = summaries.reports.find(report => report.isCurrent) || summaries.reports[0]
     if (initial) await summaries.selectReport(initial.id)
@@ -54,7 +55,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   alive = false
-  summaries.dispose()
+  summaries.dispose(owner)
 })
 
 async function refresh() {

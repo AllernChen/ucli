@@ -364,6 +364,75 @@ test('mounted panel unmount preserves a pending initialization for the next moun
   assert.equal(listeners.size, 0)
 })
 
+test('mounted panels sharing a store retain progress ownership until the final panel unmounts', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ createPinia } = await import('pinia'))
+  ;({ defineComponent } = Vue)
+  ;({ flushPromises, shallowMount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const stubs = createStubs()
+  const listeners = new Set()
+  let cancellations = 0
+  const report = {
+    id: 'shared', version: 1, status: 'running', runPhase: 'running', markdown: null,
+    sessionId: 'session-shared', periodType: 'week', periodStart: 1, periodEndExclusive: 2,
+    timezone: 'Asia/Shanghai', executorId: 'claude', profileId: null, model: null, isCurrent: true
+  }
+  const api = window.ucli
+  const originalApi = { ...api }
+  Object.assign(api, {
+    listSummaryReports: async () => [report], getSummaryReport: async () => report,
+    startInteractiveSummary: async () => ({ report, sessionId: report.sessionId }),
+    cancelSummary: async () => { cancellations += 1 }, setCurrentSummary: async () => report,
+    deleteSummaryReport: async () => ({ currentReportId: null }), exportSummaryMarkdown: async () => ({ canceled: false }),
+    exportSummaryHtml: async () => ({ canceled: false }),
+    onSummaryProgress: listener => { listeners.add(listener); return () => listeners.delete(listener) }
+  })
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let first
+  let second
+  try {
+    const panel = await loadMountedPanel(vite, stubs)
+    const options = {
+      global: {
+        plugins: [createPinia()],
+        stubs: {
+          SummaryGenerateDialog: stubs.GenerateDialogStub, SummaryReportView: stubs.ReportViewStub,
+          SummaryHistory: stubs.HistoryStub, SummaryConversationDrawer: stubs.ConversationStub,
+          'a-button': { template: '<button><slot /></button>' }, 'a-alert': { template: '<div><slot /></div>' },
+          'a-list': { template: '<div><slot /></div>' }, 'a-list-item': { template: '<div><slot /></div>' },
+          'a-list-item-meta': { template: '<div><slot /></div>' }, 'a-row': { template: '<div><slot /></div>' },
+          'a-col': { template: '<div><slot /></div>' }, 'a-spin': { template: '<div><slot /></div>' }
+        }
+      }
+    }
+    first = shallowMount(panel, options)
+    second = shallowMount(panel, options)
+    await flushPromises()
+    assert.equal(listeners.size, 1)
+
+    first.unmount()
+    first = null
+    assert.equal(listeners.size, 1)
+    for (const listener of listeners) listener({ reportId: 'shared', status: 'running', phase: 'running', completed: 1, total: 2, text: '第二个面板仍在接收进度' })
+    await flushPromises()
+    assert.match(second.get('[data-testid="report-progress"]').text(), /第二个面板仍在接收进度/)
+    assert.equal(cancellations, 0)
+
+    second.unmount()
+    second = null
+    assert.equal(listeners.size, 0)
+  } finally {
+    first?.unmount()
+    second?.unmount()
+    await flushPromises()
+    await vite.close()
+    Object.assign(api, originalApi)
+  }
+})
+
 test('mounted conversation drawer never falls back when an imported report has no session', async () => {
   Vue = await import('vue')
   ;({ createServer } = await import('vite'))

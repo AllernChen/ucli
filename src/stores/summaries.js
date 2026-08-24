@@ -18,12 +18,13 @@ function samePeriod(report) {
 }
 
 const storeMetadata = new WeakMap()
+const DEFAULT_OWNER = Symbol('summaries-store-owner')
 
 function metadata(store) {
   const state = store.$state
   let value = storeMetadata.get(state)
   if (!value) {
-    value = { unsubscribe: null, initPromise: null, selectionEpoch: 0, terminalReports: new Set(), deletedReports: new Set() }
+    value = { unsubscribe: null, initPromise: null, owners: new Set(), selectionEpoch: 0, terminalReports: new Set(), deletedReports: new Set() }
     storeMetadata.set(state, value)
   }
   return value
@@ -48,8 +49,9 @@ export const useSummariesStore = defineStore('summaries', {
     selectedReport: state => state.reports.find(report => report.id === state.selectedReportId) || null
   },
   actions: {
-    async init() {
+    async init(owner = DEFAULT_OWNER) {
       const meta = metadata(this)
+      meta.owners.add(owner)
       if (!meta.unsubscribe) meta.unsubscribe = ipc.onSummaryProgress(payload => this.applyProgress(payload))
       if (this.initialized) return this.reports
       if (meta.initPromise) return meta.initPromise
@@ -221,8 +223,10 @@ export const useSummariesStore = defineStore('summaries', {
       return ipc.exportSummaryHtml({ reportId, style })
     },
 
-    dispose() {
+    dispose(owner = DEFAULT_OWNER) {
       const meta = metadata(this)
+      meta.owners.delete(owner)
+      if (meta.owners.size) return
       meta.unsubscribe?.()
       meta.unsubscribe = null
     }
