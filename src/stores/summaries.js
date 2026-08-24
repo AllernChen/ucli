@@ -225,9 +225,6 @@ export const useSummariesStore = defineStore('summaries', {
       const meta = metadata(this)
       meta.unsubscribe?.()
       meta.unsubscribe = null
-      meta.initPromise = null
-      storeMetadata.delete(this.$state)
-      this.$dispose()
     }
   }
 })

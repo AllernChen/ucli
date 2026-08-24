@@ -40,17 +40,22 @@ const dialogOpen = ref(false)
 const drawerOpen = ref(false)
 const conversationReport = ref(null)
 const selectedProgress = computed(() => summaries.progress[summaries.selectedReportId] || null)
+let alive = true
 
 onMounted(async () => {
   try {
     await summaries.init()
+    if (!alive) return
     const initial = summaries.reports.find(report => report.isCurrent) || summaries.reports[0]
     if (initial) await summaries.selectReport(initial.id)
   } catch {
-    summaries.error = new Error('无法读取总结报告')
+    if (alive) summaries.error = new Error('无法读取总结报告')
   }
 })
-onBeforeUnmount(() => summaries.dispose())
+onBeforeUnmount(() => {
+  alive = false
+  summaries.dispose()
+})
 
 async function refresh() {
   await summaries.loadReports()

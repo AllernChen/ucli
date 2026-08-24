@@ -30,8 +30,8 @@
     <div v-if="progress" class="progress-row">
       <a-progress :percent="progress.total ? Math.round(progress.completed / progress.total * 100) : 0" />
       <span>{{ progress.text }}</span>
-      <a-button v-if="active" danger size="small" @click="$emit('cancel', report.id)">取消生成</a-button>
     </div>
+    <div v-if="active" class="cancel-row"><a-button danger size="small" @click="$emit('cancel', report.id)">取消生成</a-button></div>
     <div class="actions">
       <a-button @click="$emit('open-conversation', report)">查看关联对话</a-button>
       <a-button @click="copyMarkdown">复制 Markdown</a-button>
@@ -74,7 +74,7 @@ defineEmits(['cancel', 'export-markdown', 'export-html', 'delete-report', 'open-
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const safeHtml = computed(() => DOMPurify.sanitize(markdown.render(props.report?.markdown || '')))
 const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].includes(props.report?.status))
-const awaitingConfirmation = computed(() => props.progress?.phase === 'awaiting_confirmation')
+const awaitingConfirmation = computed(() => props.report?.status === 'awaiting_confirmation' || props.progress?.phase === 'awaiting_confirmation')
 const statusColor = computed(() => props.report?.status === 'completed' ? 'green' : props.report?.status === 'failed' ? 'red' : 'blue')
 const periodLabel = computed(() => props.report ? `${new Date(props.report.periodStart).toLocaleDateString()} — ${new Date(props.report.periodEndExclusive).toLocaleDateString()}` : '')
 const generationPerformance = computed(() => {
@@ -98,5 +98,5 @@ function handleReportLink(event) { openSummaryReportLink(event, ipc.openExternal
 </script>
 
 <style scoped>
-.progress-row,.actions { display:flex; align-items:center; gap:10px; margin-top:12px; }.progress-row :deep(.ant-progress){flex:1}.markdown-body{margin-top:18px;line-height:1.75}.markdown-body :deep(pre){overflow:auto;padding:12px;background:#f5f5f5}.markdown-body :deep(table){border-collapse:collapse}.markdown-body :deep(td),.markdown-body :deep(th){border:1px solid #ddd;padding:6px}
+.progress-row,.actions { display:flex; align-items:center; gap:10px; margin-top:12px; }.cancel-row{margin-top:12px}.progress-row :deep(.ant-progress){flex:1}.markdown-body{margin-top:18px;line-height:1.75}.markdown-body :deep(pre){overflow:auto;padding:12px;background:#f5f5f5}.markdown-body :deep(table){border-collapse:collapse}.markdown-body :deep(td),.markdown-body :deep(th){border:1px solid #ddd;padding:6px}
 </style>

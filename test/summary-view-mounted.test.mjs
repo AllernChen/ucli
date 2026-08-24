@@ -257,7 +257,7 @@ test('mounted work summary panel uses canonical reports for generation, progress
   assert.deepEqual(cancelCalls, ['r3'])
 })
 
-test('mounted awaiting-confirmation report keeps cancel but exposes no unsupported confirmation action', async () => {
+test('mounted persisted awaiting-confirmation report keeps cancellation available without a progress event', async () => {
   Vue = await import('vue')
   ;({ createServer } = await import('vite'))
   ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
@@ -269,7 +269,7 @@ test('mounted awaiting-confirmation report keeps cancel but exposes no unsupport
     wrapper = mount(await loadMountedReport(vite), {
       props: {
         report: { id: 'legacy', version: 1, status: 'awaiting_confirmation', periodStart: 1, periodEndExclusive: 2, markdown: null },
-        progress: { reportId: 'legacy', status: 'awaiting_confirmation', phase: 'awaiting_confirmation', completed: 0, total: 3, text: '等待处理' }
+        progress: null
       },
       global: { stubs: {
         'a-card': { template: '<section><slot /><slot name="extra" /></section>' }, 'a-tag': true, 'a-descriptions': { template: '<div><slot /></div>' }, 'a-descriptions-item': { template: '<div><slot /></div>' },
@@ -279,10 +279,89 @@ test('mounted awaiting-confirmation report keeps cancel but exposes no unsupport
     assert.match(wrapper.text(), /此报告无法在此继续。请取消后重试/)
     assert.match(wrapper.text(), /取消生成/)
     assert.doesNotMatch(wrapper.text(), /确认继续/)
+    await wrapper.get('button').trigger('click')
+    assert.deepEqual(wrapper.emitted('cancel'), [['legacy']])
   } finally {
     wrapper?.unmount()
     await vite.close()
   }
+})
+
+test('mounted panel unmount preserves a pending initialization for the next mount without obsolete selection', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ createPinia } = await import('pinia'))
+  ;({ defineComponent } = Vue)
+  ;({ flushPromises, shallowMount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const stubs = createStubs()
+  const listeners = new Set()
+  let resolveReports
+  let listCalls = 0
+  const selected = []
+  const report = {
+    id: 'pending', version: 1, status: 'completed', runPhase: 'completed', markdown: '# 已完成',
+    sessionId: 'session-pending', periodType: 'week', periodStart: 1, periodEndExclusive: 2,
+    timezone: 'Asia/Shanghai', executorId: 'claude', profileId: null, model: null, isCurrent: true
+  }
+  const pendingList = new Promise(resolve => { resolveReports = resolve })
+  const api = window.ucli
+  const originalApi = { ...api }
+  Object.assign(api, {
+    listSummaryReports: () => { listCalls += 1; return pendingList },
+    getSummaryReport: async id => { selected.push(id); return report },
+    startInteractiveSummary: async () => ({ report, sessionId: report.sessionId }),
+    cancelSummary: async () => ({ reportId: report.id }), setCurrentSummary: async () => report,
+    deleteSummaryReport: async () => ({ currentReportId: null }), exportSummaryMarkdown: async () => ({ canceled: false }),
+    exportSummaryHtml: async () => ({ canceled: false }),
+    onSummaryProgress: listener => { listeners.add(listener); return () => listeners.delete(listener) }
+  })
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let first
+  let second
+  try {
+    const panel = await loadMountedPanel(vite, stubs)
+    const pinia = createPinia()
+    const options = {
+      global: {
+        plugins: [pinia],
+        stubs: {
+          SummaryGenerateDialog: stubs.GenerateDialogStub, SummaryReportView: stubs.ReportViewStub,
+          SummaryHistory: stubs.HistoryStub, SummaryConversationDrawer: stubs.ConversationStub,
+          'a-button': { template: '<button><slot /></button>' }, 'a-alert': { template: '<div><slot /></div>' },
+          'a-list': { template: '<div><slot /></div>' }, 'a-list-item': { template: '<div><slot /></div>' },
+          'a-list-item-meta': { template: '<div><slot /></div>' }, 'a-row': { template: '<div><slot /></div>' },
+          'a-col': { template: '<div><slot /></div>' }, 'a-spin': { template: '<div><slot /></div>' }
+        }
+      }
+    }
+    first = shallowMount(panel, options)
+    await flushPromises()
+    assert.equal(listCalls, 1)
+    assert.equal(listeners.size, 1)
+    first.unmount()
+    first = null
+    await flushPromises()
+    assert.equal(listeners.size, 0)
+
+    second = shallowMount(panel, options)
+    await flushPromises()
+    assert.equal(listCalls, 1)
+    assert.equal(listeners.size, 1)
+
+    resolveReports([report])
+    await flushPromises()
+    assert.deepEqual(second.vm.summaries.reports.map(item => item.id), ['pending'])
+    assert.deepEqual(selected, ['pending'])
+  } finally {
+    first?.unmount()
+    second?.unmount()
+    await flushPromises()
+    await vite.close()
+    Object.assign(api, originalApi)
+  }
+  assert.equal(listeners.size, 0)
 })
 
 test('mounted conversation drawer never falls back when an imported report has no session', async () => {
