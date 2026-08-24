@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto'
 import { lstat, open, realpath } from 'node:fs/promises'
 import path from 'node:path'
 
-import { redactEvidenceText } from './redaction.js'
 import { createSummaryMarkdownParser } from './summaryMarkdownParser.js'
+import { assertSafeSummaryMarkdown } from './summaryMarkdownSafety.js'
 
 const MAX_MARKDOWN_BYTES = 5 * 1024 * 1024
 const STABILITY_INTERVAL_MS = 1000
@@ -81,12 +81,7 @@ function normalizedPathText(value) {
 }
 
 function assertSafeMarkdown(markdown, unsafePaths) {
-  if (redactEvidenceText(markdown).total > 0) throw artifactError()
-  const normalized = normalizedPathText(markdown)
-  for (const unsafePath of unsafePaths) {
-    const candidate = normalizedPathText(unsafePath)
-    if (candidate && normalized.includes(candidate)) throw artifactError()
-  }
+  try { assertSafeSummaryMarkdown(markdown, unsafePaths) } catch { throw artifactError() }
 }
 
 async function resolvedPath(value, signal, deadlineMs) {

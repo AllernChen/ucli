@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -31,6 +31,17 @@ async function createHarness(t, overrides = {}) {
       now: () => NOW,
       ...overrides
     })
+  }
+}
+
+async function symlinkOrSkip(t, target, link, type = 'file') {
+  try {
+    await symlink(target, link, type)
+    return true
+  } catch (error) {
+    if (!['EPERM', 'EACCES'].includes(error?.code)) throw error
+    t.skip('symlink creation is unavailable on this host')
+    return false
   }
 }
 
@@ -122,4 +133,81 @@ test('legacy importer leaves source files read-only', async t => {
   const before = await readFile(file)
   await importer.run()
   assert.deepEqual(await readFile(file), before)
+})
+
+test('legacy importer rejects credentials and its workLogs path without persisting either', async t => {
+  const events = []
+  const { root, repository, importer } = await createHarness(t, {
+    onEvent: event => events.push(event)
+  })
+  const credential = 'sk-live-abcdefghijklmnopqrstuv'
+  await writeFile(join(root, '2026-W33-summary.md'), validMarkdown)
+  await writeFile(join(root, '2026-W34-summary.md'), `${validMarkdown}\ncredential=${credential}`)
+  await writeFile(join(root, '2026-W35-summary.md'), `${validMarkdown}\n${root}`)
+
+  assert.deepEqual(await importer.run(), { scanned: 3, imported: 1, existing: 0, rejected: 2 })
+  const stored = JSON.stringify(repository.list({ executionMode: 'legacy-worklog-import' }))
+  assert.doesNotMatch(stored, new RegExp(credential))
+  assert.equal(stored.includes(root), false)
+  assert.deepEqual(events, Array.from({ length: 2 }, () => ({
+    phase: 'legacy-worklog-import', code: 'SUMMARY_LEGACY_WORKLOG_UNSAFE'
+  })))
+})
+
+test('legacy importer accepts a UTF-8 BOM with canonical markdown bytes', async t => {
+  const { root, repository, importer } = await createHarness(t)
+  const markdown = `\uFEFF${validMarkdown}`
+  await writeFile(join(root, '2026-W33-summary.md'), markdown, 'utf8')
+
+  assert.deepEqual(await importer.run(), { scanned: 1, imported: 1, existing: 0, rejected: 0 })
+  assert.equal(repository.list()[0].markdown, validMarkdown)
+  assert.equal(repository.list()[0].artifactMetadata.bytes, Buffer.byteLength(validMarkdown))
+  assert.deepEqual(await importer.run(), { scanned: 1, imported: 0, existing: 1, rejected: 0 })
+})
+
+test('legacy importer rejects a symlink workLogs root', async t => {
+  const sandbox = await mkdtemp(join(tmpdir(), 'ucli-legacy-worklogs-root-'))
+  const target = join(sandbox, 'target')
+  const linkedRoot = join(sandbox, 'workLogs')
+  await mkdir(target)
+  t.after(() => rm(sandbox, { recursive: true, force: true }))
+  if (!await symlinkOrSkip(t, target, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir')) return
+
+  const repository = { async importCompleted() { throw new Error('must not import') } }
+  const importer = createLegacyWorkLogsImporter({
+    workLogsRoot: linkedRoot, repository, timezone: 'Asia/Shanghai', now: () => NOW
+  })
+  await assert.rejects(() => importer.run(), error => error?.code === 'SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED')
+})
+
+test('legacy importer rejects a report swapped to a symlink before open', async t => {
+  const { root, repository } = await createHarness(t)
+  const file = join(root, '2026-W33-summary.md')
+  const backup = join(root, 'original-summary.md')
+  const probe = join(root, 'symlink-capability-probe')
+  await writeFile(file, validMarkdown)
+  if (!await symlinkOrSkip(t, file, probe)) return
+  await unlink(probe)
+  let swapped = false
+  const importer = createLegacyWorkLogsImporter({
+    workLogsRoot: root,
+    repository,
+    timezone: 'Asia/Shanghai',
+    now: () => NOW,
+    fileSystem: {
+      lstat,
+      readdir,
+      open: async candidate => {
+        if (!swapped && candidate === file) {
+          swapped = true
+          await rename(file, backup)
+          await symlink(backup, file, 'file')
+        }
+        return open(candidate, 'r')
+      }
+    }
+  })
+
+  assert.deepEqual(await importer.run(), { scanned: 1, imported: 0, existing: 0, rejected: 1 })
+  assert.equal(repository.list({ executionMode: 'legacy-worklog-import' }).length, 0)
 })

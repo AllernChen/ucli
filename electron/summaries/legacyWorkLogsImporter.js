@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
-import { lstat, readdir, readFile } from 'node:fs/promises'
+import { lstat, open, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { bucketStart, nextBucketStart } from '../usage/periods.js'
 import { isWorkLogsWorkingFile } from './workLogsService.js'
+import { assertSafeSummaryMarkdown } from './summaryMarkdownSafety.js'
 
 const ONE_MEBIBYTE = 1024 * 1024
 const MAX_LEGACY_BYTES = 5 * ONE_MEBIBYTE
@@ -103,12 +104,35 @@ function safeEvent(onEvent, code) {
   try { onEvent({ phase: 'legacy-worklog-import', code }) } catch { /* operational logging cannot block import */ }
 }
 
+function sameOrdinaryFile(first, second) {
+  if (!first?.isFile() || first.isSymbolicLink?.() || !second?.isFile() || second.isSymbolicLink?.()) {
+    return false
+  }
+  if (process.platform !== 'win32' || (first.ino !== 0 && second.ino !== 0)) {
+    return first.dev === second.dev && first.ino === second.ino
+  }
+  return first.size === second.size && first.mtimeMs === second.mtimeMs &&
+    first.ctimeMs === second.ctimeMs && first.birthtimeMs === second.birthtimeMs
+}
+
+async function readHandle(handle, size) {
+  const bytes = Buffer.alloc(size)
+  let offset = 0
+  while (offset < bytes.length) {
+    const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset)
+    if (bytesRead === 0) throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
+    offset += bytesRead
+  }
+  return bytes
+}
+
 export function createLegacyWorkLogsImporter({
   workLogsRoot,
   repository,
   timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
   now = Date.now,
-  onEvent = () => {}
+  onEvent = () => {},
+  fileSystem = { lstat, open, readdir }
 } = {}) {
   if (typeof workLogsRoot !== 'string' || !workLogsRoot.trim()) throw new TypeError('workLogsRoot is required')
   if (!repository || typeof repository.importCompleted !== 'function') {
@@ -117,13 +141,21 @@ export function createLegacyWorkLogsImporter({
   try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(0) } catch {
     throw new TypeError('timezone is invalid')
   }
+  if (!fileSystem || ['lstat', 'open', 'readdir'].some(method => typeof fileSystem[method] !== 'function')) {
+    throw new TypeError('fileSystem must provide lstat, open, and readdir')
+  }
 
   return {
     async run() {
       let entries
       try {
-        entries = await readdir(workLogsRoot, { withFileTypes: true })
+        const rootStat = await fileSystem.lstat(workLogsRoot)
+        if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+          throw importerError('SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED')
+        }
+        entries = await fileSystem.readdir(workLogsRoot, { withFileTypes: true })
       } catch (error) {
+        if (error?.code === 'SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED') throw error
         if (error?.code === 'ENOENT') return { scanned: 0, imported: 0, existing: 0, rejected: 0 }
         throw importerError('SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED')
       }
@@ -135,17 +167,35 @@ export function createLegacyWorkLogsImporter({
         try {
           const period = parsePeriod(entry.name, timezone)
           const filePath = join(workLogsRoot, entry.name)
-          const metadata = await lstat(filePath)
+          const metadata = await fileSystem.lstat(filePath)
           if (!metadata.isFile() || metadata.isSymbolicLink() ||
             metadata.size < ONE_MEBIBYTE || metadata.size > MAX_LEGACY_BYTES) {
             throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
           }
-          const bytes = await readFile(filePath)
+          let handle
+          let bytes
+          try {
+            handle = await fileSystem.open(filePath, 'r')
+            const opened = await handle.stat()
+            if (!sameOrdinaryFile(metadata, opened)) throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
+            const current = await fileSystem.lstat(filePath)
+            if (!sameOrdinaryFile(metadata, current)) throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
+            bytes = await readHandle(handle, opened.size)
+            const final = await handle.stat()
+            if (final.size !== bytes.length || final.size < ONE_MEBIBYTE || final.size > MAX_LEGACY_BYTES) {
+              throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
+            }
+          } finally {
+            await handle?.close().catch(() => {})
+          }
           let markdown
           try { markdown = new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch {
             throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
           }
           if (!MARKDOWN_HEADING.test(markdown)) throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
+          try { assertSafeSummaryMarkdown(markdown, [workLogsRoot]) } catch {
+            throw importerError('SUMMARY_LEGACY_WORKLOG_UNSAFE')
+          }
           const sourceHash = `sha256:${sha256(markdown)}`
           const timestamp = safeCreatedAt(metadata.mtimeMs, now())
           const imported = await repository.importCompleted({
@@ -155,15 +205,17 @@ export function createLegacyWorkLogsImporter({
             sourceHash,
             legacyImportKey: `sha256:${sha256(`${entry.name}\0${markdown}`)}`,
             coverage: { legacyFormat: true },
-            artifactMetadata: { canonical: 'markdown', bytes: bytes.length, sha256: sourceHash },
+            artifactMetadata: { canonical: 'markdown', bytes: Buffer.byteLength(markdown), sha256: sourceHash },
             createdAt: timestamp,
             updatedAt: timestamp
           })
           if (imported.imported) result.imported += 1
           else result.existing += 1
-        } catch {
+        } catch (error) {
           result.rejected += 1
-          safeEvent(onEvent, 'SUMMARY_LEGACY_WORKLOG_REJECTED')
+          safeEvent(onEvent, error?.code === 'SUMMARY_LEGACY_WORKLOG_UNSAFE'
+            ? 'SUMMARY_LEGACY_WORKLOG_UNSAFE'
+            : 'SUMMARY_LEGACY_WORKLOG_REJECTED')
         }
       }
       return result
