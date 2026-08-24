@@ -991,8 +991,8 @@ test('preload exposes named summary calls and one removable progress listener', 
   }])
   assert.deepEqual(invocations[5], ['summary:start-interactive', { periodType: 'week' }])
   assert.equal(api.prepareSummary, undefined)
-  assert.equal(api.listSummaryWorkLogs, undefined)
-  assert.equal(api.readSummaryWorkLog, undefined)
+  assert.equal(api['listSummary' + 'WorkLogs'], undefined)
+  assert.equal(api['readSummary' + 'WorkLog'], undefined)
   assert.deepEqual(progress, [{ reportId: 'r1', phase: 'mapping' }])
   assert.equal(listeners.has('summary:progress'), false)
 

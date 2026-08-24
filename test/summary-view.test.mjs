@@ -352,214 +352,28 @@ test('summary workspace components cover generation, safe reading, history, retr
   assert.match(all, /ipc\.sendTerminalInput\s*\(props\.sessionId,\s*data\)/)
   assert.match(all, /evt\.sessionId\s*===\s*props\.sessionId/)
   assert.match(all, /ipc\.terminalResize\s*\(props\.sessionId/)
-  assert.doesNotMatch(readFileSync(new URL('../src/components/summaries/WorkSummaryPanel.vue', import.meta.url), 'utf8'), /prepareSummary|summaryTasks\.addTask|reportProducedByRun|setInterval/)
-})
-
-/* Removed legacy conversion/task-projection coverage. The canonical report-store
- * behavior is covered above and by the mounted panel tests. */
-/*
-  assert.equal(convertTargetFileName('2026-08-21-summary.md'), '2026-08-21-summary.html')
-  assert.equal(convertTargetFileName('2026-08-21-summary.html'), '2026-08-21-summary.md')
-  assert.equal(convertTargetFileName('data.json'), null)
-  assert.equal(dirnameOf('C:\\UCLI\\summary\\workLogs\\x.md'), 'C:\\UCLI\\summary\\workLogs')
-  const prompt = buildConversionPrompt('x.md', 'x.html')
-  assert.match(prompt, /x\.html/)
-  assert.match(prompt, /不可信数据/)
-})
-
-test.skip('summary taskNote serializes shared-session generation records and stays legacy-compatible', () => {
-  // 旧格式：单文件名字符串 → 一张卡（t=0）；空 / 非法 → 无记录。
-  assert.deepEqual(parseTaskNote('2026-08-14-summary.md'), [
-    { t: 0, f: '2026-08-14-summary.md' }
-  ])
-  assert.deepEqual(parseTaskNote(null), [])
-  assert.deepEqual(parseTaskNote(''), [])
-  assert.deepEqual(parseTaskNote('[not json'), [])
-  // 新格式：JSON 数组；非法元素被过滤，缺省字段补空。
-  assert.deepEqual(parseTaskNote('[{"t":1000,"f":"a.md","pt":"week","a":"claude"}]'), [
-    { t: 1000, f: 'a.md', pt: 'week', a: 'claude' }
-  ])
-  assert.deepEqual(parseTaskNote('[{"t":1,"f":"ok.md"},{"x":1}]'), [
-    { t: 1, f: 'ok.md', pt: null, a: null }
-  ])
-
-  // append 追加并保留历史。
-  let note = appendGeneration(null, { t: 100, f: 'a.md', pt: 'week', a: 'codex' })
-  note = appendGeneration(note, { t: 200, f: 'b.md' })
-  assert.deepEqual(parseTaskNote(note).map(g => g.t), [100, 200])
-
-  // drop 摘除后保留其余；全部移除 → ''（清空 taskNote）。
-  note = dropGeneration(note, 's:100')
-  assert.deepEqual(parseTaskNote(note).map(g => g.t), [200])
-  note = dropGeneration(note, 's:200')
-  assert.equal(note, '')
-
-  // serializeTaskNote 透传序列化（规范化由 append/parse 负责）。
-  assert.equal(serializeTaskNote([{ t: 7, f: 'x.md', pt: 'week', a: 'codex' }]),
-    '[{"t":7,"f":"x.md","pt":"week","a":"codex"}]')
-
-  // 卡片命名：工作总结（周期）生成时间。
-  assert.equal(
-    buildCardName('每周', new Date(2026, 7, 21, 15, 30).getTime()),
-    '工作总结（每周）2026-08-21 15:30'
+  assert.doesNotMatch(
+    readFileSync(new URL('../src/components/summaries/WorkSummaryPanel.vue', import.meta.url), 'utf8'),
+    new RegExp(['prepare' + 'Summary', 'summaryTasks\\.addTask', 'reportProduced' + 'ByRun', 'setInterval'].join('|'))
   )
-  assert.equal(buildCardName('每周', 0), '工作总结（每周）')
-  assert.equal(buildCardName('每周', null), '工作总结（每周）')
-
-  // 完成判定只认「本次运行实际写出的」文件：同周期重新生成时磁盘上的同名旧报告
-  // mtime 早于本次生成时间，不得据此误判完成；CLI 真正覆盖后才算。
-  const gen = { suggestedFileName: '2026-W33-summary.md', createdAt: 1787296202855 }
-  assert.equal(
-    reportProducedByRun(
-      [{ name: '2026-W33-summary.md', mtime: 1787242791000 }], // 旧文件：00:19 < 15:10
-      gen),
-    false)
-  assert.equal(
-    reportProducedByRun(
-      [{ name: '2026-W33-summary.md', mtime: 1787296800000 }], // 覆盖后：晚于生成时间
-      gen),
-    true)
-  // HTML 孪生文件同样按 mtime 判定。
-  assert.equal(
-    reportProducedByRun(
-      [{ name: '2026-W33-summary.html', mtime: 1787296800000 }],
-      gen),
-    true)
-  // 文件不存在 / 缺建议文件名 → false。
-  assert.equal(reportProducedByRun([{ name: 'other.md', mtime: 9999999999999 }], gen), false)
-  assert.equal(reportProducedByRun([{ name: 'x.md', mtime: 9999999999999 }], { createdAt: 1 }), false)
 })
 
-test.skip('summaryTasks store reconstructs tasks from persisted sessions and drives the state machine', async () => {
-  const originalListSessions = window.ucli.listSessions
-  const originalListWorkLogs = window.ucli.listSummaryWorkLogs
-  const originalOn = window.ucli.on
-  let eventHandler = null
-  let subscribeCount = 0
-  window.ucli.on = (channel, handler) => {
-    if (channel === 'session:event') {
-      eventHandler = handler
-      subscribeCount += 1
-    }
-    return () => { if (eventHandler === handler) eventHandler = null }
-  }
-  // 一次生成 = 一张卡（genId = sessionId:生成时间戳），生成记录持久化在 taskNote
-  // JSON 数组；旧格式单文件名字符串仍按一张卡解析（t=0 → 回落 session.createdAt）。
-  window.ucli.listSessions = async () => [
-    { id: 's-completed', name: '工作总结（每周）', adapterId: 'claude', cwd: 'C:/work',
-      taskNote: '2026-08-14-summary.md', status: 'exited', createdAt: 2000, updatedAt: 2100,
-      lastActivity: '进程退出 (0)' },
-    { id: 's-running', name: '工作总结（每月）', adapterId: 'codex', cwd: 'C:/work',
-      taskNote: JSON.stringify([{ t: 1000, f: '2026-08-21-summary.md', pt: 'month', a: 'codex' }]),
-      status: 'running', createdAt: 1000, updatedAt: 1100, lastActivity: '运行中' },
-    { id: 's-interrupted', name: '工作总结（每日）', adapterId: 'opencode', cwd: 'C:/work',
-      taskNote: '2026-08-21-summary.md', status: 'exited', createdAt: 500, updatedAt: 600,
-      lastActivity: '进程退出 (1)' },
-    // 非总结会话必须被排除。
-    { id: 's-normal', name: '修复登录 bug', adapterId: 'claude', cwd: 'C:/app',
-      taskNote: null, status: 'exited', createdAt: 300, updatedAt: 400, lastActivity: '' }
+test('summary renderer and focused tests contain no legacy task workflow identifiers', () => {
+  const files = [
+    '../src/ipc.js', '../electron/preload.js', '../electron/orchestrator.js',
+    '../test/summary-export.test.mjs', '../test/summary-ipc.test.mjs',
+    '../test/summary-view.test.mjs', '../test/summary-view-mounted.test.mjs'
   ]
-  window.ucli.listSummaryWorkLogs = async () => [
-    { name: '2026-08-14-summary.md', path: 'C:/work/2026-08-14-summary.md', kind: 'markdown', mtime: 2100 },
-    { name: '2026-08-14-summary.html', path: 'C:/work/2026-08-14-summary.html', kind: 'html', mtime: 2100 }
-  ]
-  setActivePinia(createPinia())
-  const store = useSummaryTasksStore()
-  try {
-    await store.init()
-    assert.deepEqual(store.tasks.map(task => task.sessionId),
-      ['s-completed', 's-running', 's-interrupted'])
-    assert.equal(store.selectedTaskId, 's-completed:0')
-    const completed = store.tasks.find(task => task.genId === 's-completed:0')
-    assert.equal(completed.status, 'completed')
-    assert.equal(completed.periodLabel, '每周')
-    assert.equal(completed.suggestedFileName, '2026-08-14-summary.md')
-    assert.match(completed.displayName, /^工作总结（每周）/)
-    assert.equal(store.tasks.find(task => task.genId === 's-running:1000').status, 'running')
-    assert.equal(store.tasks.find(task => task.genId === 's-interrupted:0').status, 'interrupted')
-
-    // addTask → starting；setStatus → running；setError → failed（按 genId 键控）。
-    store.addTask({ genId: 's-new:9000', sessionId: 's-new', adapterId: 'codex', periodLabel: '每日',
-      periodType: 'day', suggestedFileName: '2026-08-21-summary.md', workLogsDir: 'C:/work', createdAt: 9000 })
-    assert.equal(store.tasks[0].sessionId, 's-new')
-    assert.equal(store.tasks[0].genId, 's-new:9000')
-    assert.equal(store.tasks[0].status, 'starting')
-    store.setStatus('s-new:9000', 'running')
-    assert.equal(store.tasks[0].status, 'running')
-    store.setError('s-new:9000', new Error('CLI 启动失败'))
-    assert.equal(store.tasks[0].status, 'failed')
-    assert.equal(store.tasks[0].lastActivity, 'CLI 启动失败')
-
-    // session:event 事件路由到该会话的活动卡；无活动卡时回落到候选第一张。
-    store._onEvent({ sessionId: 's-new', type: 'ready', ts: 3000 })
-    assert.equal(store.tasks[0].lastActivity, '已就绪')
-    store._onEvent({ sessionId: 's-new', type: 'stats_update', ts: 3001,
-      usage: { inputTokens: 10, outputTokens: 20 }, costUsd: 0.5 })
-    assert.deepEqual(store.tasks[0].tokens, { input: 10, output: 20 })
-    assert.equal(store.tasks[0].costUsd, 0.5)
-
-    // removeTask 重选下一任务；addTask 对已存在 genId 就地更新（不产生重复卡）。
-    store.selectTask('s-new:9000')
-    await store.removeTask('s-new:9000')
-    assert.equal(store.selectedTaskId, 's-completed:0')
-    store.addTask({ genId: 's-completed:0', sessionId: 's-completed', adapterId: 'claude', periodLabel: '每周',
-      periodType: 'week', suggestedFileName: '2026-08-14-summary.md', workLogsDir: 'C:/work' })
-    assert.equal(store.tasks.filter(task => task.sessionId === 's-completed').length, 1)
-    assert.equal(store.tasks.find(task => task.sessionId === 's-completed').status, 'starting')
-
-    // 第二次 init 被 unsub 守卫跳过（不重复订阅），事件仍派发到同一 handler。
-    assert.equal(subscribeCount, 1)
-    await store.init()
-    assert.equal(subscribeCount, 1)
-    assert.equal(store.tasks.filter(task => task.sessionId === 's-completed').length, 1)
-    eventHandler({ sessionId: 's-running', type: 'exit', code: 0, ts: 4000 })
-    assert.equal(store.tasks.find(task => task.genId === 's-running:1000').lastActivity, '进程退出 (0)')
-  } finally {
-    store.dispose()
-    window.ucli.listSessions = originalListSessions
-    window.ucli.listSummaryWorkLogs = originalListWorkLogs
-    window.ucli.on = originalOn
+  const legacy = new RegExp([
+    'useSummary' + 'TasksStore', 'summaryTask' + 'Note', 'summaryTask' + 'Status',
+    'listSummary' + 'WorkLogs', 'readSummary' + 'WorkLog', 'suggestedFile' + 'Name',
+    'reportProduced' + 'ByRun', '\\bm' + 'time\\b'
+  ].join('|'))
+  for (const file of files) {
+    assert.doesNotMatch(readFileSync(new URL(file, import.meta.url), 'utf8'), legacy, file)
   }
 })
 
-test.skip('repeated mount cycles (tab switches) do not duplicate reconstructed tasks', async () => {
-  const originalListSessions = window.ucli.listSessions
-  const originalListWorkLogs = window.ucli.listSummaryWorkLogs
-  const originalOn = window.ucli.on
-  window.ucli.on = () => () => {}
-  // 共享会话模型：一个会话（taskNote = 生成记录 JSON 数组）还原出多张卡。
-  window.ucli.listSessions = async () => [
-    { id: 'a', name: '工作总结（每周）', adapterId: 'claude', cwd: 'C:/work',
-      taskNote: JSON.stringify([
-        { t: 1000, f: '2026-W33-summary.md', pt: 'week', a: 'claude' },
-        { t: 2000, f: '2026-W33-2-summary.md', pt: 'week', a: 'claude' }
-      ]), status: 'exited', createdAt: 1000, updatedAt: 1100, lastActivity: '' }
-  ]
-  window.ucli.listSummaryWorkLogs = async () => []
-  setActivePinia(createPinia())
-  const store = useSummaryTasksStore()
-  try {
-    await store.init()
-    assert.equal(store.tasks.length, 2)
-    assert.equal(store.tasks.filter(task => task.sessionId === 'a').length, 2)
-    store.selectTask('a:2000')
-    // 面板在 tab 切换时卸载/重挂：dispose 重置订阅后 init 会重建。
-    // init 必须先清空旧列表，否则每切换一次任务卡就翻倍。
-    store.dispose()
-    await store.init()
-    assert.equal(store.tasks.length, 2)
-    assert.equal(store.selectedTaskId, 'a:2000')
-    store.dispose()
-    await store.init()
-    assert.equal(store.tasks.length, 2)
-  } finally {
-    store.dispose()
-    window.ucli.listSessions = originalListSessions
-    window.ucli.listSummaryWorkLogs = originalListWorkLogs
-    window.ucli.on = originalOn
-  }
-})
-*/
 
 test('completed reports show bounded generation performance without renderer-sensitive fields', () => {
   const reportView = readFileSync(

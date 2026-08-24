@@ -45,6 +45,10 @@ function createStubs() {
     ConversationStub: defineComponent({
       name: 'SummaryConversationDrawer', props: { open: Boolean, reportId: String, sessionId: String },
       template: '<p data-testid="conversation">{{ open ? `${reportId}:${sessionId || "此报告没有关联的交互会话"}` : "" }}</p>'
+    }),
+    HtmlStyleDialogStub: defineComponent({
+      name: 'SummaryHtmlStyleDialog', props: { open: Boolean }, emits: ['update:open', 'submit'],
+      template: '<button v-if="open" data-testid="summary-export-print" @click="$emit(\'submit\', { mode: \'theme\', themeId: \'print\' })">导出打印版</button>'
     })
   }
 }
@@ -76,8 +80,8 @@ async function loadMountedPanel(vite, stubs) {
   code = `const { computed, onBeforeUnmount, onMounted, ref } = Vue\n${code}`
   const { useSummariesStore } = await import('../src/stores/summaries.js')
   const panel = new Function(
-    'Vue', 'useSummariesStore', 'SummaryGenerateDialog', 'SummaryConversationDrawer', 'SummaryHistory', 'SummaryReportView', code
-  )(Vue, useSummariesStore, stubs.GenerateDialogStub, stubs.ConversationStub, stubs.HistoryStub, stubs.ReportViewStub)
+    'Vue', 'useSummariesStore', 'SummaryGenerateDialog', 'SummaryConversationDrawer', 'SummaryHistory', 'SummaryReportView', 'SummaryHtmlStyleDialog', code
+  )(Vue, useSummariesStore, stubs.GenerateDialogStub, stubs.ConversationStub, stubs.HistoryStub, stubs.ReportViewStub, stubs.HtmlStyleDialogStub)
   return attachClientRender(panel, fileName, compiledScript.bindings)
 }
 
@@ -124,7 +128,7 @@ test('mounted work summary panel uses canonical reports for generation, progress
   ;({ defineComponent } = Vue)
   ;({ flushPromises, mount, shallowMount } = await import('@vue/test-utils'))
   ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
-  const { GenerateDialogStub, ReportViewStub, HistoryStub, ConversationStub } = createStubs()
+  const { GenerateDialogStub, ReportViewStub, HistoryStub, ConversationStub, HtmlStyleDialogStub } = createStubs()
   const startCalls = []
   const cancelCalls = []
   let progressListener = () => {}
@@ -184,7 +188,7 @@ test('mounted work summary panel uses canonical reports for generation, progress
   })
   let wrapper
   try {
-    wrapper = shallowMount(await loadMountedPanel(vite, { GenerateDialogStub, ReportViewStub, HistoryStub, ConversationStub }), {
+    wrapper = shallowMount(await loadMountedPanel(vite, { GenerateDialogStub, ReportViewStub, HistoryStub, ConversationStub, HtmlStyleDialogStub }), {
       global: {
         plugins: [createPinia()],
         stubs: {
@@ -192,6 +196,7 @@ test('mounted work summary panel uses canonical reports for generation, progress
           SummaryReportView: ReportViewStub,
           SummaryHistory: HistoryStub,
           SummaryConversationDrawer: ConversationStub,
+          SummaryHtmlStyleDialog: HtmlStyleDialogStub,
           'a-button': { template: '<button><slot /></button>' },
           'a-alert': { template: '<div><slot /></div>' },
           'a-list': { template: '<div><slot /></div>' },
@@ -284,6 +289,93 @@ test('mounted persisted awaiting-confirmation report keeps cancellation availabl
   } finally {
     wrapper?.unmount()
     await vite.close()
+  }
+})
+
+test('mounted completed report enables export while queued and failed reports cannot emit it', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ mount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  const report = { id: 'report', version: 1, periodStart: 1, periodEndExclusive: 2, markdown: '# 仅完成报告可导出' }
+  let wrapper
+  try {
+    const component = await loadMountedReport(vite)
+    for (const status of ['queued', 'failed']) {
+      wrapper = mount(component, {
+        props: { report: { ...report, status }, progress: null },
+        global: { stubs: {
+          'a-card': { template: '<section><slot /><slot name="extra" /></section>' }, 'a-tag': true, 'a-descriptions': { template: '<div><slot /></div>' }, 'a-descriptions-item': { template: '<div><slot /></div>' },
+          'a-alert': true, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': { template: '<div><slot /></div>' }, 'a-empty': true
+        } }
+      })
+      const exportButtons = wrapper.findAll('button').filter(button => /导出 (?:Markdown|HTML)/.test(button.text()))
+      assert.equal(exportButtons.length, 2)
+      for (const button of exportButtons) {
+        assert.notEqual(button.attributes('disabled'), undefined, `${status} export must be disabled`)
+        await button.trigger('click')
+      }
+      assert.equal(wrapper.emitted('export-markdown'), undefined)
+      assert.equal(wrapper.emitted('export-html'), undefined)
+      wrapper.unmount()
+      wrapper = null
+    }
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+  }
+})
+
+test('mounted panel submits selected HTML style for the completed report without renderer-owned data', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ createPinia } = await import('pinia'))
+  ;({ defineComponent } = Vue)
+  ;({ flushPromises, shallowMount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const report = {
+    id: 'completed-report', version: 2, status: 'completed', runPhase: 'completed', markdown: '# private markdown',
+    periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai', isCurrent: true,
+    executorId: 'claude', profileId: 'private-profile', model: 'private-model'
+  }
+  const exportCalls = []
+  const stubs = createStubs()
+  stubs.ReportViewStub = defineComponent({
+    name: 'SummaryReportView', props: { report: Object }, emits: ['export-html'],
+    template: '<button data-testid="summary-open-html-export" @click="$emit(\'export-html\', report.id)">导出 HTML</button>'
+  })
+  const api = window.ucli
+  const originalApi = { ...api }
+  Object.assign(api, {
+    listSummaryReports: async () => [report], getSummaryReport: async () => report,
+    exportSummaryHtml: async value => { exportCalls.push(value); return { canceled: false } },
+    exportSummaryMarkdown: async () => ({ canceled: false }), onSummaryProgress: () => () => {}
+  })
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    wrapper = shallowMount(await loadMountedPanel(vite, stubs), {
+      global: { plugins: [createPinia()], stubs: {
+        SummaryGenerateDialog: stubs.GenerateDialogStub, SummaryReportView: stubs.ReportViewStub, SummaryHistory: stubs.HistoryStub,
+        SummaryConversationDrawer: stubs.ConversationStub, SummaryHtmlStyleDialog: stubs.HtmlStyleDialogStub,
+        'a-button': { template: '<button><slot /></button>' }, 'a-alert': true, 'a-list': { template: '<div><slot /></div>' },
+        'a-list-item': { template: '<div><slot /></div>' }, 'a-list-item-meta': true, 'a-row': { template: '<div><slot /></div>' },
+        'a-col': { template: '<div><slot /></div>' }, 'a-spin': { template: '<div><slot /></div>' }
+      } }
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="summary-open-html-export"]').trigger('click')
+    assert.deepEqual(exportCalls, [])
+    await wrapper.get('[data-testid="summary-export-print"]').trigger('click')
+    assert.deepEqual(exportCalls, [{ reportId: 'completed-report', style: { mode: 'theme', themeId: 'print' } }])
+    assert.doesNotMatch(JSON.stringify(exportCalls), /private markdown|private-profile|private-model/)
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+    Object.assign(api, originalApi)
   }
 })
 

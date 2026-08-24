@@ -18,12 +18,13 @@
           <SummaryHistory :versions="summaries.versions" @select="select" @retry="retry" @set-current="setCurrent" @delete-report="remove" />
         </a-col>
         <a-col :span="17">
-          <SummaryReportView :report="summaries.selectedReport" :progress="selectedProgress" @cancel="cancel" @export-markdown="summaries.exportMarkdown" @export-html="summaries.exportHtml" @delete-report="remove" @open-conversation="openConversation" />
+          <SummaryReportView :report="summaries.selectedReport" :progress="selectedProgress" :html-exporting="htmlExporting" @cancel="cancel" @export-markdown="summaries.exportMarkdown" @export-html="openHtmlExport" @delete-report="remove" @open-conversation="openConversation" />
         </a-col>
       </a-row>
     </a-spin>
     <SummaryConversationDrawer v-model:open="drawerOpen" :report-id="conversationReport?.id" :session-id="conversationReport?.sessionId || null" />
     <SummaryGenerateDialog v-model:open="dialogOpen" @submit="generate" />
+    <SummaryHtmlStyleDialog v-model:open="htmlStyleDialogOpen" :confirm-loading="htmlExporting" @submit="exportHtml" />
   </div>
 </template>
 
@@ -34,11 +35,15 @@ import SummaryGenerateDialog from './SummaryGenerateDialog.vue'
 import SummaryConversationDrawer from './SummaryConversationDrawer.vue'
 import SummaryHistory from './SummaryHistory.vue'
 import SummaryReportView from './SummaryReportView.vue'
+import SummaryHtmlStyleDialog from './SummaryHtmlStyleDialog.vue'
 
 const summaries = useSummariesStore()
 const dialogOpen = ref(false)
 const drawerOpen = ref(false)
 const conversationReport = ref(null)
+const htmlStyleDialogOpen = ref(false)
+const htmlExportReportId = ref(null)
+const htmlExporting = ref(false)
 const selectedProgress = computed(() => summaries.progress[summaries.selectedReportId] || null)
 const owner = Symbol('work-summary-panel')
 let alive = true
@@ -73,6 +78,26 @@ async function cancel(reportId) { await summaries.cancel(reportId) }
 async function setCurrent(reportId) { await summaries.setCurrent(reportId) }
 async function remove(reportId) { await summaries.deleteReport(reportId) }
 function openConversation(report) { conversationReport.value = report; drawerOpen.value = true }
+function openHtmlExport(reportId) {
+  const report = summaries.reports.find(item => item.id === reportId)
+  if (report?.status !== 'completed' || htmlExporting.value) return
+  htmlExportReportId.value = report.id
+  htmlStyleDialogOpen.value = true
+}
+async function exportHtml(style) {
+  const reportId = htmlExportReportId.value
+  const report = summaries.reports.find(item => item.id === reportId)
+  if (!reportId || report?.status !== 'completed' || htmlExporting.value) return
+  htmlExporting.value = true
+  try {
+    const result = await summaries.exportHtml(reportId, style)
+    if (result?.canceled === false) htmlStyleDialogOpen.value = false
+  } catch {
+    summaries.error = new Error('无法导出总结报告')
+  } finally {
+    htmlExporting.value = false
+  }
+}
 </script>
 
 <style scoped>

@@ -35,11 +35,11 @@
     <div class="actions">
       <a-button @click="$emit('open-conversation', report)">查看关联对话</a-button>
       <a-button @click="copyMarkdown">复制 Markdown</a-button>
-      <a-button @click="$emit('export-markdown', report.id)">导出 Markdown</a-button>
+      <a-button :disabled="!exportable" @click="exportMarkdown">导出 Markdown</a-button>
       <a-button
         :loading="htmlExporting"
-        :disabled="htmlExporting"
-        @click="$emit('export-html', report.id)"
+        :disabled="!exportable || htmlExporting"
+        @click="exportHtml"
       >{{ htmlExporting ? '正在生成 HTML' : '导出 HTML' }}</a-button>
       <a-popconfirm
         v-if="!active"
@@ -70,10 +70,11 @@ import ipc from '../../ipc.js'
 import { openSummaryReportLink } from '../../summaryLinks.js'
 
 const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean })
-defineEmits(['cancel', 'export-markdown', 'export-html', 'delete-report', 'open-conversation'])
+const emit = defineEmits(['cancel', 'export-markdown', 'export-html', 'delete-report', 'open-conversation'])
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const safeHtml = computed(() => DOMPurify.sanitize(markdown.render(props.report?.markdown || '')))
 const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].includes(props.report?.status))
+const exportable = computed(() => props.report?.status === 'completed')
 const awaitingConfirmation = computed(() => props.report?.status === 'awaiting_confirmation' || props.progress?.phase === 'awaiting_confirmation')
 const statusColor = computed(() => props.report?.status === 'completed' ? 'green' : props.report?.status === 'failed' ? 'red' : 'blue')
 const periodLabel = computed(() => props.report ? `${new Date(props.report.periodStart).toLocaleDateString()} — ${new Date(props.report.periodEndExclusive).toLocaleDateString()}` : '')
@@ -94,6 +95,8 @@ const coverageWarning = computed(() => {
   return props.report?.partial ? '当前周期尚未结束，报告为部分覆盖。' : ''
 })
 async function copyMarkdown() { await navigator.clipboard.writeText(props.report?.markdown || '') }
+function exportMarkdown() { if (exportable.value) emit('export-markdown', props.report.id) }
+function exportHtml() { if (exportable.value && !props.htmlExporting) emit('export-html', props.report.id) }
 function handleReportLink(event) { openSummaryReportLink(event, ipc.openExternal) }
 </script>
 
