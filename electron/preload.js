@@ -171,9 +171,6 @@ const api = {
   getSummaryReport: (reportId) => invokeSummary('summary:get-report', reportId),
   generateSummary: (value) => invokeSummary('summary:generate', value),
   startInteractiveSummary: (value) => invokeSummary('summary:start-interactive', value),
-  prepareSummary: (value) => invokeSummary('summary:prepare', value),
-  listSummaryWorkLogs: () => invokeSummary('summary:list-worklogs'),
-  readSummaryWorkLog: (fileName) => invokeSummary('summary:read-worklog', fileName),
   confirmSummary: (reportId, confirmationCallLimit) => invokeSummary('summary:generate', {
     reportId, confirm: true, confirmationCallLimit
   }),

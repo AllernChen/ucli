@@ -82,7 +82,6 @@ import { createSummaryWorkspaceService } from './summaries/summaryWorkspaceServi
 import { createSummaryPreparationService } from './summaries/summaryPreparationService.js'
 import { createInteractiveSummarySessionRuntime } from './summaries/interactiveSummarySessionRuntime.js'
 import { createInteractiveSummaryJobService } from './summaries/interactiveSummaryJobService.js'
-import { createWorkLogsService } from './summaries/workLogsService.js'
 import { createLegacyWorkLogsImporter } from './summaries/legacyWorkLogsImporter.js'
 import { runSummaryMaintenance, runSummaryStartupLifecycle, safeStartupFailure } from './startupLifecycle.js'
 import { SUMMARY_THEME_IDS } from './summaries/summaryThemeCatalog.js'
@@ -147,9 +146,8 @@ const SUMMARY_INTERACTIVE_FIELDS = new Set([
   'periodType', 'start', 'endExclusive', 'timezone', 'partial',
   'executorId', 'profileId', 'model'
 ])
-const SUMMARY_PREPARE_FIELDS = new Set(['periodType', 'start', 'endExclusive', 'timezone'])
 const SUMMARY_CONFIRM_FIELDS = new Set(['reportId', 'confirm', 'confirmationCallLimit'])
-const SUMMARY_EXPORT_FIELDS = new Set(['reportId', 'style', 'executorId', 'profileId', 'model'])
+const SUMMARY_EXPORT_FIELDS = new Set(['reportId', 'style'])
 const SUMMARY_STYLE_FIELDS = new Set(['mode', 'themeId', 'requirement'])
 const SUMMARY_HTML_THEME_IDS = new Set(SUMMARY_THEME_IDS)
 const SUMMARY_PERIODS = new Set(['day', 'week', 'month', 'quarter', 'year'])
@@ -174,9 +172,6 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   SUMMARY_EXECUTOR_UNSAFE: 'Selected AI CLI cannot guarantee tool-free summary execution',
   SUMMARY_PROFILE_UNAVAILABLE: 'Select an available default AI CLI profile',
   SUMMARY_DISCLOSURE_REQUIRED: 'Automatic summaries require disclosure acceptance',
-  SUMMARY_PREPARE_INVALID: 'Invalid summary period',
-  SUMMARY_WORKLOG_NOT_FOUND: 'Work log was not found',
-  SUMMARY_STORAGE_PATH_UNSAFE: 'Invalid summary work log name',
   SUMMARY_JOB_NOT_ACTIVE: 'Summary job is not active',
   SUMMARY_READY_TIMEOUT: 'AI CLI startup timed out',
   SUMMARY_TURN_NOT_CONFIRMED: 'Summary instruction delivery was not confirmed',
@@ -412,21 +407,6 @@ function validateInteractiveSummaryRequest(value) {
   return result
 }
 
-function validateSummaryPrepare(value) {
-  const result = { ...summaryObject(value, SUMMARY_PREPARE_FIELDS) }
-  if (!SUMMARY_PERIODS.has(result.periodType) || !Number.isInteger(result.start) ||
-    !Number.isInteger(result.endExclusive) || result.start >= result.endExclusive) {
-    throw invalidSummaryIpc()
-  }
-  result.timezone = validateSummaryTimezone(result.timezone)
-  return result
-}
-
-function validateSummaryWorkLogName(value) {
-  if (typeof value !== 'string' || !value || value.length > 128) throw invalidSummaryIpc()
-  return value
-}
-
 function validateSummaryExport(value, { html = false } = {}) {
   const fields = html ? SUMMARY_EXPORT_FIELDS : new Set(['reportId'])
   const result = { ...summaryObject(value, fields), reportId: validateSummaryId(value.reportId) }
@@ -445,15 +425,6 @@ function validateSummaryExport(value, { html = false } = {}) {
       if (styleKeys.length !== 1) throw invalidSummaryIpc()
     } else {
       throw invalidSummaryIpc()
-    }
-    if (result.executorId !== undefined && result.executorId !== null && !SUMMARY_EXECUTORS.has(result.executorId)) {
-      throw invalidSummaryIpc()
-    }
-    for (const field of ['profileId', 'model']) {
-      if (result[field] !== undefined && result[field] !== null &&
-        (typeof result[field] !== 'string' || !result[field] || result[field].length > 200 || result[field].includes('\0'))) {
-        throw invalidSummaryIpc()
-      }
     }
     result.style = style
   }
@@ -624,9 +595,6 @@ export function registerSummaryIpc({ ipcMain, service }) {
     const run = await service.startInteractive(validateInteractiveSummaryRequest(value))
     return { report: run.report, sessionId: run.sessionId }
   }))
-  ipcMain.handle('summary:prepare', safeSummaryEnvelope((_event, value) => service.prepare(validateSummaryPrepare(value))))
-  ipcMain.handle('summary:list-worklogs', safeSummaryEnvelope(() => service.listWorkLogs()))
-  ipcMain.handle('summary:read-worklog', safeSummaryEnvelope((_event, value) => service.readWorkLog(validateSummaryWorkLogName(value))))
   ipcMain.handle('summary:cancel', safeSummaryEnvelope((_event, value) => service.cancel(validateSummaryId(value))))
   ipcMain.handle('summary:set-current', safeSummaryEnvelope((_event, value) => service.setCurrent(validateSummaryId(value))))
   ipcMain.handle('summary:delete', safeSummaryEnvelope((_event, value) => service.deleteReport(validateSummaryId(value))))
@@ -802,7 +770,6 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   let summaryExportService = null
   let summaryWorkspaceService = null
   let summaryCacheService = null
-  let workLogsService = null
   let storageService = null
   let dshProfileManager = null
   let dshRuntimeManager = null
@@ -1064,12 +1031,6 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       platform: process.platform,
       env: process.env,
       homeDirectory: homedir()
-    })
-    workLogsService = createWorkLogsService({
-      workLogsRoot,
-      historyService,
-      listSessions,
-      snapshotUsage: snapshotSummaryUsage
     })
     const legacyWorkLogsImporter = createLegacyWorkLogsImporter({
       workLogsRoot,
@@ -3246,18 +3207,6 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
           }
           return interactiveSummaryJobService.start(resolveInteractiveSummarySelection(input))
-        },
-        prepare: input => {
-          if (!workLogsService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
-          return workLogsService.prepare(input)
-        },
-        listWorkLogs: () => {
-          if (!workLogsService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
-          return workLogsService.listReports()
-        },
-        readWorkLog: fileName => {
-          if (!workLogsService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
-          return workLogsService.readReport(fileName)
         },
         cancel: async reportId => {
           if (!interactiveSummaryJobService && !summaryJobService) {

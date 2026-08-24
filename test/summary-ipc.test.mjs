@@ -218,7 +218,6 @@ function makeBoundProfileUnavailable({ profile, executorId, codexHome }) {
 const CHANNELS = [
   'summary:get-settings', 'summary:set-settings', 'summary:list-reports',
   'summary:get-report', 'summary:generate', 'summary:start-interactive',
-  'summary:list-worklogs', 'summary:read-worklog',
   'summary:cancel',
   'summary:set-current', 'summary:delete', 'summary:export-markdown', 'summary:export-html',
   'summary:cache-stats', 'summary:cache-clear'
@@ -286,6 +285,17 @@ test('summary IPC returns typed safe errors without provider output', async () =
   assert.match(source, /SUMMARY_SERVICE_UNAVAILABLE:\s*'Summary service is unavailable'/)
   assert.match(source, /SUMMARY_EXPORT_UNAVAILABLE:\s*'Summary export is unavailable'/)
   assert.doesNotMatch(source, /safeSummaryError[\s\S]{0,800}error\.message/)
+})
+
+test('summary IPC exposes report-bound operations without legacy worklog orchestration', async () => {
+  const handlers = new Map()
+  registerSummaryIpc({
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    service: {}
+  })
+  for (const channel of ['summary:prepare', 'summary:list-worklogs', 'summary:read-worklog']) {
+    assert.equal(handlers.has(channel), false, channel)
+  }
 })
 
 test('summary IPC preserves the safe concurrent-confirmation error', async () => {
@@ -894,6 +904,22 @@ test('HTML export IPC accepts the strict theme and AI custom unions plus legacy 
     assert.equal(response.error.code, 'INVALID_SUMMARY_IPC')
     assert.doesNotMatch(JSON.stringify(response), /secret/i)
   }
+  for (const rendererOwnedField of [
+    ['markdown', '# forged report'],
+    ['html', '<html>forged</html>'],
+    ['executorId', 'claude'],
+    ['profileId', 'renderer-profile'],
+    ['model', 'renderer-model'],
+    ['workspace', 'C:\\private\\workspace']
+  ]) {
+    const response = await handlers.get('summary:export-html')({}, {
+      reportId: 'report-1', style: { mode: 'theme', themeId: 'dashboard' },
+      [rendererOwnedField[0]]: rendererOwnedField[1]
+    })
+    assert.equal(response.ok, false)
+    assert.equal(response.error.code, 'INVALID_SUMMARY_IPC')
+    assert.doesNotMatch(JSON.stringify(response), /forged|private|renderer-/i)
+  }
   assert.equal(calls.length, 5)
 })
 
@@ -945,8 +971,6 @@ test('preload exposes named summary calls and one removable progress listener', 
   await api.generateSummary({ periodType: 'week' })
   await api.startInteractiveSummary({ periodType: 'week' })
   await api.confirmSummary('r1', 24)
-  await api.listSummaryWorkLogs()
-  await api.readSummaryWorkLog('2026-W33-summary.md')
   await api.cancelSummary('r1')
   await api.setCurrentSummary('r1')
   await api.deleteSummaryReport('r1')
@@ -966,8 +990,9 @@ test('preload exposes named summary calls and one removable progress listener', 
     reportId: 'r1', confirm: true, confirmationCallLimit: 24
   }])
   assert.deepEqual(invocations[5], ['summary:start-interactive', { periodType: 'week' }])
-  assert.deepEqual(invocations[7], ['summary:list-worklogs'])
-  assert.deepEqual(invocations[8], ['summary:read-worklog', '2026-W33-summary.md'])
+  assert.equal(api.prepareSummary, undefined)
+  assert.equal(api.listSummaryWorkLogs, undefined)
+  assert.equal(api.readSummaryWorkLog, undefined)
   assert.deepEqual(progress, [{ reportId: 'r1', phase: 'mapping' }])
   assert.equal(listeners.has('summary:progress'), false)
 
@@ -1003,44 +1028,6 @@ test('cache IPC accepts no stats payload and only the failed-workspace boolean f
     ['stats'],
     ['clear', { includeFailedWorkspaces: true }]
   ])
-})
-
-test('worklog IPC lists reports and maps invalid or missing reads to safe codes', async () => {
-  const handlers = new Map()
-  const calls = []
-  registerSummaryIpc({
-    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
-    service: {
-      listWorkLogs: () => { calls.push('list'); return [] },
-      readWorkLog: fileName => {
-        calls.push(`read:${fileName}`)
-        if (fileName === 'missing.md') {
-          throw Object.assign(new Error('C:\\private\\missing.md'), { code: 'SUMMARY_WORKLOG_NOT_FOUND' })
-        }
-        return { name: fileName, kind: 'markdown', content: '# 周报' }
-      }
-    }
-  })
-
-  const list = await handlers.get('summary:list-worklogs')({})
-  assert.equal(list.ok, true)
-  assert.deepEqual(list.value, [])
-
-  const read = await handlers.get('summary:read-worklog')({}, '2026-W33-summary.md')
-  assert.equal(read.ok, true)
-  assert.equal(read.value.content, '# 周报')
-
-  const missing = await handlers.get('summary:read-worklog')({}, 'missing.md')
-  assert.equal(missing.ok, false)
-  assert.equal(missing.error.code, 'SUMMARY_WORKLOG_NOT_FOUND')
-  assert.doesNotMatch(JSON.stringify(missing), /private|missing\.md/)
-
-  for (const invalid of ['', 0, null, {}, 'x'.repeat(129)]) {
-    const response = await handlers.get('summary:read-worklog')({}, invalid)
-    assert.equal(response.ok, false)
-    assert.equal(response.error.code, 'INVALID_SUMMARY_IPC')
-  }
-  assert.deepEqual(calls, ['list', 'read:2026-W33-summary.md', 'read:missing.md'])
 })
 
 test('cache stats expose bounded nonnegative counters without paths or extra metadata', () => {

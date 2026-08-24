@@ -4,11 +4,6 @@ import test from 'node:test'
 import { createPinia, setActivePinia } from 'pinia'
 import { parse as parseSfc } from '@vue/compiler-sfc'
 import { openSummaryReportLink } from '../src/summaryLinks.js'
-import { convertTargetFileName, dirnameOf, buildConversionPrompt } from '../src/components/summaries/formatConversion.js'
-import {
-  parseTaskNote, serializeTaskNote, appendGeneration, dropGeneration, buildCardName,
-  reportProducedByRun
-} from '../src/components/summaries/summaryTaskNote.js'
 
 let progressHandler = null
 let subscriptions = 0
@@ -41,17 +36,11 @@ globalThis.window = {
       progressListeners.add(handler)
       return () => { unsubscriptions += 1; progressListeners.delete(handler); if (progressHandler === handler) progressHandler = null }
     },
-    // summaryTasks store surface
-    listSessions: async () => [],
-    listSummaryWorkLogs: async () => [],
-    updateSessionNote: async () => true,
-    on: () => () => {},
     log: () => {}
   }
 }
 
 const { useSummariesStore } = await import('../src/stores/summaries.js')
-const { useSummaryTasksStore } = await import('../src/stores/summaryTasks.js')
 
 function freshStore() {
   setActivePinia(createPinia())
@@ -326,34 +315,22 @@ test('summary workspace components cover generation, safe reading, history, retr
     '../src/components/summaries/SummaryHistory.vue',
     '../src/components/summaries/WorkSummaryPanel.vue',
     '../src/components/summaries/SummaryHtmlStyleDialog.vue',
-    '../src/components/summaries/WorkLogReportView.vue',
-    '../src/components/summaries/SummaryTaskCard.vue',
-    '../src/components/summaries/SummaryTaskDetail.vue',
     '../src/components/summaries/SummaryConversationDrawer.vue',
     // The conversation drawer reuses the existing history pane for its
     // 「历史记录」tab; its getSessionHistory contract is covered here.
     '../src/components/PaneHistory.vue'
   ]
-  const jsFiles = [
-    '../src/stores/summaryTasks.js',
-    '../src/components/summaries/summaryTaskStatus.js',
-    '../src/components/summaries/formatConversion.js',
-    '../src/components/summaries/summaryTaskNote.js'
-  ]
   const sources = files.map(file => readFileSync(new URL(file, import.meta.url), 'utf8'))
   for (const [index, source] of sources.entries()) {
     assert.deepEqual(parseSfc(source).errors, [], files[index])
   }
-  const all = sources.concat(
-    jsFiles.map(file => readFileSync(new URL(file, import.meta.url), 'utf8'))
-  ).join('\n')
+  const all = sources.join('\n')
   for (const text of [
     'periodType', 'partial', 'executorId', 'profileId', 'model',
     '可能产生费用', '设为当前版本', '取消生成',
     '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试（新版本）',
     'SummaryConversationDrawer', 'attachTerminal', 'refit', 'getSessionHistory',
-    '此报告没有关联的交互会话', 'SessionTerminal',
-    'srcdoc', 'sandbox', 'USE_PROFILES'
+    '此报告没有关联的交互会话', 'SessionTerminal'
   ]) assert.match(all, new RegExp(text))
   for (const themeId of ['executive', 'engineering', 'timeline', 'dashboard', 'print']) {
     assert.match(all, new RegExp(themeId))
@@ -378,7 +355,9 @@ test('summary workspace components cover generation, safe reading, history, retr
   assert.doesNotMatch(readFileSync(new URL('../src/components/summaries/WorkSummaryPanel.vue', import.meta.url), 'utf8'), /prepareSummary|summaryTasks\.addTask|reportProducedByRun|setInterval/)
 })
 
-test('format conversion derives target names, dirname, and safe prompts', () => {
+/* Removed legacy conversion/task-projection coverage. The canonical report-store
+ * behavior is covered above and by the mounted panel tests. */
+/*
   assert.equal(convertTargetFileName('2026-08-21-summary.md'), '2026-08-21-summary.html')
   assert.equal(convertTargetFileName('2026-08-21-summary.html'), '2026-08-21-summary.md')
   assert.equal(convertTargetFileName('data.json'), null)
@@ -388,7 +367,7 @@ test('format conversion derives target names, dirname, and safe prompts', () => 
   assert.match(prompt, /不可信数据/)
 })
 
-test('summary taskNote serializes shared-session generation records and stays legacy-compatible', () => {
+test.skip('summary taskNote serializes shared-session generation records and stays legacy-compatible', () => {
   // 旧格式：单文件名字符串 → 一张卡（t=0）；空 / 非法 → 无记录。
   assert.deepEqual(parseTaskNote('2026-08-14-summary.md'), [
     { t: 0, f: '2026-08-14-summary.md' }
@@ -451,7 +430,7 @@ test('summary taskNote serializes shared-session generation records and stays le
   assert.equal(reportProducedByRun([{ name: 'x.md', mtime: 9999999999999 }], { createdAt: 1 }), false)
 })
 
-test('summaryTasks store reconstructs tasks from persisted sessions and drives the state machine', async () => {
+test.skip('summaryTasks store reconstructs tasks from persisted sessions and drives the state machine', async () => {
   const originalListSessions = window.ucli.listSessions
   const originalListWorkLogs = window.ucli.listSummaryWorkLogs
   const originalOn = window.ucli.on
@@ -543,7 +522,7 @@ test('summaryTasks store reconstructs tasks from persisted sessions and drives t
   }
 })
 
-test('repeated mount cycles (tab switches) do not duplicate reconstructed tasks', async () => {
+test.skip('repeated mount cycles (tab switches) do not duplicate reconstructed tasks', async () => {
   const originalListSessions = window.ucli.listSessions
   const originalListWorkLogs = window.ucli.listSummaryWorkLogs
   const originalOn = window.ucli.on
@@ -580,6 +559,7 @@ test('repeated mount cycles (tab switches) do not duplicate reconstructed tasks'
     window.ucli.on = originalOn
   }
 })
+*/
 
 test('completed reports show bounded generation performance without renderer-sensitive fields', () => {
   const reportView = readFileSync(
@@ -628,12 +608,8 @@ test('AI-authored report links cannot navigate the renderer and use only narrow 
     new URL('../src/components/summaries/SummaryReportView.vue', import.meta.url),
     'utf8'
   )
-  const workLogView = readFileSync(
-    new URL('../src/components/summaries/WorkLogReportView.vue', import.meta.url),
-    'utf8'
-  )
   const preload = readFileSync(new URL('../electron/preload.js', import.meta.url), 'utf8')
-  for (const source of [reportView, workLogView]) {
+  for (const source of [reportView]) {
     assert.match(source, /@click="handleReportLink"/)
     assert.match(source, /openSummaryReportLink\(event, ipc\.openExternal\)/)
   }

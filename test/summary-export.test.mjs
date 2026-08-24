@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -149,12 +149,57 @@ test('Markdown copy and export use only persisted text, a sanitized filename, an
   try {
     assert.equal(service.copyMarkdown({ reportId: 'report-1' }), markdown)
     const result = await service.exportMarkdown({ reportId: 'report-1' })
-    assert.deepEqual(result, { canceled: false, filePath: destination })
+    assert.deepEqual(result, {
+      canceled: false, filePath: destination, reportId: 'report-1',
+      bytes: Buffer.byteLength(markdown)
+    })
     assert.equal(dialogOptions.defaultPath, 'UCLI-周报-2026-08-03--2026-08-09-v2.md')
     assert.equal(await readFile(destination, 'utf8'), markdown)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('HTML export derives from the selected completed report and atomically replaces an existing destination', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-export-'))
+  const destination = join(root, 'chosen.html')
+  const first = report({ id: 'r1', markdown: '# 周报\n\nversion one marker' })
+  const second = report({ id: 'r2', markdown: '# 周报\n\nversion two marker' })
+  const service = createReportExportService({
+    repository: { get: id => ({ r1: first, r2: second })[id] || null },
+    runner: { async run() { throw new Error('theme export must remain local') } },
+    showSaveDialog: async () => assert.fail('a main-process-selected destination must not reopen the dialog')
+  })
+  try {
+    await writeFile(destination, '<html>stale</html>', 'utf8')
+    const result = await service.exportHtml({
+      reportId: 'r2', destination, style: { mode: 'light' }
+    })
+    const html = await readFile(destination, 'utf8')
+    assert.equal(result.reportId, 'r2')
+    assert.match(html, /version two marker/)
+    assert.doesNotMatch(html, /stale/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('only completed reports export and canceling a destination does not mutate the report', async () => {
+  const completed = report()
+  let dialogCalls = 0
+  const service = createReportExportService({
+    repository: { get: id => id === 'completed' ? completed : report({ id, status: id }) },
+    runner: { async run() { throw new Error('must not run') } },
+    showSaveDialog: async () => { dialogCalls += 1; return { canceled: true } }
+  })
+
+  for (const status of ['queued', 'failed']) {
+    await assert.rejects(service.exportMarkdown({ reportId: status }), error =>
+      error.code === 'SUMMARY_REPORT_NOT_COMPLETED')
+  }
+  assert.deepEqual(await service.exportMarkdown({ reportId: 'completed' }), { canceled: true })
+  assert.equal(completed.status, 'completed')
+  assert.equal(dialogCalls, 1)
 })
 
 test('AI custom HTML requests contain only persisted Markdown and style data', async () => {
@@ -168,7 +213,10 @@ test('AI custom HTML requests contain only persisted Markdown and style data', a
   for (const style of [
     { mode: 'ai-custom', requirement: 'compact engineering layout' },
     { mode: 'custom', requirement: '深蓝色科技风，重点数字使用青色' }
-  ]) await service.exportHtml({ reportId: 'report-1', style })
+  ]) await service.exportHtml({
+    reportId: 'report-1', style,
+    executorId: 'claude', profileId: null, model: 'renderer-controlled-model'
+  })
 
   assert.equal(calls.length, 2)
   for (const call of calls) {
@@ -196,7 +244,10 @@ test('built-in themes export locally without invoking the runner', async () => {
         showSaveDialog: async () => ({ canceled: false, filePath: destination })
       })
       const result = await service.exportHtml({ reportId: 'report-1', style: { mode: 'theme', themeId } })
-      assert.deepEqual(result, { canceled: false, filePath: destination, generation: 'local' })
+      assert.deepEqual(result, {
+        canceled: false, filePath: destination, reportId: 'report-1',
+        bytes: Buffer.byteLength(await readFile(destination, 'utf8')), generation: 'local'
+      })
       assert.match(await readFile(destination, 'utf8'), new RegExp(`data-summary-theme="${themeId}"`))
     }
     assert.equal(runnerCalls, 0)
@@ -369,7 +420,7 @@ test('HTML export sanitizes a single draft and writes it without a repair round-
     assert.equal(calls.length, 1, 'sanitizer must not need a repair round-trip')
     assert.deepEqual(
       { executorId: calls[0].executorId, profileId: calls[0].profileId, model: calls[0].model },
-      { executorId: 'claude', profileId: null, model: 'sonnet' }
+      { executorId: 'codex', profileId: 'profile-1', model: 'gpt-5' }
     )
     const written = await readFile(destination, 'utf8')
     assert.doesNotMatch(written, /<script/, 'script must be stripped before writing')
