@@ -78,6 +78,9 @@ import { createSummaryRunner } from './summaries/summaryRunner.js'
 import { createSummaryCacheService } from './summaries/summaryCacheService.js'
 import { resolveSummaryStorageRoot, resolveSummaryChild, resolveSummaryWorkLogsRoot } from './summaries/summaryStoragePaths.js'
 import { createSummaryWorkspaceService } from './summaries/summaryWorkspaceService.js'
+import { createSummaryPreparationService } from './summaries/summaryPreparationService.js'
+import { createInteractiveSummarySessionRuntime } from './summaries/interactiveSummarySessionRuntime.js'
+import { createInteractiveSummaryJobService } from './summaries/interactiveSummaryJobService.js'
 import { createWorkLogsService } from './summaries/workLogsService.js'
 import { runSummaryMaintenance, runSummaryStartupLifecycle, safeStartupFailure } from './startupLifecycle.js'
 import { SUMMARY_THEME_IDS } from './summaries/summaryThemeCatalog.js'
@@ -138,6 +141,10 @@ const SUMMARY_GENERATE_FIELDS = new Set([
   'periodType', 'start', 'endExclusive', 'timezone', 'partial',
   'executorId', 'profileId', 'model'
 ])
+const SUMMARY_INTERACTIVE_FIELDS = new Set([
+  'periodType', 'start', 'endExclusive', 'timezone', 'partial',
+  'executorId', 'profileId', 'model'
+])
 const SUMMARY_PREPARE_FIELDS = new Set(['periodType', 'start', 'endExclusive', 'timezone'])
 const SUMMARY_CONFIRM_FIELDS = new Set(['reportId', 'confirm', 'confirmationCallLimit'])
 const SUMMARY_EXPORT_FIELDS = new Set(['reportId', 'style', 'executorId', 'profileId', 'model'])
@@ -164,7 +171,15 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   SUMMARY_DISCLOSURE_REQUIRED: 'Automatic summaries require disclosure acceptance',
   SUMMARY_PREPARE_INVALID: 'Invalid summary period',
   SUMMARY_WORKLOG_NOT_FOUND: 'Work log was not found',
-  SUMMARY_STORAGE_PATH_UNSAFE: 'Invalid summary work log name'
+  SUMMARY_STORAGE_PATH_UNSAFE: 'Invalid summary work log name',
+  SUMMARY_JOB_NOT_ACTIVE: 'Summary job is not active',
+  SUMMARY_READY_TIMEOUT: 'AI CLI startup timed out',
+  SUMMARY_TURN_NOT_CONFIRMED: 'Summary instruction delivery was not confirmed',
+  SUMMARY_RUN_TIMEOUT: 'Interactive summary generation timed out',
+  SUMMARY_ARTIFACT_MISSING: 'Summary Markdown report was not generated',
+  SUMMARY_ARTIFACT_INVALID: 'Summary Markdown report is invalid',
+  SUMMARY_APP_SHUTDOWN: 'Interactive summary was interrupted by application shutdown',
+  SUMMARY_RUN_FAILED: 'Interactive summary generation failed'
 })
 
 const STORAGE_CATEGORY_ID_SET = new Set(STORAGE_CATEGORY_IDS)
@@ -370,6 +385,25 @@ function validateSummaryGenerate(value) {
   return { action: 'generate', ...result }
 }
 
+function validateInteractiveSummaryRequest(value) {
+  const result = { ...summaryObject(value, SUMMARY_INTERACTIVE_FIELDS) }
+  if (!SUMMARY_PERIODS.has(result.periodType) || !Number.isInteger(result.start) ||
+    !Number.isInteger(result.endExclusive) || result.start >= result.endExclusive ||
+    typeof result.partial !== 'boolean' || !SUMMARY_EXECUTORS.has(result.executorId)) {
+    throw invalidSummaryIpc()
+  }
+  result.timezone = validateSummaryTimezone(result.timezone)
+  for (const field of ['profileId', 'model']) {
+    if (result[field] !== null && result[field] !== undefined &&
+      (typeof result[field] !== 'string' || !result[field] ||
+        result[field].length > 200 || result[field].includes('\0'))) {
+      throw invalidSummaryIpc()
+    }
+    result[field] = result[field] || null
+  }
+  return result
+}
+
 function validateSummaryPrepare(value) {
   const result = { ...summaryObject(value, SUMMARY_PREPARE_FIELDS) }
   if (!SUMMARY_PERIODS.has(result.periodType) || !Number.isInteger(result.start) ||
@@ -517,29 +551,59 @@ export function summaryProgressPayload(report, confirmationCallLimit = null, pip
     completed: '总结已生成', failed: '生成失败', cancelled: '已取消',
     interrupted: '生成已中断', skipped_empty: '周期内没有可总结内容'
   }
+  const interactiveText = {
+    preparing: '正在准备工作总结', starting: '正在启动 AI CLI',
+    'awaiting-delivery': '正在投递生成指令', running: '正在生成总结',
+    validating: '正在验证 Markdown 报告', completed: '总结已生成',
+    failed: '生成失败', cancelled: '已取消', interrupted: '生成已中断'
+  }
+  const status = [
+    'queued', 'running', 'awaiting_confirmation', 'completed', 'failed',
+    'cancelled', 'interrupted', 'skipped_empty'
+  ].includes(report?.status) ? report.status : 'running'
   const terminal = ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(report?.status)
   if (pipelineProgress) {
     const progressText = {
       'cache-check': '正在检查缓存', collecting: '正在收集材料', mapping: '正在分析材料',
       reducing: '正在汇总项目', rendering: '正在生成报告'
     }
+    const phase = Object.hasOwn(progressText, pipelineProgress.phase)
+      ? pipelineProgress.phase
+      : 'running'
     return {
       reportId: validateSummaryId(report?.id),
-      phase: pipelineProgress.phase,
-      completed: pipelineProgress.completed,
-      total: pipelineProgress.total,
-      text: progressText[pipelineProgress.phase]
+      status,
+      phase,
+      completed: storageCounter(pipelineProgress.completed),
+      total: storageCounter(pipelineProgress.total),
+      text: progressText[phase] || '正在处理'
     }
   }
+  const interactivePhase = Object.hasOwn(interactiveText, report?.runPhase)
+    ? report.runPhase
+    : null
   return {
     reportId: validateSummaryId(report?.id),
-    phase: phaseByStatus[report?.status] || 'running',
+    status,
+    phase: interactivePhase || phaseByStatus[report?.status] || 'running',
     completed: terminal ? 1 : 0,
     total: report?.status === 'awaiting_confirmation' && Number.isInteger(confirmationCallLimit)
       ? confirmationCallLimit
       : 1,
-    text: textByStatus[report?.status] || '正在处理'
+    text: interactiveText[interactivePhase] || textByStatus[report?.status] || '正在处理'
   }
+}
+
+export async function cancelActiveSummary(reportId, {
+  interactiveJobService,
+  headlessJobService
+} = {}) {
+  if (interactiveJobService?.isActive(reportId) &&
+    await interactiveJobService.cancel(reportId) === true) return true
+  if (await headlessJobService?.cancel(reportId) === true) return true
+  throw Object.assign(new Error('Summary job is not active'), {
+    code: 'SUMMARY_JOB_NOT_ACTIVE'
+  })
 }
 
 export function registerSummaryIpc({ ipcMain, service }) {
@@ -548,6 +612,10 @@ export function registerSummaryIpc({ ipcMain, service }) {
   ipcMain.handle('summary:list-reports', safeSummaryEnvelope((_event, value = {}) => service.listReports(validateSummaryFilters(value))))
   ipcMain.handle('summary:get-report', safeSummaryEnvelope((_event, value) => service.getReport(validateSummaryId(value))))
   ipcMain.handle('summary:generate', safeSummaryEnvelope((_event, value) => service.generate(validateSummaryGenerate(value))))
+  ipcMain.handle('summary:start-interactive', safeSummaryEnvelope(async (_event, value) => {
+    const run = await service.startInteractive(validateInteractiveSummaryRequest(value))
+    return { report: run.report, sessionId: run.sessionId }
+  }))
   ipcMain.handle('summary:prepare', safeSummaryEnvelope((_event, value) => service.prepare(validateSummaryPrepare(value))))
   ipcMain.handle('summary:list-worklogs', safeSummaryEnvelope(() => service.listWorkLogs()))
   ipcMain.handle('summary:read-worklog', safeSummaryEnvelope((_event, value) => service.readWorkLog(validateSummaryWorkLogName(value))))
@@ -720,6 +788,7 @@ export function createOrchestrator() {
   let summarySettings = normalizeSummarySettings(DEFAULT_SUMMARY_SETTINGS)
   let summaryRepository = null
   let summaryJobService = null
+  let interactiveSummaryJobService = null
   let summaryScheduler = null
   let summaryStorageMaintenance = null
   let summaryExportService = null
@@ -963,6 +1032,25 @@ export function createOrchestrator() {
       listSessions,
       defaultTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
     })
+    const summaryPreparationService = createSummaryPreparationService({
+      historyService,
+      listSessions,
+      snapshotUsage: snapshotSummaryUsage,
+      workspaceService: summaryWorkspaceService
+    })
+    const interactiveSessionRuntime = createInteractiveSummarySessionRuntime({
+      createSession,
+      startAdapter: startAdapterSession,
+      stopSession,
+      getEntry: interactiveSummarySessionEntry
+    })
+    interactiveSummaryJobService = createInteractiveSummaryJobService({
+      repository: summaryRepository,
+      workspaceService: summaryWorkspaceService,
+      preparationService: summaryPreparationService,
+      sessionRuntime: interactiveSessionRuntime,
+      onOperationalEvent: event => log('summary-operation', event)
+    })
     workLogsService = createWorkLogsService({
       workLogsRoot: resolveSummaryWorkLogsRoot({
         platform: process.platform,
@@ -987,13 +1075,25 @@ export function createOrchestrator() {
         )
       }
     })
+    interactiveSummaryJobService.subscribe(progress => {
+      if (!progress?.phase || !progress?.status) return
+      scheduleFlush()
+      if (mainWindow && !mainWindow.isDestroyed?.()) {
+        mainWindow.webContents.send('summary:progress', summaryProgressPayload({
+          id: progress.reportId,
+          status: progress.status,
+          runPhase: progress.phase
+        }))
+      }
+    })
     scheduleFlush()
     summaryStorageMaintenance = async () => {
       const result = await runSummaryMaintenance({
         quotaBytes: summarySettings.cacheMaxBytes,
         pruneExpiredWorkspaces: () => summaryWorkspaceService.pruneExpired(),
         pruneOrphanWorkspaces: () => summaryWorkspaceService.pruneOrphans({
-          isProtected: reportId => summaryJobService.isActive(reportId),
+          isProtected: reportId => summaryJobService.isActive(reportId) ||
+            interactiveSummaryJobService.isActive(reportId),
           isRetained: reportId => Boolean(summaryRepository.get(reportId))
         }),
         getWorkspaceUsage: () => summaryWorkspaceService.usage(),
@@ -1001,7 +1101,8 @@ export function createOrchestrator() {
         getCacheUsage: () => summaryCacheService.stats(),
         pruneCompletedWorkspaces: maxBytes => summaryWorkspaceService.pruneCompleted({
           maxBytes,
-          isProtected: reportId => summaryJobService.isActive(reportId)
+          isProtected: reportId => summaryJobService.isActive(reportId) ||
+            interactiveSummaryJobService.isActive(reportId)
         }),
         onEvent: event => log('summary-maintenance', event)
       })
@@ -1029,13 +1130,13 @@ export function createOrchestrator() {
       onMaintenanceError: event => log('summary-maintenance', event)
     })
     await runSummaryStartupLifecycle({
+      interruptStaleJobs: () => summaryRepository.interruptStale(),
       recoverWorkspaces: () => summaryWorkspaceService.recover(),
       maintainCache: async () => {
         const verified = summarySettings.cacheEnabled ? await cache.verify() : null
         const maintained = await summaryStorageMaintenance()
         return { verified, maintained }
       },
-      interruptStaleJobs: () => summaryRepository.interruptStale(),
       startScheduler: () => summaryScheduler.start(),
       onEvent: event => log('summary-startup', event)
     })
@@ -2740,6 +2841,132 @@ export function createOrchestrator() {
     })
   })
 
+  const interactiveAdapterFacades = new Map()
+
+  function interactiveSummarySessionEntry(sessionId) {
+    const entry = sessions.get(sessionId)
+    if (!entry?.adapter) return null
+    const cached = interactiveAdapterFacades.get(sessionId)
+    if (cached?.source === entry.adapter) return { adapter: cached.facade }
+    const source = entry.adapter
+    const facade = {
+      on: (...args) => source.on(...args),
+      removeListener: (...args) => source.removeListener(...args),
+      sendTurn: text => sendSessionTurn(sessionId, text)
+    }
+    interactiveAdapterFacades.set(sessionId, { source, facade })
+    return { adapter: facade }
+  }
+
+  async function startAdapterSession(sessionId) {
+    const e = sessions.get(sessionId)
+    if (e) assertDshSessionStartable(e.session)
+    if (!e || !e.adapter) return false
+    if (e.session.adapterId === 'codex') {
+      if (e.session.profileId) {
+        const prepared = prepareCodexSessionRuntime(e.session, {
+          imported: Boolean(e.session.cliSessionId),
+          explicitProfileId: e.session.profileId
+        })
+        Object.assign(e.session, prepared.session)
+        e.adapter.setProfileEnvironment?.(prepared.profileEnvironment)
+      } else {
+        const next = refreshCodexProviderRuntime(e, {
+          imported: Boolean(e.session.cliSessionId),
+          isActive: false
+        })
+        send('session:event', {
+          sessionId,
+          type: 'codex-runtime',
+          provider: next.provider,
+          providerPolicy: next.providerPolicy,
+          explicitProvider: next.explicitProvider,
+          providerWarning: next.providerWarning,
+          pendingProvider: next.pendingProvider,
+          pendingProviderWarning: next.pendingProviderWarning,
+          restartRequired: next.restartRequired,
+          canStart: next.canStart
+        })
+        assertCodexSessionCanStart(next)
+      }
+    }
+    await hookReady
+    e.adapter.hookPort = hookPort
+    if (e.session.adapterId === 'claude') armClaudeSessionLaunch(e)
+    let started
+    try {
+      started = await e.adapter.start()
+    } catch (error) {
+      let disposed = false
+      try {
+        await e.adapter.dispose()
+        disposed = true
+      } catch (cleanupError) {
+        error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
+      }
+      if (disposed) e.adapter = null
+      e.status = 'error'
+      const db = getDb()
+      if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+      throw error
+    }
+    if (started === false) {
+      e.status = 'error'
+      const db = getDb()
+      if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+      return false
+    }
+    if (['codex', 'claude'].includes(e.session.adapterId)) {
+      if (e.session.adapterId === 'codex') {
+        e.session.activeProfileId = e.session.profileId || null
+        e.session.pendingProfileId = null
+        e.session.pendingProfileRuntimeRevision = null
+        e.session.restartRequired = false
+      }
+      publishProfileRuntime(sessionId, e.session)
+    }
+    await gatewayManager?.resyncSession(sessionId)
+    return true
+  }
+
+  async function stopSession(sessionId, _reason = null) {
+    const e = sessions.get(sessionId)
+    if (e) {
+      engine.removeSession(sessionId)
+      const cleanup = e.adapter?.dispose()
+      gatewaySignals.publish({
+        type: 'session_stopped',
+        sessionId,
+        occurredAt: Date.now()
+      })
+      await cleanup
+      e.adapter = null
+      interactiveAdapterFacades.delete(sessionId)
+      e.status = 'offline'
+      if (e.session.capabilities.surface === 'web') {
+        e.surfaceState = normalizeDshWebSurfaceState({
+          status: 'stopped', url: null, errorCode: null
+        })
+        send('session:event', {
+          sessionId,
+          type: 'surface_state',
+          surfaceState: e.surfaceState,
+          status: e.status
+        })
+      }
+      if (['codex', 'claude'].includes(e.session.adapterId)) {
+        e.session.activeProfileId = null
+        e.session.pendingProfileId = null
+        e.session.pendingProfileRuntimeRevision = null
+        e.session.restartRequired = false
+        publishProfileRuntime(sessionId, e.session)
+      }
+      const db = getDb()
+      if (db) { db.updateSession(sessionId, { status: 'offline' }); scheduleFlush() }
+    }
+    return true
+  }
+
   function registerIpc() {
     registerGatewayIpc({ ipcMain, manager: gatewayManager })
     registerAiCliProfileIpc({
@@ -2790,6 +3017,12 @@ export function createOrchestrator() {
           const { reportId } = await summaryJobService.generate({ ...validated, generatedBy: 'manual' })
           return { reportId }
         },
+        startInteractive: input => {
+          if (!interactiveSummaryJobService) {
+            throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          }
+          return interactiveSummaryJobService.start(input)
+        },
         prepare: input => {
           if (!workLogsService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
           return workLogsService.prepare(input)
@@ -2803,8 +3036,13 @@ export function createOrchestrator() {
           return workLogsService.readReport(fileName)
         },
         cancel: async reportId => {
-          if (!summaryJobService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
-          return await summaryJobService.cancel(reportId)
+          if (!interactiveSummaryJobService && !summaryJobService) {
+            throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          }
+          return cancelActiveSummary(reportId, {
+            interactiveJobService: interactiveSummaryJobService,
+            headlessJobService: summaryJobService
+          })
         },
         async setCurrent(reportId) {
           if (!summaryRepository) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
@@ -2942,89 +3180,8 @@ export function createOrchestrator() {
     })
 
     // Renderer calls this after it has registered the terminal-output listener
-    ipcMain.handle('session:start-adapter', async (_e, sessionId) => {
-      const e = sessions.get(sessionId)
-      if (e) assertDshSessionStartable(e.session)
-      if (!e || !e.adapter) return false
-      if (e.session.adapterId === 'codex') {
-        if (e.session.profileId) {
-          const prepared = prepareCodexSessionRuntime(e.session, {
-            imported: Boolean(e.session.cliSessionId),
-            explicitProfileId: e.session.profileId
-          })
-          Object.assign(e.session, prepared.session)
-          e.adapter.setProfileEnvironment?.(prepared.profileEnvironment)
-        } else {
-          const next = refreshCodexProviderRuntime(e, {
-            imported: Boolean(e.session.cliSessionId),
-            isActive: false
-          })
-          send('session:event', {
-            sessionId,
-            type: 'codex-runtime',
-            provider: next.provider,
-            providerPolicy: next.providerPolicy,
-            explicitProvider: next.explicitProvider,
-            providerWarning: next.providerWarning,
-            pendingProvider: next.pendingProvider,
-            pendingProviderWarning: next.pendingProviderWarning,
-            restartRequired: next.restartRequired,
-            canStart: next.canStart
-          })
-          assertCodexSessionCanStart(next)
-        }
-      }
-      await hookReady
-      e.adapter.hookPort = hookPort
-      if (e.session.adapterId === 'claude') {
-        armClaudeSessionLaunch(e)
-      }
-      let started
-      try {
-        started = await e.adapter.start()
-      } catch (error) {
-        let disposed = false
-        try {
-          await e.adapter.dispose()
-          disposed = true
-        } catch (cleanupError) {
-          error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
-        }
-        if (disposed) e.adapter = null
-        e.status = 'error'
-        const db = getDb()
-        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
-        throw error
-      }
-      if (started === false) {
-        e.status = 'error'
-        const db = getDb()
-        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
-        return false
-      }
-      if (['codex', 'claude'].includes(e.session.adapterId)) {
-        if (e.session.adapterId === 'codex') {
-          e.session.activeProfileId = e.session.profileId || null
-          e.session.pendingProfileId = null
-          e.session.pendingProfileRuntimeRevision = null
-          e.session.restartRequired = false
-        }
-        publishProfileRuntime(sessionId, e.session)
-      }
-      await gatewayManager?.resyncSession(sessionId)
-      return true
-    })
-    ipcMain.handle('session:send-turn', (_e, sessionId, text) => {
-      const e = sessions.get(sessionId)
-      if (!e) throw new Error('no session')
-      if (e.session.capabilities.surface === 'web') {
-        throw Object.assign(new Error('DSH_WEB_NATIVE_OWNERSHIP'), {
-          code: 'DSH_WEB_NATIVE_OWNERSHIP'
-        })
-      }
-      if (!e.adapter) throw new Error('会话已离线，请先重新启动')
-      return sendAdapterTurn(e, text)
-    })
+    ipcMain.handle('session:start-adapter', (_e, sessionId) => startAdapterSession(sessionId))
+    ipcMain.handle('session:send-turn', (_e, sessionId, text) => sendSessionTurn(sessionId, text))
     ipcMain.handle('session:send-terminal-input', async (_e, sessionId, data) => {
       const e = sessions.get(sessionId)
       if (e?.session.capabilities.surface === 'web') return false
@@ -3121,42 +3278,7 @@ export function createOrchestrator() {
     ipcMain.handle('session:set-profile', (_e, sessionId, profileId) =>
       setSessionProfile(sessionId, profileId)
     )
-    ipcMain.handle('session:stop', async (_e, sessionId) => {
-      const e = sessions.get(sessionId)
-      if (e) {
-        engine.removeSession(sessionId)
-        const cleanup = e.adapter?.dispose()
-        gatewaySignals.publish({
-          type: 'session_stopped',
-          sessionId,
-          occurredAt: Date.now()
-        })
-        await cleanup
-        e.adapter = null
-        e.status = 'offline'
-        if (e.session.capabilities.surface === 'web') {
-          e.surfaceState = normalizeDshWebSurfaceState({
-            status: 'stopped', url: null, errorCode: null
-          })
-          send('session:event', {
-            sessionId,
-            type: 'surface_state',
-            surfaceState: e.surfaceState,
-            status: e.status
-          })
-        }
-        if (['codex', 'claude'].includes(e.session.adapterId)) {
-          e.session.activeProfileId = null
-          e.session.pendingProfileId = null
-          e.session.pendingProfileRuntimeRevision = null
-          e.session.restartRequired = false
-          publishProfileRuntime(sessionId, e.session)
-        }
-        const db = getDb()
-        if (db) { db.updateSession(sessionId, { status: 'offline' }); scheduleFlush() }
-      }
-      return true
-    })
+    ipcMain.handle('session:stop', (_e, sessionId) => stopSession(sessionId))
     ipcMain.handle('session:delete', async (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (e) {
@@ -3363,6 +3485,18 @@ export function createOrchestrator() {
     })
   }
 
+  function sendSessionTurn(sessionId, text) {
+    const e = sessions.get(sessionId)
+    if (!e) throw new Error('no session')
+    if (e.session.capabilities.surface === 'web') {
+      throw Object.assign(new Error('DSH_WEB_NATIVE_OWNERSHIP'), {
+        code: 'DSH_WEB_NATIVE_OWNERSHIP'
+      })
+    }
+    if (!e.adapter) throw new Error('会话已离线，请先重新启动')
+    return sendAdapterTurn(e, text)
+  }
+
   let shutdownPromise = null
   function shutdown() {
     if (shutdownPromise) return shutdownPromise
@@ -3377,6 +3511,7 @@ export function createOrchestrator() {
       codexConfigWatcher = null
       await summaryScheduler?.stop()
       summaryScheduler = null
+      await interactiveSummaryJobService?.interruptAll('SUMMARY_APP_SHUTDOWN')
       await summaryJobService?.shutdown()
       await summaryWorkspaceService?.recover()
       for (const notification of approvalNotifications.values()) notification.close()

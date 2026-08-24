@@ -38,7 +38,7 @@ test('summary startup failure is typed and never blocks the main window', async 
   assert.doesNotMatch(JSON.stringify(errors), /prompt|transcript|credential/)
 })
 
-test('summary lifecycle orders recovery, cache maintenance, stale interruption, and catch-up', async () => {
+test('summary lifecycle interrupts stale jobs before recovery, maintenance, and catch-up', async () => {
   const events = []
   const errors = []
   await runSummaryStartupLifecycle({
@@ -48,7 +48,7 @@ test('summary lifecycle orders recovery, cache maintenance, stale interruption, 
     startScheduler: async () => { events.push('scheduler') },
     onEvent: event => errors.push(event)
   })
-  assert.deepEqual(events, ['workspace-recover', 'cache-prune', 'job-interrupt', 'scheduler'])
+  assert.deepEqual(events, ['job-interrupt', 'workspace-recover', 'cache-prune', 'scheduler'])
   assert.deepEqual(errors, [])
 })
 
@@ -67,7 +67,7 @@ test('summary startup maintenance failures are typed and never block scheduler o
     startScheduler: async () => { events.push('scheduler') },
     onEvent: event => logs.push(event)
   })
-  assert.deepEqual(events, ['workspace', 'cache', 'interrupt', 'scheduler'])
+  assert.deepEqual(events, ['interrupt', 'workspace', 'cache', 'scheduler'])
   assert.deepEqual(logs, [{ phase: 'cache-maintenance', code: 'SUMMARY_CACHE_ENTRY_INVALID' }])
   assert.doesNotMatch(JSON.stringify(logs), /private|cache key|prompt|secret/i)
 })
@@ -109,7 +109,7 @@ test('shared quota maintenance prunes expired workspaces, cache, then completed 
   assert.deepEqual(result.total, { bytes: 90, quotaBytes: 100, overQuotaBytes: 0 })
 })
 
-test('summary recovery happens after persistence and before scheduler catch-up', () => {
+test('summary stale interruption and recovery happen before scheduler catch-up accepts work', () => {
   const orchestrator = readFileSync(
     new URL('../electron/orchestrator.js', import.meta.url),
     'utf8'
@@ -117,19 +117,19 @@ test('summary recovery happens after persistence and before scheduler catch-up',
   const persistence = orchestrator.indexOf('const db = await openDb(dbPath')
   const initializeAutomation = orchestrator.indexOf('await initSummaryAutomation(db)', persistence)
   const automationFactory = orchestrator.indexOf('async function initSummaryAutomation(db)')
-  const jobService = orchestrator.indexOf('summaryJobService = createSummaryJobService')
+  const jobService = orchestrator.indexOf('interactiveSummaryJobService = createInteractiveSummaryJobService')
   const scheduler = orchestrator.indexOf('summaryScheduler = createSummaryScheduler')
   const lifecycle = orchestrator.indexOf('await runSummaryStartupLifecycle({', scheduler)
-  const workspaceRecovery = orchestrator.indexOf('recoverWorkspaces:', lifecycle)
+  const interrupt = orchestrator.indexOf('interruptStaleJobs:', lifecycle)
+  const workspaceRecovery = orchestrator.indexOf('recoverWorkspaces:', interrupt)
   const cacheMaintenance = orchestrator.indexOf('maintainCache:', workspaceRecovery)
-  const interrupt = orchestrator.indexOf('interruptStaleJobs:', cacheMaintenance)
-  const catchUp = orchestrator.indexOf('startScheduler:', interrupt)
+  const catchUp = orchestrator.indexOf('startScheduler:', cacheMaintenance)
 
   assert.ok(persistence >= 0 && initializeAutomation > persistence)
   assert.ok(automationFactory >= 0 && jobService > automationFactory)
   assert.ok(scheduler > jobService && lifecycle > scheduler)
-  assert.ok(workspaceRecovery > lifecycle && cacheMaintenance > workspaceRecovery)
-  assert.ok(interrupt > cacheMaintenance && catchUp > interrupt)
+  assert.ok(interrupt > lifecycle && workspaceRecovery > interrupt)
+  assert.ok(cacheMaintenance > workspaceRecovery && catchUp > cacheMaintenance)
 })
 
 test('orchestrator stops summary catch-up before gateway and database shutdown', () => {
@@ -139,13 +139,15 @@ test('orchestrator stops summary catch-up before gateway and database shutdown',
   )
   const shutdown = source.indexOf('function shutdown()')
   const schedulerStop = source.indexOf('await summaryScheduler?.stop()', shutdown)
-  const jobsStop = source.indexOf('await summaryJobService?.shutdown()', schedulerStop)
+  const interactiveStop = source.indexOf("await interactiveSummaryJobService?.interruptAll('SUMMARY_APP_SHUTDOWN')", schedulerStop)
+  const jobsStop = source.indexOf('await summaryJobService?.shutdown()', interactiveStop)
   const compactWorkspaces = source.indexOf('await summaryWorkspaceService?.recover()', jobsStop)
   const gatewayStop = source.indexOf('await gatewayManager?.shutdown()', compactWorkspaces)
   const databaseFlush = source.indexOf('db.flush()', gatewayStop)
 
   assert.ok(shutdown >= 0 && schedulerStop > shutdown)
-  assert.ok(jobsStop > schedulerStop && compactWorkspaces > jobsStop)
+  assert.ok(interactiveStop > schedulerStop && jobsStop > interactiveStop)
+  assert.ok(compactWorkspaces > jobsStop)
   assert.ok(gatewayStop > compactWorkspaces && databaseFlush > gatewayStop)
 })
 

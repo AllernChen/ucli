@@ -107,6 +107,7 @@ export const ipc = {
   listSummaryReports: (filters) => u.listSummaryReports(filters),
   getSummaryReport: (reportId) => u.getSummaryReport(reportId),
   generateSummary: (value) => u.generateSummary(value),
+  startInteractiveSummary: (value) => u.startInteractiveSummary(value),
   prepareSummary: (value) => u.prepareSummary(value),
   listSummaryWorkLogs: () => u.listSummaryWorkLogs(),
   readSummaryWorkLog: (fileName) => u.readSummaryWorkLog(fileName),

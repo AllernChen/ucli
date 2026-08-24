@@ -173,13 +173,13 @@ export function createSummaryScheduler({
       if (scheduled.has(periodKey)) continue
       const reports = await listReports({
         periodType,
+        status: 'completed',
         periodStart: period.start,
         periodEndExclusive: period.endExclusive,
         timezone: timeZone
       })
       if (stopped) break
-      if (reports.some(report => matchesPeriod(report, reminder) &&
-        (report.isCurrent || ['completed', 'skipped_empty'].includes(report.status)))) {
+      if (reports.some(report => report.status === 'completed' && matchesPeriod(report, reminder))) {
         scheduled.add(periodKey)
         continue
       }

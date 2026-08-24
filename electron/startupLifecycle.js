@@ -25,9 +25,9 @@ export async function runSummaryStartupLifecycle({
   interruptStaleJobs = () => {}, startScheduler = () => {}, onEvent = () => {}
 } = {}) {
   for (const [phase, operation] of [
+    ['stale-job-interruption', interruptStaleJobs],
     ['workspace-recovery', recoverWorkspaces],
     ['cache-maintenance', maintainCache],
-    ['stale-job-interruption', interruptStaleJobs],
     ['scheduler-catch-up', startScheduler]
   ]) await continueAfterFailure(phase, operation, onEvent)
 }

@@ -11,11 +11,18 @@ import { createSummaryWorkspaceService } from '../electron/summaries/summaryWork
 
 register('./fixtures/electron-stub-loader.mjs', import.meta.url)
 
-const { deleteSummaryReportAndWorkspace, normalizeSummaryStorageStats, registerSummaryIpc, summaryProgressPayload } = await import(`../electron/orchestrator.js?summary-ipc=${Date.now()}`)
+const {
+  cancelActiveSummary,
+  deleteSummaryReportAndWorkspace,
+  normalizeSummaryStorageStats,
+  registerSummaryIpc,
+  summaryProgressPayload
+} = await import(`../electron/orchestrator.js?summary-ipc=${Date.now()}`)
 
 const CHANNELS = [
   'summary:get-settings', 'summary:set-settings', 'summary:list-reports',
-  'summary:get-report', 'summary:generate', 'summary:list-worklogs', 'summary:read-worklog',
+  'summary:get-report', 'summary:generate', 'summary:start-interactive',
+  'summary:list-worklogs', 'summary:read-worklog',
   'summary:cancel',
   'summary:set-current', 'summary:delete', 'summary:export-markdown', 'summary:export-html',
   'summary:cache-stats', 'summary:cache-clear'
@@ -109,6 +116,103 @@ test('summary IPC preserves the safe concurrent-confirmation error', async () =>
     }
   })
   assert.doesNotMatch(JSON.stringify(response), /private|detail/i)
+})
+
+test('interactive summary IPC returns only report and session identifiers', async () => {
+  const handlers = new Map()
+  const calls = []
+  registerSummaryIpc({
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    service: {
+      async startInteractive(value) {
+        calls.push(value)
+        return {
+          report: { id: 'report-1', status: 'queued' },
+          sessionId: 'session-1',
+          done: Promise.resolve(),
+          workspace: 'C:\\private\\summary',
+          prompt: 'credential prompt',
+          transcript: 'raw transcript'
+        }
+      }
+    }
+  })
+  const request = {
+    periodType: 'week', start: 1, endExclusive: 2, timezone: 'Asia/Shanghai',
+    partial: false, executorId: 'claude', profileId: 'p1', model: 'sonnet'
+  }
+
+  const result = await handlers.get('summary:start-interactive')({}, request)
+
+  assert.equal(result.ok, true)
+  assert.deepEqual(Object.keys(result.value).sort(), ['report', 'sessionId'])
+  assert.deepEqual(result.value, {
+    report: { id: 'report-1', status: 'queued' },
+    sessionId: 'session-1'
+  })
+  assert.doesNotMatch(JSON.stringify(result), /workspace|prompt|transcript|done|private|credential/i)
+  assert.deepEqual(calls, [{ ...request, profileId: 'p1', model: 'sonnet' }])
+})
+
+test('interactive summary IPC rejects renderer-owned lifecycle and output fields', async () => {
+  const handlers = new Map()
+  let starts = 0
+  registerSummaryIpc({
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    service: { startInteractive: async () => { starts += 1; return {} } }
+  })
+  const valid = {
+    periodType: 'week', start: 1, endExclusive: 2, timezone: 'UTC',
+    partial: false, executorId: 'claude', profileId: null, model: null
+  }
+  for (const invalidField of [
+    ['reportId', 'renderer-report'],
+    ['sessionId', 'renderer-session'],
+    ['cwd', 'C:\\private'],
+    ['output', 'C:\\private\\report.md'],
+    ['outputPath', 'C:\\private\\report.md'],
+    ['generatedBy', 'automatic'],
+    ['unknown', true]
+  ]) {
+    const response = await handlers.get('summary:start-interactive')({}, {
+      ...valid,
+      [invalidField[0]]: invalidField[1]
+    })
+    assert.equal(response.ok, false)
+    assert.equal(response.error.code, 'INVALID_SUMMARY_IPC')
+    assert.doesNotMatch(JSON.stringify(response), /private|renderer-report|renderer-session/i)
+  }
+  assert.equal(starts, 0)
+})
+
+test('summary cancellation prefers interactive jobs, falls back to headless, and types inactivity', async () => {
+  const calls = []
+  const interactiveJobService = {
+    isActive: reportId => reportId === 'interactive',
+    async cancel(reportId) { calls.push(`interactive:${reportId}`); return true }
+  }
+  const headlessJobService = {
+    async cancel(reportId) {
+      calls.push(`headless:${reportId}`)
+      return reportId === 'headless'
+    }
+  }
+
+  assert.equal(await cancelActiveSummary('interactive', {
+    interactiveJobService, headlessJobService
+  }), true)
+  assert.deepEqual(calls, ['interactive:interactive'])
+
+  assert.equal(await cancelActiveSummary('headless', {
+    interactiveJobService, headlessJobService
+  }), true)
+  assert.deepEqual(calls.slice(1), ['headless:headless'])
+
+  await assert.rejects(
+    cancelActiveSummary('missing', { interactiveJobService, headlessJobService }),
+    error => error.code === 'SUMMARY_JOB_NOT_ACTIVE'
+  )
+  assert.deepEqual(calls.slice(2), ['headless:missing'])
 })
 
 test('report deletion keeps database success when best-effort workspace cleanup fails', async () => {
@@ -253,9 +357,25 @@ test('cache-check progress is a narrow localized payload without cache metadata'
     phase: 'cache-check', completed: 0, total: 1,
     cacheKey: 'sha256:secret', path: 'C:\\private', providerOutput: 'secret'
   }), {
-    reportId: 'report-1', phase: 'cache-check', completed: 0, total: 1,
+    reportId: 'report-1', status: 'running', phase: 'cache-check', completed: 0, total: 1,
     text: '正在检查缓存'
   })
+})
+
+test('interactive progress exposes only the fixed safe recoverable fields', () => {
+  const payload = summaryProgressPayload({
+    id: 'report-1', status: 'running', runPhase: 'awaiting-delivery',
+    sessionId: 'session-secret', workspace: 'C:\\private', prompt: 'raw prompt',
+    transcript: 'raw transcript', errorText: 'raw error'
+  })
+  assert.deepEqual(Object.keys(payload).sort(), [
+    'completed', 'phase', 'reportId', 'status', 'text', 'total'
+  ].sort())
+  assert.deepEqual(payload, {
+    reportId: 'report-1', status: 'running', phase: 'awaiting-delivery',
+    completed: 0, total: 1, text: '正在投递生成指令'
+  })
+  assert.doesNotMatch(JSON.stringify(payload), /session-secret|private|prompt|transcript|raw error/i)
 })
 
 test('preload exposes named summary calls and one removable progress listener', async () => {
@@ -278,6 +398,7 @@ test('preload exposes named summary calls and one removable progress listener', 
   await api.listSummaryReports({ periodType: 'week' })
   await api.getSummaryReport('r1')
   await api.generateSummary({ periodType: 'week' })
+  await api.startInteractiveSummary({ periodType: 'week' })
   await api.confirmSummary('r1', 24)
   await api.listSummaryWorkLogs()
   await api.readSummaryWorkLog('2026-W33-summary.md')
@@ -294,15 +415,19 @@ test('preload exposes named summary calls and one removable progress listener', 
   dispose()
 
   assert.deepEqual(invocations.map(call => call[0]), [
-    ...CHANNELS.slice(0, 5), 'summary:generate', ...CHANNELS.slice(5)
+    ...CHANNELS.slice(0, 6), 'summary:generate', ...CHANNELS.slice(6)
   ])
-  assert.deepEqual(invocations[5], ['summary:generate', {
+  assert.deepEqual(invocations[6], ['summary:generate', {
     reportId: 'r1', confirm: true, confirmationCallLimit: 24
   }])
-  assert.deepEqual(invocations[6], ['summary:list-worklogs'])
-  assert.deepEqual(invocations[7], ['summary:read-worklog', '2026-W33-summary.md'])
+  assert.deepEqual(invocations[5], ['summary:start-interactive', { periodType: 'week' }])
+  assert.deepEqual(invocations[7], ['summary:list-worklogs'])
+  assert.deepEqual(invocations[8], ['summary:read-worklog', '2026-W33-summary.md'])
   assert.deepEqual(progress, [{ reportId: 'r1', phase: 'mapping' }])
   assert.equal(listeners.has('summary:progress'), false)
+
+  const rendererIpc = readFileSync(new URL('../src/ipc.js', import.meta.url), 'utf8')
+  assert.match(rendererIpc, /startInteractiveSummary:\s*\(value\)\s*=>\s*u\.startInteractiveSummary\(value\)/)
 })
 
 test('cache IPC accepts no stats payload and only the failed-workspace boolean for clear', async () => {

@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
+import { openDb } from '../electron/persistence/db.js'
+import { SUMMARY_EXECUTION_MODE } from '../electron/summaries/interactiveSummaryContracts.js'
+import { createReportRepository } from '../electron/summaries/reportRepository.js'
 import { createSummaryScheduler } from '../electron/summaries/summaryScheduler.js'
 
 const NOW = Date.parse('2026-08-12T08:30:00.000Z')
@@ -107,7 +114,7 @@ test('persisted unsafe executors no longer suppress reminders', async () => {
   assert.equal(reminded.length, 5)
 })
 
-test('completed, current, and skipped empty periods are not reminded again', async () => {
+test('only canonical completed reports suppress reminders', async () => {
   const reminded = []
   const statusByPeriod = {
     day: [{ status: 'completed', isCurrent: false }],
@@ -119,7 +126,11 @@ test('completed, current, and skipped empty periods are not reminded again', asy
     getSettings: () => enabledSettings({
       autoPeriods: { day: true, week: true, month: true, quarter: true, year: false }
     }),
-    listReports: filters => statusByPeriod[filters.periodType] || [],
+    listReports: filters => {
+      assert.equal(filters.status, 'completed')
+      return (statusByPeriod[filters.periodType] || [])
+        .filter(report => report.status === filters.status)
+    },
     onReminder: reminder => { reminded.push(reminder) },
     now: () => NOW,
     timeZone: 'UTC',
@@ -128,7 +139,49 @@ test('completed, current, and skipped empty periods are not reminded again', asy
   })
 
   await scheduler.start()
-  assert.deepEqual(reminded.map(item => item.periodType), ['quarter'])
+  assert.deepEqual(reminded.map(item => item.periodType), ['week', 'quarter'])
+})
+
+test('completed interactive repository report suppresses its logical period reminder', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-scheduler-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const repository = createReportRepository({ db: await openDb(join(root, 'ucli.db')) })
+  const request = {
+    periodType: 'day',
+    start: Date.parse('2026-08-11T00:00:00.000Z'),
+    endExclusive: Date.parse('2026-08-12T00:00:00.000Z'),
+    timezone: 'UTC', partial: false, generatedBy: 'manual', executorId: 'claude',
+    profileId: null, model: null, executionMode: SUMMARY_EXECUTION_MODE.INTERACTIVE_CLI
+  }
+  const report = await repository.createQueued(request)
+  await repository.update(report.id, { status: 'running', runPhase: 'running' })
+  const markdown = '# 工作总结\n'
+  const sha256 = `sha256:${createHash('sha256').update(markdown).digest('hex')}`
+  await repository.complete(report.id, {
+    markdown,
+    sourceHash: sha256,
+    artifactMetadata: {
+      canonical: 'markdown',
+      bytes: Buffer.byteLength(markdown),
+      sha256
+    }
+  })
+  const reminded = []
+  const scheduler = createSummaryScheduler({
+    getSettings: () => enabledSettings({
+      autoPeriods: { day: true, week: false, month: false, quarter: false, year: false }
+    }),
+    listReports: filters => repository.list(filters),
+    onReminder: reminder => { reminded.push(reminder) },
+    now: () => NOW,
+    timeZone: 'UTC',
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {}
+  })
+
+  await scheduler.start()
+
+  assert.deepEqual(reminded, [])
 })
 
 test('the in-app timer ticks every 15 minutes and stop clears it', async () => {
