@@ -45,6 +45,35 @@ class MemoryDb {
     return structuredClone(target)
   }
 
+  async completeSummaryReport(id, patch) {
+    const target = this.rows.find(item => item.id === id)
+    if (!target || target.status !== 'running') {
+      throw Object.assign(new Error('not running'), { code: 'SUMMARY_REPORT_NOT_RUNNING' })
+    }
+    for (const row of this.rows) {
+      if (row.periodType === target.periodType && row.periodStart === target.periodStart &&
+        row.periodEndExclusive === target.periodEndExclusive && row.timezone === target.timezone) {
+        row.isCurrent = false
+      }
+    }
+    Object.assign(target, structuredClone(patch), { isCurrent: true })
+    return structuredClone(target)
+  }
+
+  async importCompletedSummaryReport(report) {
+    const existing = this.rows.find(item => item.legacyImportKey === report.legacyImportKey)
+    if (existing) return { report: structuredClone(existing), imported: false }
+    const version = this.rows
+      .filter(item => item.periodType === report.periodType &&
+        item.periodStart === report.periodStart &&
+        item.periodEndExclusive === report.periodEndExclusive &&
+        item.timezone === report.timezone)
+      .reduce((max, item) => Math.max(max, item.version), 0) + 1
+    const created = { ...structuredClone(report), version }
+    this.rows.push(created)
+    return { report: structuredClone(created), imported: true }
+  }
+
   async deleteSummaryReport(id) {
     const index = this.rows.findIndex(item => item.id === id)
     if (index < 0) throw Object.assign(new Error('missing'), { code: 'SUMMARY_REPORT_NOT_FOUND' })
@@ -151,6 +180,142 @@ test('report repository assigns monotonic versions per logical key and validates
   }
   assert.deepEqual(repository.get(first.id).generationMetrics, {})
   assert.equal(db.getSummaryReport(second.id).status, 'queued')
+})
+
+test('report repository normalizes interactive defaults and rejects invalid run fields', () => {
+  const db = new MemoryDb()
+  const repository = createReportRepository({ db, now: () => 1000, idFactory: () => 'r1' })
+
+  const queued = repository.createQueued(request({
+    executionMode: 'interactive-cli',
+    sessionId: 'session-1'
+  }))
+  assert.equal(queued.executionMode, 'interactive-cli')
+  assert.equal(queued.sessionId, 'session-1')
+  assert.equal(queued.runPhase, 'preparing')
+  assert.deepEqual(queued.artifactMetadata, {})
+  assert.equal(queued.legacyImportKey, null)
+
+  db.rows.push({
+    ...structuredClone(queued),
+    id: 'legacy-r1',
+    executionMode: undefined,
+    sessionId: undefined,
+    runPhase: undefined,
+    artifactMetadata: undefined,
+    legacyImportKey: undefined
+  })
+  assert.deepEqual(
+    (({ executionMode, sessionId, runPhase, artifactMetadata, legacyImportKey }) => ({
+      executionMode, sessionId, runPhase, artifactMetadata, legacyImportKey
+    }))(repository.get('legacy-r1')),
+    {
+      executionMode: 'isolated-runner',
+      sessionId: null,
+      runPhase: null,
+      artifactMetadata: {},
+      legacyImportKey: null
+    }
+  )
+
+  for (const patch of [
+    { runPhase: 'waiting-forever' },
+    { sessionId: '' },
+    { artifactMetadata: { transcript: 'secret' } },
+    { artifactMetadata: { projectPath: 'D:\\private\\source-project' } },
+    { artifactMetadata: { workspacePath: 'C:\\private\\summary-run' } }
+  ]) {
+    assert.throws(
+      () => repository.update(queued.id, patch),
+      error => ['SUMMARY_RUN_PHASE_INVALID', 'INVALID_SUMMARY_REPORT',
+        'SUMMARY_SENSITIVE_JSON_FORBIDDEN'].includes(error.code)
+    )
+  }
+  assert.throws(
+    () => repository.createQueued(request({ executionMode: 'shared-session' })),
+    error => error.code === 'INVALID_SUMMARY_REPORT'
+  )
+})
+
+test('report repository forbids identity and raw-path patches', () => {
+  const repository = createReportRepository({
+    db: new MemoryDb(), now: () => 1000, idFactory: () => 'r1'
+  })
+  const report = repository.createQueued(request())
+
+  for (const patch of [
+    { version: 2 },
+    { periodStart: 0 },
+    { workspacePath: 'C:\\private\\summary-run' },
+    { rawPath: '/private/summary-run' }
+  ]) {
+    assert.throws(
+      () => repository.update(report.id, patch),
+      error => error.code === 'SUMMARY_REPORT_FIELD_FORBIDDEN'
+    )
+  }
+})
+
+test('report repository imports legacy markdown idempotently without changing current report', async () => {
+  const db = new MemoryDb()
+  let id = 0
+  const repository = createReportRepository({
+    db, now: () => 1000, idFactory: () => `r${++id}`
+  })
+  const current = repository.createQueued(request())
+  db.updateSummaryReport(current.id, {
+    status: 'completed', markdown: '# Existing', isCurrent: true
+  })
+  const input = {
+    ...request(),
+    markdown: '# Imported',
+    legacyImportKey: 'legacy-key-1',
+    sourceHash: 'sha256-1',
+    artifactMetadata: { canonical: 'markdown', bytes: 10, sha256: 'sha256-1' }
+  }
+
+  const first = await repository.importCompleted(input)
+  const second = await repository.importCompleted(input)
+
+  assert.equal(first.imported, true)
+  assert.equal(second.imported, false)
+  assert.equal(second.report.id, first.report.id)
+  assert.equal(first.report.version, 2)
+  assert.equal(first.report.status, 'completed')
+  assert.equal(first.report.executionMode, 'legacy-worklog-import')
+  assert.equal(first.report.isCurrent, false)
+  assert.equal(repository.get(current.id).isCurrent, true)
+  assert.equal(repository.listForKey(request()).length, 2)
+})
+
+test('report repository completes only running reports with canonical metadata', async () => {
+  const db = new MemoryDb()
+  const repository = createReportRepository({ db, now: () => 2000, idFactory: () => 'r1' })
+  const queued = repository.createQueued(request({
+    executionMode: 'interactive-cli', sessionId: 'session-1'
+  }))
+  repository.update(queued.id, { status: 'running', runPhase: 'running' })
+
+  const report = await repository.complete(queued.id, {
+    markdown: '# Completed',
+    sourceHash: 'sha256-completed',
+    usageSnapshot: { inputTokens: 1 },
+    coverage: { sessionsIncluded: 1 },
+    artifactMetadata: { canonical: 'markdown', bytes: 11, sha256: 'sha256-completed' }
+  })
+
+  assert.equal(report.status, 'completed')
+  assert.equal(report.runPhase, 'completed')
+  assert.equal(report.isCurrent, true)
+  assert.equal(report.markdown, '# Completed')
+  assert.equal(report.errorText, null)
+  await assert.rejects(
+    repository.complete(report.id, {
+      markdown: '# Replaced', sourceHash: 'sha256-replaced', usageSnapshot: {}, coverage: {},
+      artifactMetadata: { canonical: 'markdown', bytes: 10, sha256: 'sha256-replaced' }
+    }),
+    error => error.code === 'SUMMARY_REPORT_NOT_RUNNING'
+  )
 })
 
 test('report repository exposes only the normalized deletion result', async () => {

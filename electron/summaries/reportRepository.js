@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto'
+import {
+  SUMMARY_EXECUTION_MODE,
+  assertInteractiveSummaryPhase
+} from './interactiveSummaryContracts.js'
 
-const JSON_FIELDS = ['usageSnapshot', 'coverage', 'generationUsage', 'generationMetrics']
+const JSON_FIELDS = [
+  'usageSnapshot', 'coverage', 'generationUsage', 'generationMetrics', 'artifactMetadata'
+]
 const STATUSES = new Set([
   'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted',
   'awaiting_confirmation', 'skipped_empty'
@@ -10,8 +16,9 @@ const PERIOD_TYPES = new Set(['day', 'week', 'month', 'quarter', 'year'])
 const PATCH_FIELDS = new Set([
   'status', 'markdown', 'executorId', 'profileId', 'model', 'usageSnapshot', 'coverage',
   'generationUsage', 'generationMetrics', 'generationCostUsd', 'promptVersion', 'sourceHash', 'generatedBy',
-  'errorText', 'updatedAt', 'partial'
+  'errorText', 'updatedAt', 'partial', 'sessionId', 'runPhase', 'artifactMetadata'
 ])
+const EXECUTION_MODES = new Set(Object.values(SUMMARY_EXECUTION_MODE))
 
 function repositoryError(code, message) {
   return Object.assign(new TypeError(message), { code })
@@ -25,7 +32,7 @@ function hasSensitiveJson(value, path = []) {
       path[1] === 'sources' && key === 'transcript' &&
       typeof child === 'number' && Number.isFinite(child) && child >= 0
     return (!coverageTranscriptCount &&
-      /^(?:evidence|prompt|raw(?:output|metadata)?|transcript|messages?)$/i.test(key)) ||
+      /^(?:evidence|prompt|raw(?:output|metadata)?|transcript|messages?|.*path)$/i.test(key)) ||
       hasSensitiveJson(child, [...path, key])
   })
 }
@@ -88,6 +95,19 @@ function normalizeReport(report) {
     throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report record')
   }
   const normalized = { ...report }
+  normalized.executionMode = report.executionMode || SUMMARY_EXECUTION_MODE.ISOLATED_RUNNER
+  normalized.sessionId = report.sessionId || null
+  normalized.runPhase = report.runPhase || null
+  normalized.legacyImportKey = report.legacyImportKey || null
+  if (!EXECUTION_MODES.has(normalized.executionMode) ||
+    (normalized.sessionId !== null && (
+      typeof normalized.sessionId !== 'string' || !normalized.sessionId.trim()
+    )) || (normalized.legacyImportKey !== null && (
+      typeof normalized.legacyImportKey !== 'string' || !normalized.legacyImportKey.trim()
+    ))) {
+    throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report record')
+  }
+  if (normalized.runPhase !== null) assertInteractiveSummaryPhase(normalized.runPhase)
   for (const field of JSON_FIELDS) {
     normalized[field] = field === 'generationMetrics'
       ? persistedGenerationMetrics(report[field] ?? {})
@@ -109,9 +129,22 @@ function assertQueuedInput(input, key) {
   if (!PERIOD_TYPES.has(key.periodType) || !Number.isInteger(key.periodStart) ||
     !Number.isInteger(key.periodEndExclusive) || key.periodStart >= key.periodEndExclusive ||
     typeof key.timezone !== 'string' || !key.timezone.trim() ||
-    !GENERATED_BY.has(input.generatedBy)) {
+    !GENERATED_BY.has(input.generatedBy) ||
+    (input.executionMode !== undefined && !EXECUTION_MODES.has(input.executionMode)) ||
+    (input.sessionId !== undefined && input.sessionId !== null &&
+      (typeof input.sessionId !== 'string' || !input.sessionId.trim()))) {
     throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid queued summary report')
   }
+  if (input.runPhase !== undefined && input.runPhase !== null) {
+    assertInteractiveSummaryPhase(input.runPhase)
+  }
+}
+
+function requiredString(value, field) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw repositoryError('INVALID_SUMMARY_REPORT', `${field} is required`)
+  }
+  return value
 }
 
 export function summaryReportLogicalKey(input) {
@@ -133,6 +166,7 @@ export function createReportRepository({
       assertQueuedInput(input, key)
       const version = listForKey(key).reduce((max, report) => Math.max(max, report.version), 0) + 1
       const timestamp = now()
+      const executionMode = input.executionMode || SUMMARY_EXECUTION_MODE.ISOLATED_RUNNER
       return normalizeReport(db.createSummaryReport({
         id: idFactory(),
         ...key,
@@ -153,6 +187,13 @@ export function createReportRepository({
         isCurrent: false,
         generatedBy: input.generatedBy,
         errorText: null,
+        executionMode,
+        sessionId: input.sessionId || null,
+        runPhase: input.runPhase ?? (
+          executionMode === SUMMARY_EXECUTION_MODE.INTERACTIVE_CLI ? 'preparing' : null
+        ),
+        artifactMetadata: {},
+        legacyImportKey: null,
         createdAt: timestamp,
         updatedAt: timestamp
       }))
@@ -180,12 +221,74 @@ export function createReportRepository({
       if (safe.generatedBy !== undefined && !GENERATED_BY.has(safe.generatedBy)) {
         throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report origin')
       }
+      if (safe.sessionId !== undefined && safe.sessionId !== null &&
+        (typeof safe.sessionId !== 'string' || !safe.sessionId.trim())) {
+        throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary session id')
+      }
+      if (safe.runPhase !== undefined && safe.runPhase !== null) {
+        assertInteractiveSummaryPhase(safe.runPhase)
+      }
       for (const field of JSON_FIELDS) {
         if (safe[field] !== undefined) safe[field] = field === 'generationMetrics'
           ? generationMetrics(safe[field], { allowEmpty: true })
           : jsonObject(safe[field], field)
       }
       return normalizeReport(db.updateSummaryReport(reportId, safe))
+    },
+
+    async complete(reportId, result = {}) {
+      const markdown = requiredString(result.markdown, 'markdown')
+      const sourceHash = requiredString(result.sourceHash, 'sourceHash')
+      const updatedAt = result.updatedAt ?? now()
+      return normalizeReport(await db.completeSummaryReport(reportId, {
+        status: 'completed',
+        runPhase: 'completed',
+        markdown,
+        sourceHash,
+        usageSnapshot: jsonObject(result.usageSnapshot ?? {}, 'usageSnapshot'),
+        coverage: jsonObject(result.coverage ?? {}, 'coverage'),
+        artifactMetadata: jsonObject(result.artifactMetadata ?? {}, 'artifactMetadata'),
+        errorText: null,
+        updatedAt
+      }))
+    },
+
+    async importCompleted(input) {
+      const key = keyFilters(input)
+      assertQueuedInput({
+        ...input,
+        generatedBy: input.generatedBy || 'manual',
+        executionMode: SUMMARY_EXECUTION_MODE.LEGACY_WORKLOG_IMPORT
+      }, key)
+      const timestamp = input.createdAt ?? now()
+      const result = await db.importCompletedSummaryReport({
+        id: idFactory(),
+        ...key,
+        partial: input.partial === true,
+        status: 'completed',
+        markdown: requiredString(input.markdown, 'markdown'),
+        executorId: input.executorId || null,
+        profileId: input.profileId || null,
+        model: input.model || null,
+        usageSnapshot: jsonObject(input.usageSnapshot ?? {}, 'usageSnapshot'),
+        coverage: jsonObject(input.coverage ?? {}, 'coverage'),
+        generationUsage: jsonObject(input.generationUsage ?? {}, 'generationUsage'),
+        generationMetrics: generationMetrics(input.generationMetrics ?? {}, { allowEmpty: true }),
+        generationCostUsd: input.generationCostUsd ?? null,
+        promptVersion: input.promptVersion || null,
+        sourceHash: requiredString(input.sourceHash, 'sourceHash'),
+        isCurrent: false,
+        generatedBy: input.generatedBy || 'manual',
+        errorText: null,
+        executionMode: SUMMARY_EXECUTION_MODE.LEGACY_WORKLOG_IMPORT,
+        sessionId: null,
+        runPhase: 'completed',
+        artifactMetadata: jsonObject(input.artifactMetadata ?? {}, 'artifactMetadata'),
+        legacyImportKey: requiredString(input.legacyImportKey, 'legacyImportKey'),
+        createdAt: timestamp,
+        updatedAt: input.updatedAt ?? timestamp
+      })
+      return { report: normalizeReport(result.report), imported: result.imported }
     },
 
     async setCurrent(reportId) {

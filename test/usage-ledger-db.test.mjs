@@ -94,6 +94,11 @@ function summaryReport(overrides = {}) {
     isCurrent: false,
     generatedBy: 'manual',
     errorText: null,
+    executionMode: 'isolated-runner',
+    sessionId: null,
+    runPhase: null,
+    artifactMetadata: {},
+    legacyImportKey: null,
     createdAt: 1000,
     updatedAt: 1000,
     ...overrides

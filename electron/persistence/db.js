@@ -449,6 +449,16 @@ class Db {
         is_current            INTEGER NOT NULL DEFAULT 0,
         generated_by          TEXT NOT NULL CHECK (generated_by IN ('manual', 'automatic')),
         error_text            TEXT,
+        execution_mode        TEXT NOT NULL DEFAULT 'isolated-runner' CHECK (execution_mode IN (
+          'isolated-runner', 'interactive-cli', 'legacy-worklog-import'
+        )),
+        session_id            TEXT,
+        run_phase             TEXT CHECK (run_phase IS NULL OR run_phase IN (
+          'preparing', 'starting', 'awaiting-delivery', 'running', 'validating',
+          'completed', 'failed', 'interrupted', 'cancelled'
+        )),
+        artifact_metadata_json TEXT NOT NULL DEFAULT '{}',
+        legacy_import_key     TEXT,
         created_at            INTEGER NOT NULL,
         updated_at            INTEGER NOT NULL,
         UNIQUE (period_type, period_start, period_end_exclusive, timezone, version),
@@ -460,10 +470,34 @@ class Db {
     if (!summaryReportColumns.some((column) => column.name === 'generation_metrics_json')) {
       this.sql.run("ALTER TABLE summary_reports ADD COLUMN generation_metrics_json TEXT NOT NULL DEFAULT '{}'")
     }
+    for (const [column, ddl] of [
+      ['execution_mode', `ALTER TABLE summary_reports ADD COLUMN execution_mode TEXT NOT NULL
+        DEFAULT 'isolated-runner' CHECK (execution_mode IN (
+          'isolated-runner', 'interactive-cli', 'legacy-worklog-import'
+        ))`],
+      ['session_id', 'ALTER TABLE summary_reports ADD COLUMN session_id TEXT'],
+      ['run_phase', `ALTER TABLE summary_reports ADD COLUMN run_phase TEXT CHECK (
+        run_phase IS NULL OR run_phase IN (
+          'preparing', 'starting', 'awaiting-delivery', 'running', 'validating',
+          'completed', 'failed', 'interrupted', 'cancelled'
+        ))`],
+      ['artifact_metadata_json', `ALTER TABLE summary_reports ADD COLUMN
+        artifact_metadata_json TEXT NOT NULL DEFAULT '{}'`],
+      ['legacy_import_key', 'ALTER TABLE summary_reports ADD COLUMN legacy_import_key TEXT']
+    ]) {
+      if (!summaryReportColumns.some((candidate) => candidate.name === column)) {
+        this.sql.run(ddl)
+      }
+    }
     this.sql.run(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_summary_reports_current
       ON summary_reports(period_type, period_start, period_end_exclusive, timezone)
       WHERE is_current = 1
+    `)
+    this.sql.run(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_summary_reports_legacy_import
+      ON summary_reports(legacy_import_key)
+      WHERE legacy_import_key IS NOT NULL
     `)
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS summary_settings (
@@ -932,8 +966,9 @@ class Db {
          version, status, markdown, executor_id, profile_id, model,
          usage_snapshot_json, coverage_json, generation_usage_json, generation_metrics_json,
          generation_cost_usd, prompt_version, source_hash, is_current,
-         generated_by, error_text, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         generated_by, error_text, execution_mode, session_id, run_phase,
+         artifact_metadata_json, legacy_import_key, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         report.id, report.periodType, report.periodStart, report.periodEndExclusive,
         report.timezone, report.partial ? 1 : 0, report.version, report.status,
@@ -943,7 +978,10 @@ class Db {
         stringifyJsonObject(report.generationMetrics),
         report.generationCostUsd ?? null, report.promptVersion || null,
         report.sourceHash || null, report.isCurrent ? 1 : 0, report.generatedBy,
-        report.errorText ?? null, createdAt, updatedAt
+        report.errorText ?? null, report.executionMode || 'isolated-runner',
+        report.sessionId || null, report.runPhase ?? null,
+        stringifyJsonObject(report.artifactMetadata), report.legacyImportKey || null,
+        createdAt, updatedAt
       ]
     )
     return this.getSummaryReport(report.id)
@@ -962,7 +1000,8 @@ class Db {
       status: 'status', markdown: 'markdown', executorId: 'executor_id',
       profileId: 'profile_id', model: 'model', generationCostUsd: 'generation_cost_usd',
       promptVersion: 'prompt_version', sourceHash: 'source_hash', generatedBy: 'generated_by',
-      errorText: 'error_text', updatedAt: 'updated_at'
+      errorText: 'error_text', executionMode: 'execution_mode', sessionId: 'session_id',
+      runPhase: 'run_phase', legacyImportKey: 'legacy_import_key', updatedAt: 'updated_at'
     }
     const sets = []
     const values = []
@@ -975,7 +1014,8 @@ class Db {
       ['usageSnapshot', 'usage_snapshot_json'],
       ['coverage', 'coverage_json'],
       ['generationUsage', 'generation_usage_json'],
-      ['generationMetrics', 'generation_metrics_json']
+      ['generationMetrics', 'generation_metrics_json'],
+      ['artifactMetadata', 'artifact_metadata_json']
     ]) {
       if (fields[field] === undefined) continue
       sets.push(`${column} = ?`)
@@ -1000,12 +1040,70 @@ class Db {
       .map(rowToSummaryReport)[0] || null
   }
 
+  async completeSummaryReport(reportId, fields = {}) {
+    assertSummaryReportPatch(fields)
+    if (fields.status !== 'completed' || fields.runPhase !== 'completed') {
+      throw summaryValidationError('INVALID_SUMMARY_STATUS', 'Invalid completed summary report')
+    }
+    return this.transaction(async () => {
+      const target = this.getSummaryReport(reportId)
+      if (!target) {
+        throw Object.assign(new Error(`Summary report not found: ${reportId}`), {
+          code: 'SUMMARY_REPORT_NOT_FOUND'
+        })
+      }
+      if (target.status !== 'running') {
+        throw Object.assign(new Error('Only running summary reports can complete'), {
+          code: 'SUMMARY_REPORT_NOT_RUNNING'
+        })
+      }
+      this.updateSummaryReport(reportId, fields)
+      this.sql.run(
+        `UPDATE summary_reports SET is_current = 0
+         WHERE period_type = ? AND period_start = ?
+           AND period_end_exclusive = ? AND timezone = ? AND id <> ?`,
+        [target.periodType, target.periodStart, target.periodEndExclusive, target.timezone, reportId]
+      )
+      this.sql.run('UPDATE summary_reports SET is_current = 1 WHERE id = ?', [reportId])
+      return this.getSummaryReport(reportId)
+    })
+  }
+
+  async importCompletedSummaryReport(report) {
+    if (typeof report?.legacyImportKey !== 'string' || !report.legacyImportKey.trim()) {
+      throw summaryValidationError('INVALID_SUMMARY_LEGACY_IMPORT_KEY', 'Invalid legacy import key')
+    }
+    return this.transaction(async () => {
+      const existing = rows(this.sql.exec(
+        'SELECT * FROM summary_reports WHERE legacy_import_key = ? LIMIT 1',
+        [report.legacyImportKey]
+      )).map(rowToSummaryReport)[0]
+      if (existing) return { report: existing, imported: false }
+
+      const latest = rows(this.sql.exec(
+        `SELECT COALESCE(MAX(version), 0) AS version FROM summary_reports
+         WHERE period_type = ? AND period_start = ?
+           AND period_end_exclusive = ? AND timezone = ?`,
+        [report.periodType, report.periodStart, report.periodEndExclusive, report.timezone]
+      ))[0]
+      const created = this.createSummaryReport({
+        ...report,
+        version: Number(latest?.version || 0) + 1,
+        status: 'completed',
+        isCurrent: false
+      })
+      return { report: created, imported: true }
+    })
+  }
+
   listSummaryReports(filters = {}) {
     const conditions = []
     const values = []
     for (const [field, column] of [
       ['periodType', 'period_type'], ['status', 'status'], ['generatedBy', 'generated_by'],
-      ['timezone', 'timezone']
+      ['timezone', 'timezone'], ['executionMode', 'execution_mode'],
+      ['sessionId', 'session_id'], ['runPhase', 'run_phase'],
+      ['legacyImportKey', 'legacy_import_key']
     ]) {
       if (filters[field] === undefined) continue
       conditions.push(`${column} = ?`)
@@ -2056,6 +2154,13 @@ const SUMMARY_STATUSES = new Set([
   'awaiting_confirmation', 'skipped_empty'
 ])
 const SUMMARY_GENERATORS = new Set(['manual', 'automatic'])
+const SUMMARY_EXECUTION_MODES = new Set([
+  'isolated-runner', 'interactive-cli', 'legacy-worklog-import'
+])
+const SUMMARY_RUN_PHASES = new Set([
+  'preparing', 'starting', 'awaiting-delivery', 'running', 'validating',
+  'completed', 'failed', 'interrupted', 'cancelled'
+])
 
 function assertSummaryReport(report) {
   if (!SUMMARY_PERIOD_TYPES.has(report?.periodType)) {
@@ -2080,6 +2185,17 @@ function assertSummaryReport(report) {
   if (report.isCurrent && report.status !== 'completed') {
     throw summaryValidationError('SUMMARY_REPORT_NOT_COMPLETED', 'Only completed reports can be current')
   }
+  if (report.executionMode !== undefined && !SUMMARY_EXECUTION_MODES.has(report.executionMode)) {
+    throw summaryValidationError('INVALID_SUMMARY_EXECUTION_MODE', 'Invalid summary execution mode')
+  }
+  if (report.sessionId !== undefined && report.sessionId !== null &&
+    (typeof report.sessionId !== 'string' || !report.sessionId.trim())) {
+    throw summaryValidationError('INVALID_SUMMARY_SESSION_ID', 'Invalid summary session id')
+  }
+  if (report.runPhase !== undefined && report.runPhase !== null &&
+    !SUMMARY_RUN_PHASES.has(report.runPhase)) {
+    throw summaryValidationError('SUMMARY_RUN_PHASE_INVALID', 'Invalid summary run phase')
+  }
 }
 
 function assertSummaryReportPatch(fields) {
@@ -2088,6 +2204,17 @@ function assertSummaryReportPatch(fields) {
   }
   if (fields.generatedBy !== undefined && !SUMMARY_GENERATORS.has(fields.generatedBy)) {
     throw summaryValidationError('INVALID_SUMMARY_GENERATED_BY', 'Invalid summary report origin')
+  }
+  if (fields.executionMode !== undefined && !SUMMARY_EXECUTION_MODES.has(fields.executionMode)) {
+    throw summaryValidationError('INVALID_SUMMARY_EXECUTION_MODE', 'Invalid summary execution mode')
+  }
+  if (fields.sessionId !== undefined && fields.sessionId !== null &&
+    (typeof fields.sessionId !== 'string' || !fields.sessionId.trim())) {
+    throw summaryValidationError('INVALID_SUMMARY_SESSION_ID', 'Invalid summary session id')
+  }
+  if (fields.runPhase !== undefined && fields.runPhase !== null &&
+    !SUMMARY_RUN_PHASES.has(fields.runPhase)) {
+    throw summaryValidationError('SUMMARY_RUN_PHASE_INVALID', 'Invalid summary run phase')
   }
 }
 
@@ -2137,6 +2264,11 @@ function rowToSummaryReport(row) {
     isCurrent: row.is_current === 1,
     generatedBy: row.generated_by,
     errorText: row.error_text ?? null,
+    executionMode: row.execution_mode || 'isolated-runner',
+    sessionId: row.session_id || null,
+    runPhase: row.run_phase || null,
+    artifactMetadata: parseJsonObject(row.artifact_metadata_json),
+    legacyImportKey: row.legacy_import_key || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   }
