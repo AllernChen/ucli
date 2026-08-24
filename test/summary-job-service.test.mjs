@@ -108,14 +108,14 @@ function request(overrides = {}) {
   }
 }
 
-test('report repository assigns monotonic versions per logical key and validates JSON fields', () => {
+test('report repository assigns monotonic versions per logical key and validates JSON fields', async () => {
   const db = new MemoryDb()
   let id = 0
   const repository = createReportRepository({ db, now: () => 1000, idFactory: () => `r${++id}` })
 
-  const first = repository.createQueued(request())
-  const second = repository.createQueued(request())
-  const otherZone = repository.createQueued(request({ timezone: 'UTC' }))
+  const first = await repository.createQueued(request())
+  const second = await repository.createQueued(request())
+  const otherZone = await repository.createQueued(request({ timezone: 'UTC' }))
   assert.deepEqual([first.version, second.version, otherZone.version], [1, 2, 1])
   assert.deepEqual(first.usageSnapshot, {})
   assert.deepEqual(first.coverage, {})
@@ -125,39 +125,36 @@ test('report repository assigns monotonic versions per logical key and validates
   db.rows[0].coverage = '{"sessionsIncluded":2}'
   assert.deepEqual(repository.get(first.id).coverage, { sessionsIncluded: 2 })
   db.rows[0].generationUsage = '[]'
-  assert.throws(
-    () => repository.get(first.id),
-    error => error.code === 'INVALID_SUMMARY_REPORT_JSON'
-  )
+  assert.deepEqual(repository.get(first.id).generationUsage, {})
   db.rows[0].generationUsage = {}
-  assert.throws(
-    () => repository.update(second.id, { usageSnapshot: [] }),
+  await assert.rejects(
+    repository.update(second.id, { usageSnapshot: [] }),
     error => error.code === 'INVALID_SUMMARY_REPORT_JSON'
   )
-  assert.throws(
-    () => repository.update(second.id, { providerRawOutput: 'secret' }),
+  await assert.rejects(
+    repository.update(second.id, { providerRawOutput: 'secret' }),
     error => error.code === 'SUMMARY_REPORT_FIELD_FORBIDDEN'
   )
-  assert.throws(
-    () => repository.createQueued(request({ periodType: 'hour' })),
+  await assert.rejects(
+    repository.createQueued(request({ periodType: 'hour' })),
     error => error.code === 'INVALID_SUMMARY_REPORT'
   )
-  assert.throws(
-    () => repository.update(second.id, { coverage: { evidence: 'raw transcript' } }),
+  await assert.rejects(
+    repository.update(second.id, { coverage: { evidence: 'raw transcript' } }),
     error => error.code === 'SUMMARY_SENSITIVE_JSON_FORBIDDEN'
   )
-  assert.doesNotThrow(() => repository.update(second.id, {
+  await assert.doesNotReject(repository.update(second.id, {
     coverage: {
       sessionsIncluded: 4,
       sources: { transcript: 4, note: 1, nativeDigest: 0 }
     }
   }))
-  assert.deepEqual(repository.update(second.id, {
+  assert.deepEqual((await repository.update(second.id, {
     generationMetrics: {
       strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0,
       durationMs: 25, mapConcurrency: 2
     }
-  }).generationMetrics, {
+  })).generationMetrics, {
     strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0,
     durationMs: 25, mapConcurrency: 2
   })
@@ -169,21 +166,21 @@ test('report repository assigns monotonic versions per logical key and validates
     { strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0, durationMs: 1, mapConcurrency: 4 },
     { strategy: 'direct', plannedCalls: 1, aiCalls: 1, cacheHits: 0, durationMs: 1, mapConcurrency: 2, prompt: 'secret' }
   ]) {
-    assert.throws(
-      () => repository.update(second.id, { generationMetrics }),
+    await assert.rejects(
+      repository.update(second.id, { generationMetrics }),
       error => error.code === 'INVALID_SUMMARY_GENERATION_METRICS'
     )
   }
-  assert.throws(
-    () => repository.update(second.id, { generationMetrics: [] }),
+  await assert.rejects(
+    repository.update(second.id, { generationMetrics: [] }),
     error => error.code === 'INVALID_SUMMARY_GENERATION_METRICS'
   )
-  assert.throws(
-    () => repository.update(second.id, { coverage: { sources: { transcript: 'raw transcript' } } }),
+  await assert.rejects(
+    repository.update(second.id, { coverage: { sources: { transcript: 'raw transcript' } } }),
     error => error.code === 'SUMMARY_SENSITIVE_JSON_FORBIDDEN'
   )
-  assert.throws(
-    () => repository.update(second.id, { status: 'done' }),
+  await assert.rejects(
+    repository.update(second.id, { status: 'done' }),
     error => error.code === 'INVALID_SUMMARY_REPORT'
   )
   db.rows[0].generationMetrics = {
@@ -193,11 +190,11 @@ test('report repository assigns monotonic versions per logical key and validates
   assert.equal(db.getSummaryReport(second.id).status, 'queued')
 })
 
-test('report repository normalizes interactive defaults and rejects invalid run fields', () => {
+test('report repository normalizes interactive defaults and rejects invalid run fields', async () => {
   const db = new MemoryDb()
   const repository = createReportRepository({ db, now: () => 1000, idFactory: () => 'r1' })
 
-  const queued = repository.createQueued(request({
+  const queued = await repository.createQueued(request({
     executionMode: 'interactive-cli',
     sessionId: 'session-1'
   }))
@@ -236,23 +233,23 @@ test('report repository normalizes interactive defaults and rejects invalid run 
     { artifactMetadata: { projectPath: 'D:\\private\\source-project' } },
     { artifactMetadata: { workspacePath: 'C:\\private\\summary-run' } }
   ]) {
-    assert.throws(
-      () => repository.update(queued.id, patch),
+    await assert.rejects(
+      repository.update(queued.id, patch),
       error => ['SUMMARY_RUN_PHASE_INVALID', 'INVALID_SUMMARY_REPORT',
         'SUMMARY_SENSITIVE_JSON_FORBIDDEN'].includes(error.code)
     )
   }
-  assert.throws(
-    () => repository.createQueued(request({ executionMode: 'shared-session' })),
+  await assert.rejects(
+    repository.createQueued(request({ executionMode: 'shared-session' })),
     error => error.code === 'INVALID_SUMMARY_REPORT'
   )
 })
 
-test('report repository rejects recursive secrets, tool payloads, and absolute path values', () => {
+test('report repository rejects recursive secrets, tool payloads, and absolute path values', async () => {
   const repository = createReportRepository({
     db: new MemoryDb(), now: () => 1000, idFactory: () => 'r-sensitive'
   })
-  const report = repository.createQueued(request())
+  const report = await repository.createQueued(request())
   const unsafePatches = [
     { artifactMetadata: { apiKey: 'sk-secret' } },
     { coverage: { nested: { toolPayload: { command: 'rm -rf data' } } } },
@@ -269,22 +266,22 @@ test('report repository rejects recursive secrets, tool payloads, and absolute p
 
   for (const patch of unsafePatches) {
     const rejectedKey = Object.keys(patch)[0]
-    assert.throws(
-      () => repository.update(report.id, patch),
+    await assert.rejects(
+      repository.update(report.id, patch),
       error => error.code === 'SUMMARY_SENSITIVE_JSON_FORBIDDEN' &&
         !error.message.includes(rejectedKey)
     )
   }
-  assert.deepEqual(repository.update(report.id, {
+  assert.deepEqual((await repository.update(report.id, {
     usageSnapshot: { totals: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } }
-  }).usageSnapshot, { totals: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } })
+  })).usageSnapshot, { totals: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } })
 })
 
-test('report repository rejects unknown summary shapes and credential-shaped scalar values', () => {
+test('report repository rejects unknown summary shapes and credential-shaped scalar values', async () => {
   const repository = createReportRepository({
     db: new MemoryDb(), now: () => 1000, idFactory: () => 'r-closed-json'
   })
-  const report = repository.createQueued(request())
+  const report = await repository.createQueued(request())
   const secretKey = `sk-ant-${'x'.repeat(20)}`
   const awsKey = `AKIA${'A'.repeat(16)}`
   for (const patch of [
@@ -297,22 +294,23 @@ test('report repository rejects unknown summary shapes and credential-shaped sca
     { usageSnapshot: { totals: { inputTokens: 1 }, value: awsKey } },
     { generationUsage: { inputTokens: 1, outputTokens: 1, extra: 1 } }
   ]) {
-    assert.throws(
-      () => repository.update(report.id, patch),
+    await assert.rejects(
+      repository.update(report.id, patch),
       error => ['INVALID_SUMMARY_REPORT_JSON',
         'SUMMARY_SENSITIVE_JSON_FORBIDDEN'].includes(error.code)
     )
   }
-  assert.deepEqual(repository.update(report.id, {
+  assert.deepEqual((await repository.update(report.id, {
     coverage: { sessionsIncluded: 1, sources: { transcript: 2, note: 1, nativeDigest: 0 } }
-  }).coverage.sources, { transcript: 2, note: 1, nativeDigest: 0 })
+  })).coverage.sources, { transcript: 2, note: 1, nativeDigest: 0 })
 })
 
-test('report repository accepts only bounded safe error machine codes', () => {
+test('report repository accepts only bounded safe error machine codes', async () => {
+  const db = new MemoryDb()
   const repository = createReportRepository({
-    db: new MemoryDb(), now: () => 1000, idFactory: () => 'r-errors'
+    db, now: () => 1000, idFactory: () => 'r-errors'
   })
-  const report = repository.createQueued(request())
+  const report = await repository.createQueued(request())
 
   for (const errorText of [
     'C:\\private\\workspace\\report.md',
@@ -323,18 +321,45 @@ test('report repository accepts only bounded safe error machine codes', () => {
     'SUMMARY_PROVIDER_FAILED',
     'ARBITRARY_UPPERCASE_CODE',
     'SUMMARY_GENERATION_FAILED:leaked-suffix',
-    'SUMMARY_AUTOMATIC_DUPLICATE:../../private/report'
+    'SUMMARY_AUTOMATIC_DUPLICATE:../../private/report',
+    `SUMMARY_AUTOMATIC_DUPLICATE:sk-ant-${'x'.repeat(20)}`,
+    `SUMMARY_AUTOMATIC_DUPLICATE:AKIA${'A'.repeat(16)}`
   ]) {
-    assert.throws(
-      () => repository.update(report.id, { errorText }),
+    await assert.rejects(
+      repository.update(report.id, { errorText }),
       error => error.code === 'INVALID_SUMMARY_ERROR_CODE' &&
         !error.message.includes(errorText)
     )
   }
-  assert.equal(repository.update(report.id, {
-    errorText: 'SUMMARY_AUTOMATIC_DUPLICATE:safe-report_1.2-abc'
-  }).errorText, 'SUMMARY_AUTOMATIC_DUPLICATE:safe-report_1.2-abc')
-  assert.equal(repository.update(report.id, { errorText: null }).errorText, null)
+  const targetId = '11111111-1111-4111-8111-111111111111'
+  db.rows.push({
+    ...structuredClone(report), id: targetId, version: 2, status: 'completed',
+    markdown: '# Existing', sourceHash: SOURCE_HASH, runPhase: 'completed',
+    artifactMetadata: artifactMetadata('# Existing'), isCurrent: true
+  })
+  db.rows.push({
+    ...structuredClone(report), id: '22222222-2222-4222-8222-222222222222',
+    version: 3, status: 'running', runPhase: 'running'
+  })
+  db.rows.push({
+    ...structuredClone(report), id: '33333333-3333-4333-8333-333333333333',
+    periodStart: 300, periodEndExclusive: 400, status: 'completed',
+    markdown: '# Other', sourceHash: SOURCE_HASH, runPhase: 'completed',
+    artifactMetadata: artifactMetadata('# Other')
+  })
+  for (const duplicateTargetId of [
+    '44444444-4444-4444-8444-444444444444',
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333'
+  ]) {
+    await assert.rejects(repository.update(report.id, {
+      errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${duplicateTargetId}`
+    }), error => error.code === 'INVALID_SUMMARY_ERROR_CODE')
+  }
+  assert.equal((await repository.update(report.id, {
+    errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${targetId}`
+  })).errorText, `SUMMARY_AUTOMATIC_DUPLICATE:${targetId}`)
+  assert.equal((await repository.update(report.id, { errorText: null })).errorText, null)
 })
 
 test('completed and imported artifact metadata is exact while active metadata stays empty', async () => {
@@ -343,16 +368,16 @@ test('completed and imported artifact metadata is exact while active metadata st
   const repository = createReportRepository({
     db, now: () => 1000, idFactory: () => `r-artifact-${++id}`
   })
-  const queued = repository.createQueued(request({
+  const queued = await repository.createQueued(request({
     executionMode: 'interactive-cli', sessionId: 'session-1'
   }))
-  assert.throws(
-    () => repository.update(queued.id, {
+  await assert.rejects(
+    repository.update(queued.id, {
       artifactMetadata: artifactMetadata('# Active')
     }),
     error => error.code === 'INVALID_SUMMARY_ARTIFACT_METADATA'
   )
-  repository.update(queued.id, { status: 'running', runPhase: 'running' })
+  await repository.update(queued.id, { status: 'running', runPhase: 'running' })
   for (const invalidMetadata of [
     {},
     { canonical: 'html', bytes: 1, sha256: artifactMetadata('# Completed').sha256 },
@@ -378,10 +403,10 @@ test('repository completion and import verify Markdown byte length and digest', 
   const repository = createReportRepository({
     db, now: () => 1000, idFactory: () => `r-integrity-${++id}`
   })
-  const queued = repository.createQueued(request({
+  const queued = await repository.createQueued(request({
     executionMode: 'interactive-cli', sessionId: 'session-integrity'
   }))
-  repository.update(queued.id, { status: 'running', runPhase: 'running' })
+  await repository.update(queued.id, { status: 'running', runPhase: 'running' })
   const markdown = '# Integrity'
   const correct = artifactMetadata(markdown)
   for (const metadata of [
@@ -404,11 +429,11 @@ test('repository completion and import verify Markdown byte length and digest', 
   }
 })
 
-test('report repository forbids identity and raw-path patches', () => {
+test('report repository forbids identity and raw-path patches', async () => {
   const repository = createReportRepository({
     db: new MemoryDb(), now: () => 1000, idFactory: () => 'r1'
   })
-  const report = repository.createQueued(request())
+  const report = await repository.createQueued(request())
 
   for (const patch of [
     { version: 2 },
@@ -416,8 +441,8 @@ test('report repository forbids identity and raw-path patches', () => {
     { workspacePath: 'C:\\private\\summary-run' },
     { rawPath: '/private/summary-run' }
   ]) {
-    assert.throws(
-      () => repository.update(report.id, patch),
+    await assert.rejects(
+      repository.update(report.id, patch),
       error => error.code === 'SUMMARY_REPORT_FIELD_FORBIDDEN'
     )
   }
@@ -429,9 +454,11 @@ test('report repository imports legacy markdown idempotently without changing cu
   const repository = createReportRepository({
     db, now: () => 1000, idFactory: () => `r${++id}`
   })
-  const current = repository.createQueued(request())
-  db.updateSummaryReport(current.id, {
-    status: 'completed', markdown: '# Existing', isCurrent: true
+  const current = await repository.createQueued(request())
+  await repository.update(current.id, { status: 'running' })
+  await repository.complete(current.id, {
+    markdown: '# Existing', sourceHash: SOURCE_HASH, usageSnapshot: {}, coverage: {},
+    artifactMetadata: artifactMetadata('# Existing')
   })
   const input = {
     ...request(),
@@ -458,10 +485,14 @@ test('report repository imports legacy markdown idempotently without changing cu
 test('report repository completes only running reports with canonical metadata', async () => {
   const db = new MemoryDb()
   const repository = createReportRepository({ db, now: () => 2000, idFactory: () => 'r1' })
-  const queued = repository.createQueued(request({
+  const queued = await repository.createQueued(request({
     executionMode: 'interactive-cli', sessionId: 'session-1'
   }))
-  repository.update(queued.id, { status: 'running', runPhase: 'running' })
+  await assert.rejects(repository.update(queued.id, {
+    status: 'completed', runPhase: 'completed', markdown: '# Bypass',
+    sourceHash: SOURCE_HASH, artifactMetadata: artifactMetadata('# Bypass')
+  }), error => error.code === 'INVALID_SUMMARY_STATUS')
+  await repository.update(queued.id, { status: 'running', runPhase: 'running' })
 
   const report = await repository.complete(queued.id, {
     markdown: '# Completed',
@@ -488,7 +519,7 @@ test('report repository completes only running reports with canonical metadata',
 test('report repository exposes only the normalized deletion result', async () => {
   const db = new MemoryDb()
   const repository = createReportRepository({ db, now: () => 1000, idFactory: () => 'r1' })
-  repository.createQueued(request())
+  await repository.createQueued(request())
   assert.deepEqual(await repository.delete('r1'), {
     deletedReportId: 'r1', currentReportId: null
   })
@@ -541,7 +572,7 @@ test('successful jobs use an opaque persistent workspace then compact it to outp
       }
     })
 
-    const job = service.generate(request())
+    const job = await service.generate(request())
     const report = await job.completion
     const workspace = join(root, 'workspaces', job.reportId)
     const manifest = JSON.parse(readFileSync(join(workspace, 'manifest.json'), 'utf8'))
@@ -582,7 +613,7 @@ test('failed jobs retain bounded redacted inputs with a seven day expiry', async
       },
       pipeline: { async run() { throw Object.assign(new Error('credential leak'), { code: 'SUMMARY_PROVIDER_FAILED' }) } }
     })
-    const job = service.generate(request())
+  const job = await service.generate(request())
     await job.completion
     const workspace = join(root, 'workspaces', job.reportId)
     const manifest = JSON.parse(readFileSync(join(workspace, 'manifest.json'), 'utf8'))
@@ -609,7 +640,11 @@ test('failed jobs retain bounded redacted inputs with a seven day expiry', async
 function createHarness(overrides = {}) {
   const db = new MemoryDb()
   let id = 0
-  const repository = createReportRepository({ db, now: () => 1000 + id, idFactory: () => `r${++id}` })
+  const repository = createReportRepository({
+    db,
+    now: () => 1000 + id,
+    idFactory: () => `00000000-0000-4000-8000-${String(++id).padStart(12, '0')}`
+  })
   const service = createSummaryJobService({
     repository,
     evidenceCollector: { async collect() { return evidence() } },
@@ -639,8 +674,9 @@ test('jobs persist queued and running transitions while executing only one pipel
   })
   service.subscribe(report => transitions.push(`${report.id}:${report.status}`))
 
-  const first = service.generate(request())
-  const second = service.generate(request())
+  const [first, second] = await Promise.all([
+    service.generate(request()), service.generate(request())
+  ])
   const [firstResult, secondResult] = await Promise.all([first.completion, second.completion])
 
   assert.equal(maxActive, 1)
@@ -649,7 +685,9 @@ test('jobs persist queued and running transitions while executing only one pipel
   assert.equal(repository.get(first.reportId).isCurrent, false)
   assert.equal(repository.get(second.reportId).isCurrent, true)
   assert.deepEqual(transitions, [
-    'r1:queued', 'r2:queued', 'r1:running', 'r1:completed', 'r2:running', 'r2:completed'
+    `${first.reportId}:queued`, `${second.reportId}:queued`,
+    `${first.reportId}:running`, `${first.reportId}:completed`,
+    `${second.reportId}:running`, `${second.reportId}:completed`
   ])
 })
 
@@ -669,7 +707,7 @@ test('pipeline progress is forwarded ephemerally without changing persisted repo
     if (progress) events.push({ reportId: report.id, ...progress })
   })
 
-  const job = service.generate(request())
+  const job = await service.generate(request())
   await job.completion
   assert.deepEqual(events, [
     { reportId: job.reportId, phase: 'cache-check', completed: 0, total: 1 },
@@ -688,7 +726,7 @@ test('completed jobs persist only bounded generation metrics that survive reposi
   const { service, repository, db } = createHarness({
     pipeline: { async run() { return { ...pipelineResult(), generationMetrics: unsafeMetrics } } }
   })
-  const job = service.generate(request())
+  const job = await service.generate(request())
   await job.completion
   const restarted = createReportRepository({ db })
   assert.deepEqual(restarted.get(job.reportId).generationMetrics, {
@@ -721,9 +759,9 @@ test('cancelling an active job aborts the pipeline and preserves a cancelled aud
       }
     }
   })
-  const job = service.generate(request())
-  await waitFor(() => repository.get(job.reportId).status === 'running')
-  assert.equal(service.cancel(job.reportId), true)
+  const job = await service.generate(request())
+  await waitFor(() => observedSignal !== null)
+  assert.equal(await service.cancel(job.reportId), true)
   const report = await job.completion
 
   assert.equal(observedSignal.aborted, true)
@@ -738,10 +776,10 @@ test('cancellation wins if requested as the pipeline result is resolving', async
   const { service, repository } = createHarness({
     pipeline: { run() { return pending } }
   })
-  const job = service.generate(request())
+  const job = await service.generate(request())
   await waitFor(() => repository.get(job.reportId).status === 'running')
   resolvePipeline(pipelineResult())
-  service.cancel(job.reportId)
+  await service.cancel(job.reportId)
   const report = await job.completion
   assert.equal(report.status, 'cancelled')
   assert.equal(report.isCurrent, false)
@@ -756,10 +794,10 @@ test('cancellation wins while usage snapshot is resolving on an empty report', a
     },
     snapshotUsage: () => pendingUsage
   })
-  const job = service.generate(request())
+  const job = await service.generate(request())
   await waitFor(() => repository.get(job.reportId).sourceHash !== null)
 
-  service.cancel(job.reportId)
+  await service.cancel(job.reportId)
   resolveUsage({ totals: { inputTokens: 0 } })
   const report = await job.completion
 
@@ -767,17 +805,17 @@ test('cancellation wins while usage snapshot is resolving on an empty report', a
   assert.equal(report.isCurrent, false)
 })
 
-test('repository startup recovery marks stale queued, running, and awaiting reports interrupted', () => {
+test('repository startup recovery marks stale queued, running, and awaiting reports interrupted', async () => {
   const db = new MemoryDb()
   let id = 0
   const repository = createReportRepository({ db, idFactory: () => `stale-${++id}` })
-  const queued = repository.createQueued(request())
-  const running = repository.createQueued(request())
-  repository.update(running.id, { status: 'running' })
-  const awaiting = repository.createQueued(request())
-  repository.update(awaiting.id, { status: 'awaiting_confirmation' })
+  const queued = await repository.createQueued(request())
+  const running = await repository.createQueued(request())
+  await repository.update(running.id, { status: 'running' })
+  const awaiting = await repository.createQueued(request())
+  await repository.update(awaiting.id, { status: 'awaiting_confirmation' })
 
-  repository.interruptStale()
+  await repository.interruptStale()
 
   assert.equal(repository.get(queued.id).status, 'interrupted')
   assert.equal(repository.get(running.id).status, 'interrupted')
@@ -795,7 +833,7 @@ test('empty evidence snapshots usage but becomes skipped_empty without AI calls'
     snapshotUsage: async () => { usageCalls += 1; return { totals: { inputTokens: 0 } } },
     pipeline: { async run() { aiCalls += 1; return pipelineResult() } }
   })
-  const job = service.generate(request())
+  const job = await service.generate(request())
   const result = await job.completion
 
   assert.equal(result.status, 'skipped_empty')
@@ -819,9 +857,9 @@ test('a failed regeneration leaves the previous completed version current and st
       }
     }
   })
-  const first = service.generate(request())
+  const first = await service.generate(request())
   const firstResult = await first.completion
-  const second = service.generate(request())
+  const second = await service.generate(request())
   const secondResult = await second.completion
 
   assert.equal(firstResult.isCurrent, true)
@@ -846,9 +884,9 @@ test('a regenerated version becomes current only after its pipeline succeeds', a
       }
     }
   })
-  const first = service.generate(request())
+  const first = await service.generate(request())
   await first.completion
-  const second = service.generate(request())
+  const second = await service.generate(request())
   await waitFor(() => repository.get(second.reportId).status === 'running')
   assert.equal(repository.get(first.reportId).isCurrent, true)
   assert.equal(repository.get(second.reportId).isCurrent, false)
@@ -874,17 +912,17 @@ test('automatic generation deduplicates identical source while manual generation
     },
     pipeline: { async run() { aiCalls += 1; return pipelineResult(`call ${aiCalls}`) } }
   })
-  const first = service.generate(request())
+  const first = await service.generate(request())
   await first.completion
 
-  const automatic = service.generate(request({ generatedBy: 'automatic' }))
+  const automatic = await service.generate(request({ generatedBy: 'automatic' }))
   const automaticResult = await automatic.completion
   assert.equal(automaticResult.status, 'skipped_empty')
   assert.match(automaticResult.errorText, /^SUMMARY_AUTOMATIC_DUPLICATE:/)
   assert.equal(aiCalls, 1)
   assert.equal(repository.get(first.reportId).isCurrent, true)
 
-  const manual = service.generate(request({ generatedBy: 'manual' }))
+  const manual = await service.generate(request({ generatedBy: 'manual' }))
   const manualResult = await manual.completion
   assert.equal(manualResult.version, 3)
   assert.equal(manualResult.status, 'completed')
@@ -911,13 +949,13 @@ test('manual preflight persists awaiting_confirmation and resumes only through e
       }
     }
   })
-  const job = service.generate(request())
+  const job = await service.generate(request())
   await waitFor(() => repository.get(job.reportId).status === 'awaiting_confirmation')
   assert.equal(calls.length, 1)
   assert.equal(repository.get(job.reportId).errorText, 'SUMMARY_MANUAL_CONFIRMATION_REQUIRED')
   assert.equal(service.getConfirmationCallLimit(job.reportId), 24)
 
-  const resumed = service.confirm(job.reportId)
+  const resumed = await service.confirm(job.reportId)
   assert.equal(resumed.completion, job.completion)
   const completed = await resumed.completion
   assert.equal(calls.length, 2)
@@ -940,13 +978,13 @@ test('a dynamic confirmation error fails safely instead of pretending a costly r
       }
     }
   })
-  const job = service.generate(request())
+  const job = await service.generate(request())
   const report = await job.completion
   assert.equal(report.status, 'failed')
   assert.equal(report.errorText, 'SUMMARY_MANUAL_CONFIRMATION_REQUIRED')
   assert.equal(calls, 1)
-  assert.throws(
-    () => service.confirm(job.reportId),
+  await assert.rejects(
+    service.confirm(job.reportId),
     error => error.code === 'SUMMARY_CONFIRMATION_CONTEXT_MISSING'
   )
   assert.equal(repository.get(job.reportId).status, 'failed')
@@ -961,7 +999,7 @@ test('headless jobs map unlisted provider codes to the persisted generation fall
         }
       }
     })
-    const report = await service.generate(request()).completion
+    const report = await (await service.generate(request())).completion
     assert.equal(report.status, 'failed')
     assert.equal(report.errorText, 'SUMMARY_GENERATION_FAILED')
   }
@@ -987,7 +1025,7 @@ test('workspace finalization failure never persists a completed non-current repo
       return originalUpdate(id, patch)
     }
 
-    const job = service.generate(request())
+    const job = await service.generate(request())
     const report = await job.completion
 
     assert.equal(report.status, 'failed')
@@ -1023,7 +1061,7 @@ test('job order finalizes the workspace before one atomic database completion', 
       async fail() {}
     }
   })
-  const job = service.generate(request())
+  const job = await service.generate(request())
   await job.completion
   assert.deepEqual(order, ['queued', 'collect', 'usage', 'pipeline', 'workspace', 'complete'])
 })
@@ -1045,7 +1083,7 @@ test('shutdown is idempotent, rejects new jobs, cancels active work, and drains 
         }
       }
     })
-    const job = service.generate(request())
+  const job = await service.generate(request())
     await started
     const first = service.shutdown()
     const second = service.shutdown()
@@ -1056,8 +1094,8 @@ test('shutdown is idempotent, rejects new jobs, cancels active work, and drains 
       join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
     ))
     assert.notEqual(manifest.status, 'running')
-    assert.throws(
-      () => service.generate(request()),
+    await assert.rejects(
+      service.generate(request()),
       error => error.code === 'SUMMARY_SERVICE_SHUTTING_DOWN'
     )
   } finally {
@@ -1075,7 +1113,7 @@ test('shutdown compacts an awaiting-confirmation workspace instead of leaving it
         return { requiresConfirmation: true, estimatedCalls: 24, confirmationCallLimit: 24 }
       } }
     })
-    const job = service.generate(request())
+  const job = await service.generate(request())
     await waitFor(() => repository.get(job.reportId).status === 'awaiting_confirmation')
     await service.shutdown()
     const manifest = JSON.parse(readFileSync(
@@ -1092,7 +1130,7 @@ test('isActive protects queued work only until the job reaches a terminal state'
   const { service, repository } = createHarness({
     pipeline: { run: async () => pipelineResult('done') }
   })
-  const job = service.generate(request())
+  const job = await service.generate(request())
   assert.equal(service.isActive(job.reportId), true)
   await job.completion
   assert.equal(repository.get(job.reportId).status, 'completed')

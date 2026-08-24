@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import {
   SUMMARY_EXECUTION_MODE,
   assertInteractiveSummaryPhase,
-  isPersistedSummaryErrorText
+  isPersistedSummaryErrorText,
+  summaryAutomaticDuplicateReportId
 } from './interactiveSummaryContracts.js'
 import {
   assertSafeSummaryHash,
@@ -56,6 +57,94 @@ function safeErrorText(value) {
     throw repositoryError('INVALID_SUMMARY_ERROR_CODE', 'Invalid summary error code')
   }
   return normalized
+}
+
+function persistedErrorText(value) {
+  const normalized = value ?? null
+  return isPersistedSummaryErrorText(normalized)
+    ? normalized
+    : 'SUMMARY_GENERATION_FAILED'
+}
+
+const LEGACY_USAGE_METRIC_FIELDS = new Set([
+  'start', 'endExclusive', 'label', 'coveredStart', 'coveredEndExclusive', 'partial',
+  'inputTokens', 'outputTokens', 'totalTokens', 'knownCostUsd', 'costUsd', 'costCoverage',
+  'costAvailable', 'turns', 'activeSessions', 'approvals'
+])
+const PERSISTED_COVERAGE_FIELDS = new Set([
+  'sessionsDiscovered', 'sessionsIncluded', 'sessionsMissing', 'messagesIncluded',
+  'truncatedSessions', 'sources', 'warnings', 'redactions', 'legacyFormat'
+])
+
+function parsedObject(value) {
+  let parsed = value
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed) } catch { return null }
+  }
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+}
+
+function pickObject(value, fields) {
+  const object = parsedObject(value)
+  if (!object) return {}
+  return Object.fromEntries(Object.entries(object).filter(([key]) => fields.has(key)))
+}
+
+function projectPersistedJson(value, field) {
+  const object = parsedObject(value)
+  if (!object) return {}
+  if (field === 'usageSnapshot') {
+    const projected = pickObject(object, new Set([
+      'granularity', 'timezone', 'range', 'buckets', 'totals', 'legacyBaseline', 'exactSince'
+    ]))
+    if (projected.range !== undefined) {
+      projected.range = pickObject(projected.range, new Set(['start', 'endExclusive']))
+    }
+    if (Array.isArray(projected.buckets)) {
+      projected.buckets = projected.buckets.map(bucket => pickObject(bucket, LEGACY_USAGE_METRIC_FIELDS))
+    }
+    if (projected.totals !== undefined) {
+      projected.totals = pickObject(projected.totals, LEGACY_USAGE_METRIC_FIELDS)
+    }
+    if (projected.legacyBaseline !== undefined) {
+      projected.legacyBaseline = pickObject(
+        projected.legacyBaseline,
+        new Set(['available', 'reason', 'metrics'])
+      )
+      if (projected.legacyBaseline.metrics !== undefined) {
+        projected.legacyBaseline.metrics = pickObject(
+          projected.legacyBaseline.metrics,
+          LEGACY_USAGE_METRIC_FIELDS
+        )
+      }
+    }
+    const legacyTotals = pickObject(object, LEGACY_USAGE_METRIC_FIELDS)
+    if (Object.keys(legacyTotals).length > 0 && projected.totals === undefined) {
+      projected.totals = legacyTotals
+    }
+    return projected
+  }
+  if (field === 'coverage') {
+    const projected = pickObject(object, PERSISTED_COVERAGE_FIELDS)
+    if (projected.sources !== undefined) {
+      projected.sources = pickObject(projected.sources, new Set(['transcript', 'note', 'nativeDigest']))
+    }
+    if (projected.redactions !== undefined) {
+      projected.redactions = pickObject(projected.redactions, new Set([
+        'authorization', 'commonKey', 'privateKey', 'credentialUrl', 'namedValue'
+      ]))
+    }
+    return projected
+  }
+  if (field === 'generationUsage') {
+    return pickObject(object, new Set(['inputTokens', 'outputTokens', 'costUsd']))
+  }
+  return {}
+}
+
+function persistedJsonObject(value, field) {
+  try { return normalizeSummaryJsonField(value ?? {}, field) } catch {}
+  try { return normalizeSummaryJsonField(projectPersistedJson(value, field), field) } catch { return {} }
 }
 
 function emptyArtifactMetadata(value) {
@@ -129,11 +218,11 @@ function normalizeReport(report) {
     throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report record')
   }
   if (normalized.runPhase !== null) assertInteractiveSummaryPhase(normalized.runPhase)
-  normalized.errorText = safeErrorText(report.errorText)
+  normalized.errorText = persistedErrorText(report.errorText)
   for (const field of JSON_FIELDS) {
     normalized[field] = field === 'generationMetrics'
       ? persistedGenerationMetrics(report[field] ?? {})
-      : jsonObject(report[field] ?? {}, field)
+      : persistedJsonObject(report[field] ?? {}, field)
   }
   return normalized
 }
@@ -181,15 +270,27 @@ export function createReportRepository({
 } = {}) {
   if (!db) throw new TypeError('db is required')
 
+  function assertAutomaticDuplicateTarget(reportId, errorText) {
+    const targetId = summaryAutomaticDuplicateReportId(errorText)
+    if (!targetId) return
+    const report = db.getSummaryReport(reportId)
+    const target = db.getSummaryReport(targetId)
+    if (!report || !target || target.status !== 'completed' ||
+      target.periodType !== report.periodType || target.periodStart !== report.periodStart ||
+      target.periodEndExclusive !== report.periodEndExclusive || target.timezone !== report.timezone) {
+      throw repositoryError('INVALID_SUMMARY_ERROR_CODE', 'Invalid summary error code')
+    }
+  }
+
   const listForKey = input => db.listSummaryReports(keyFilters(input)).map(normalizeReport)
   const repository = {
-    createQueued(input) {
+    async createQueued(input) {
       const key = keyFilters(input)
       assertQueuedInput(input, key)
       const version = listForKey(key).reduce((max, report) => Math.max(max, report.version), 0) + 1
       const timestamp = now()
       const executionMode = input.executionMode || SUMMARY_EXECUTION_MODE.ISOLATED_RUNNER
-      return normalizeReport(db.createSummaryReport({
+      return normalizeReport(await db.createSummaryReport({
         id: idFactory(),
         ...key,
         partial: input.partial === true,
@@ -231,7 +332,7 @@ export function createReportRepository({
 
     listForKey,
 
-    update(reportId, patch = {}) {
+    async update(reportId, patch = {}) {
       const forbidden = Object.keys(patch).find(field => !PATCH_FIELDS.has(field))
       if (forbidden) {
         throw repositoryError('SUMMARY_REPORT_FIELD_FORBIDDEN', 'Summary report field is not persistable')
@@ -239,6 +340,12 @@ export function createReportRepository({
       const safe = { ...patch }
       if (safe.status !== undefined && !STATUSES.has(safe.status)) {
         throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report status')
+      }
+      if (safe.status === 'completed' || safe.runPhase === 'completed') {
+        throw repositoryError(
+          'INVALID_SUMMARY_STATUS',
+          'Completed summary reports require the dedicated completion path'
+        )
       }
       if (safe.generatedBy !== undefined && !GENERATED_BY.has(safe.generatedBy)) {
         throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report origin')
@@ -250,7 +357,10 @@ export function createReportRepository({
       if (safe.runPhase !== undefined && safe.runPhase !== null) {
         assertInteractiveSummaryPhase(safe.runPhase)
       }
-      if (safe.errorText !== undefined) safe.errorText = safeErrorText(safe.errorText)
+      if (safe.errorText !== undefined) {
+        safe.errorText = safeErrorText(safe.errorText)
+        assertAutomaticDuplicateTarget(reportId, safe.errorText)
+      }
       for (const field of JSON_FIELDS) {
         if (safe[field] === undefined) continue
         safe[field] = field === 'generationMetrics'
@@ -259,7 +369,7 @@ export function createReportRepository({
             ? emptyArtifactMetadata(safe[field])
             : jsonObject(safe[field], field)
       }
-      return normalizeReport(db.updateSummaryReport(reportId, safe))
+      return normalizeReport(await db.updateSummaryReport(reportId, safe))
     },
 
     async complete(reportId, result = {}) {
@@ -331,8 +441,8 @@ export function createReportRepository({
       return normalizeReport(await db.setCurrentSummaryReport(reportId))
     },
 
-    delete(reportId) {
-      return db.deleteSummaryReport(reportId)
+    async delete(reportId) {
+      return await db.deleteSummaryReport(reportId)
     },
 
     findCompletedBySource(input, sourceHash, excludeId = null) {
@@ -341,11 +451,11 @@ export function createReportRepository({
       ) || null
     },
 
-    interruptStale() {
+    async interruptStale() {
       const interrupted = []
       for (const status of ['queued', 'running', 'awaiting_confirmation']) {
         for (const report of repository.list({ status })) {
-          interrupted.push(repository.update(report.id, {
+          interrupted.push(await repository.update(report.id, {
             status: 'interrupted',
             errorText: 'SUMMARY_PROCESS_RESTARTED',
             updatedAt: now()

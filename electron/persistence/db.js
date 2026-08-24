@@ -5,7 +5,10 @@ import {
 import { createHash } from 'node:crypto'
 import { join } from 'path'
 
-import { isPersistedSummaryErrorText } from '../summaries/interactiveSummaryContracts.js'
+import {
+  isPersistedSummaryErrorText,
+  summaryAutomaticDuplicateReportId
+} from '../summaries/interactiveSummaryContracts.js'
 import {
   assertSafeSummaryHash,
   normalizeCompletedArtifactMetadata,
@@ -963,8 +966,20 @@ class Db {
   }
 
   // ---- summary reports ----
-  createSummaryReport(report) {
+  async createSummaryReport(report) {
     assertSummaryReport(report)
+    if (report.status === 'completed' || report.isCurrent === true) {
+      throw summaryValidationError(
+        'INVALID_SUMMARY_STATUS',
+        'Completed summary reports require the dedicated completion or import path'
+      )
+    }
+    return this.transactionSync(() => this._insertSummaryReportSync(report))
+  }
+
+  _insertSummaryReportSync(report) {
+    assertSummaryReport(report)
+    assertAutomaticDuplicateTarget(this, report, report.errorText)
     const createdAt = Number.isFinite(report.createdAt) ? report.createdAt : Date.now()
     const updatedAt = Number.isFinite(report.updatedAt) ? report.updatedAt : createdAt
     this.sql.run(
@@ -994,10 +1009,22 @@ class Db {
     return this.getSummaryReport(report.id)
   }
 
-  updateSummaryReport(reportId, fields = {}) {
+  async updateSummaryReport(reportId, fields = {}) {
     assertSummaryReportPatch(fields)
-    if (fields.status !== undefined && fields.status !== 'completed' &&
-      this.getSummaryReport(reportId)?.isCurrent) {
+    if (fields.status === 'completed' || fields.runPhase === 'completed') {
+      throw summaryValidationError(
+        'INVALID_SUMMARY_STATUS',
+        'Completed summary reports require the dedicated completion path'
+      )
+    }
+    return this.transactionSync(() => this._updateSummaryReportSync(reportId, fields))
+  }
+
+  _updateSummaryReportSync(reportId, fields = {}) {
+    assertSummaryReportPatch(fields)
+    const existing = this.getSummaryReport(reportId)
+    assertAutomaticDuplicateTarget(this, existing, fields.errorText)
+    if (fields.status !== undefined && fields.status !== 'completed' && existing?.isCurrent) {
       throw summaryValidationError(
         'SUMMARY_REPORT_NOT_COMPLETED',
         'A current summary report must remain completed'
@@ -1065,7 +1092,7 @@ class Db {
           code: 'SUMMARY_REPORT_NOT_RUNNING'
         })
       }
-      this.updateSummaryReport(reportId, fields)
+      this._updateSummaryReportSync(reportId, fields)
       this.sql.run(
         `UPDATE summary_reports SET is_current = 0
          WHERE period_type = ? AND period_start = ?
@@ -1095,7 +1122,7 @@ class Db {
            AND period_end_exclusive = ? AND timezone = ?`,
         [report.periodType, report.periodStart, report.periodEndExclusive, report.timezone]
       ))[0]
-      const created = this.createSummaryReport({
+      const created = this._insertSummaryReportSync({
         ...report,
         version: Number(latest?.version || 0) + 1,
         status: 'completed',
@@ -2212,6 +2239,17 @@ function assertSummaryJson(value, field) {
 
 function assertSummaryErrorText(value) {
   if (value !== undefined && !isPersistedSummaryErrorText(value)) {
+    throw summaryValidationError('INVALID_SUMMARY_ERROR_CODE', 'Invalid summary error code')
+  }
+}
+
+function assertAutomaticDuplicateTarget(db, report, errorText) {
+  const targetId = summaryAutomaticDuplicateReportId(errorText)
+  if (!targetId) return
+  const target = db.getSummaryReport(targetId)
+  if (!report || !target || target.status !== 'completed' ||
+    target.periodType !== report.periodType || target.periodStart !== report.periodStart ||
+    target.periodEndExclusive !== report.periodEndExclusive || target.timezone !== report.timezone) {
     throw summaryValidationError('INVALID_SUMMARY_ERROR_CODE', 'Invalid summary error code')
   }
 }

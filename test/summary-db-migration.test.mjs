@@ -109,9 +109,22 @@ test('existing 0.11.5 summary database gains interactive fields without losing r
       createdAt: 10,
       updatedAt: 10
     })
+    db.sql.run(`UPDATE summary_reports SET
+      usage_snapshot_json = '{"inputTokens":30,"unknownCounter":99}',
+      coverage_json = '{"sessionsIncluded":2,"unknownSafe":1}',
+      error_text = 'LEGACY_PROVIDER_TIMEOUT_42'
+      WHERE id = 'legacy-r1'`)
+    const legacyReport = createReportRepository({ db }).get('legacy-r1')
+    assert.deepEqual(legacyReport.usageSnapshot, { totals: { inputTokens: 30 } })
+    assert.deepEqual(legacyReport.coverage, { sessionsIncluded: 2 })
+    assert.equal(legacyReport.errorText, 'SUMMARY_GENERATION_FAILED')
+    assert.equal(legacyReport.markdown, '# 摘要')
     db.close()
     db = await openDb(dbPath)
-    assert.equal(db.getSummaryReport('legacy-r1').markdown, '# 摘要')
+    const reopenedLegacyReport = createReportRepository({ db }).list()[0]
+    assert.equal(reopenedLegacyReport.markdown, '# 摘要')
+    assert.deepEqual(reopenedLegacyReport.usageSnapshot, { totals: { inputTokens: 30 } })
+    assert.equal(reopenedLegacyReport.errorText, 'SUMMARY_GENERATION_FAILED')
     assert.deepEqual(
       db.sql.exec('PRAGMA table_info(summary_reports)')[0].values
         .map(row => row[1])
@@ -134,8 +147,8 @@ function summaryReport(overrides = {}) {
     timezone: 'Asia/Shanghai',
     partial: false,
     version: 1,
-    status: 'completed',
-    markdown: '# Previous',
+    status: 'queued',
+    markdown: null,
     executorId: 'codex',
     profileId: 'profile-1',
     model: 'gpt-5',
@@ -145,7 +158,7 @@ function summaryReport(overrides = {}) {
     generationMetrics: {},
     generationCostUsd: null,
     promptVersion: 'summary-v1',
-    sourceHash: SOURCE_HASH,
+    sourceHash: null,
     isCurrent: false,
     generatedBy: 'manual',
     errorText: null,
@@ -160,12 +173,30 @@ function summaryReport(overrides = {}) {
   }
 }
 
+async function seedCompletedSummary(db, overrides = {}) {
+  const markdown = overrides.markdown ?? '# Previous'
+  const report = summaryReport({
+    ...overrides,
+    status: 'completed',
+    markdown,
+    sourceHash: overrides.sourceHash ?? SOURCE_HASH,
+    executionMode: 'legacy-worklog-import',
+    runPhase: 'completed',
+    artifactMetadata: overrides.artifactMetadata ?? artifactMetadata(markdown),
+    legacyImportKey: overrides.legacyImportKey ?? `legacy:${overrides.id ?? 'report-1'}`,
+    isCurrent: false
+  })
+  const result = await db.importCompletedSummaryReport(report)
+  if (overrides.isCurrent) return db.setCurrentSummaryReport(result.report.id)
+  return result.report
+}
+
 test('completing a running report atomically commits markdown and switches current version', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ucli-summary-complete-'))
   const db = await openDb(join(root, 'ucli.db'))
   try {
-    db.createSummaryReport(summaryReport({ id: 'week-v1', isCurrent: true }))
-    db.createSummaryReport(summaryReport({
+    await seedCompletedSummary(db, { id: 'week-v1', isCurrent: true })
+    await db.createSummaryReport(summaryReport({
       id: 'week-v2', version: 2, status: 'running', markdown: null,
       sourceHash: null, executionMode: 'interactive-cli', sessionId: 'session-2',
       runPhase: 'running'
@@ -187,7 +218,7 @@ test('completing a running report atomically commits markdown and switches curre
     assert.equal(completed.markdown, '# Current')
     assert.equal(db.getSummaryReport('week-v1').isCurrent, false)
 
-    db.createSummaryReport(summaryReport({
+    await db.createSummaryReport(summaryReport({
       id: 'week-v3', version: 3, status: 'running', markdown: null,
       sourceHash: null, executionMode: 'interactive-cli', sessionId: 'session-3',
       runPhase: 'running'
@@ -220,7 +251,7 @@ test('database completion rejects invalid canonical fields before changing repor
   const root = await mkdtemp(join(tmpdir(), 'ucli-summary-complete-boundary-'))
   const db = await openDb(join(root, 'ucli.db'))
   try {
-    db.createSummaryReport(summaryReport({
+    await db.createSummaryReport(summaryReport({
       id: 'running-boundary', status: 'running', markdown: null, sourceHash: null,
       executionMode: 'interactive-cli', sessionId: 'session-boundary', runPhase: 'running'
     }))
@@ -248,12 +279,45 @@ test('database completion rejects invalid canonical fields before changing repor
   }
 })
 
+test('direct create and update cannot bypass the dedicated completion path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-completion-bypass-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  try {
+    const markdown = '# Bypass'
+    await assert.rejects(db.createSummaryReport(summaryReport({
+      id: 'direct-completed', status: 'completed', markdown, sourceHash: SOURCE_HASH,
+      runPhase: 'completed', artifactMetadata: artifactMetadata(markdown)
+    })), error => error.code === 'INVALID_SUMMARY_STATUS')
+
+    await db.createSummaryReport(summaryReport({
+      id: 'bypass-target', status: 'running', runPhase: 'running'
+    }))
+    await assert.rejects(db.updateSummaryReport('bypass-target', {
+      status: 'completed', runPhase: 'completed', markdown, sourceHash: SOURCE_HASH,
+      artifactMetadata: artifactMetadata(markdown), updatedAt: 2000
+    }), error => error.code === 'INVALID_SUMMARY_STATUS')
+    await assert.rejects(
+      db.setCurrentSummaryReport('bypass-target'),
+      error => error.code === 'SUMMARY_REPORT_NOT_COMPLETED'
+    )
+    assert.deepEqual(
+      (({ status, markdown, sourceHash, isCurrent }) => ({ status, markdown, sourceHash, isCurrent }))(
+        db.getSummaryReport('bypass-target')
+      ),
+      { status: 'running', markdown: null, sourceHash: null, isCurrent: false }
+    )
+  } finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('a failed completion transaction cannot roll back an unrelated synchronous write', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ucli-summary-transaction-isolation-'))
   const db = await openDb(join(root, 'ucli.db'))
   try {
-    db.createSummaryReport(summaryReport({ id: 'week-current', isCurrent: true }))
-    db.createSummaryReport(summaryReport({
+    await seedCompletedSummary(db, { id: 'week-current', isCurrent: true })
+    await db.createSummaryReport(summaryReport({
       id: 'week-running', version: 2, status: 'running', markdown: null, sourceHash: null,
       executionMode: 'interactive-cli', sessionId: 'session-running', runPhase: 'running'
     }))
@@ -269,7 +333,7 @@ test('a failed completion transaction cannot roll back an unrelated synchronous 
       errorText: null, updatedAt: 2000
     })
     await Promise.resolve()
-    db.createSummaryReport(summaryReport({
+    await db.createSummaryReport(summaryReport({
       id: 'unrelated-day', periodType: 'day', periodStart: 300, periodEndExclusive: 400
     }))
 
@@ -299,7 +363,7 @@ test('real database imports are concurrent-idempotent and allocate same-period v
     return { ...value, artifactMetadata: overrides.artifactMetadata ?? artifactMetadata(value.markdown) }
   }
   try {
-    db.createSummaryReport(summaryReport({ id: 'existing-current', isCurrent: true }))
+    await seedCompletedSummary(db, { id: 'existing-current', isCurrent: true })
     const [first, repeated] = await Promise.all([
       repository.importCompleted(imported()),
       repository.importCompleted(imported())
@@ -340,6 +404,103 @@ test('database transaction preserves existing async callback compatibility', asy
   }
 })
 
+test('a failing async transaction preserves an unrelated summary created while it awaits', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-async-transaction-ownership-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  let releaseTransaction
+  let markStarted
+  const started = new Promise(resolve => { markStarted = resolve })
+  const gate = new Promise(resolve => { releaseTransaction = resolve })
+  try {
+    const failed = db.transaction(async () => {
+      db.saveGatewaySetting('gateway.async-summary-isolation', { enabled: true })
+      markStarted()
+      await gate
+      throw new Error('gateway transaction failed')
+    })
+    await started
+
+    const create = db.createSummaryReport(summaryReport({ id: 'unrelated-summary' }))
+    releaseTransaction()
+
+    await assert.rejects(failed, /gateway transaction failed/)
+    const created = await create
+    assert.equal(created.id, 'unrelated-summary')
+    assert.equal(db.getGatewaySetting('gateway.async-summary-isolation'), null)
+    assert.equal(db.getSummaryReport('unrelated-summary')?.id, 'unrelated-summary')
+  } finally {
+    releaseTransaction?.()
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a successful async transaction commits before a queued summary create', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-async-transaction-commit-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  let releaseTransaction
+  let markStarted
+  const started = new Promise(resolve => { markStarted = resolve })
+  const gate = new Promise(resolve => { releaseTransaction = resolve })
+  try {
+    const committed = db.transaction(async () => {
+      db.saveGatewaySetting('gateway.async-summary-commit', { enabled: true })
+      markStarted()
+      await gate
+    })
+    await started
+
+    let createSettled = false
+    const create = db.createSummaryReport(summaryReport({ id: 'after-commit' }))
+      .finally(() => { createSettled = true })
+    await Promise.resolve()
+    assert.equal(createSettled, false)
+
+    releaseTransaction()
+    await committed
+    assert.equal((await create).id, 'after-commit')
+    assert.deepEqual(db.getGatewaySetting('gateway.async-summary-commit'), { enabled: true })
+    assert.equal(db.getSummaryReport('after-commit')?.id, 'after-commit')
+  } finally {
+    releaseTransaction?.()
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('queued summary create and update preserve invocation order', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-write-order-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  let releaseTransaction
+  let markStarted
+  const started = new Promise(resolve => { markStarted = resolve })
+  const gate = new Promise(resolve => { releaseTransaction = resolve })
+  try {
+    const blocker = db.transaction(async () => {
+      markStarted()
+      await gate
+    })
+    await started
+
+    const create = db.createSummaryReport(summaryReport({ id: 'ordered-report' }))
+    const update = db.updateSummaryReport('ordered-report', {
+      status: 'running', runPhase: 'running', model: 'ordered-model', updatedAt: 2000
+    })
+    releaseTransaction()
+
+    await blocker
+    await create
+    const updated = await update
+    assert.equal(updated.status, 'running')
+    assert.equal(updated.model, 'ordered-model')
+    assert.equal(db.getSummaryReport('ordered-report').updatedAt, 2000)
+  } finally {
+    releaseTransaction?.()
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('direct database report writes reject unknown shapes and credential scalars', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ucli-summary-db-closed-json-'))
   const db = await openDb(join(root, 'ucli.db'))
@@ -356,16 +517,16 @@ test('direct database report writes reject unknown shapes and credential scalars
       { usageSnapshot: { totals: { inputTokens: 1 }, value: awsKey } }
     ]
     for (const [index, fields] of unsafe.entries()) {
-      assert.throws(
-        () => db.createSummaryReport(summaryReport({ id: `unsafe-create-${index}`, ...fields })),
+      await assert.rejects(
+        db.createSummaryReport(summaryReport({ id: `unsafe-create-${index}`, ...fields })),
         error => ['INVALID_SUMMARY_JSON_SHAPE',
           'SUMMARY_SENSITIVE_JSON_FORBIDDEN'].includes(error.code)
       )
     }
-    db.createSummaryReport(summaryReport({ id: 'safe-update-target' }))
+    await db.createSummaryReport(summaryReport({ id: 'safe-update-target' }))
     for (const fields of unsafe) {
-      assert.throws(
-        () => db.updateSummaryReport('safe-update-target', fields),
+      await assert.rejects(
+        db.updateSummaryReport('safe-update-target', fields),
         error => ['INVALID_SUMMARY_JSON_SHAPE',
         'SUMMARY_SENSITIVE_JSON_FORBIDDEN'].includes(error.code)
       )
@@ -373,23 +534,42 @@ test('direct database report writes reject unknown shapes and credential scalars
     for (const [index, errorText] of [
       `SUMMARY_RUN_FAILED:AKIA${'A'.repeat(16)}`,
       'ARBITRARY_UPPERCASE_CODE',
-      'SUMMARY_GENERATION_FAILED:leaked-suffix'
+      'SUMMARY_GENERATION_FAILED:leaked-suffix',
+      `SUMMARY_AUTOMATIC_DUPLICATE:${secretKey}`,
+      `SUMMARY_AUTOMATIC_DUPLICATE:${awsKey}`
     ].entries()) {
-      assert.throws(
-        () => db.createSummaryReport(summaryReport({
-          id: `unsafe-error-${index}`, errorText
+      await assert.rejects(
+        db.createSummaryReport(summaryReport({
+          id: `unsafe-error-${index}`, version: index + 2, errorText
         })),
         error => error.code === 'INVALID_SUMMARY_ERROR_CODE'
       )
-      assert.throws(
-        () => db.updateSummaryReport('safe-update-target', { errorText }),
+      await assert.rejects(
+        db.updateSummaryReport('safe-update-target', { errorText }),
         error => error.code === 'INVALID_SUMMARY_ERROR_CODE'
       )
     }
-    assert.equal(db.updateSummaryReport('safe-update-target', {
-      errorText: 'SUMMARY_AUTOMATIC_DUPLICATE:safe-report-1'
-    }).errorText, 'SUMMARY_AUTOMATIC_DUPLICATE:safe-report-1')
-    assert.doesNotThrow(() => db.updateSummaryReport('safe-update-target', {
+    const completedTargetId = '11111111-1111-4111-8111-111111111111'
+    const wrongPeriodTargetId = '22222222-2222-4222-8222-222222222222'
+    const runningTargetId = '33333333-3333-4333-8333-333333333333'
+    await seedCompletedSummary(db, { id: completedTargetId })
+    await seedCompletedSummary(db, {
+      id: wrongPeriodTargetId, periodStart: 300, periodEndExclusive: 400
+    })
+    await db.createSummaryReport(summaryReport({
+      id: runningTargetId, version: 3, status: 'running', runPhase: 'running'
+    }))
+    for (const targetId of [
+      '44444444-4444-4444-8444-444444444444', wrongPeriodTargetId, runningTargetId
+    ]) {
+      await assert.rejects(db.updateSummaryReport('safe-update-target', {
+        errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${targetId}`
+      }), error => error.code === 'INVALID_SUMMARY_ERROR_CODE')
+    }
+    assert.equal((await db.updateSummaryReport('safe-update-target', {
+      errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${completedTargetId}`
+    })).errorText, `SUMMARY_AUTOMATIC_DUPLICATE:${completedTargetId}`)
+    await assert.doesNotReject(db.updateSummaryReport('safe-update-target', {
       coverage: { sessionsIncluded: 1, sources: { transcript: 2, note: 1, nativeDigest: 0 } }
     }))
   } finally {
@@ -410,6 +590,7 @@ test('direct database import verifies Markdown byte length and digest', async ()
     ].entries()) {
       await assert.rejects(db.importCompletedSummaryReport(summaryReport({
         id: `direct-import-${index}`, status: 'completed', markdown,
+        sourceHash: SOURCE_HASH,
         executionMode: 'legacy-worklog-import', runPhase: 'completed', isCurrent: false,
         legacyImportKey: `direct-integrity-${index}`, artifactMetadata: metadata
       })), error => error.code === 'INVALID_SUMMARY_ARTIFACT_METADATA')

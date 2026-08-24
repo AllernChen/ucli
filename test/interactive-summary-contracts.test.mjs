@@ -53,7 +53,7 @@ test('persisted summary errors use one closed central allowlist', () => {
     'SUMMARY_RUN_TIMEOUT',
     'SUMMARY_ARTIFACT_INVALID',
     'SUMMARY_RUN_FAILED',
-    'SUMMARY_AUTOMATIC_DUPLICATE:safe-report_1.2-abc'
+    'SUMMARY_AUTOMATIC_DUPLICATE:11111111-1111-4111-8111-111111111111'
   ]) assert.equal(isPersistedSummaryErrorText(value), true)
 
   for (const value of [
@@ -61,7 +61,10 @@ test('persisted summary errors use one closed central allowlist', () => {
     'ARBITRARY_UPPERCASE_CODE',
     `SUMMARY_RUN_FAILED:AKIA${'A'.repeat(16)}`,
     'SUMMARY_GENERATION_FAILED:leaked-suffix',
-    'SUMMARY_AUTOMATIC_DUPLICATE:../../private'
+    'SUMMARY_AUTOMATIC_DUPLICATE:../../private',
+    `SUMMARY_AUTOMATIC_DUPLICATE:sk-ant-${'x'.repeat(20)}`,
+    `SUMMARY_AUTOMATIC_DUPLICATE:AKIA${'A'.repeat(16)}`,
+    'SUMMARY_AUTOMATIC_DUPLICATE:safe-report_1.2-abc'
   ]) assert.equal(isPersistedSummaryErrorText(value), false)
 })
 

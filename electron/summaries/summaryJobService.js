@@ -114,8 +114,8 @@ export function createSummaryJobService({
     }
     return report
   }
-  const update = (reportId, patch, { notify = true } = {}) => {
-    const report = repository.update(reportId, patch)
+  const update = async (reportId, patch, { notify = true } = {}) => {
+    const report = await repository.update(reportId, patch)
     return notify ? publish(report) : report
   }
   const finish = (job, report) => {
@@ -141,12 +141,12 @@ export function createSummaryJobService({
     if (job.cancelled) {
       const current = repository.get(job.reportId)
       if (current?.status === 'cancelled') return finish(job, current)
-      return finish(job, update(job.reportId, {
+      return finish(job, await update(job.reportId, {
         status: 'cancelled',
         errorText: 'SUMMARY_CANCELLED'
       }))
     }
-    return finish(job, update(job.reportId, {
+    return finish(job, await update(job.reportId, {
       status: 'failed',
       errorText: safeErrorCode(error)
     }))
@@ -188,7 +188,7 @@ export function createSummaryJobService({
     }
     if (result?.requiresConfirmation) {
       job.confirmationCallLimit = result.confirmationCallLimit || result.estimatedCalls
-      update(job.reportId, {
+      await update(job.reportId, {
         status: 'awaiting_confirmation',
         errorText: 'SUMMARY_MANUAL_CONFIRMATION_REQUIRED'
       })
@@ -217,7 +217,7 @@ export function createSummaryJobService({
 
   const runInitial = async job => {
     if (job.cancelled) return repository.get(job.reportId)
-    update(job.reportId, { status: 'running', errorText: null })
+    await update(job.reportId, { status: 'running', errorText: null })
     try {
       const request = job.request
       if (workspaceService) job.workspace = await workspaceService.create(job.reportId)
@@ -229,7 +229,7 @@ export function createSummaryJobService({
       })
       if (job.cancelled) throw Object.assign(new Error('cancelled'), { code: 'SUMMARY_CANCELLED' })
       const hash = sourceHash(evidence)
-      update(job.reportId, {
+      await update(job.reportId, {
         coverage: evidence.coverage || {},
         sourceHash: hash
       }, { notify: false })
@@ -251,7 +251,7 @@ export function createSummaryJobService({
         timezone: request.timezone
       })
       if (job.cancelled) throw Object.assign(new Error('cancelled'), { code: 'SUMMARY_CANCELLED' })
-      update(job.reportId, { usageSnapshot }, { notify: false })
+      await update(job.reportId, { usageSnapshot }, { notify: false })
       if (job.workspace) {
         await workspaceService.writeArtifact(
           job.reportId, 'input/usage.json', jsonArtifact(usageSnapshot)
@@ -260,7 +260,7 @@ export function createSummaryJobService({
       job.context = { evidence, usageSnapshot, sourceHash: hash }
       if (!evidence.blocks?.length) {
         if (job.workspace) await workspaceService.complete(job.reportId)
-        return finish(job, update(job.reportId, {
+        return finish(job, await update(job.reportId, {
           status: 'skipped_empty',
           errorText: 'SUMMARY_EMPTY_EVIDENCE'
         }))
@@ -269,7 +269,7 @@ export function createSummaryJobService({
         const duplicate = repository.findCompletedBySource(request, hash, job.reportId)
         if (duplicate) {
           if (job.workspace) await workspaceService.complete(job.reportId)
-          return finish(job, update(job.reportId, {
+          return finish(job, await update(job.reportId, {
             status: 'skipped_empty',
             errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${duplicate.id}`
           }))
@@ -283,7 +283,7 @@ export function createSummaryJobService({
 
   const runConfirmed = async (job, confirmationCallLimit) => {
     if (job.cancelled) return repository.get(job.reportId)
-    update(job.reportId, { status: 'running', errorText: null })
+    await update(job.reportId, { status: 'running', errorText: null })
     try {
       return await completePipeline(job, true, confirmationCallLimit)
     } catch (error) {
@@ -295,36 +295,38 @@ export function createSummaryJobService({
     if (shutdownPromise) return shutdownPromise
     shuttingDown = true
     const active = [...jobs.values()]
-    for (const job of active) {
-      const report = repository.get(job.reportId)
-      if (!report || terminal(report.status)) continue
-      job.cancelled = true
-      job.controller.abort()
-      const cancelled = update(job.reportId, {
-        status: 'cancelled',
-        errorText: 'SUMMARY_CANCELLED'
-      })
-      if (['queued', 'awaiting_confirmation'].includes(report.status)) finish(job, cancelled)
-    }
-    shutdownPromise = Promise.allSettled(active.map(async job => {
-      await job.done.promise
-      if (job.workspace) {
-        await settleWorkspaceUpdates(job)
-        await workspaceService.fail(job.reportId, 'SUMMARY_CANCELLED').catch(() => {})
+    shutdownPromise = (async () => {
+      for (const job of active) {
+        const report = repository.get(job.reportId)
+        if (!report || terminal(report.status)) continue
+        job.cancelled = true
+        job.controller.abort()
+        const cancelled = await update(job.reportId, {
+          status: 'cancelled',
+          errorText: 'SUMMARY_CANCELLED'
+        })
+        if (['queued', 'awaiting_confirmation'].includes(report.status)) finish(job, cancelled)
       }
-    })).then(() => undefined)
+      await Promise.allSettled(active.map(async job => {
+        await job.done.promise
+        if (job.workspace) {
+          await settleWorkspaceUpdates(job)
+          await workspaceService.fail(job.reportId, 'SUMMARY_CANCELLED').catch(() => {})
+        }
+      }))
+    })().then(() => undefined)
     return shutdownPromise
   }
 
   return {
-    generate(input) {
+    async generate(input) {
       if (shuttingDown) {
         throw Object.assign(new Error('Summary service is shutting down'), {
           code: 'SUMMARY_SERVICE_SHUTTING_DOWN'
         })
       }
       const request = { ...input, timezone: input.timezone || defaultTimezone }
-      const queued = repository.createQueued(request)
+      const queued = await repository.createQueued(request)
       const job = {
         reportId: queued.id,
         request,
@@ -342,7 +344,7 @@ export function createSummaryJobService({
       return { reportId: job.reportId, completion: job.done.promise }
     },
 
-    cancel(reportId) {
+    async cancel(reportId) {
       const report = repository.get(reportId)
       if (!report || terminal(report.status)) return false
       const job = jobs.get(reportId)
@@ -350,7 +352,7 @@ export function createSummaryJobService({
         job.cancelled = true
         job.controller.abort()
       }
-      const cancelled = update(reportId, {
+      const cancelled = await update(reportId, {
         status: 'cancelled',
         errorText: 'SUMMARY_CANCELLED'
       })
@@ -358,7 +360,7 @@ export function createSummaryJobService({
       return true
     },
 
-    confirm(reportId, { confirmationCallLimit } = {}) {
+    async confirm(reportId, { confirmationCallLimit } = {}) {
       const job = jobs.get(reportId)
       const report = repository.get(reportId)
       if (!job || !job.context || report?.status !== 'awaiting_confirmation') {
@@ -369,7 +371,7 @@ export function createSummaryJobService({
       const limit = Number.isFinite(confirmationCallLimit)
         ? confirmationCallLimit
         : job.confirmationCallLimit
-      publish(repository.update(reportId, { status: 'queued', errorText: null }))
+      publish(await repository.update(reportId, { status: 'queued', errorText: null }))
       enqueue(() => runConfirmed(job, limit))
       return { reportId, completion: job.done.promise }
     },

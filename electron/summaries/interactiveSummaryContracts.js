@@ -76,7 +76,7 @@ const PERSISTED_SUMMARY_ERROR_CODES = new Set([
   'SUMMARY_WORKSPACE_STAGE_INVALID',
   ...Object.keys(SAFE_MESSAGES)
 ])
-const AUTOMATIC_DUPLICATE_ERROR = /^SUMMARY_AUTOMATIC_DUPLICATE:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+const AUTOMATIC_DUPLICATE_ERROR = /^SUMMARY_AUTOMATIC_DUPLICATE:([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i
 
 export function isPersistedSummaryErrorCode(value) {
   return typeof value === 'string' && PERSISTED_SUMMARY_ERROR_CODES.has(value)
@@ -85,6 +85,10 @@ export function isPersistedSummaryErrorCode(value) {
 export function isPersistedSummaryErrorText(value) {
   return value === null || isPersistedSummaryErrorCode(value) ||
     (typeof value === 'string' && AUTOMATIC_DUPLICATE_ERROR.test(value))
+}
+
+export function summaryAutomaticDuplicateReportId(value) {
+  return typeof value === 'string' ? AUTOMATIC_DUPLICATE_ERROR.exec(value)?.[1] ?? null : null
 }
 
 export function assertInteractiveSummaryPhase(value) {

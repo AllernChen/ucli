@@ -2771,7 +2771,7 @@ export function createOrchestrator() {
             if (!Number.isInteger(required) || input.confirmationCallLimit < required) {
               throw Object.assign(new Error(), { code: 'INVALID_SUMMARY_IPC' })
             }
-            const { reportId } = summaryJobService.confirm(input.reportId, {
+            const { reportId } = await summaryJobService.confirm(input.reportId, {
               confirmationCallLimit: input.confirmationCallLimit
             })
             return { reportId }
@@ -2785,7 +2785,7 @@ export function createOrchestrator() {
             availableExecutors,
             availableProfiles
           })
-          const { reportId } = summaryJobService.generate({ ...validated, generatedBy: 'manual' })
+          const { reportId } = await summaryJobService.generate({ ...validated, generatedBy: 'manual' })
           return { reportId }
         },
         prepare: input => {
@@ -2800,9 +2800,9 @@ export function createOrchestrator() {
           if (!workLogsService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
           return workLogsService.readReport(fileName)
         },
-        cancel: reportId => {
+        cancel: async reportId => {
           if (!summaryJobService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
-          return summaryJobService.cancel(reportId)
+          return await summaryJobService.cancel(reportId)
         },
         async setCurrent(reportId) {
           if (!summaryRepository) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
