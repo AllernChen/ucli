@@ -26,10 +26,18 @@ export async function runSummaryStartupLifecycle({
 } = {}) {
   for (const [phase, operation] of [
     ['stale-job-interruption', interruptStaleJobs],
-    ['workspace-recovery', recoverWorkspaces],
-    ['cache-maintenance', maintainCache],
-    ['scheduler-catch-up', startScheduler]
-  ]) await continueAfterFailure(phase, operation, onEvent)
+    ['workspace-recovery', recoverWorkspaces]
+  ]) {
+    try {
+      await operation()
+    } catch (error) {
+      try { onEvent(safeStartupFailure(phase, error)) } catch { /* logging cannot block startup */ }
+      return { ready: false }
+    }
+  }
+  await continueAfterFailure('cache-maintenance', maintainCache, onEvent)
+  await continueAfterFailure('scheduler-catch-up', startScheduler, onEvent)
+  return { ready: true }
 }
 
 function safeMaintenanceResult(value) {

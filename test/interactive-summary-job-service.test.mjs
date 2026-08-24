@@ -390,6 +390,21 @@ test('ready timeout settles failed and releases workspace session resources', as
   })
 })
 
+test('a resolved system selection cannot be replaced by profile bindings during session creation', async t => {
+  const state = await fixture(t)
+  const run = await state.service.start(request({ profileId: null, model: 'system-model' }))
+  assert.equal(run.report.profileId, null)
+  assert.equal(run.report.model, 'system-model')
+  assert.deepEqual(state.fake.config(run.sessionId), {
+    adapterId: 'claude',
+    profileId: null,
+    profileSelection: 'system',
+    model: 'system-model',
+    name: '工作总结（每周）v1',
+    cwd: join(state.root, 'summaries', 'workspaces', run.report.id, 'work')
+  })
+})
+
 test('send false fails closed before a confirmed turn', async t => {
   const state = await fixture(t)
   const run = await state.service.start(request())

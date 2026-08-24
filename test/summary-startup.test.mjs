@@ -72,6 +72,32 @@ test('summary startup maintenance failures are typed and never block scheduler o
   assert.doesNotMatch(JSON.stringify(logs), /private|cache key|prompt|secret/i)
 })
 
+test('critical summary recovery failures skip maintenance and scheduler and report not-ready', async () => {
+  for (const failedPhase of ['interrupt', 'workspace']) {
+    const calls = []
+    const errors = []
+    const result = await runSummaryStartupLifecycle({
+      interruptStaleJobs: async () => {
+        calls.push('interrupt')
+        if (failedPhase === 'interrupt') throw new Error('private database path')
+      },
+      recoverWorkspaces: async () => {
+        calls.push('workspace')
+        if (failedPhase === 'workspace') throw new Error('private workspace path')
+      },
+      maintainCache: async () => { calls.push('maintenance') },
+      startScheduler: async () => { calls.push('scheduler') },
+      onEvent: event => errors.push(event)
+    })
+    assert.deepEqual(result, { ready: false })
+    assert.deepEqual(calls, failedPhase === 'interrupt'
+      ? ['interrupt']
+      : ['interrupt', 'workspace'])
+    assert.equal(errors.length, 1)
+    assert.doesNotMatch(JSON.stringify(errors), /private|path/i)
+  }
+})
+
 test('daily maintenance isolates workspace and cache phases and exposes only safe counters', async () => {
   const events = []
   const result = await runSummaryMaintenance({

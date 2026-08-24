@@ -49,6 +49,7 @@ import { createProfileService } from './aiCliProfiles/profileService.js'
 import { reconcileActiveProfile } from './aiCliProfiles/profileResolver.js'
 import {
   describeClaudeModelSelection,
+  isSafeClaudeModel,
   normalizeClaudeHistoryModel,
   prepareClaudeProfileSession
 } from './aiCliProfiles/claudeProfileAdapter.js'
@@ -152,6 +153,9 @@ const SUMMARY_STYLE_FIELDS = new Set(['mode', 'themeId', 'requirement'])
 const SUMMARY_HTML_THEME_IDS = new Set(SUMMARY_THEME_IDS)
 const SUMMARY_PERIODS = new Set(['day', 'week', 'month', 'quarter', 'year'])
 const SUMMARY_EXECUTORS = new Set(['claude', 'codex', 'opencode', 'ucode'])
+const SUMMARY_MIN_EPOCH_MS = Date.UTC(2000, 0, 1)
+const SUMMARY_MAX_FUTURE_MS = 2 * 24 * 60 * 60 * 1000
+const SUMMARY_MAX_SPAN_MS = 367 * 24 * 60 * 60 * 1000
 const SUMMARY_ERROR_MESSAGES = Object.freeze({
   INVALID_SUMMARY_IPC: 'Invalid summary request',
   SUMMARY_SERVICE_UNAVAILABLE: 'Summary service is unavailable',
@@ -387,8 +391,11 @@ function validateSummaryGenerate(value) {
 
 function validateInteractiveSummaryRequest(value) {
   const result = { ...summaryObject(value, SUMMARY_INTERACTIVE_FIELDS) }
-  if (!SUMMARY_PERIODS.has(result.periodType) || !Number.isInteger(result.start) ||
-    !Number.isInteger(result.endExclusive) || result.start >= result.endExclusive ||
+  if (!SUMMARY_PERIODS.has(result.periodType) || !Number.isSafeInteger(result.start) ||
+    !Number.isSafeInteger(result.endExclusive) || result.start < SUMMARY_MIN_EPOCH_MS ||
+    result.endExclusive > Date.now() + SUMMARY_MAX_FUTURE_MS ||
+    result.endExclusive - result.start > SUMMARY_MAX_SPAN_MS ||
+    result.start >= result.endExclusive ||
     typeof result.partial !== 'boolean' || !SUMMARY_EXECUTORS.has(result.executorId)) {
     throw invalidSummaryIpc()
   }
@@ -772,7 +779,7 @@ export async function assertDshQuiescent(entries) {
   return true
 }
 
-export function createOrchestrator() {
+export function createOrchestrator({ summaryStartup = {} } = {}) {
   initLogger()
   log('createOrchestrator() — starting')
   const adapters = createAdapterMap()
@@ -800,6 +807,7 @@ export function createOrchestrator() {
   let dshRuntimeManager = null
   let dshWebClient = null
   let summaryCacheLastPrunedAt = null
+  let summaryAutomationReady = false
   let persistenceRecovery = null
   const storageRoots = resolveUcliStorageRoots({
     platform: process.platform,
@@ -1129,17 +1137,24 @@ export function createOrchestrator() {
       maintain: () => summaryStorageMaintenance(),
       onMaintenanceError: event => log('summary-maintenance', event)
     })
-    await runSummaryStartupLifecycle({
-      interruptStaleJobs: () => summaryRepository.interruptStale(),
-      recoverWorkspaces: () => summaryWorkspaceService.recover(),
+    const startup = await runSummaryStartupLifecycle({
+      interruptStaleJobs: typeof summaryStartup.interruptStaleJobs === 'function'
+        ? summaryStartup.interruptStaleJobs
+        : () => summaryRepository.interruptStale(),
+      recoverWorkspaces: typeof summaryStartup.recoverWorkspaces === 'function'
+        ? summaryStartup.recoverWorkspaces
+        : () => summaryWorkspaceService.recover(),
       maintainCache: async () => {
         const verified = summarySettings.cacheEnabled ? await cache.verify() : null
         const maintained = await summaryStorageMaintenance()
         return { verified, maintained }
       },
-      startScheduler: () => summaryScheduler.start(),
+      startScheduler: typeof summaryStartup.startScheduler === 'function'
+        ? summaryStartup.startScheduler
+        : () => summaryScheduler.start(),
       onEvent: event => log('summary-startup', event)
     })
+    summaryAutomationReady = startup.ready === true
   }
 
   function applyCodexProviderPolicy(session, { imported = false } = {}) {
@@ -1231,6 +1246,48 @@ export function createOrchestrator() {
         })
       : null
     return prepareClaudeProfileSession({ session, selection, launch })
+  }
+
+  function resolveInteractiveSummarySelection(input) {
+    if (input.model && !isSafeClaudeModel(input.model)) throw invalidSummaryIpc()
+    if (['opencode', 'ucode'].includes(input.executorId)) {
+      if (input.profileId) {
+        throw Object.assign(new Error(), { code: 'SUMMARY_PROFILE_UNAVAILABLE' })
+      }
+      return { ...input, profileId: null, model: input.model || null }
+    }
+
+    const preview = {
+      adapterId: input.executorId,
+      cwd: process.cwd(),
+      model: input.model || null,
+      systemModel: input.model || null
+    }
+    try {
+      const prepared = input.executorId === 'codex'
+        ? prepareCodexSessionRuntime(preview, {
+            explicitProfileId: input.profileId || null,
+            forceSystem: !input.profileId
+          })
+        : prepareClaudeSessionRuntime(preview, {
+            explicitProfileId: input.profileId || null,
+            forceSystem: !input.profileId
+          })
+      if (input.executorId === 'codex') assertCodexSessionCanStart(prepared.session)
+      const model = prepared.session.model || null
+      if (model && !isSafeClaudeModel(model)) {
+        throw Object.assign(new Error(), { code: 'SUMMARY_PROFILE_UNAVAILABLE' })
+      }
+      return {
+        ...input,
+        profileId: prepared.session.profileId || null,
+        model
+      }
+    } catch {
+      throw Object.assign(new Error(), {
+        code: input.profileId ? 'SUMMARY_PROFILE_UNAVAILABLE' : 'SUMMARY_EXECUTOR_UNAVAILABLE'
+      })
+    }
   }
 
   function armClaudeSessionLaunch(entry) {
@@ -2770,7 +2827,7 @@ export function createOrchestrator() {
       autoPeriods: { ...summarySettings.autoPeriods, ...(summary.autoPeriods || {}) }
     }
     const db = getDb()
-    const automationAvailable = Boolean(db && summaryScheduler)
+    const automationAvailable = Boolean(db && summaryScheduler && summaryAutomationReady)
     summarySettings = {
       ...updateSummarySettings(summarySettings, summary, { automationAvailable }),
       cacheEnabled: candidate.cacheEnabled,
@@ -2785,7 +2842,7 @@ export function createOrchestrator() {
     if (summarySettings.cacheMaxBytes < previousCacheMaxBytes) {
       await summaryStorageMaintenance?.()
     }
-    await summaryScheduler?.tick()
+    if (summaryAutomationReady) await summaryScheduler?.tick()
     return summarySettings
   }
 
@@ -3005,6 +3062,9 @@ export function createOrchestrator() {
             })
             return { reportId }
           }
+          if (!summaryAutomationReady) {
+            throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          }
           const { action: _action, ...request } = input
           const availableExecutors = await inspectCliTools()
           const availableProfiles = request.profileId
@@ -3018,10 +3078,10 @@ export function createOrchestrator() {
           return { reportId }
         },
         startInteractive: input => {
-          if (!interactiveSummaryJobService) {
+          if (!interactiveSummaryJobService || !summaryAutomationReady) {
             throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
           }
-          return interactiveSummaryJobService.start(input)
+          return interactiveSummaryJobService.start(resolveInteractiveSummarySelection(input))
         },
         prepare: input => {
           if (!workLogsService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
@@ -3283,17 +3343,24 @@ export function createOrchestrator() {
       const e = sessions.get(sessionId)
       if (e) {
         engine.removeSession(sessionId)
-        const cleanup = e.adapter?.dispose()
         gatewaySignals.publish({
           type: 'session_stopped',
           sessionId,
           occurredAt: Date.now()
         })
-        await cleanup
-        sessions.delete(sessionId)
-        historyService.invalidate(sessionId)
-        const db = getDb()
-        if (db) { db.removeSession(sessionId); scheduleFlush() }
+        let cleanupError = null
+        try {
+          await e.adapter?.dispose()
+        } catch (error) {
+          cleanupError = error
+        } finally {
+          interactiveAdapterFacades.delete(sessionId)
+          sessions.delete(sessionId)
+          historyService.invalidate(sessionId)
+          const db = getDb()
+          if (db) { db.removeSession(sessionId); scheduleFlush() }
+        }
+        if (cleanupError) throw cleanupError
       }
       return true
     })

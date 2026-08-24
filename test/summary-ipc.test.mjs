@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { EventEmitter } from 'node:events'
 import { register } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { claudeDescriptor } from '../electron/adapters/claudeAdapter.js'
+import { codexDescriptor } from '../electron/adapters/codexAdapter.js'
+import { openCodeDescriptor } from '../electron/adapters/openCodeAdapter.js'
+import { ucodeDescriptor } from '../electron/adapters/ucodeAdapter.js'
+import { getDb } from '../electron/persistence/db.js'
 import { runSummaryMaintenance } from '../electron/startupLifecycle.js'
 import { createSummaryWorkspaceService } from '../electron/summaries/summaryWorkspaceService.js'
 
@@ -13,11 +19,103 @@ register('./fixtures/electron-stub-loader.mjs', import.meta.url)
 
 const {
   cancelActiveSummary,
+  createOrchestrator,
   deleteSummaryReportAndWorkspace,
   normalizeSummaryStorageStats,
   registerSummaryIpc,
   summaryProgressPayload
 } = await import(`../electron/orchestrator.js?summary-ipc=${Date.now()}`)
+
+const PERIOD_START = Date.UTC(2026, 7, 10)
+const PERIOD_END = Date.UTC(2026, 7, 17)
+
+function interactiveRequest(overrides = {}) {
+  return {
+    periodType: 'week', start: PERIOD_START, endExclusive: PERIOD_END,
+    timezone: 'Asia/Shanghai', partial: false, executorId: 'opencode',
+    profileId: null, model: 'provider/model', ...overrides
+  }
+}
+
+async function waitUntil(predicate, { timeoutMs = 5000 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const value = predicate()
+    if (value) return value
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.fail('timed out waiting for orchestrator behavior')
+}
+
+class FakeInteractiveAdapter extends EventEmitter {
+  constructor(options) {
+    super()
+    this.session = options.session
+    this.sent = []
+    this.throwOnDispose = false
+  }
+
+  async start() {
+    this.emit('event', {
+      type: 'ready', sessionId: this.session.id, ts: Date.now()
+    })
+    return true
+  }
+
+  async sendTurn(text) {
+    this.sent.push(text)
+    this.emit('gateway-event', {
+      type: 'turn_started', sessionId: this.session.id,
+      turnId: 'summary-turn-1', occurredAt: Date.now()
+    })
+    return true
+  }
+
+  async dispose() {
+    if (this.throwOnDispose) throw new Error('private adapter disposal failure')
+  }
+}
+
+async function withInteractiveOrchestrator(t, { summaryStartup } = {}, callback) {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), 'ucli-summary-orchestrator-'))
+  const userData = join(temporaryRoot, 'user-data')
+  const localAppData = join(temporaryRoot, 'local-app-data')
+  await mkdir(userData, { recursive: true })
+  await mkdir(localAppData, { recursive: true })
+  const previousUserData = process.env.UCLI_TEST_USER_DATA
+  const previousLocalAppData = process.env.LOCALAPPDATA
+  process.env.UCLI_TEST_USER_DATA = userData
+  process.env.LOCALAPPDATA = localAppData
+  const electron = await import('electron')
+  const handlers = new Map()
+  electron.ipcMain.handle = (channel, handler) => handlers.set(channel, handler)
+  const instances = []
+  const descriptors = [claudeDescriptor, codexDescriptor, openCodeDescriptor, ucodeDescriptor]
+  const originalCreates = new Map(descriptors.map(descriptor => [descriptor, descriptor.create]))
+  for (const descriptor of descriptors) {
+    descriptor.create = options => {
+      const adapter = new FakeInteractiveAdapter(options)
+      instances.push(adapter)
+      return adapter
+    }
+  }
+  let orchestrator
+  try {
+    orchestrator = createOrchestrator({ summaryStartup })
+    await orchestrator.initPersistence()
+    orchestrator.registerIpc()
+    await callback({ handlers, instances, orchestrator })
+  } finally {
+    for (const descriptor of descriptors) descriptor.create = originalCreates.get(descriptor)
+    await orchestrator?.shutdown()
+    getDb()?.close()
+    if (previousUserData === undefined) delete process.env.UCLI_TEST_USER_DATA
+    else process.env.UCLI_TEST_USER_DATA = previousUserData
+    if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA
+    else process.env.LOCALAPPDATA = previousLocalAppData
+    await rm(temporaryRoot, { recursive: true, force: true })
+  }
+}
 
 const CHANNELS = [
   'summary:get-settings', 'summary:set-settings', 'summary:list-reports',
@@ -138,7 +236,7 @@ test('interactive summary IPC returns only report and session identifiers', asyn
     }
   })
   const request = {
-    periodType: 'week', start: 1, endExclusive: 2, timezone: 'Asia/Shanghai',
+    periodType: 'week', start: PERIOD_START, endExclusive: PERIOD_END, timezone: 'Asia/Shanghai',
     partial: false, executorId: 'claude', profileId: 'p1', model: 'sonnet'
   }
 
@@ -162,7 +260,7 @@ test('interactive summary IPC rejects renderer-owned lifecycle and output fields
     service: { startInteractive: async () => { starts += 1; return {} } }
   })
   const valid = {
-    periodType: 'week', start: 1, endExclusive: 2, timezone: 'UTC',
+    periodType: 'week', start: PERIOD_START, endExclusive: PERIOD_END, timezone: 'UTC',
     partial: false, executorId: 'claude', profileId: null, model: null
   }
   for (const invalidField of [
@@ -183,6 +281,123 @@ test('interactive summary IPC rejects renderer-owned lifecycle and output fields
     assert.doesNotMatch(JSON.stringify(response), /private|renderer-report|renderer-session/i)
   }
   assert.equal(starts, 0)
+})
+
+test('interactive summary IPC rejects unsafe epochs and unbounded periods before queueing', async () => {
+  const handlers = new Map()
+  let starts = 0
+  registerSummaryIpc({
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    service: { startInteractive: async () => { starts += 1; return {} } }
+  })
+  for (const request of [
+    interactiveRequest({ start: Number.MAX_SAFE_INTEGER + 1 }),
+    interactiveRequest({ start: Date.UTC(1999, 11, 31) }),
+    interactiveRequest({ endExclusive: Date.now() + 3 * 24 * 60 * 60 * 1000 }),
+    interactiveRequest({ start: Date.UTC(2024, 0, 1), endExclusive: Date.UTC(2026, 0, 2) })
+  ]) {
+    const response = await handlers.get('summary:start-interactive')({}, request)
+    assert.equal(response.ok, false)
+    assert.equal(response.error.code, 'INVALID_SUMMARY_IPC')
+  }
+  assert.equal(starts, 0)
+})
+
+test('createOrchestrator routes interactive summary delivery through the runtime facade to the adapter', async t => {
+  await withInteractiveOrchestrator(t, {}, async ({ handlers, instances }) => {
+    const response = await handlers.get('summary:start-interactive')({}, interactiveRequest())
+    assert.equal(response.ok, true)
+    assert.deepEqual(Object.keys(response.value).sort(), ['report', 'sessionId'])
+    const adapter = await waitUntil(() => instances[0])
+    await waitUntil(() => adapter.sent.length === 1)
+    assert.equal(adapter.session.model, 'provider/model')
+    assert.equal(adapter.session.profileId ?? null, null)
+    assert.match(adapter.sent[0], /只写入 \.\.\/output\/report\.md/)
+    const persisted = await handlers.get('summary:get-report')({}, response.value.report.id)
+    assert.equal(persisted.ok, true)
+    assert.equal(persisted.value.model, 'provider/model')
+    assert.equal(persisted.value.profileId, null)
+    assert.equal(persisted.value.model, adapter.session.model)
+    assert.equal(persisted.value.profileId, adapter.session.profileId ?? null)
+  })
+})
+
+test('interactive summary resolves or rejects requested profiles for every executor before persistence', async t => {
+  await withInteractiveOrchestrator(t, {}, async ({ handlers, instances }) => {
+    for (const executorId of ['claude', 'codex', 'opencode', 'ucode']) {
+      const response = await handlers.get('summary:start-interactive')({}, interactiveRequest({
+        executorId,
+        profileId: 'profile-that-executor-cannot-apply'
+      }))
+      assert.equal(response.ok, false)
+      assert.equal(response.error.code, 'SUMMARY_PROFILE_UNAVAILABLE')
+    }
+    const reports = await handlers.get('summary:list-reports')({}, {})
+    assert.deepEqual(reports.value, [])
+    assert.equal(instances.length, 0)
+  })
+})
+
+test('interactive summary rejects unsafe model selections for every executor before persistence', async t => {
+  await withInteractiveOrchestrator(t, {}, async ({ handlers, instances }) => {
+    for (const executorId of ['claude', 'codex', 'opencode', 'ucode']) {
+      const response = await handlers.get('summary:start-interactive')({}, interactiveRequest({
+        executorId,
+        model: 'unsafe model\n--permission-bypass'
+      }))
+      assert.equal(response.ok, false, executorId)
+      assert.equal(response.error.code, 'INVALID_SUMMARY_IPC', executorId)
+    }
+    const reports = await handlers.get('summary:list-reports')({}, {})
+    assert.deepEqual(reports.value, [])
+    assert.equal(instances.length, 0)
+  })
+})
+
+test('critical summary recovery failure keeps the app usable but gates scheduler and new runs', async t => {
+  for (const failedPhase of ['interrupt', 'recover']) {
+    let schedulerStarts = 0
+    await withInteractiveOrchestrator(t, {
+      summaryStartup: {
+        interruptStaleJobs: async () => {
+          if (failedPhase === 'interrupt') throw new Error('private stale-row failure')
+        },
+        recoverWorkspaces: async () => {
+          if (failedPhase === 'recover') throw new Error('private workspace failure')
+        },
+        startScheduler: async () => { schedulerStarts += 1 }
+      }
+    }, async ({ handlers, instances }) => {
+      assert.equal(schedulerStarts, 0)
+      const response = await handlers.get('summary:start-interactive')({}, interactiveRequest())
+      assert.equal(response.ok, false)
+      assert.equal(response.error.code, 'SUMMARY_SERVICE_UNAVAILABLE')
+      const headless = await handlers.get('summary:generate')({}, interactiveRequest({ model: null }))
+      assert.equal(headless.ok, false)
+      assert.equal(headless.error.code, 'SUMMARY_SERVICE_UNAVAILABLE')
+      const reports = await handlers.get('summary:list-reports')({}, {})
+      assert.deepEqual(reports.value, [])
+      assert.equal(instances.length, 0)
+    })
+  }
+})
+
+test('session deletion clears ownership even when adapter disposal rejects', async t => {
+  await withInteractiveOrchestrator(t, {}, async ({ handlers, instances }) => {
+    const response = await handlers.get('summary:start-interactive')({}, interactiveRequest())
+    assert.equal(response.ok, true)
+    const adapter = await waitUntil(() => instances[0])
+    await waitUntil(() => adapter.sent.length === 1)
+    adapter.throwOnDispose = true
+    await assert.rejects(
+      handlers.get('session:delete')({}, response.value.sessionId),
+      /private adapter disposal failure/
+    )
+    assert.equal(
+      handlers.get('session:list')().some(session => session.id === response.value.sessionId),
+      false
+    )
+  })
 })
 
 test('summary cancellation prefers interactive jobs, falls back to headless, and types inactivity', async () => {
