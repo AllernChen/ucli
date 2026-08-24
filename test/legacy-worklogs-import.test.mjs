@@ -343,3 +343,64 @@ test('legacy importer rejects a handle whose final stat changes during reading',
   assert.deepEqual(await importer.run(), { scanned: 1, imported: 0, existing: 0, rejected: 1 })
   assert.equal(repository.list({ executionMode: 'legacy-worklog-import' }).length, 0)
 })
+
+test('legacy importer rejects an oscillating root before external content can import', async () => {
+  const root = '/trusted/workLogs'
+  const file = join(root, '2026-W33-summary.md')
+  const rootStat = mtimeMs => ({
+    dev: 1, ino: 2, mtimeMs, ctimeMs: mtimeMs, birthtimeMs: 1,
+    isDirectory: () => true, isSymbolicLink: () => false
+  })
+  const fileStat = {
+    dev: 3, ino: 4, size: Buffer.byteLength(validMarkdown),
+    mtimeMs: 10, ctimeMs: 10, birthtimeMs: 1,
+    isFile: () => true, isSymbolicLink: () => false
+  }
+  let rootChecks = 0
+  let sent = false
+  const imported = []
+  const importer = createLegacyWorkLogsImporter({
+    workLogsRoot: root,
+    repository: { async importCompleted(input) { imported.push(input); return { imported: true } } },
+    timezone: 'Asia/Shanghai',
+    now: () => NOW,
+    fileSystem: {
+      async lstat(candidate) {
+        if (candidate === root) return rootStat(rootChecks++ === 0 ? 1 : 2)
+        return fileStat
+      },
+      async realpath() { return root },
+      async readdir() { return [{ name: '2026-W33-summary.md', isFile: () => true }] },
+      async open() {
+        return {
+          async stat() { return fileStat },
+          async read(buffer, offset) {
+            if (sent) return { bytesRead: 0 }
+            sent = true
+            Buffer.from(validMarkdown).copy(buffer, offset)
+            return { bytesRead: Buffer.byteLength(validMarkdown) }
+          },
+          async close() {}
+        }
+      }
+    }
+  })
+
+  await assert.rejects(() => importer.run(), error => error?.code === 'SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED')
+  assert.deepEqual(imported, [])
+})
+
+test('summary markdown safety rejects forward UNC and namespaced Windows aliases', () => {
+  assert.throws(
+    () => assertSafeSummaryMarkdown('# Summary\n//server/share/segment/../workLogs', ['\\\\server\\share\\workLogs']),
+    { code: 'SUMMARY_MARKDOWN_UNSAFE' }
+  )
+  assert.throws(
+    () => assertSafeSummaryMarkdown('# Summary\n\\\\?\\C:\\safe\\segment\\..\\workLogs', ['C:\\safe\\workLogs']),
+    { code: 'SUMMARY_MARKDOWN_UNSAFE' }
+  )
+  assert.throws(
+    () => assertSafeSummaryMarkdown('# Summary\n\\\\?\\UNC\\server\\share\\segment\\..\\workLogs', ['\\\\server\\share\\workLogs']),
+    { code: 'SUMMARY_MARKDOWN_UNSAFE' }
+  )
+})

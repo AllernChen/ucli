@@ -6,15 +6,28 @@ function normalizedPathText(value) {
   return String(value).replaceAll('\\', '/').replace(/\/{2,}/g, '/').toLowerCase()
 }
 
+function canonicalWindowsPath(value) {
+  let candidate = String(value)
+  if (candidate.startsWith('//')) candidate = `\\\\${candidate.slice(2)}`
+  if (candidate.startsWith('\\\\') || /^[a-z]:[\\/]/i.test(candidate)) {
+    candidate = candidate.replaceAll('/', '\\')
+  }
+  if (/^\\\\\?\\UNC\\/i.test(candidate)) return candidate.replace(/^\\\\\?\\UNC\\/i, '\\\\')
+  if (/^\\\\\?\\/i.test(candidate)) return candidate.replace(/^\\\\\?\\/i, '')
+  return candidate
+}
+
 function pathApiFor(value) {
-  return /^[a-z]:[\\/]/i.test(value) || value.startsWith('\\\\') ? path.win32 : path.posix
+  const candidate = canonicalWindowsPath(value)
+  return /^[a-z]:\\/i.test(candidate) || candidate.startsWith('\\\\') ? path.win32 : path.posix
 }
 
 function normalizedAbsolutePath(value) {
   if (typeof value !== 'string') return null
-  const pathApi = pathApiFor(value)
-  if (!pathApi.isAbsolute(value)) return null
-  return { pathApi, value: pathApi.resolve(value) }
+  const candidate = canonicalWindowsPath(value)
+  const pathApi = pathApiFor(candidate)
+  if (!pathApi.isAbsolute(candidate)) return null
+  return { pathApi, value: pathApi.resolve(candidate) }
 }
 
 function containsUnsafePath(markdown, unsafePath) {

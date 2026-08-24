@@ -129,16 +129,17 @@ function sameRoot(first, second) {
   if (!first?.isDirectory() || first.isSymbolicLink?.() || !second?.isDirectory() || second.isSymbolicLink?.()) {
     return false
   }
+  const stable = first.mtimeMs === second.mtimeMs && first.ctimeMs === second.ctimeMs &&
+    first.birthtimeMs === second.birthtimeMs
   const identityKnown = Number.isSafeInteger(first.dev) && Number.isSafeInteger(second.dev) &&
     Number.isSafeInteger(first.ino) && Number.isSafeInteger(second.ino)
   if (process.platform !== 'win32') {
-    return identityKnown && first.dev === second.dev && first.ino === second.ino
+    return stable && identityKnown && first.dev === second.dev && first.ino === second.ino
   }
   if (identityKnown && first.ino !== 0 && second.ino !== 0) {
-    return first.dev === second.dev && first.ino === second.ino
+    return stable && first.dev === second.dev && first.ino === second.ino
   }
-  return first.mtimeMs === second.mtimeMs && first.ctimeMs === second.ctimeMs &&
-    first.birthtimeMs === second.birthtimeMs
+  return stable
 }
 
 function sameRootPath(first, second) {
