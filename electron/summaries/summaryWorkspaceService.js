@@ -79,13 +79,17 @@ export function createSummaryWorkspaceService({
   root,
   now = Date.now,
   maxWorkspaceBytes = DEFAULT_MAX_WORKSPACE_BYTES,
-  failedRetentionMs = DEFAULT_FAILED_RETENTION_MS
+  failedRetentionMs = DEFAULT_FAILED_RETENTION_MS,
+  removeTree = rm
 } = {}) {
   if (!Number.isSafeInteger(maxWorkspaceBytes) || maxWorkspaceBytes < 1) {
     throw workspaceError('SUMMARY_WORKSPACE_LIMIT')
   }
   if (!Number.isSafeInteger(failedRetentionMs) || failedRetentionMs < 0) {
     throw workspaceError('SUMMARY_WORKSPACE_RETENTION_INVALID')
+  }
+  if (typeof removeTree !== 'function') {
+    throw workspaceError('SUMMARY_WORKSPACE_CLEANUP_INVALID')
   }
 
   async function create(reportId) {
@@ -167,9 +171,6 @@ export function createSummaryWorkspaceService({
     if (typeof outputs.markdown === 'string') {
       await writeArtifact(reportId, 'output/summary.md', outputs.markdown)
     }
-    await rm(artifactPath(workspace, 'input'), { recursive: true, force: true })
-    await rm(artifactPath(workspace, 'work'), { recursive: true, force: true })
-
     const manifest = await readManifest(workspace)
     manifest.status = 'completed'
     manifest.stage = 'completed'
@@ -179,6 +180,10 @@ export function createSummaryWorkspaceService({
     manifest.updatedAt = timestamp(now)
     delete manifest.errorCode
     await writeManifest(workspace, manifest)
+    await Promise.allSettled([
+      removeTree(artifactPath(workspace, 'input'), { recursive: true, force: true }),
+      removeTree(artifactPath(workspace, 'work'), { recursive: true, force: true })
+    ])
     return manifest
   }
 

@@ -131,6 +131,25 @@ test('completion compacts inputs and work while retaining output and manifest', 
   assert.deepEqual(manifest.artifacts, [{ path: 'output/summary.md', bytes: 8 }])
 })
 
+test('completion persists a terminal manifest before best-effort cleanup of locked directories', async t => {
+  const { service } = await withWorkspace(t, {
+    removeTree: async () => { throw Object.assign(new Error('locked cwd'), { code: 'EPERM' }) }
+  })
+  const workspace = await service.create('report-complete-locked')
+  await service.writeArtifact('report-complete-locked', 'input/project.md', 'evidence')
+  await service.writeArtifact('report-complete-locked', 'work/prompt.md', 'prompt')
+
+  await assert.doesNotReject(
+    service.complete('report-complete-locked', { markdown: '# Completed' })
+  )
+
+  const completed = await readManifest(workspace.path)
+  assert.equal(completed.status, 'completed')
+  assert.equal(completed.stage, 'completed')
+  assert.equal(existsSync(join(workspace.path, 'input')), true)
+  assert.equal(existsSync(join(workspace.path, 'work')), true)
+})
+
 test('failure retains bounded inputs for seven days without persisting secrets', async t => {
   let currentTime = Date.parse('2026-08-12T00:00:00.000Z')
   const { service } = await withWorkspace(t, {

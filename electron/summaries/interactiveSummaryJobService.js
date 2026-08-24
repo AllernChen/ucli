@@ -12,7 +12,8 @@ const DEFAULT_TIMEOUTS = Object.freeze({
   readyMs: 60_000,
   deliveryMs: 12_000,
   runMs: 20 * 60_000,
-  missingMs: 5_000
+  missingMs: 5_000,
+  cleanupMs: 5_000
 })
 
 const PERIOD_LABELS = Object.freeze({
@@ -84,7 +85,8 @@ export function createInteractiveSummaryJobService({
   waitForArtifact = waitForCanonicalMarkdown,
   now = Date.now,
   timers = globalThis,
-  timeouts = {}
+  timeouts = {},
+  onOperationalEvent = () => {}
 } = {}) {
   for (const method of ['createQueued', 'update', 'complete', 'get']) {
     requireMethod(repository, method, 'repository')
@@ -98,7 +100,7 @@ export function createInteractiveSummaryJobService({
   }
   if (typeof buildPrompt !== 'function' || typeof waitForArtifact !== 'function' ||
     typeof now !== 'function' || typeof timers?.setTimeout !== 'function' ||
-    typeof timers?.clearTimeout !== 'function') {
+    typeof timers?.clearTimeout !== 'function' || typeof onOperationalEvent !== 'function') {
     throw new TypeError('Interactive summary job dependencies are required')
   }
 
@@ -106,7 +108,8 @@ export function createInteractiveSummaryJobService({
     readyMs: timeoutValue(timeouts.readyMs, DEFAULT_TIMEOUTS.readyMs),
     deliveryMs: timeoutValue(timeouts.deliveryMs, DEFAULT_TIMEOUTS.deliveryMs),
     runMs: timeoutValue(timeouts.runMs, DEFAULT_TIMEOUTS.runMs),
-    missingMs: timeoutValue(timeouts.missingMs, DEFAULT_TIMEOUTS.missingMs)
+    missingMs: timeoutValue(timeouts.missingMs, DEFAULT_TIMEOUTS.missingMs),
+    cleanupMs: timeoutValue(timeouts.cleanupMs, DEFAULT_TIMEOUTS.cleanupMs)
   })
   const active = new Map()
   const listeners = new Set()
@@ -123,26 +126,12 @@ export function createInteractiveSummaryJobService({
     }
   }
 
-  async function transition(job, phase, patch = {}) {
-    if (!TRANSITIONS[job.phase]?.has(phase)) throw typed('SUMMARY_RUN_TRANSITION_INVALID')
-    job.phase = phase
-    const status = ['failed', 'interrupted', 'cancelled'].includes(phase) ? phase : 'running'
-    const operation = job.persistPromise.then(async () => {
-      const [report] = await Promise.all([
-        repository.update(job.reportId, {
-          status,
-          runPhase: phase,
-          ...patch,
-          updatedAt: now()
-        }),
-        workspaceService.markStage(job.reportId, phase)
-      ])
-      job.report = report
-      publish(report)
-      return report
-    })
-    job.persistPromise = operation.catch(() => {})
-    return operation
+  function operational(reportId, code = 'SUMMARY_RUN_FAILED') {
+    const event = Object.freeze({ type: 'operational', reportId, code })
+    try { onOperationalEvent(event) } catch {}
+    for (const listener of [...listeners]) {
+      try { listener(event) } catch {}
+    }
   }
 
   function clearJobTimer(job, key) {
@@ -159,27 +148,131 @@ export function createInteractiveSummaryJobService({
     }, delay)
   }
 
-  async function cleanup(job) {
+  async function bounded(job, operation, timeoutMs = limits.cleanupMs) {
+    let handle
+    const work = Promise.resolve(operation).then(
+      value => ({ ok: true, value }),
+      error => ({ ok: false, error })
+    )
+    const deadline = new Promise(resolve => {
+      handle = timers.setTimeout(() => {
+        job.cleanupTimers.delete(handle)
+        resolve({ ok: false, timeout: true })
+      }, timeoutMs)
+      job.cleanupTimers.add(handle)
+    })
+    const outcome = await Promise.race([work, deadline])
+    if (handle) {
+      timers.clearTimeout(handle)
+      job.cleanupTimers.delete(handle)
+    }
+    return outcome
+  }
+
+  function clearOwnedResources(job) {
     clearJobTimer(job, 'totalTimer')
     clearJobTimer(job, 'missingTimer')
+    for (const handle of job.cleanupTimers) timers.clearTimeout(handle)
+    job.cleanupTimers.clear()
     job.abortController.abort()
     job.unsubscribe?.()
     job.unsubscribe = null
-    if (job.sessionId && !job.stopPromise) {
-      job.stopPromise = Promise.resolve(sessionRuntime.stop(job.sessionId)).catch(() => false)
+  }
+
+  async function stopOwnedSession(job) {
+    if (!job.sessionId) return { ok: true, value: false }
+    if (!job.stopPromise) {
+      job.stopPromise = Promise.resolve().then(() => sessionRuntime.stop(job.sessionId))
     }
-    await job.stopPromise
-    active.delete(job.reportId)
+    return bounded(job, job.stopPromise)
+  }
+
+  async function ownedStep(job, operation, onLateValue) {
+    if (job.terminal) throw typed(job.terminal.code)
+    const pending = Promise.resolve().then(operation)
+    pending.then(
+      value => {
+        if (job.terminal) Promise.resolve(onLateValue?.(value)).catch(() => {})
+      },
+      () => {}
+    )
+    const outcome = await Promise.race([
+      pending.then(
+        value => ({ kind: 'value', value }),
+        error => ({ kind: 'error', error })
+      ),
+      job.terminalSignal.promise.then(terminal => ({ kind: 'terminal', terminal }))
+    ])
+    if (outcome.kind === 'terminal') throw typed(outcome.terminal.code)
+    if (outcome.kind === 'error') throw outcome.error
+    if (job.terminal) throw typed(job.terminal.code)
+    return outcome.value
+  }
+
+  async function transition(job, phase, patch = {}) {
+    if (!TRANSITIONS[job.phase]?.has(phase)) throw typed('SUMMARY_RUN_TRANSITION_INVALID')
+    job.phase = phase
+    const status = ['failed', 'interrupted', 'cancelled'].includes(phase) ? phase : 'running'
+    const repositoryOperation = Promise.resolve().then(() => repository.update(job.reportId, {
+      status,
+      runPhase: phase,
+      ...patch,
+      updatedAt: now()
+    }))
+    job.repositoryOperation = repositoryOperation
+    repositoryOperation.then(
+      () => {
+        if (job.repositoryOperation === repositoryOperation) job.repositoryOperation = null
+      },
+      () => {
+        if (job.repositoryOperation === repositoryOperation) job.repositoryOperation = null
+      }
+    )
+    const report = await ownedStep(job, () => repositoryOperation, () => repository.update(
+      job.reportId,
+      {
+        status: job.terminal?.phase || 'failed',
+        runPhase: job.terminal?.phase || 'failed',
+        errorText: job.terminal?.code || 'SUMMARY_RUN_FAILED',
+        updatedAt: now()
+      }
+    ))
+    job.report = report
+    if (job.terminal) throw typed(job.terminal.code)
+    const workspaceOperation = Promise.resolve().then(() => workspaceService.markStage(job.reportId, phase))
+    job.workspaceOperation = workspaceOperation
+    workspaceOperation.then(
+      () => {
+        if (job.workspaceOperation === workspaceOperation) job.workspaceOperation = null
+      },
+      () => {
+        if (job.workspaceOperation === workspaceOperation) job.workspaceOperation = null
+      }
+    )
+    await ownedStep(job, () => workspaceOperation, () => workspaceService.fail(
+      job.reportId,
+      job.terminal?.code || 'SUMMARY_RUN_FAILED',
+      {
+        status: job.terminal?.phase || 'failed',
+        stage: job.terminal?.phase || 'failed'
+      }
+    ))
+    publish(report)
+    return report
   }
 
   async function finishTerminal(job, phase, code) {
+    if (job.completionCommitted || job.commitStarted) return job.done.promise
     if (job.finishPromise) return job.finishPromise
+    job.terminal = { phase, code }
+    job.terminalSignal.resolve(job.terminal)
+    clearOwnedResources(job)
     job.finishPromise = (async () => {
       const error = typed(code)
       let report
       try {
-        await job.persistPromise
         job.phase = phase
+        if (job.repositoryOperation) await bounded(job, job.repositoryOperation)
         report = await repository.update(job.reportId, {
           status: phase,
           runPhase: phase,
@@ -187,15 +280,23 @@ export function createInteractiveSummaryJobService({
           updatedAt: now()
         })
         job.report = report
-        try {
-          await workspaceService.fail(job.reportId, code, { status: phase, stage: phase })
-        } catch {
-          publish(report, typed('SUMMARY_RUN_FAILED'))
+        const cleanup = []
+        if (job.workspace) {
+          if (job.workspaceOperation) await bounded(job, job.workspaceOperation)
+          cleanup.push(bounded(job, Promise.resolve().then(() => workspaceService.fail(
+            job.reportId,
+            code,
+            { status: phase, stage: phase }
+          ))))
         }
+        if (job.sessionId) cleanup.push(stopOwnedSession(job))
+        const outcomes = await Promise.all(cleanup)
+        if (outcomes.some(outcome => !outcome.ok)) operational(job.reportId)
         publish(report, error)
         return report
       } finally {
-        await cleanup(job)
+        clearOwnedResources(job)
+        active.delete(job.reportId)
         job.done.resolve(report || repository.get(job.reportId))
       }
     })()
@@ -203,12 +304,13 @@ export function createInteractiveSummaryJobService({
   }
 
   async function finishCompleted(job, artifact) {
-    if (job.finishPromise) return job.finishPromise
-    job.finishPromise = (async () => {
-      let report
+    if (job.completionPromise) return job.completionPromise
+    job.completionPromise = (async () => {
       try {
         await transition(job, INTERACTIVE_SUMMARY_PHASE.VALIDATING)
-        report = await repository.complete(job.reportId, {
+        if (job.terminal) return job.done.promise
+        job.commitStarted = true
+        const report = await repository.complete(job.reportId, {
           markdown: artifact.markdown,
           sourceHash: artifact.sha256,
           usageSnapshot: job.preparation.usageSnapshot,
@@ -220,43 +322,43 @@ export function createInteractiveSummaryJobService({
           },
           updatedAt: now()
         })
+        job.completionCommitted = true
+        job.commitStarted = false
         job.phase = INTERACTIVE_SUMMARY_PHASE.COMPLETED
         job.report = report
-        try {
-          await workspaceService.complete(job.reportId, { markdown: artifact.markdown })
-        } catch {
-          publish(report, typed('SUMMARY_RUN_FAILED'))
-        }
+        clearOwnedResources(job)
+        const stopped = await stopOwnedSession(job)
+        if (!stopped.ok) operational(job.reportId)
+        const finalized = await bounded(
+          job,
+          Promise.resolve().then(() => workspaceService.complete(job.reportId, {
+            markdown: artifact.markdown
+          }))
+        )
+        if (!finalized.ok) operational(job.reportId)
         publish(report)
+        active.delete(job.reportId)
+        job.done.resolve(report)
         return report
       } catch (error) {
-        job.finishPromise = null
+        job.commitStarted = false
+        if (job.terminal) return job.done.promise
         return finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, safeTerminalCode(error))
       } finally {
-        if (report?.status === 'completed') {
-          await cleanup(job)
-          job.done.resolve(report)
-        }
+        if (job.completionCommitted) clearOwnedResources(job)
       }
     })()
-    return job.finishPromise
-  }
-
-  function settleLifecycle(job, outcome) {
-    if (!job.lifecycleOutcome) {
-      job.lifecycleOutcome = outcome
-      job.lifecycle.resolve(outcome)
-    }
+    return job.completionPromise
   }
 
   function acceptLifecycle(job, event) {
-    if (job.finishPromise) return
+    if (job.terminal || job.completionCommitted) return
     if (['error', 'exit'].includes(event?.type)) {
-      settleLifecycle(job, { kind: 'failed', code: 'SUMMARY_RUN_FAILED' })
+      void finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, 'SUMMARY_RUN_FAILED')
       return
     }
     if (event?.type === 'session_stopped') {
-      settleLifecycle(job, { kind: 'interrupted', code: 'SUMMARY_RUN_FAILED' })
+      void finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.INTERRUPTED, 'SUMMARY_RUN_FAILED')
       return
     }
     if (!['turn_completed', 'turn_failed', 'turn_interrupted'].includes(event?.type)) return
@@ -266,38 +368,36 @@ export function createInteractiveSummaryJobService({
     }
     if (event.turnId !== job.turnId) return
     if (event.type === 'turn_failed') {
-      settleLifecycle(job, { kind: 'failed', code: 'SUMMARY_RUN_FAILED' })
+      void finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, 'SUMMARY_RUN_FAILED')
     } else if (event.type === 'turn_interrupted') {
-      settleLifecycle(job, { kind: 'interrupted', code: 'SUMMARY_RUN_FAILED' })
+      void finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.INTERRUPTED, 'SUMMARY_RUN_FAILED')
     } else {
       schedule(job, 'missingTimer', limits.missingMs, () => {
-        settleLifecycle(job, { kind: 'failed', code: 'SUMMARY_ARTIFACT_MISSING' })
+        void finishTerminal(
+          job,
+          INTERACTIVE_SUMMARY_PHASE.FAILED,
+          'SUMMARY_ARTIFACT_MISSING'
+        )
       })
     }
   }
 
   async function execute(job) {
     try {
-      schedule(job, 'totalTimer', limits.runMs, () => {
-        settleLifecycle(job, { kind: 'failed', code: 'SUMMARY_RUN_TIMEOUT' })
-      })
-      const started = await sessionRuntime.start(job.sessionId)
-      if (job.finishPromise) return job.finishPromise
+      const started = await ownedStep(job, () => sessionRuntime.start(job.sessionId))
       if (started !== true) throw typed('SUMMARY_RUN_FAILED')
-      await sessionRuntime.waitReady(job.sessionId, { timeoutMs: limits.readyMs })
-      if (job.finishPromise) return job.finishPromise
+      await ownedStep(job, () => sessionRuntime.waitReady(job.sessionId, {
+        timeoutMs: limits.readyMs
+      }))
       await transition(job, INTERACTIVE_SUMMARY_PHASE.AWAITING_DELIVERY)
-      if (job.finishPromise) return job.finishPromise
 
       job.unsubscribe = sessionRuntime.subscribe(job.sessionId, event => acceptLifecycle(job, event))
-      const delivered = await sessionRuntime.deliver(job.sessionId, job.prompt, {
+      const delivered = await ownedStep(job, () => sessionRuntime.deliver(job.sessionId, job.prompt, {
         timeoutMs: limits.deliveryMs
-      })
-      if (job.finishPromise) return job.finishPromise
+      }))
       job.turnId = delivered.turnId
       for (const event of job.bufferedEvents.splice(0)) acceptLifecycle(job, event)
       await transition(job, INTERACTIVE_SUMMARY_PHASE.RUNNING)
-      if (job.finishPromise) return job.finishPromise
 
       const artifact = Promise.resolve(waitForArtifact({
         workspacePath: job.workspace.path,
@@ -307,10 +407,13 @@ export function createInteractiveSummaryJobService({
         value => ({ kind: 'artifact', value }),
         error => ({ kind: 'artifact-error', error })
       )
-      const outcome = await Promise.race([artifact, job.lifecycle.promise])
+      const outcome = await Promise.race([
+        artifact,
+        job.terminalSignal.promise.then(() => ({ kind: 'terminal' }))
+      ])
+      if (outcome.kind === 'terminal') return job.done.promise
       if (outcome.kind === 'artifact') return finishCompleted(job, outcome.value)
       if (outcome.kind === 'artifact-error') {
-        if (job.finishPromise && outcome.error?.code === 'ABORT_ERR') return job.finishPromise
         if (now() >= job.deadlineMs) {
           return finishTerminal(
             job,
@@ -324,9 +427,8 @@ export function createInteractiveSummaryJobService({
           safeTerminalCode(outcome.error, 'SUMMARY_ARTIFACT_INVALID')
         )
       }
-      return finishTerminal(job, outcome.kind, outcome.code)
     } catch (error) {
-      if (job.finishPromise && error?.code === 'ABORT_ERR') return job.finishPromise
+      if (job.terminal) return job.done.promise
       return finishTerminal(
         job,
         INTERACTIVE_SUMMARY_PHASE.FAILED,
@@ -342,49 +444,86 @@ export function createInteractiveSummaryJobService({
       executionMode: SUMMARY_EXECUTION_MODE.INTERACTIVE_CLI,
       runPhase: INTERACTIVE_SUMMARY_PHASE.PREPARING
     })
-    const workspace = await workspaceService.create(queued.id)
-    const preparation = await preparationService.prepare({ report: queued, workspace })
-    const initial = {
+    const job = {
       reportId: queued.id,
       report: queued,
-      workspace,
-      preparation,
+      workspace: null,
+      preparation: null,
       phase: INTERACTIVE_SUMMARY_PHASE.PREPARING,
       sessionId: null,
       turnId: null,
       prompt: buildPrompt({ periodLabel: PERIOD_LABELS[queued.periodType] }),
       abortController: new AbortController(),
       bufferedEvents: [],
-      lifecycle: deferred(),
-      lifecycleOutcome: null,
+      terminalSignal: deferred(),
+      terminal: null,
       done: deferred(),
       unsubscribe: null,
       totalTimer: null,
       missingTimer: null,
+      cleanupTimers: new Set(),
+      workspaceOperation: null,
+      repositoryOperation: null,
       stopPromise: null,
       finishPromise: null,
-      persistPromise: Promise.resolve(),
+      completionPromise: null,
+      commitStarted: false,
+      completionCommitted: false,
       deadlineMs: now() + limits.runMs
     }
-    await transition(initial, INTERACTIVE_SUMMARY_PHASE.STARTING)
-    const created = await sessionRuntime.create({
-      adapterId: request.executorId,
-      profileId: request.profileId || null,
-      model: request.model || null,
-      name: `工作总结（${PERIOD_LABELS[queued.periodType]}）v${queued.version}`,
-      cwd: workspace.workDirectory
+    active.set(queued.id, job)
+    schedule(job, 'totalTimer', limits.runMs, () => {
+      void finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, 'SUMMARY_RUN_TIMEOUT')
     })
-    initial.sessionId = resultSessionId(created)
-    initial.report = await repository.update(queued.id, {
-      sessionId: initial.sessionId,
-      updatedAt: now()
-    })
-    active.set(queued.id, initial)
-    void execute(initial)
-    return {
-      report: initial.report,
-      sessionId: initial.sessionId,
-      done: initial.done.promise
+
+    try {
+      job.workspace = await ownedStep(
+        job,
+        () => workspaceService.create(queued.id),
+        workspace => workspaceService.fail(
+          queued.id,
+          job.terminal?.code || 'SUMMARY_RUN_FAILED',
+          {
+            status: job.terminal?.phase || 'failed',
+            stage: job.terminal?.phase || 'failed'
+          }
+        )
+      )
+      job.preparation = await ownedStep(job, () => preparationService.prepare({
+        report: queued,
+        workspace: job.workspace
+      }))
+      await transition(job, INTERACTIVE_SUMMARY_PHASE.STARTING)
+      const created = await ownedStep(
+        job,
+        () => sessionRuntime.create({
+          adapterId: request.executorId,
+          profileId: request.profileId || null,
+          model: request.model || null,
+          name: `工作总结（${PERIOD_LABELS[queued.periodType]}）v${queued.version}`,
+          cwd: job.workspace.workDirectory
+        }),
+        late => sessionRuntime.stop(resultSessionId(late))
+      )
+      job.sessionId = resultSessionId(created)
+      job.report = await ownedStep(job, () => repository.update(queued.id, {
+        sessionId: job.sessionId,
+        updatedAt: now()
+      }))
+      void execute(job)
+      return {
+        report: job.report,
+        sessionId: job.sessionId,
+        done: job.done.promise
+      }
+    } catch (error) {
+      const code = job.terminal?.code || safeTerminalCode(error)
+      if (!job.terminal) {
+        await finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, code)
+      } else {
+        await job.done.promise
+      }
+      throw typed(code)
     }
   }
 

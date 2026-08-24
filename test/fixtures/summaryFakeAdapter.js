@@ -37,28 +37,56 @@ export class SummaryFakeAdapter extends EventEmitter {
   }
 }
 
-export function createSummaryFakeAdapterHarness({ workspaceService } = {}) {
+export function createSummaryFakeAdapterHarness({
+  workspaceService,
+  createGate,
+  createError,
+  startGate,
+  startError,
+  stopGate,
+  stopError,
+  onStop
+} = {}) {
   const entries = new Map()
   const configs = new Map()
   const stopped = []
+  const stopRequests = []
+  const createRequests = []
+  const startRequests = []
   let nextSession = 0
 
-  const runtime = createInteractiveSummarySessionRuntime({
-    createSession(config) {
+  const baseRuntime = createInteractiveSummarySessionRuntime({
+    async createSession(config) {
+      createRequests.push(structuredClone(config))
+      await createGate?.promise
+      if (createError) throw createError
       const sessionId = `summary-session-${++nextSession}`
       entries.set(sessionId, { adapter: new SummaryFakeAdapter(sessionId) })
       configs.set(sessionId, structuredClone(config))
       return { sessionId }
     },
     async startAdapter(sessionId) {
+      startRequests.push(sessionId)
+      await startGate?.promise
+      if (startError) throw startError
       return entries.has(sessionId)
     },
     async stopSession(sessionId) {
       stopped.push(sessionId)
+      onStop?.(sessionId)
+      await stopGate?.promise
+      if (stopError) throw stopError
       return true
     },
     getEntry(sessionId) {
       return entries.get(sessionId)
+    }
+  })
+  const runtime = Object.freeze({
+    ...baseRuntime,
+    stop(sessionId) {
+      stopRequests.push(sessionId)
+      return baseRuntime.stop(sessionId)
     }
   })
 
@@ -71,6 +99,9 @@ export function createSummaryFakeAdapterHarness({ workspaceService } = {}) {
   return {
     runtime,
     stopped,
+    stopRequests,
+    createRequests,
+    startRequests,
     config(sessionId) { return configs.get(sessionId) },
     adapter,
     emitReady(sessionId) { adapter(sessionId).emitEvent('ready') },

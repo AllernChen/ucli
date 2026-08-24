@@ -44,6 +44,38 @@ function timerTracker() {
   }
 }
 
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((done, fail) => {
+    resolve = done
+    reject = fail
+  })
+  return { promise, resolve, reject }
+}
+
+async function watchdog(promise, timeoutMs = 2_000) {
+  let timer
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('external watchdog expired')), timeoutMs)
+      })
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function waitUntil(predicate, timeoutMs = 200) {
+  const deadline = Date.now() + timeoutMs
+  while (!(await predicate())) {
+    if (Date.now() >= deadline) throw new Error('condition wait expired')
+    await new Promise(resolve => setTimeout(resolve, 2))
+  }
+}
+
 function abortError() {
   return Object.assign(new Error('aborted'), { name: 'AbortError', code: 'ABORT_ERR' })
 }
@@ -70,19 +102,71 @@ async function quickArtifact({ workspacePath, signal, deadlineMs }) {
 
 async function fixture(t, {
   realArtifact = false,
-  timeouts = {}
+  timeouts = {},
+  fakeOptions = {},
+  workspaceRunningGate = null,
+  workspaceCreateError = null,
+  workspaceCompleteError = null,
+  preparationError = null,
+  sessionIdPatchError = null
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'ucli-interactive-job-'))
   const db = await openDb(join(root, 'ucli.db'))
   const repository = createReportRepository({ db })
   const workspaceService = createSummaryWorkspaceService({ root: join(root, 'summaries') })
-  const fake = createSummaryFakeAdapterHarness({ workspaceService })
-  const timers = timerTracker()
-  const service = createInteractiveSummaryJobService({
-    repository,
+  const order = []
+  const operational = []
+  const fake = createSummaryFakeAdapterHarness({
     workspaceService,
+    ...fakeOptions,
+    onStop(sessionId) {
+      order.push('session.stop')
+      fakeOptions.onStop?.(sessionId)
+    }
+  })
+  const timers = timerTracker()
+  const jobRepository = {
+    ...repository,
+    async update(reportId, patch) {
+      if (sessionIdPatchError && Object.hasOwn(patch, 'sessionId')) throw sessionIdPatchError
+      return repository.update(reportId, patch)
+    },
+    async complete(...args) {
+      order.push('repository.complete')
+      return repository.complete(...args)
+    }
+  }
+  const jobWorkspaceService = {
+    ...workspaceService,
+    async create(...args) {
+      if (workspaceCreateError) throw workspaceCreateError
+      return workspaceService.create(...args)
+    },
+    async complete(...args) {
+      order.push('workspace.complete')
+      if (workspaceCompleteError) throw workspaceCompleteError
+      return workspaceService.complete(...args)
+    },
+    async markStage(...args) {
+      order.push(`workspace.mark:${args[1]}:start`)
+      if (args[1] === 'running') await workspaceRunningGate?.promise
+      const value = await workspaceService.markStage(...args)
+      order.push(`workspace.mark:${args[1]}:end`)
+      return value
+    },
+    async fail(...args) {
+      order.push(`workspace.fail:${args[2]?.status || 'failed'}:start`)
+      const value = await workspaceService.fail(...args)
+      order.push(`workspace.fail:${args[2]?.status || 'failed'}:end`)
+      return value
+    }
+  }
+  const service = createInteractiveSummaryJobService({
+    repository: jobRepository,
+    workspaceService: jobWorkspaceService,
     preparationService: {
       async prepare({ report, workspace }) {
+        if (preparationError) throw preparationError
         await workspaceService.writeArtifact(report.id, 'input/data.json', '{}\n')
         return { coverage: { sessionsIncluded: 1 }, usageSnapshot: {}, workspace }
       }
@@ -90,27 +174,37 @@ async function fixture(t, {
     sessionRuntime: fake.runtime,
     waitForArtifact: realArtifact ? undefined : quickArtifact,
     timers,
+    onOperationalEvent: event => operational.push(event),
     timeouts: {
       readyMs: 40,
       deliveryMs: 40,
-      runMs: realArtifact ? 2_500 : 150,
+      runMs: 4_000,
       missingMs: 40,
+      cleanupMs: 1_000,
       ...timeouts
     }
   })
   t.after(async () => {
-    await service.interruptAll('SUMMARY_APP_SHUTDOWN')
+    await watchdog(service.interruptAll('SUMMARY_APP_SHUTDOWN'), 100).catch(() => {})
     db.close()
     await rm(root, { recursive: true, force: true })
   })
-  return { root, db, repository, workspaceService, fake, timers, service }
+  return { root, db, repository, workspaceService, fake, timers, service, order, operational }
 }
 
 async function beginRunning(state, run, turnId = 'turn-1') {
   state.fake.emitReady(run.sessionId)
   await state.fake.waitForSend(run.sessionId)
   state.fake.emitTurnStarted(run.sessionId, turnId)
-  await new Promise(resolve => setImmediate(resolve))
+  try {
+    await waitUntil(() => {
+      const persisted = state.repository.get(run.report.id)
+      return persisted?.runPhase === 'running'
+    }, 3_000)
+  } catch (error) {
+    const persisted = state.repository.get(run.report.id)
+    throw new Error(`${error.message}: db=${persisted?.runPhase} order=${state.order.join(',')}`)
+  }
 }
 
 async function manifest(state, reportId) {
@@ -120,7 +214,12 @@ async function manifest(state, reportId) {
   ))
 }
 
-async function assertSettled(state, run, { status, phase, code = null }) {
+async function assertSettled(state, run, {
+  status,
+  phase,
+  code = null,
+  expectNoTimers = true
+}) {
   const settled = await run.done
   const persisted = state.repository.get(run.report.id)
   const workspace = await manifest(state, run.report.id)
@@ -134,15 +233,24 @@ async function assertSettled(state, run, { status, phase, code = null }) {
   assert.equal(workspace.errorCode ?? null, code)
   assert.equal(state.service.isActive(run.report.id), false)
   assert.equal(state.fake.listenerCount(run.sessionId), 0)
-  assert.equal(state.fake.stopped.filter(sessionId => sessionId === run.sessionId).length, 1)
-  assert.equal(state.timers.activeCount, 0)
+  assert.equal(state.fake.stopRequests.filter(sessionId => sessionId === run.sessionId).length, 1)
+  assert.equal(state.fake.stopped.filter(sessionId => sessionId === run.sessionId).length <= 1, true)
+  if (expectNoTimers) assert.equal(state.timers.activeCount, 0)
   return settled
 }
 
-async function completeRun(state, run, markdown = VALID_MARKDOWN, turnId = 'turn-1') {
+async function completeRun(
+  state,
+  run,
+  markdown = VALID_MARKDOWN,
+  turnId = 'turn-1',
+  expectNoTimers = true
+) {
   await beginRunning(state, run, turnId)
   await state.fake.writeCanonicalMarkdown(run.report.id, markdown)
-  return assertSettled(state, run, { status: 'completed', phase: 'completed' })
+  return assertSettled(state, run, {
+    status: 'completed', phase: 'completed', expectNoTimers
+  })
 }
 
 test('interactive run owns report workspace session artifact and atomic completion', async t => {
@@ -223,6 +331,23 @@ for (const [kind, emit] of [
   })
 }
 
+test('terminal event during a pending running workspace transition cannot be overwritten', async t => {
+  const workspaceRunningGate = deferred()
+  const state = await fixture(t, { workspaceRunningGate })
+  const run = await state.service.start(request())
+  state.fake.emitReady(run.sessionId)
+  await state.fake.waitForSend(run.sessionId)
+  state.fake.emitTurnStarted(run.sessionId)
+  await waitUntil(() => state.order.includes('workspace.mark:running:start'))
+
+  state.fake.emitExit(run.sessionId)
+  workspaceRunningGate.resolve()
+
+  await assertSettled(state, run, {
+    status: 'failed', phase: 'failed', code: 'SUMMARY_RUN_FAILED'
+  })
+})
+
 for (const [kind, emit, status, phase] of [
   ['same-turn failure', (fake, sessionId) => fake.emitTurnFailed(sessionId), 'failed', 'failed'],
   ['same-turn interruption', (fake, sessionId) => fake.emitTurnInterrupted(sessionId), 'interrupted', 'interrupted'],
@@ -249,7 +374,7 @@ test('terminal event for another turn cannot settle the current run', async t =>
 })
 
 test('total run timeout bounds a running CLI that produces no artifact or terminal event', async t => {
-  const state = await fixture(t, { timeouts: { runMs: 35 } })
+  const state = await fixture(t, { timeouts: { runMs: 1_000 } })
   const run = await state.service.start(request())
   await beginRunning(state, run)
   await assertSettled(state, run, {
@@ -313,7 +438,7 @@ test('same-period reruns create immutable v1 and v2 with unique sessions', async
 })
 
 test('day and week runs execute concurrently without sharing report workspace or session', async t => {
-  const state = await fixture(t)
+  const state = await fixture(t, { timeouts: { readyMs: 1_000 } })
   const [week, day] = await Promise.all([
     state.service.start(request()),
     state.service.start(request({ periodType: 'day', endExclusive: START + 24 * 60 * 60 * 1000 }))
@@ -321,11 +446,15 @@ test('day and week runs execute concurrently without sharing report workspace or
   assert.notEqual(week.report.id, day.report.id)
   assert.notEqual(week.sessionId, day.sessionId)
   assert.notEqual(state.fake.config(week.sessionId).cwd, state.fake.config(day.sessionId).cwd)
-  await Promise.all([completeRun(state, week), completeRun(state, day, VALID_MARKDOWN, 'turn-2')])
+  await Promise.all([
+    completeRun(state, week, VALID_MARKDOWN, 'turn-1', false),
+    completeRun(state, day, VALID_MARKDOWN, 'turn-2', false)
+  ])
+  assert.equal(state.timers.activeCount, 0)
 })
 
 test('different profile and model inputs are forwarded to distinct native sessions', async t => {
-  const state = await fixture(t)
+  const state = await fixture(t, { timeouts: { readyMs: 1_000 } })
   const first = await state.service.start(request({ profileId: 'profile-a', model: 'model-a' }))
   const second = await state.service.start(request({ profileId: 'profile-b', model: 'model-b' }))
   assert.notEqual(first.sessionId, second.sessionId)
@@ -334,5 +463,142 @@ test('different profile and model inputs are forwarded to distinct native sessio
       [config.profileId, config.model]),
     [['profile-a', 'model-a'], ['profile-b', 'model-b']]
   )
-  await Promise.all([completeRun(state, first), completeRun(state, second, VALID_MARKDOWN, 'turn-2')])
+  try {
+    await Promise.all([
+      watchdog(completeRun(state, first, VALID_MARKDOWN, 'turn-1', false), 5_000),
+      watchdog(completeRun(state, second, VALID_MARKDOWN, 'turn-2', false), 5_000)
+    ])
+  } catch (error) {
+    const firstManifest = await manifest(state, first.report.id)
+    const secondManifest = await manifest(state, second.report.id)
+    throw new Error(`${error.message}: first=${state.repository.get(first.report.id)?.runPhase}/${firstManifest.stage} second=${state.repository.get(second.report.id)?.runPhase}/${secondManifest.stage} order=${state.order.join(',')}`)
+  }
+  assert.equal(state.timers.activeCount, 0)
+})
+
+test('hung runtime start is bounded by the total deadline and settles every owner', async t => {
+  const startGate = deferred()
+  const state = await fixture(t, {
+    fakeOptions: { startGate },
+    timeouts: { runMs: 1_000, cleanupMs: 500 }
+  })
+  const run = await watchdog(state.service.start(request()))
+  await waitUntil(() => state.fake.startRequests.length === 1, 1_000)
+  const completed = await watchdog(run.done, 2_000)
+
+  assert.equal(completed.status, 'failed')
+  assert.equal(completed.errorText, 'SUMMARY_RUN_TIMEOUT')
+  assert.equal((await manifest(state, run.report.id)).status, 'failed')
+  assert.equal(state.service.isActive(run.report.id), false)
+  assert.equal(state.fake.listenerCount(run.sessionId), 0)
+  assert.equal(state.fake.stopRequests.filter(id => id === run.sessionId).length, 1)
+  assert.equal(state.timers.activeCount, 0)
+})
+
+for (const [label, terminal] of [
+  ['completion', 'completed'],
+  ['cancel', 'cancelled'],
+  ['shutdown interrupt', 'interrupted']
+]) {
+  test(`hung native stop cannot block ${label} settlement`, async t => {
+    const stopGate = deferred()
+    const state = await fixture(t, {
+      fakeOptions: { stopGate },
+      timeouts: { cleanupMs: 500 }
+    })
+    const run = await watchdog(state.service.start(request()))
+    await beginRunning(state, run)
+    if (terminal === 'completed') {
+      await state.fake.writeCanonicalMarkdown(run.report.id, VALID_MARKDOWN)
+    } else if (terminal === 'cancelled') {
+      await watchdog(state.service.cancel(run.report.id))
+    } else {
+      await watchdog(state.service.interruptAll('SUMMARY_APP_SHUTDOWN'))
+    }
+    const completed = await watchdog(run.done)
+
+    assert.equal(completed.status, terminal)
+    assert.equal(state.repository.get(run.report.id).status, terminal)
+    assert.equal((await manifest(state, run.report.id)).status, terminal)
+    assert.equal(state.service.isActive(run.report.id), false)
+    assert.equal(state.fake.listenerCount(run.sessionId), 0)
+    assert.equal(state.fake.stopRequests.filter(id => id === run.sessionId).length, 1)
+    assert.equal(state.timers.activeCount, 0)
+  })
+}
+
+for (const [label, options, hasWorkspace, hasSession] of [
+  ['workspace create', { workspaceCreateError: new Error('private workspace path') }, false, false],
+  ['preparation', { preparationError: new Error('private evidence') }, true, false],
+  ['session create', { fakeOptions: { createError: new Error('private session') } }, true, false],
+  ['session id persistence', { sessionIdPatchError: new Error('private database') }, true, true]
+]) {
+  test(`${label} initialization failure leaves no queued or running orphan`, async t => {
+    const state = await fixture(t, options)
+    await assert.rejects(
+      watchdog(state.service.start(request())),
+      error => error?.code === 'SUMMARY_RUN_FAILED'
+    )
+    const [report] = state.repository.list()
+    assert.equal(report.status, 'failed')
+    assert.equal(report.runPhase, 'failed')
+    assert.equal(report.errorText, 'SUMMARY_RUN_FAILED')
+    assert.equal(state.service.isActive(report.id), false)
+    assert.equal(state.timers.activeCount, 0)
+    if (hasWorkspace) assert.equal((await manifest(state, report.id)).status, 'failed')
+    if (hasSession) assert.equal(state.fake.stopRequests.length, 1)
+  })
+}
+
+test('interruptAll owns a start that is still waiting for native session creation', async t => {
+  const createGate = deferred()
+  const state = await fixture(t, {
+    fakeOptions: { createGate },
+    timeouts: { runMs: 1_500, cleanupMs: 1_000 }
+  })
+  const starting = state.service.start(request())
+  await waitUntil(() => state.fake.createRequests.length === 1)
+  const [queued] = state.repository.list()
+  assert.equal(state.service.isActive(queued.id), true)
+  assert.equal(await watchdog(state.service.interruptAll('SUMMARY_APP_SHUTDOWN')), 1)
+  await assert.rejects(
+    watchdog(starting),
+    error => error?.code === 'SUMMARY_APP_SHUTDOWN'
+  )
+  assert.equal(state.repository.get(queued.id).status, 'interrupted')
+  assert.equal((await manifest(state, queued.id)).status, 'interrupted')
+  assert.equal(state.service.isActive(queued.id), false)
+  assert.equal(state.timers.activeCount, 0)
+})
+
+test('completed database state survives workspace finalization failure with one safe operational event', async t => {
+  const state = await fixture(t, {
+    workspaceCompleteError: new Error('C:\\private\\locked-work')
+  })
+  const progress = []
+  state.service.subscribe(event => progress.push(event))
+  const run = await state.service.start(request())
+  await beginRunning(state, run)
+  await state.fake.writeCanonicalMarkdown(run.report.id, VALID_MARKDOWN)
+  const completed = await watchdog(run.done)
+
+  assert.equal(completed.status, 'completed')
+  assert.equal(state.repository.get(run.report.id).status, 'completed')
+  assert.deepEqual(state.operational, [{
+    type: 'operational', reportId: run.report.id, code: 'SUMMARY_RUN_FAILED'
+  }])
+  assert.equal(JSON.stringify(state.operational).includes('private'), false)
+  assert.equal(progress.filter(event => event.phase === 'completed').length, 1)
+  assert.equal(progress.some(event => event.status === 'failed'), false)
+})
+
+test('completion commits the database then releases native cwd before workspace compaction', async t => {
+  const state = await fixture(t)
+  const run = await state.service.start(request())
+  await completeRun(state, run)
+  assert.deepEqual(state.order.filter(value => [
+    'repository.complete', 'session.stop', 'workspace.complete'
+  ].includes(value)), [
+    'repository.complete', 'session.stop', 'workspace.complete'
+  ])
 })
