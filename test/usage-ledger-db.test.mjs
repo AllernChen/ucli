@@ -84,7 +84,7 @@ function summaryReport(overrides = {}) {
     executorId: 'codex',
     profileId: 'profile-1',
     model: 'gpt-5',
-    usageSnapshot: { inputTokens: 30, outputTokens: 10 },
+    usageSnapshot: { totals: { inputTokens: 30, outputTokens: 10 } },
     coverage: { sessionsIncluded: 2 },
     generationUsage: { inputTokens: 0, outputTokens: 0 },
     generationMetrics: {},
@@ -683,7 +683,10 @@ test('summary report CRUD maps fields and validates JSON at the database boundar
       markdown: '# 周报',
       coverage: { sessionsIncluded: 3 },
       generationUsage: { inputTokens: 200, outputTokens: 50 },
-      generationMetrics: { strategy: 'map-reduce', aiCalls: 3, cacheHits: 2 },
+      generationMetrics: {
+        strategy: 'map-reduce', plannedCalls: 3, aiCalls: 3, cacheHits: 2,
+        durationMs: 25, mapConcurrency: 2
+      },
       generationCostUsd: 0.25,
       updatedAt: 2000
     })
@@ -692,7 +695,10 @@ test('summary report CRUD maps fields and validates JSON at the database boundar
       markdown: '# 周报',
       coverage: { sessionsIncluded: 3 },
       generationUsage: { inputTokens: 200, outputTokens: 50 },
-      generationMetrics: { strategy: 'map-reduce', aiCalls: 3, cacheHits: 2 },
+      generationMetrics: {
+        strategy: 'map-reduce', plannedCalls: 3, aiCalls: 3, cacheHits: 2,
+        durationMs: 25, mapConcurrency: 2
+      },
       generationCostUsd: 0.25,
       updatedAt: 2000
     }))

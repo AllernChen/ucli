@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,7 +10,14 @@ import { openDb } from '../electron/persistence/db.js'
 import { createReportRepository } from '../electron/summaries/reportRepository.js'
 
 const SOURCE_HASH = `sha256:${'a'.repeat(64)}`
-const MARKDOWN_HASH = `sha256:${'b'.repeat(64)}`
+
+function artifactMetadata(markdown) {
+  return {
+    canonical: 'markdown',
+    bytes: Buffer.byteLength(markdown),
+    sha256: `sha256:${createHash('sha256').update(markdown).digest('hex')}`
+  }
+}
 
 const V0115_SUMMARY_REPORTS_DDL = `CREATE TABLE summary_reports (
   id TEXT PRIMARY KEY,
@@ -168,9 +176,9 @@ test('completing a running report atomically commits markdown and switches curre
       runPhase: 'completed',
       markdown: '# Current',
       sourceHash: SOURCE_HASH,
-      usageSnapshot: { inputTokens: 3 },
+      usageSnapshot: { totals: { inputTokens: 3 } },
       coverage: { sessionsIncluded: 1 },
-      artifactMetadata: { canonical: 'markdown', bytes: 9, sha256: MARKDOWN_HASH },
+      artifactMetadata: artifactMetadata('# Current'),
       errorText: null,
       updatedAt: 2000
     })
@@ -192,7 +200,7 @@ test('completing a running report atomically commits markdown and switches curre
     await assert.rejects(db.completeSummaryReport('week-v3', {
       status: 'completed', runPhase: 'completed', markdown: '# Must Roll Back',
       sourceHash: SOURCE_HASH, usageSnapshot: {}, coverage: {},
-      artifactMetadata: { canonical: 'markdown', bytes: 16, sha256: MARKDOWN_HASH },
+      artifactMetadata: artifactMetadata('# Must Roll Back'),
       errorText: null, updatedAt: 3000
     }), /complete current switch failed/)
     assert.equal(db.getSummaryReport('week-v2').isCurrent, true)
@@ -217,13 +225,15 @@ test('database completion rejects invalid canonical fields before changing repor
       executionMode: 'interactive-cli', sessionId: 'session-boundary', runPhase: 'running'
     }))
     for (const patch of [
-      { markdown: '', sourceHash: SOURCE_HASH,
-        artifactMetadata: { canonical: 'markdown', bytes: 1, sha256: MARKDOWN_HASH } },
-      { markdown: '# Report', sourceHash: '',
-        artifactMetadata: { canonical: 'markdown', bytes: 1, sha256: MARKDOWN_HASH } },
+      { markdown: '', sourceHash: SOURCE_HASH, artifactMetadata: artifactMetadata('# Report') },
+      { markdown: '# Report', sourceHash: '', artifactMetadata: artifactMetadata('# Report') },
       { markdown: '# Report', sourceHash: SOURCE_HASH, artifactMetadata: {} },
       { markdown: '# Report', sourceHash: SOURCE_HASH,
-        artifactMetadata: { canonical: 'markdown', bytes: 1, sha256: MARKDOWN_HASH, extra: true } }
+        artifactMetadata: { ...artifactMetadata('# Report'), extra: true } },
+      { markdown: '# Report', sourceHash: SOURCE_HASH,
+        artifactMetadata: { ...artifactMetadata('# Report'), bytes: 1 } },
+      { markdown: '# Report', sourceHash: SOURCE_HASH,
+        artifactMetadata: { ...artifactMetadata('# Report'), sha256: `sha256:${'f'.repeat(64)}` } }
     ]) {
       await assert.rejects(db.completeSummaryReport('running-boundary', {
         status: 'completed', runPhase: 'completed', usageSnapshot: {}, coverage: {},
@@ -255,7 +265,7 @@ test('a failed completion transaction cannot roll back an unrelated synchronous 
     const failedCompletion = db.completeSummaryReport('week-running', {
       status: 'completed', runPhase: 'completed', markdown: '# Fails',
       sourceHash: SOURCE_HASH, usageSnapshot: {}, coverage: {},
-      artifactMetadata: { canonical: 'markdown', bytes: 7, sha256: MARKDOWN_HASH },
+      artifactMetadata: artifactMetadata('# Fails'),
       errorText: null, updatedAt: 2000
     })
     await Promise.resolve()
@@ -280,13 +290,14 @@ test('real database imports are concurrent-idempotent and allocate same-period v
   const repository = createReportRepository({
     db, now: () => 1000, idFactory: () => `import-${++id}`
   })
-  const imported = overrides => ({
-    periodType: 'week', start: 100, endExclusive: 200, timezone: 'Asia/Shanghai',
-    partial: false, generatedBy: 'manual', markdown: '# Imported',
-    sourceHash: SOURCE_HASH, legacyImportKey: 'legacy-key-1',
-    artifactMetadata: { canonical: 'markdown', bytes: 10, sha256: MARKDOWN_HASH },
-    ...overrides
-  })
+  const imported = (overrides = {}) => {
+    const value = {
+      periodType: 'week', start: 100, endExclusive: 200, timezone: 'Asia/Shanghai',
+      partial: false, generatedBy: 'manual', markdown: '# Imported',
+      sourceHash: SOURCE_HASH, legacyImportKey: 'legacy-key-1', ...overrides
+    }
+    return { ...value, artifactMetadata: overrides.artifactMetadata ?? artifactMetadata(value.markdown) }
+  }
   try {
     db.createSummaryReport(summaryReport({ id: 'existing-current', isCurrent: true }))
     const [first, repeated] = await Promise.all([
@@ -304,6 +315,106 @@ test('real database imports are concurrent-idempotent and allocate same-period v
     assert.equal(next.report.isCurrent, false)
     assert.equal(repository.get('existing-current').isCurrent, true)
     assert.equal(repository.listForKey(imported()).length, 3)
+  } finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('database transaction preserves existing async callback compatibility', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-async-transaction-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  try {
+    await db.transaction(async () => {
+      db.sql.run('CREATE TABLE async_transaction_probe (id TEXT PRIMARY KEY)')
+      await Promise.resolve()
+      db.sql.run("INSERT INTO async_transaction_probe VALUES ('survived')")
+    })
+    assert.equal(
+      db.sql.exec('SELECT id FROM async_transaction_probe')[0].values[0][0],
+      'survived'
+    )
+  } finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('direct database report writes reject unknown shapes and credential scalars', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-db-closed-json-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  try {
+    const secretKey = `sk-ant-${'x'.repeat(20)}`
+    const awsKey = `AKIA${'A'.repeat(16)}`
+    const unsafe = [
+      { coverage: { authorization: 'value' } },
+      { coverage: { accessKey: 'value' } },
+      { coverage: { auth: 'value' } },
+      { coverage: { payload: { safe: true } } },
+      { coverage: { command: 'git status' } },
+      { coverage: { sessionsIncluded: 1, value: secretKey } },
+      { usageSnapshot: { totals: { inputTokens: 1 }, value: awsKey } }
+    ]
+    for (const [index, fields] of unsafe.entries()) {
+      assert.throws(
+        () => db.createSummaryReport(summaryReport({ id: `unsafe-create-${index}`, ...fields })),
+        error => ['INVALID_SUMMARY_JSON_SHAPE',
+          'SUMMARY_SENSITIVE_JSON_FORBIDDEN'].includes(error.code)
+      )
+    }
+    db.createSummaryReport(summaryReport({ id: 'safe-update-target' }))
+    for (const fields of unsafe) {
+      assert.throws(
+        () => db.updateSummaryReport('safe-update-target', fields),
+        error => ['INVALID_SUMMARY_JSON_SHAPE',
+        'SUMMARY_SENSITIVE_JSON_FORBIDDEN'].includes(error.code)
+      )
+    }
+    for (const [index, errorText] of [
+      `SUMMARY_RUN_FAILED:AKIA${'A'.repeat(16)}`,
+      'ARBITRARY_UPPERCASE_CODE',
+      'SUMMARY_GENERATION_FAILED:leaked-suffix'
+    ].entries()) {
+      assert.throws(
+        () => db.createSummaryReport(summaryReport({
+          id: `unsafe-error-${index}`, errorText
+        })),
+        error => error.code === 'INVALID_SUMMARY_ERROR_CODE'
+      )
+      assert.throws(
+        () => db.updateSummaryReport('safe-update-target', { errorText }),
+        error => error.code === 'INVALID_SUMMARY_ERROR_CODE'
+      )
+    }
+    assert.equal(db.updateSummaryReport('safe-update-target', {
+      errorText: 'SUMMARY_AUTOMATIC_DUPLICATE:safe-report-1'
+    }).errorText, 'SUMMARY_AUTOMATIC_DUPLICATE:safe-report-1')
+    assert.doesNotThrow(() => db.updateSummaryReport('safe-update-target', {
+      coverage: { sessionsIncluded: 1, sources: { transcript: 2, note: 1, nativeDigest: 0 } }
+    }))
+  } finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('direct database import verifies Markdown byte length and digest', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-db-import-integrity-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  const markdown = '# Imported Integrity'
+  const correct = artifactMetadata(markdown)
+  try {
+    for (const [index, metadata] of [
+      { ...correct, bytes: correct.bytes + 1 },
+      { ...correct, sha256: `sha256:${'e'.repeat(64)}` }
+    ].entries()) {
+      await assert.rejects(db.importCompletedSummaryReport(summaryReport({
+        id: `direct-import-${index}`, status: 'completed', markdown,
+        executionMode: 'legacy-worklog-import', runPhase: 'completed', isCurrent: false,
+        legacyImportKey: `direct-integrity-${index}`, artifactMetadata: metadata
+      })), error => error.code === 'INVALID_SUMMARY_ARTIFACT_METADATA')
+    }
+    assert.equal(db.listSummaryReports({ executionMode: 'legacy-worklog-import' }).length, 0)
   } finally {
     db.close()
     await rm(root, { recursive: true, force: true })

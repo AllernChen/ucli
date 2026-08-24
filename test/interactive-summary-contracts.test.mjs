@@ -6,6 +6,7 @@ import {
   INTERACTIVE_SUMMARY_PHASE,
   INTERACTIVE_SUMMARY_TERMINAL_PHASES,
   assertInteractiveSummaryPhase,
+  isPersistedSummaryErrorText,
   safeInteractiveSummaryError
 } from '../electron/summaries/interactiveSummaryContracts.js'
 
@@ -40,6 +41,28 @@ test('interactive summary contracts are closed and safe for consumers', () => {
     () => assertInteractiveSummaryPhase('waiting-forever'),
     { code: 'SUMMARY_RUN_PHASE_INVALID' }
   )
+})
+
+test('persisted summary errors use one closed central allowlist', () => {
+  for (const value of [
+    null,
+    'SUMMARY_GENERATION_FAILED',
+    'SUMMARY_CANCELLED',
+    'SUMMARY_READY_TIMEOUT',
+    'SUMMARY_TURN_NOT_CONFIRMED',
+    'SUMMARY_RUN_TIMEOUT',
+    'SUMMARY_ARTIFACT_INVALID',
+    'SUMMARY_RUN_FAILED',
+    'SUMMARY_AUTOMATIC_DUPLICATE:safe-report_1.2-abc'
+  ]) assert.equal(isPersistedSummaryErrorText(value), true)
+
+  for (const value of [
+    'SUMMARY_PROVIDER_FAILED',
+    'ARBITRARY_UPPERCASE_CODE',
+    `SUMMARY_RUN_FAILED:AKIA${'A'.repeat(16)}`,
+    'SUMMARY_GENERATION_FAILED:leaked-suffix',
+    'SUMMARY_AUTOMATIC_DUPLICATE:../../private'
+  ]) assert.equal(isPersistedSummaryErrorText(value), false)
 })
 
 test('terminal summary phases are an immutable read-only collection', () => {

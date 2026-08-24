@@ -10,7 +10,14 @@ import { createSummaryJobService } from '../electron/summaries/summaryJobService
 import { createSummaryWorkspaceService } from '../electron/summaries/summaryWorkspaceService.js'
 
 const SOURCE_HASH = `sha256:${'a'.repeat(64)}`
-const MARKDOWN_HASH = `sha256:${'b'.repeat(64)}`
+
+function artifactMetadata(markdown) {
+  return {
+    canonical: 'markdown',
+    bytes: Buffer.byteLength(markdown),
+    sha256: `sha256:${createHash('sha256').update(markdown).digest('hex')}`
+  }
+}
 
 class MemoryDb {
   constructor() {
@@ -269,8 +276,36 @@ test('report repository rejects recursive secrets, tool payloads, and absolute p
     )
   }
   assert.deepEqual(repository.update(report.id, {
-    usageSnapshot: { inputTokens: 10, outputTokens: 2, totalTokens: 12 }
-  }).usageSnapshot, { inputTokens: 10, outputTokens: 2, totalTokens: 12 })
+    usageSnapshot: { totals: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } }
+  }).usageSnapshot, { totals: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } })
+})
+
+test('report repository rejects unknown summary shapes and credential-shaped scalar values', () => {
+  const repository = createReportRepository({
+    db: new MemoryDb(), now: () => 1000, idFactory: () => 'r-closed-json'
+  })
+  const report = repository.createQueued(request())
+  const secretKey = `sk-ant-${'x'.repeat(20)}`
+  const awsKey = `AKIA${'A'.repeat(16)}`
+  for (const patch of [
+    { coverage: { authorization: 'safe-looking' } },
+    { coverage: { accessKey: 'safe-looking' } },
+    { coverage: { auth: 'safe-looking' } },
+    { coverage: { payload: { safe: true } } },
+    { coverage: { command: 'git status' } },
+    { coverage: { sessionsIncluded: 1, value: secretKey } },
+    { usageSnapshot: { totals: { inputTokens: 1 }, value: awsKey } },
+    { generationUsage: { inputTokens: 1, outputTokens: 1, extra: 1 } }
+  ]) {
+    assert.throws(
+      () => repository.update(report.id, patch),
+      error => ['INVALID_SUMMARY_REPORT_JSON',
+        'SUMMARY_SENSITIVE_JSON_FORBIDDEN'].includes(error.code)
+    )
+  }
+  assert.deepEqual(repository.update(report.id, {
+    coverage: { sessionsIncluded: 1, sources: { transcript: 2, note: 1, nativeDigest: 0 } }
+  }).coverage.sources, { transcript: 2, note: 1, nativeDigest: 0 })
 })
 
 test('report repository accepts only bounded safe error machine codes', () => {
@@ -284,6 +319,10 @@ test('report repository accepts only bounded safe error machine codes', () => {
     'apiKey=sk-secret',
     'raw prompt text',
     'SUMMARY_RUN_FAILED:sk-secret',
+    `SUMMARY_RUN_FAILED:AKIA${'A'.repeat(16)}`,
+    'SUMMARY_PROVIDER_FAILED',
+    'ARBITRARY_UPPERCASE_CODE',
+    'SUMMARY_GENERATION_FAILED:leaked-suffix',
     'SUMMARY_AUTOMATIC_DUPLICATE:../../private/report'
   ]) {
     assert.throws(
@@ -309,28 +348,60 @@ test('completed and imported artifact metadata is exact while active metadata st
   }))
   assert.throws(
     () => repository.update(queued.id, {
-      artifactMetadata: { canonical: 'markdown', bytes: 1, sha256: MARKDOWN_HASH }
+      artifactMetadata: artifactMetadata('# Active')
     }),
     error => error.code === 'INVALID_SUMMARY_ARTIFACT_METADATA'
   )
   repository.update(queued.id, { status: 'running', runPhase: 'running' })
-  for (const artifactMetadata of [
+  for (const invalidMetadata of [
     {},
-    { canonical: 'html', bytes: 1, sha256: MARKDOWN_HASH },
-    { canonical: 'markdown', bytes: 0, sha256: MARKDOWN_HASH },
+    { canonical: 'html', bytes: 1, sha256: artifactMetadata('# Completed').sha256 },
+    { canonical: 'markdown', bytes: 0, sha256: artifactMetadata('# Completed').sha256 },
     { canonical: 'markdown', bytes: 1, sha256: 'not-a-safe-hash' },
-    { canonical: 'markdown', bytes: 1, sha256: MARKDOWN_HASH, path: '/private/report.md' }
+    { ...artifactMetadata('# Completed'), path: '/private/report.md' }
   ]) {
     await assert.rejects(repository.complete(queued.id, {
       markdown: '# Completed', sourceHash: SOURCE_HASH, usageSnapshot: {}, coverage: {},
-      artifactMetadata
+      artifactMetadata: invalidMetadata
     }), error => error.code === 'INVALID_SUMMARY_ARTIFACT_METADATA')
   }
   await assert.rejects(repository.importCompleted({
     ...request(), markdown: '# Imported', legacyImportKey: 'legacy-invalid-artifact',
     sourceHash: SOURCE_HASH,
-    artifactMetadata: { canonical: 'markdown', bytes: 1, sha256: MARKDOWN_HASH, extra: true }
+    artifactMetadata: { ...artifactMetadata('# Imported'), extra: true }
   }), error => error.code === 'INVALID_SUMMARY_ARTIFACT_METADATA')
+})
+
+test('repository completion and import verify Markdown byte length and digest', async () => {
+  const db = new MemoryDb()
+  let id = 0
+  const repository = createReportRepository({
+    db, now: () => 1000, idFactory: () => `r-integrity-${++id}`
+  })
+  const queued = repository.createQueued(request({
+    executionMode: 'interactive-cli', sessionId: 'session-integrity'
+  }))
+  repository.update(queued.id, { status: 'running', runPhase: 'running' })
+  const markdown = '# Integrity'
+  const correct = artifactMetadata(markdown)
+  for (const metadata of [
+    { ...correct, bytes: correct.bytes + 1 },
+    { ...correct, sha256: `sha256:${'f'.repeat(64)}` }
+  ]) {
+    await assert.rejects(repository.complete(queued.id, {
+      markdown, sourceHash: SOURCE_HASH, usageSnapshot: {}, coverage: {},
+      artifactMetadata: metadata
+    }), error => error.code === 'INVALID_SUMMARY_ARTIFACT_METADATA')
+  }
+  for (const [index, metadata] of [
+    { ...correct, bytes: correct.bytes + 1 },
+    { ...correct, sha256: `sha256:${'e'.repeat(64)}` }
+  ].entries()) {
+    await assert.rejects(repository.importCompleted({
+      ...request(), markdown, sourceHash: SOURCE_HASH,
+      legacyImportKey: `legacy-integrity-${index}`, artifactMetadata: metadata
+    }), error => error.code === 'INVALID_SUMMARY_ARTIFACT_METADATA')
+  }
 })
 
 test('report repository forbids identity and raw-path patches', () => {
@@ -367,7 +438,7 @@ test('report repository imports legacy markdown idempotently without changing cu
     markdown: '# Imported',
     legacyImportKey: 'legacy-key-1',
     sourceHash: SOURCE_HASH,
-    artifactMetadata: { canonical: 'markdown', bytes: 10, sha256: MARKDOWN_HASH }
+    artifactMetadata: artifactMetadata('# Imported')
   }
 
   const first = await repository.importCompleted(input)
@@ -395,9 +466,9 @@ test('report repository completes only running reports with canonical metadata',
   const report = await repository.complete(queued.id, {
     markdown: '# Completed',
     sourceHash: SOURCE_HASH,
-    usageSnapshot: { inputTokens: 1 },
+    usageSnapshot: { totals: { inputTokens: 1 } },
     coverage: { sessionsIncluded: 1 },
-    artifactMetadata: { canonical: 'markdown', bytes: 11, sha256: MARKDOWN_HASH }
+    artifactMetadata: artifactMetadata('# Completed')
   })
 
   assert.equal(report.status, 'completed')
@@ -408,7 +479,7 @@ test('report repository completes only running reports with canonical metadata',
   await assert.rejects(
     repository.complete(report.id, {
       markdown: '# Replaced', sourceHash: SOURCE_HASH, usageSnapshot: {}, coverage: {},
-      artifactMetadata: { canonical: 'markdown', bytes: 10, sha256: MARKDOWN_HASH }
+      artifactMetadata: artifactMetadata('# Replaced')
     }),
     error => error.code === 'SUMMARY_REPORT_NOT_RUNNING'
   )
@@ -519,7 +590,7 @@ test('failed jobs retain bounded redacted inputs with a seven day expiry', async
     const inputText = inputNames.map(name => readFileSync(join(workspace, 'input', name), 'utf8')).join('\n')
 
     assert.equal(manifest.status, 'failed')
-    assert.equal(manifest.errorCode, 'SUMMARY_PROVIDER_FAILED')
+    assert.equal(manifest.errorCode, 'SUMMARY_GENERATION_FAILED')
     assert.equal(manifest.expiresAt, '2026-08-19T00:00:00.000Z')
     assert.equal(inputNames.includes('period.json'), true)
     assert.equal(inputNames.includes('usage.json'), true)
@@ -758,7 +829,7 @@ test('a failed regeneration leaves the previous completed version current and st
   assert.equal(secondResult.status, 'failed')
   assert.equal(secondResult.isCurrent, false)
   assert.equal(repository.get(first.reportId).isCurrent, true)
-  assert.equal(secondResult.errorText, 'SUMMARY_PROVIDER_FAILED')
+  assert.equal(secondResult.errorText, 'SUMMARY_GENERATION_FAILED')
   assert.doesNotMatch(JSON.stringify(secondResult), /prompt and provider|secret output/)
 })
 
@@ -879,6 +950,21 @@ test('a dynamic confirmation error fails safely instead of pretending a costly r
     error => error.code === 'SUMMARY_CONFIRMATION_CONTEXT_MISSING'
   )
   assert.equal(repository.get(job.reportId).status, 'failed')
+})
+
+test('headless jobs map unlisted provider codes to the persisted generation fallback', async () => {
+  for (const code of ['SUMMARY_PROVIDER_FAILED', 'ARBITRARY_UPPERCASE_CODE']) {
+    const { service } = createHarness({
+      pipeline: {
+        async run() {
+          throw Object.assign(new Error('private provider failure'), { code })
+        }
+      }
+    })
+    const report = await service.generate(request()).completion
+    assert.equal(report.status, 'failed')
+    assert.equal(report.errorText, 'SUMMARY_GENERATION_FAILED')
+  }
 })
 
 test('workspace finalization failure never persists a completed non-current report', async () => {

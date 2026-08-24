@@ -5,6 +5,13 @@ import {
 import { createHash } from 'node:crypto'
 import { join } from 'path'
 
+import { isPersistedSummaryErrorText } from '../summaries/interactiveSummaryContracts.js'
+import {
+  assertSafeSummaryHash,
+  normalizeCompletedArtifactMetadata,
+  normalizeSummaryJsonField
+} from '../summaries/summaryPersistenceValidation.js'
+
 const USAGE_MODEL_KEY_PREFIX = 'model:'
 const USAGE_SESSION_TOTAL_KEY = '__ucli_internal__:session-total'
 
@@ -751,7 +758,7 @@ class Db {
   // ---- exact post-upgrade usage ledger ----
   async observeUsage(snapshot) {
     assertUsageObservationScope(snapshot)
-    return this.transaction(() => {
+    return this.transactionSync(() => {
       const modelKey = snapshot.scope === 'session'
         ? USAGE_SESSION_TOTAL_KEY
         : `${USAGE_MODEL_KEY_PREFIX}${snapshot.model}`
@@ -1046,7 +1053,7 @@ class Db {
       throw summaryValidationError('INVALID_SUMMARY_STATUS', 'Invalid completed summary report')
     }
     assertSummaryCompletion(fields)
-    return this.transaction(() => {
+    return this.transactionSync(() => {
       const target = this.getSummaryReport(reportId)
       if (!target) {
         throw Object.assign(new Error(`Summary report not found: ${reportId}`), {
@@ -1074,7 +1081,8 @@ class Db {
     if (typeof report?.legacyImportKey !== 'string' || !report.legacyImportKey.trim()) {
       throw summaryValidationError('INVALID_SUMMARY_LEGACY_IMPORT_KEY', 'Invalid legacy import key')
     }
-    return this.transaction(() => {
+    assertSummaryCompletion(report)
+    return this.transactionSync(() => {
       const existing = rows(this.sql.exec(
         'SELECT * FROM summary_reports WHERE legacy_import_key = ? LIMIT 1',
         [report.legacyImportKey]
@@ -1131,7 +1139,7 @@ class Db {
   }
 
   async setCurrentSummaryReport(reportId) {
-    return this.transaction(() => {
+    return this.transactionSync(() => {
       const target = this.getSummaryReport(reportId)
       if (!target) {
         throw Object.assign(new Error(`Summary report not found: ${reportId}`), {
@@ -1158,7 +1166,7 @@ class Db {
   }
 
   async deleteSummaryReport(reportId) {
-    return this.transaction(() => {
+    return this.transactionSync(() => {
       const target = this.getSummaryReport(reportId)
       if (!target) {
         throw Object.assign(new Error(`Summary report not found: ${reportId}`), {
@@ -1887,7 +1895,24 @@ class Db {
     }
   }
 
-  transaction(work) {
+  async transaction(work) {
+    const run = async () => {
+      this.sql.run('BEGIN IMMEDIATE')
+      try {
+        const result = await work()
+        this.sql.run('COMMIT')
+        return result
+      } catch (error) {
+        try { this.sql.run('ROLLBACK') } catch { /* preserve original error */ }
+        throw error
+      }
+    }
+    const result = this._transactionTail.then(run, run)
+    this._transactionTail = result.catch(() => {})
+    return result
+  }
+
+  transactionSync(work) {
     const run = () => {
       this.sql.run('BEGIN IMMEDIATE')
       try {
@@ -2167,65 +2192,17 @@ const SUMMARY_RUN_PHASES = new Set([
   'preparing', 'starting', 'awaiting-delivery', 'running', 'validating',
   'completed', 'failed', 'interrupted', 'cancelled'
 ])
-const SUMMARY_SAFE_HASH = /^(?:sha256:)?[a-f0-9]{64}$/
-const SUMMARY_SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{2,80}(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?$/
-
-function isSummaryAbsolutePath(value) {
-  return typeof value === 'string' && (
-    /^[a-z]:[\\/]/i.test(value) || /^\\\\/.test(value) || /^\/{1,2}/.test(value) ||
-    /^file:\/\//i.test(value)
-  )
-}
-
-function hasSensitiveSummaryJson(value, path = []) {
-  if (isSummaryAbsolutePath(value)) return true
-  if (!value || typeof value !== 'object') return false
-  if (Array.isArray(value)) {
-    return value.some((child, index) => hasSensitiveSummaryJson(child, [...path, index]))
-  }
-  return Object.entries(value).some(([key, child]) => {
-    const normalizedKey = key.replace(/[^a-z0-9]/gi, '').toLowerCase()
-    const coverageTranscriptCount = path.length === 2 && path[0] === 'coverage' &&
-      path[1] === 'sources' && key === 'transcript' &&
-      typeof child === 'number' && Number.isFinite(child) && child >= 0
-    const numericTokenCounter = normalizedKey.endsWith('tokens') &&
-      typeof child === 'number' && Number.isFinite(child) && child >= 0
-    return (!coverageTranscriptCount && (
-      /(?:credential|password|passphrase|secret|apikey|evidence|prompt|transcript|message|toolpayload|rawoutput|rawmetadata)/
-        .test(normalizedKey) || normalizedKey.endsWith('path') ||
-      (normalizedKey.includes('token') && !numericTokenCounter)
-    )) || hasSensitiveSummaryJson(child, [...path, key])
-  })
-}
-
 function assertSummaryJson(value, field) {
   if (value === undefined) return
-  if (!value || typeof value !== 'object' || Array.isArray(value) ||
-    hasSensitiveSummaryJson(value, [field])) {
-    throw summaryValidationError('SUMMARY_SENSITIVE_JSON_FORBIDDEN', 'Invalid summary JSON')
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw summaryValidationError('INVALID_SUMMARY_JSON_SHAPE', 'Invalid summary JSON shape')
   }
-}
-
-function assertSummaryErrorText(value) {
-  const suffix = typeof value === 'string' && value.includes(':')
-    ? value.slice(value.indexOf(':') + 1)
-    : ''
-  if (value !== undefined && value !== null &&
-    (typeof value !== 'string' || !SUMMARY_SAFE_ERROR_CODE.test(value) ||
-      /^(?:sk-)|(?:credential|password|secret|apikey|prompt|transcript|message|toolpayload|token)/i
-        .test(suffix))) {
-    throw summaryValidationError('INVALID_SUMMARY_ERROR_CODE', 'Invalid summary error code')
-  }
-}
-
-function assertCompletedArtifactMetadata(value) {
-  const keys = value && typeof value === 'object' && !Array.isArray(value)
-    ? Object.keys(value)
-    : []
-  if (keys.length !== 3 || !keys.every(key => ['canonical', 'bytes', 'sha256'].includes(key)) ||
-    value.canonical !== 'markdown' || !Number.isSafeInteger(value.bytes) || value.bytes <= 0 ||
-    typeof value.sha256 !== 'string' || !SUMMARY_SAFE_HASH.test(value.sha256) ||
-    hasSensitiveSummaryJson(value, ['artifactMetadata'])) {
+  try {
+    normalizeSummaryJsonField(value, field)
+  } catch (error) {
+    if (field !== 'artifactMetadata' || error?.code === 'SUMMARY_SENSITIVE_JSON_FORBIDDEN') {
+      throw error
+    }
     throw summaryValidationError(
       'INVALID_SUMMARY_ARTIFACT_METADATA',
       'Invalid summary artifact metadata'
@@ -2233,15 +2210,21 @@ function assertCompletedArtifactMetadata(value) {
   }
 }
 
+function assertSummaryErrorText(value) {
+  if (value !== undefined && !isPersistedSummaryErrorText(value)) {
+    throw summaryValidationError('INVALID_SUMMARY_ERROR_CODE', 'Invalid summary error code')
+  }
+}
+
 function assertSummaryCompletion(fields) {
-  if (typeof fields.markdown !== 'string' || !fields.markdown.trim() ||
-    typeof fields.sourceHash !== 'string' || !SUMMARY_SAFE_HASH.test(fields.sourceHash)) {
+  if (typeof fields.markdown !== 'string' || !fields.markdown.trim()) {
     throw summaryValidationError(
       'INVALID_SUMMARY_CANONICAL_REPORT',
       'Invalid canonical summary report'
     )
   }
-  assertCompletedArtifactMetadata(fields.artifactMetadata)
+  assertSafeSummaryHash(fields.sourceHash)
+  normalizeCompletedArtifactMetadata(fields.markdown, fields.artifactMetadata)
 }
 
 function assertSummaryReport(report) {

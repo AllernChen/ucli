@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
 
+import { isPersistedSummaryErrorCode } from './interactiveSummaryContracts.js'
+
 function deferred() {
   let resolve
   const promise = new Promise(done => { resolve = done })
@@ -7,7 +9,7 @@ function deferred() {
 }
 
 function safeErrorCode(error) {
-  return typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{2,80}$/.test(error.code)
+  return isPersistedSummaryErrorCode(error?.code)
     ? error.code
     : 'SUMMARY_GENERATION_FAILED'
 }
