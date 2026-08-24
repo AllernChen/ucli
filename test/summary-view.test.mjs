@@ -16,6 +16,7 @@ let unsubscriptions = 0
 let listCalls = 0
 let getCalls = 0
 let generatedPayloads = []
+const progressListeners = new Set()
 
 globalThis.window = {
   ucli: {
@@ -37,7 +38,8 @@ globalThis.window = {
     onSummaryProgress: handler => {
       subscriptions += 1
       progressHandler = handler
-      return () => { unsubscriptions += 1; progressHandler = null }
+      progressListeners.add(handler)
+      return () => { unsubscriptions += 1; progressListeners.delete(handler); if (progressHandler === handler) progressHandler = null }
     },
     // summaryTasks store surface
     listSessions: async () => [],
@@ -54,6 +56,10 @@ const { useSummaryTasksStore } = await import('../src/stores/summaryTasks.js')
 function freshStore() {
   setActivePinia(createPinia())
   return useSummariesStore()
+}
+
+function emitProgress(payload) {
+  for (const listener of progressListeners) listener(payload)
 }
 
 test('summary store subscribes once and completion refreshes only the affected report', async () => {
@@ -99,6 +105,84 @@ test('interactive generation creates and selects the canonical queued report', a
   assert.equal(report.sessionId, 'session-1')
   assert.equal(store.selectedReportId, 'report-1')
   store.dispose()
+})
+
+test('init preserves the list failure for callers while keeping a safe error message', async () => {
+  const originalList = window.ucli.listSummaryReports
+  const store = freshStore()
+  try {
+    window.ucli.listSummaryReports = async () => { throw new Error('database unavailable') }
+    await assert.rejects(store.init(), /database unavailable/)
+    assert.equal(store.error.message, '无法读取总结报告')
+  } finally {
+    window.ucli.listSummaryReports = originalList
+    store.dispose()
+  }
+})
+
+test('each Pinia store owns its progress listener and disposing one leaves the other live', async () => {
+  const piniaA = createPinia()
+  const piniaB = createPinia()
+  setActivePinia(piniaA)
+  const storeA = useSummariesStore()
+  setActivePinia(piniaB)
+  const storeB = useSummariesStore()
+  await Promise.all([storeA.init(), storeB.init()])
+  storeA.dispose()
+  emitProgress({ reportId: 'still-live', status: 'running', phase: 'running', completed: 0, total: 1, text: '仍在生成' })
+  assert.equal(storeA.progress['still-live'], undefined)
+  assert.equal(storeB.progress['still-live'].text, '仍在生成')
+  storeB.dispose()
+})
+
+test('terminal progress cannot be regressed by a late nonterminal progress event', () => {
+  const store = freshStore()
+  store.reports = [{ id: 'r1', status: 'running', version: 1 }]
+  store.applyProgress({ reportId: 'r1', status: 'completed', phase: 'completed', completed: 1, total: 1, text: '完成' })
+  store.applyProgress({ reportId: 'r1', status: 'running', phase: 'running', completed: 0, total: 1, text: '迟到的运行中' })
+  assert.equal(store.progress.r1.phase, 'completed')
+  assert.equal(store.reports[0].status, 'completed')
+  store.dispose()
+})
+
+test('a slower earlier selection cannot replace the latest selected report or its versions', async () => {
+  const originalGet = window.ucli.getSummaryReport
+  const originalList = window.ucli.listSummaryReports
+  let resolveA
+  const reportA = new Promise(resolve => { resolveA = resolve })
+  const store = freshStore()
+  try {
+    window.ucli.getSummaryReport = id => id === 'a' ? reportA : Promise.resolve({ id: 'b', periodType: 'week', periodStart: 3, periodEndExclusive: 4, timezone: 'Asia/Shanghai', version: 2 })
+    window.ucli.listSummaryReports = async filters => [{ id: filters.periodStart === 3 ? 'b' : 'a', version: filters.periodStart === 3 ? 2 : 1 }]
+    const selectingA = store.selectReport('a')
+    await store.selectReport('b')
+    resolveA({ id: 'a', periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai', version: 1 })
+    await selectingA
+    assert.equal(store.selectedReportId, 'b')
+    assert.deepEqual(store.versions.map(report => report.id), ['b'])
+  } finally {
+    window.ucli.getSummaryReport = originalGet
+    window.ucli.listSummaryReports = originalList
+    store.dispose()
+  }
+})
+
+test('new interactive reports are immediately included in the selected period history', async () => {
+  const originalStart = window.ucli.startInteractiveSummary
+  const originalList = window.ucli.listSummaryReports
+  const store = freshStore()
+  try {
+    const report = { id: 'r3', version: 3, periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai', status: 'queued' }
+    window.ucli.startInteractiveSummary = async () => ({ report, sessionId: 'session-3' })
+    window.ucli.listSummaryReports = async () => [report, { id: 'r2', version: 2 }]
+    await store.generateInteractive({ periodType: 'week', start: 1, endExclusive: 2, timezone: 'Asia/Shanghai', partial: false, executorId: 'claude', profileId: null, model: null })
+    assert.equal(store.selectedReportId, 'r3')
+    assert.deepEqual(store.versions.map(item => item.id), ['r3', 'r2'])
+  } finally {
+    window.ucli.startInteractiveSummary = originalStart
+    window.ucli.listSummaryReports = originalList
+    store.dispose()
+  }
 })
 
 test('deleting the selected report clears stale state and selects the promoted version', async () => {
@@ -210,6 +294,25 @@ test('a terminal event arriving after deletion does not surface a not-found erro
   } finally {
     window.ucli.deleteSummaryReport = originalDelete
     window.ucli.listSummaryReports = originalList
+    window.ucli.getSummaryReport = originalGet
+    store.dispose()
+  }
+})
+
+test('an externally deleted terminal report is removed without surfacing a refresh error', async () => {
+  const originalGet = window.ucli.getSummaryReport
+  const store = freshStore()
+  try {
+    store.reports = [{ id: 'externally-deleted', status: 'running', version: 1 }]
+    store.versions = [{ id: 'externally-deleted', status: 'running', version: 1 }]
+    store.selectedReportId = 'externally-deleted'
+    window.ucli.getSummaryReport = async () => { throw Object.assign(new Error('not found'), { code: 'SUMMARY_REPORT_NOT_FOUND' }) }
+    store.applyProgress({ reportId: 'externally-deleted', status: 'completed', phase: 'completed', completed: 1, total: 1, text: '完成' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.deepEqual(store.reports, [])
+    assert.deepEqual(store.versions, [])
+    assert.equal(store.error, null)
+  } finally {
     window.ucli.getSummaryReport = originalGet
     store.dispose()
   }

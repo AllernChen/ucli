@@ -28,7 +28,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useSummariesStore } from '../../stores/summaries.js'
 import SummaryGenerateDialog from './SummaryGenerateDialog.vue'
 import SummaryConversationDrawer from './SummaryConversationDrawer.vue'
@@ -50,7 +50,7 @@ onMounted(async () => {
     summaries.error = new Error('无法读取总结报告')
   }
 })
-onUnmounted(() => summaries.dispose())
+onBeforeUnmount(() => summaries.dispose())
 
 async function refresh() {
   await summaries.loadReports()

@@ -24,13 +24,9 @@
       style="margin-top:12px"
       type="warning"
       show-icon
-      message="确认继续"
-      :description="`预计调用 ${progress.total} 次，继续可能产生费用。确认后将在同一报告版本中继续。`"
-    >
-      <template #action>
-        <a-button type="primary" size="small" @click="$emit('confirm', report.id)">确认继续</a-button>
-      </template>
-    </a-alert>
+      message="旧版报告等待确认"
+      description="此报告无法在此继续。请取消后重试，以创建新的总结版本。"
+    />
     <div v-if="progress" class="progress-row">
       <a-progress :percent="progress.total ? Math.round(progress.completed / progress.total * 100) : 0" />
       <span>{{ progress.text }}</span>
@@ -74,7 +70,7 @@ import ipc from '../../ipc.js'
 import { openSummaryReportLink } from '../../summaryLinks.js'
 
 const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean })
-defineEmits(['cancel', 'confirm', 'export-markdown', 'export-html', 'delete-report', 'open-conversation'])
+defineEmits(['cancel', 'export-markdown', 'export-html', 'delete-report', 'open-conversation'])
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const safeHtml = computed(() => DOMPurify.sanitize(markdown.render(props.report?.markdown || '')))
 const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].includes(props.report?.status))

@@ -2,14 +2,34 @@ import { defineStore } from 'pinia'
 
 import { ipc } from '../ipc.js'
 
-let unsubscribeProgress = null
-let initPromise = null
-const deletedReportIds = new Set()
-
 function withoutMarkdown(report) {
   if (!report) return report
   const { markdown, ...summary } = report
   return summary
+}
+
+function samePeriod(report) {
+  return {
+    periodType: report.periodType,
+    periodStart: report.periodStart,
+    periodEndExclusive: report.periodEndExclusive,
+    timezone: report.timezone
+  }
+}
+
+const storeMetadata = new WeakMap()
+
+function metadata(store) {
+  let value = storeMetadata.get(store)
+  if (!value) {
+    value = { unsubscribe: null, initPromise: null, selectionEpoch: 0, terminalReports: new Set(), deletedReports: new Set() }
+    storeMetadata.set(store, value)
+  }
+  return value
+}
+
+function isTerminal(phase) {
+  return ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(phase)
 }
 
 export const useSummariesStore = defineStore('summaries', {
@@ -28,26 +48,24 @@ export const useSummariesStore = defineStore('summaries', {
   },
   actions: {
     async init() {
-      if (!unsubscribeProgress) {
-        unsubscribeProgress = ipc.onSummaryProgress(payload => {
-          this.applyProgress(payload)
-        })
-      }
-      if (this.initialized) return
-      if (initPromise) return initPromise
+      const meta = metadata(this)
+      if (!meta.unsubscribe) meta.unsubscribe = ipc.onSummaryProgress(payload => this.applyProgress(payload))
+      if (this.initialized) return this.reports
+      if (meta.initPromise) return meta.initPromise
       this.loading = true
       this.error = null
-      initPromise = ipc.listSummaryReports({}).then(reports => {
+      meta.initPromise = ipc.listSummaryReports({}).then(reports => {
         this.reports = reports
         this.initialized = true
-      }).catch(() => {
+        return reports
+      }).catch(error => {
         this.error = new Error('无法读取总结报告')
         throw error
       }).finally(() => {
         this.loading = false
-        initPromise = null
+        meta.initPromise = null
       })
-      return initPromise
+      return meta.initPromise
     },
 
     async loadReports(filters = this.filters) {
@@ -59,6 +77,8 @@ export const useSummariesStore = defineStore('summaries', {
 
     applyProgress(payload) {
       if (!payload?.reportId) return
+      const meta = metadata(this)
+      if (meta.terminalReports.has(payload.reportId) && !isTerminal(payload.phase)) return
       const progress = {
         reportId: payload.reportId,
         status: payload.status,
@@ -74,8 +94,11 @@ export const useSummariesStore = defineStore('summaries', {
         runPhase: progress.phase,
         progressText: progress.text
       })
-      if (['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(progress.phase)) {
-        void this.refreshReport(progress.reportId).catch(() => { this.error = new Error('无法刷新总结报告') })
+      if (isTerminal(progress.phase)) {
+        meta.terminalReports.add(progress.reportId)
+        void this.refreshReport(progress.reportId).catch(error => {
+          if (error?.code !== 'SUMMARY_REPORT_NOT_FOUND') this.error = new Error('无法刷新总结报告')
+        })
       }
     },
 
@@ -87,35 +110,61 @@ export const useSummariesStore = defineStore('summaries', {
       if (versionIndex >= 0) this.versions.splice(versionIndex, 1, withoutMarkdown(report))
     },
 
+    removeProjection(reportId) {
+      this.reports = this.reports.filter(report => report.id !== reportId)
+      this.versions = this.versions.filter(report => report.id !== reportId)
+      const progress = { ...this.progress }
+      delete progress[reportId]
+      this.progress = progress
+      if (this.selectedReportId === reportId) this.selectedReportId = null
+    },
+
     async refreshReport(reportId) {
-      if (deletedReportIds.has(reportId)) return null
-      const report = await ipc.getSummaryReport(reportId)
-      if (deletedReportIds.has(reportId)) return null
+      const meta = metadata(this)
+      if (meta.deletedReports.has(reportId)) return null
+      let report
+      try {
+        report = await ipc.getSummaryReport(reportId)
+      } catch (error) {
+        if (error?.code === 'SUMMARY_REPORT_NOT_FOUND') {
+          this.removeProjection(reportId)
+          return null
+        }
+        throw error
+      }
+      if (meta.deletedReports.has(reportId)) return null
       this.upsertReport(report)
-      if (this.selectedReportId === reportId) this.selectedReportId = report.id
       const versionIndex = this.versions.findIndex(item => item.id === reportId)
       if (versionIndex >= 0) this.versions.splice(versionIndex, 1, withoutMarkdown(report))
       return report
     },
 
     async selectReport(reportId) {
+      const meta = metadata(this)
+      const epoch = ++meta.selectionEpoch
       const report = await ipc.getSummaryReport(reportId)
+      if (epoch !== meta.selectionEpoch) return this.selectedReport
       this.upsertReport(report)
       this.selectedReportId = report.id
-      this.versions = await ipc.listSummaryReports({
-        periodType: report.periodType,
-        periodStart: report.periodStart,
-        periodEndExclusive: report.periodEndExclusive,
-        timezone: report.timezone
-      })
+      const versions = await ipc.listSummaryReports(samePeriod(report))
+      if (epoch !== meta.selectionEpoch) return this.selectedReport
+      this.versions = versions
       return report
     },
 
     async generateInteractive(request) {
+      const meta = metadata(this)
+      const epoch = ++meta.selectionEpoch
       const { report, sessionId } = await ipc.startInteractiveSummary(request)
       const created = { ...report, sessionId: sessionId || report.sessionId || null }
+      if (epoch !== meta.selectionEpoch) return created
       this.upsertReport(created)
       this.selectedReportId = created.id
+      const listed = await ipc.listSummaryReports(samePeriod(created))
+      if (epoch !== meta.selectionEpoch) return created
+      this.versions = listed.some(item => item.id === created.id)
+        ? listed
+        : [withoutMarkdown(created), ...listed]
       return created
     },
 
@@ -132,43 +181,34 @@ export const useSummariesStore = defineStore('summaries', {
       })
     },
 
-    async cancel(reportId) {
+    cancel(reportId) {
       return ipc.cancelSummary(reportId)
     },
 
     async setCurrent(reportId) {
-      const report = await ipc.setCurrentSummary(reportId)
-      await this.selectReport(reportId)
-      return report
+      await ipc.setCurrentSummary(reportId)
+      return this.selectReport(reportId)
     },
 
     async deleteReport(reportId) {
-      const selectedId = this.selectedReport?.id || null
-      deletedReportIds.add(reportId)
+      const meta = metadata(this)
+      const selectedId = this.selectedReportId
+      meta.deletedReports.add(reportId)
       let result
       try {
         result = await ipc.deleteSummaryReport(reportId)
       } catch (error) {
-        deletedReportIds.delete(reportId)
+        meta.deletedReports.delete(reportId)
         throw error
       }
-      const progress = { ...this.progress }
-      delete progress[reportId]
-      this.progress = progress
-      this.reports = this.reports.filter(report => report.id !== reportId)
-      this.versions = this.versions.filter(report => report.id !== reportId)
-      if (selectedId === reportId) this.selectedReportId = null
-
+      this.removeProjection(reportId)
       await this.loadReports()
       const nextId =
         (selectedId !== reportId && this.reports.some(report => report.id === selectedId) ? selectedId : null) ||
         result.currentReportId ||
         this.reports[0]?.id || null
       if (nextId) await this.selectReport(nextId)
-      else {
-        this.selectedReportId = null
-        this.versions = []
-      }
+      else this.versions = []
       return result
     },
 
@@ -181,9 +221,11 @@ export const useSummariesStore = defineStore('summaries', {
     },
 
     dispose() {
-      unsubscribeProgress?.()
-      unsubscribeProgress = null
-      initPromise = null
+      const meta = metadata(this)
+      meta.unsubscribe?.()
+      meta.unsubscribe = null
+      meta.initPromise = null
+      storeMetadata.delete(this)
       this.$dispose()
     }
   }

@@ -14,6 +14,7 @@ let Vue
 let createServer
 let vuePlugin
 let createPinia
+let setActivePinia
 let defineComponent
 let flushPromises
 let shallowMount
@@ -72,7 +73,7 @@ async function loadMountedPanel(vite, stubs) {
   const compiledScript = compileScript(descriptor, { id: 'summary-mounted' })
   let code = compiledScript.content
   code = code.replace(/^import[^\n]*\n/gm, '').replace('export default', 'return')
-  code = `const { computed, onMounted, onUnmounted, ref } = Vue\n${code}`
+  code = `const { computed, onBeforeUnmount, onMounted, ref } = Vue\n${code}`
   const { useSummariesStore } = await import('../src/stores/summaries.js')
   const panel = new Function(
     'Vue', 'useSummariesStore', 'SummaryGenerateDialog', 'SummaryConversationDrawer', 'SummaryHistory', 'SummaryReportView', code
@@ -95,11 +96,31 @@ async function loadMountedDrawer(vite) {
   return attachClientRender(drawer, fileName, compiledScript.bindings)
 }
 
+async function loadMountedReport(vite) {
+  await vite.transformRequest('/src/components/summaries/SummaryReportView.vue')
+  const fileName = '../src/components/summaries/SummaryReportView.vue'
+  const source = readFileSync(new URL(fileName, import.meta.url), 'utf8')
+  const { descriptor, errors } = parseSfc(source, { filename: fileName })
+  assert.deepEqual(errors, [])
+  const compiledScript = compileScript(descriptor, { id: 'summary-report-mounted' })
+  let code = compiledScript.content.replace(/^import[^\n]*\n/gm, '').replace('export default', 'return')
+  code = `const { computed } = Vue\n${code}`
+  const report = new Function('Vue', 'DOMPurify', 'MarkdownIt', 'ipc', 'openSummaryReportLink', code)(
+    Vue,
+    { sanitize: value => value },
+    class { render(value) { return value } },
+    { openExternal: () => {} },
+    () => {}
+  )
+  return attachClientRender(report, fileName, compiledScript.bindings)
+}
+
 test('mounted work summary panel uses canonical reports for generation, progress, versions, retry, cancel, and conversations', async () => {
   Vue = await import('vue')
   ;({ createServer } = await import('vite'))
   ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
   ;({ createPinia } = await import('pinia'))
+  ;({ setActivePinia } = await import('pinia'))
   ;({ defineComponent } = Vue)
   ;({ flushPromises, mount, shallowMount } = await import('@vue/test-utils'))
   ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
@@ -108,6 +129,7 @@ test('mounted work summary panel uses canonical reports for generation, progress
   const cancelCalls = []
   let progressListener = () => {}
   let unsubscribeCalls = 0
+  const progressListeners = new Set()
   const reports = {
     r1: {
       id: 'r1', version: 1, status: 'completed', runPhase: 'completed', executionMode: 'interactive-cli',
@@ -148,7 +170,8 @@ test('mounted work summary panel uses canonical reports for generation, progress
     exportSummaryHtml: async () => ({ canceled: false }),
     onSummaryProgress: listener => {
       progressListener = listener
-      return () => { unsubscribeCalls += 1; progressListener = () => {} }
+      progressListeners.add(listener)
+      return () => { unsubscribeCalls += 1; progressListeners.delete(listener); if (progressListener === listener) progressListener = () => {} }
     }
   }
 
@@ -184,6 +207,7 @@ test('mounted work summary panel uses canonical reports for generation, progress
 
     await wrapper.get('[data-testid="summary-generate"]').trigger('click')
     assert.deepEqual(startCalls, [request])
+    assert.ok(wrapper.vm.summaries.versions.some(report => report.id === 'r3'))
 
     progressListener({ reportId: 'r3', phase: 'running', status: 'running', completed: 0, total: 1, text: '正在生成总结' })
     reports.r3 = { ...reports.r3, status: 'completed', runPhase: 'completed', markdown: '# 摘要\n\n新版本' }
@@ -212,12 +236,51 @@ test('mounted work summary panel uses canonical reports for generation, progress
     await flushPromises()
     await wrapper.get('[data-testid="summary-conversation"]').trigger('click')
     assert.match(wrapper.get('[data-testid="conversation"]').text(), /此报告没有关联的交互会话/)
+
+    const { useSummariesStore } = await import('../src/stores/summaries.js')
+    setActivePinia(createPinia())
+    const otherStore = useSummariesStore()
+    await otherStore.init()
+    wrapper.unmount()
+    wrapper = null
+    await flushPromises()
+    for (const listener of progressListeners) listener({ reportId: 'other-store', status: 'running', phase: 'running', completed: 0, total: 1, text: '另一页仍在生成' })
+    assert.equal(otherStore.progress['other-store'].text, '另一页仍在生成')
+    otherStore.dispose()
+  } finally {
+    wrapper?.unmount()
+    await flushPromises()
+    await vite.close()
+  }
+  assert.deepEqual(cancelCalls, ['r3'])
+})
+
+test('mounted awaiting-confirmation report keeps cancel but exposes no unsupported confirmation action', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ mount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    wrapper = mount(await loadMountedReport(vite), {
+      props: {
+        report: { id: 'legacy', version: 1, status: 'awaiting_confirmation', periodStart: 1, periodEndExclusive: 2, markdown: null },
+        progress: { reportId: 'legacy', status: 'awaiting_confirmation', phase: 'awaiting_confirmation', completed: 0, total: 3, text: '等待处理' }
+      },
+      global: { stubs: {
+        'a-card': { template: '<section><slot /><slot name="extra" /></section>' }, 'a-tag': true, 'a-descriptions': { template: '<div><slot /></div>' }, 'a-descriptions-item': { template: '<div><slot /></div>' },
+        'a-alert': { props: ['message', 'description'], template: '<div>{{ message }} {{ description }}</div>' }, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': { template: '<div><slot /></div>' }, 'a-empty': true
+      } }
+    })
+    assert.match(wrapper.text(), /此报告无法在此继续。请取消后重试/)
+    assert.match(wrapper.text(), /取消生成/)
+    assert.doesNotMatch(wrapper.text(), /确认继续/)
   } finally {
     wrapper?.unmount()
     await vite.close()
   }
-  assert.equal(unsubscribeCalls, 1)
-  assert.deepEqual(cancelCalls, ['r3'])
 })
 
 test('mounted conversation drawer never falls back when an imported report has no session', async () => {
