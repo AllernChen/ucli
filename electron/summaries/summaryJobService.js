@@ -143,17 +143,22 @@ export function createSummaryJobService({
   const settleWorkspaceUpdates = job => job.workspaceUpdates.catch(() => {})
   const completeWorkspace = async (job, outputs) => {
     const manifest = await workspaceService.complete(job.reportId, outputs)
-    job.workspaceSettled = true
+    job.workspaceFinalized = 'completed'
     return manifest
   }
   const failWorkspace = async (job, code) => {
-    if (!job.workspace || job.workspaceSettled) return
+    if (!job.workspace || job.workspaceSettled || job.workspaceFinalized === 'failed') return
     await settleWorkspaceUpdates(job)
     try {
       await workspaceService.fail(job.reportId, code)
-      job.workspaceSettled = true
+      job.workspaceFinalized = 'failed'
     } catch {
       // A failed workspace transition remains eligible for shutdown compensation.
+    }
+  }
+  const markWorkspaceSettled = (job, finalizedAs) => {
+    if (job.workspace && job.workspaceFinalized === finalizedAs) {
+      job.workspaceSettled = true
     }
   }
   const failJob = async (job, error) => {
@@ -161,21 +166,40 @@ export function createSummaryJobService({
       job, job.cancelled ? 'SUMMARY_CANCELLED' : safeErrorCode(error)
     )
     try {
+      let report
       if (job.cancelled) {
         const current = repository.get(job.reportId)
-        if (current?.status === 'cancelled') return finish(job, current)
-        return finish(job, await update(job.reportId, {
-          status: 'cancelled',
-          errorText: 'SUMMARY_CANCELLED'
-        }))
+        report = current?.status === 'cancelled'
+          ? current
+          : await update(job.reportId, {
+              status: 'cancelled',
+              errorText: 'SUMMARY_CANCELLED'
+            })
+      } else {
+        report = await update(job.reportId, {
+          status: 'failed',
+          errorText: safeErrorCode(error)
+        })
       }
-      return finish(job, await update(job.reportId, {
-        status: 'failed',
-        errorText: safeErrorCode(error)
-      }))
+      markWorkspaceSettled(job, 'failed')
+      return finish(job, report)
     } catch (persistenceError) {
       return rejectJob(job, persistenceError)
     }
+  }
+
+  const finalizeTerminal = async (job, outputs, persist) => {
+    if (job.workspace) {
+      await settleWorkspaceUpdates(job)
+      await completeWorkspace(job, outputs)
+    }
+    if (job.cancelled) {
+      throw Object.assign(new Error('cancelled'), { code: 'SUMMARY_CANCELLED' })
+    }
+    job.finishing = true
+    const report = await persist()
+    markWorkspaceSettled(job, 'completed')
+    return finish(job, report)
   }
 
   const completePipeline = async (job, confirmed = false, confirmedCallLimit = null) => {
@@ -222,27 +246,20 @@ export function createSummaryJobService({
     }
 
     const artifactMetadata = markdownArtifactMetadata(result.markdown)
-    if (job.workspace) {
-      await settleWorkspaceUpdates(job)
-      await completeWorkspace(job, { markdown: result.markdown })
-    }
-    if (job.cancelled) {
-      throw Object.assign(new Error('cancelled'), { code: 'SUMMARY_CANCELLED' })
-    }
-    job.finishing = true
-    const current = await repository.complete(job.reportId, {
-      markdown: result.markdown,
-      usageSnapshot: context.usageSnapshot,
-      coverage: context.evidence.coverage || {},
-      generationUsage: result.generationUsage || {},
-      generationMetrics: safeGenerationMetrics(result.generationMetrics),
-      generationCostUsd: result.generationUsage?.costUsd ?? null,
-      promptVersion: request.promptVersion || 'summary-v1',
-      sourceHash: context.sourceHash,
-      artifactMetadata
+    return finalizeTerminal(job, { markdown: result.markdown }, async () => {
+      const current = await repository.complete(job.reportId, {
+        markdown: result.markdown,
+        usageSnapshot: context.usageSnapshot,
+        coverage: context.evidence.coverage || {},
+        generationUsage: result.generationUsage || {},
+        generationMetrics: safeGenerationMetrics(result.generationMetrics),
+        generationCostUsd: result.generationUsage?.costUsd ?? null,
+        promptVersion: request.promptVersion || 'summary-v1',
+        sourceHash: context.sourceHash,
+        artifactMetadata
+      })
+      return publish(current)
     })
-    publish(current)
-    return finish(job, current)
   }
 
   const runInitial = async job => {
@@ -294,8 +311,7 @@ export function createSummaryJobService({
       }
       job.context = { evidence, usageSnapshot, sourceHash: hash }
       if (!evidence.blocks?.length) {
-        if (job.workspace) await completeWorkspace(job)
-        return finish(job, await update(job.reportId, {
+        return await finalizeTerminal(job, undefined, () => update(job.reportId, {
           status: 'skipped_empty',
           errorText: 'SUMMARY_EMPTY_EVIDENCE'
         }))
@@ -303,8 +319,7 @@ export function createSummaryJobService({
       if (request.generatedBy === 'automatic') {
         const duplicate = repository.findCompletedBySource(request, hash, job.reportId)
         if (duplicate) {
-          if (job.workspace) await completeWorkspace(job)
-          return finish(job, await update(job.reportId, {
+          return await finalizeTerminal(job, undefined, () => update(job.reportId, {
             status: 'skipped_empty',
             errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${duplicate.id}`
           }))
@@ -394,6 +409,7 @@ export function createSummaryJobService({
           context: null,
           confirmationCallLimit: null,
           workspace: null,
+          workspaceFinalized: null,
           workspaceSettled: false,
           workspaceUpdates: Promise.resolve(),
           done: deferred()

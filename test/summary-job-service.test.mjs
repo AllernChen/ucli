@@ -1274,6 +1274,168 @@ test('workspace finalization failure never persists a completed non-current repo
   }
 })
 
+test('cancel during real workspace finalization pairs a cancelled report with one failed manifest', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-workspace-finalize-cancel-'))
+  let releaseFinalize
+  let markFinalized
+  const finalizeGate = new Promise(resolve => { releaseFinalize = resolve })
+  const finalized = new Promise(resolve => { markFinalized = resolve })
+  let workspaceFailCalls = 0
+  try {
+    const workspace = createSummaryWorkspaceService({ root })
+    const workspaceService = {
+      ...workspace,
+      async complete(reportId, outputs) {
+        const manifest = await workspace.complete(reportId, outputs)
+        markFinalized()
+        await finalizeGate
+        return manifest
+      },
+      async fail(...args) {
+        workspaceFailCalls += 1
+        return workspace.fail(...args)
+      }
+    }
+    const { service, repository } = createHarness({ workspaceService })
+    const job = await service.generate(request())
+    await finalized
+
+    assert.equal(await service.cancel(job.reportId), true)
+    releaseFinalize()
+    const report = await job.completion
+    const manifest = JSON.parse(readFileSync(
+      join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
+    ))
+
+    assert.equal(report.status, 'cancelled')
+    assert.equal(repository.get(job.reportId).status, 'cancelled')
+    assert.equal(manifest.status, 'failed')
+    assert.equal(manifest.errorCode, 'SUMMARY_CANCELLED')
+    assert.equal(workspaceFailCalls, 1)
+  } finally {
+    releaseFinalize?.()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('database completion rejection converts a completed workspace manifest to failed', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-db-complete-failure-'))
+  try {
+    const workspaceService = createSummaryWorkspaceService({ root })
+    const { service, repository } = createHarness({ workspaceService })
+    repository.complete = async () => {
+      throw Object.assign(new Error('private database failure'), {
+        code: 'PRIVATE_DB_FAILURE'
+      })
+    }
+
+    const job = await service.generate(request())
+    const report = await job.completion
+    const manifest = JSON.parse(readFileSync(
+      join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
+    ))
+
+    assert.equal(report.status, 'failed')
+    assert.equal(repository.get(job.reportId).status, 'failed')
+    assert.equal(manifest.status, 'failed')
+    assert.equal(manifest.errorCode, 'SUMMARY_GENERATION_FAILED')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cancel during empty workspace finalization cannot overwrite cancelled with skipped', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-empty-finalize-cancel-'))
+  let releaseFinalize
+  let markFinalized
+  const finalizeGate = new Promise(resolve => { releaseFinalize = resolve })
+  const finalized = new Promise(resolve => { markFinalized = resolve })
+  try {
+    const workspace = createSummaryWorkspaceService({ root })
+    const workspaceService = {
+      ...workspace,
+      async complete(reportId, outputs) {
+        const manifest = await workspace.complete(reportId, outputs)
+        markFinalized()
+        await finalizeGate
+        return manifest
+      }
+    }
+    const { service, repository } = createHarness({
+      workspaceService,
+      evidenceCollector: {
+        async collect() { return { blocks: [], coverage: { sessionsIncluded: 0 } } }
+      }
+    })
+    const job = await service.generate(request())
+    await Promise.race([
+      finalized,
+      job.completion.then(report => assert.fail(`finalization was not reached: ${report.errorText}`))
+    ])
+
+    assert.equal(await service.cancel(job.reportId), true)
+    releaseFinalize()
+    const report = await job.completion
+    const manifest = JSON.parse(readFileSync(
+      join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
+    ))
+
+    assert.equal(report.status, 'cancelled')
+    assert.equal(repository.get(job.reportId).status, 'cancelled')
+    assert.equal(manifest.status, 'failed')
+    assert.equal(manifest.errorCode, 'SUMMARY_CANCELLED')
+  } finally {
+    releaseFinalize?.()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cancel during duplicate workspace finalization cannot overwrite cancelled with skipped', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-duplicate-finalize-cancel-'))
+  let releaseFinalize
+  let markFinalized
+  const finalizeGate = new Promise(resolve => { releaseFinalize = resolve })
+  const finalized = new Promise(resolve => { markFinalized = resolve })
+  let completions = 0
+  try {
+    const workspace = createSummaryWorkspaceService({ root })
+    const workspaceService = {
+      ...workspace,
+      async complete(reportId, outputs) {
+        const manifest = await workspace.complete(reportId, outputs)
+        completions += 1
+        if (completions === 2) {
+          markFinalized()
+          await finalizeGate
+        }
+        return manifest
+      }
+    }
+    const { service, repository } = createHarness({ workspaceService })
+    await (await service.generate(request())).completion
+    const duplicate = await service.generate(request({ generatedBy: 'automatic' }))
+    await Promise.race([
+      finalized,
+      duplicate.completion.then(report => assert.fail(`finalization was not reached: ${report.errorText}`))
+    ])
+
+    assert.equal(await service.cancel(duplicate.reportId), true)
+    releaseFinalize()
+    const report = await duplicate.completion
+    const manifest = JSON.parse(readFileSync(
+      join(root, 'workspaces', duplicate.reportId, 'manifest.json'), 'utf8'
+    ))
+
+    assert.equal(report.status, 'cancelled')
+    assert.equal(repository.get(duplicate.reportId).status, 'cancelled')
+    assert.equal(manifest.status, 'failed')
+    assert.equal(manifest.errorCode, 'SUMMARY_CANCELLED')
+  } finally {
+    releaseFinalize?.()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('job order finalizes the workspace before one atomic database completion', async () => {
   const order = []
   const db = new MemoryDb()
