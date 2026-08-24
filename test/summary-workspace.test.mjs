@@ -73,6 +73,30 @@ test('atomically replaces artifacts without leaving temporary files', async t =>
   assert.equal((await readManifest(workspace.path)).bytes, 11)
 })
 
+test('resolveArtifact only resolves a canonical child inside one report workspace', async t => {
+  const { root, service } = await withWorkspace(t)
+  await service.create('report-resolve')
+
+  assert.equal(
+    service.resolveArtifact('report-resolve', 'output/report.md'),
+    join(root, 'workspaces', 'report-resolve', 'output', 'report.md')
+  )
+  for (const candidate of [
+    'report.md',
+    'output/other.md',
+    'input/data.json',
+    '../output/report.md',
+    'output/../report.md',
+    'output/other.md/..'
+  ]) {
+    assert.throws(
+      () => service.resolveArtifact('report-resolve', candidate),
+      error => error?.code === 'SUMMARY_STORAGE_PATH_UNSAFE',
+      candidate
+    )
+  }
+})
+
 test('rejects an artifact before it crosses the injected workspace limit', async t => {
   const { service } = await withWorkspace(t, { maxWorkspaceBytes: 12 })
   const workspace = await service.create('report-limited')

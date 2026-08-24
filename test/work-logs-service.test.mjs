@@ -81,6 +81,7 @@ test('prepare writes data/template/README and returns the workLogs directory and
   assert.ok(Array.isArray(data.evidenceBlocks))
   assert.equal(data.evidenceBlocks[0].projectPath, 'C:/work/proj')
   assert.match(data.evidenceBlocks[0].text, /开始重构权限引擎/)
+  assert.deepEqual(data.usage, FIXTURE_USAGE)
 
   const template = await readFile(join(workLogsRoot, 'template.md'), 'utf8')
   assert.match(template, /## 1\. 报告结构/)

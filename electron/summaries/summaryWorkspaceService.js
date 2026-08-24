@@ -140,6 +140,13 @@ export function createSummaryWorkspaceService({
     return target
   }
 
+  function resolveArtifact(reportId, relativePath) {
+    if (relativePath !== 'output/report.md') {
+      throw workspaceError('SUMMARY_STORAGE_PATH_UNSAFE')
+    }
+    return artifactPath(workspacePath(root, reportId), relativePath)
+  }
+
   async function markStage(reportId, stage, patch) {
     if (!SAFE_STAGE.test(String(stage || ''))) {
       throw workspaceError('SUMMARY_WORKSPACE_STAGE_INVALID')
@@ -380,7 +387,7 @@ export function createSummaryWorkspaceService({
   }
 
   return {
-    create, writeArtifact, markStage, complete, fail, recover, remove, usage,
+    create, writeArtifact, resolveArtifact, markStage, complete, fail, recover, remove, usage,
     clearFailed, clearDerived, pruneExpired, pruneOrphans, pruneCompleted
   }
 }

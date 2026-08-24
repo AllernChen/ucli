@@ -1,8 +1,8 @@
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 
-import { collectSummaryEvidence } from './evidenceCollector.js'
 import { commonPolicy } from './promptBuilder.js'
 import { projectDigestSchema } from './summarySchema.js'
+import { collectSummaryInput } from './summaryPreparationService.js'
 import { SUMMARY_BASE_CSS } from './summaryThemeRenderer.js'
 import { resolveWorkLogsFile } from './summaryStoragePaths.js'
 
@@ -255,19 +255,17 @@ export function createWorkLogsService({
     async prepare(input) {
       const request = validatePrepareInput(input, defaultTimezone)
       await mkdir(workLogsRoot, { recursive: true })
-      const evidence = await collectSummaryEvidence({
-        sessions: await listSessions(),
-        historyService,
-        start: request.start,
-        endExclusive: request.endExclusive
-      })
-      const usage = await snapshotUsage({
+      const collected = await collectSummaryInput({
         periodType: request.periodType,
         start: request.start,
         endExclusive: request.endExclusive,
-        timezone: request.timezone
+        timezone: request.timezone,
+        historyService,
+        listSessions,
+        snapshotUsage
       })
-      const coverage = evidence.coverage || {}
+      const usage = collected.usageSnapshot
+      const coverage = collected.coverage
       const stamp = periodStamp(request.periodType, request.start, request.timezone)
       const suggestedFileName = `${stamp}-summary.md`
       const htmlFileName = `${stamp}-summary.html`
@@ -277,16 +275,7 @@ export function createWorkLogsService({
         endExclusive: new Date(request.endExclusive).toISOString(),
         timezone: request.timezone
       }
-      const data = {
-        period,
-        usage,
-        coverage,
-        evidenceBlocks: (evidence.blocks || []).map(block => ({
-          id: block.id,
-          projectPath: block.projectPath,
-          text: block.text
-        }))
-      }
+      const data = collected.data
       const files = {
         'data.json': `${JSON.stringify(data, null, 2)}\n`,
         'template.md': templateMarkdown({ period, usage, coverage }),
