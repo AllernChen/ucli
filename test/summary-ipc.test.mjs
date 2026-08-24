@@ -85,6 +85,32 @@ test('summary IPC returns typed safe errors without provider output', async () =
   assert.doesNotMatch(source, /safeSummaryError[\s\S]{0,800}error\.message/)
 })
 
+test('summary IPC preserves the safe concurrent-confirmation error', async () => {
+  const handlers = new Map()
+  registerSummaryIpc({
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    service: {
+      generate() {
+        throw Object.assign(new Error('private confirmation detail'), {
+          code: 'SUMMARY_CONFIRMATION_IN_PROGRESS'
+        })
+      }
+    }
+  })
+
+  const response = await handlers.get('summary:generate')({}, {
+    reportId: 'report-1', confirm: true, confirmationCallLimit: 24
+  })
+  assert.deepEqual(response, {
+    ok: false,
+    error: {
+      code: 'SUMMARY_CONFIRMATION_IN_PROGRESS',
+      message: 'Summary confirmation is already in progress'
+    }
+  })
+  assert.doesNotMatch(JSON.stringify(response), /private|detail/i)
+})
+
 test('report deletion keeps database success when best-effort workspace cleanup fails', async () => {
   const events = []
   const result = await deleteSummaryReportAndWorkspace('report-1', {

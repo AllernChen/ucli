@@ -270,10 +270,9 @@ export function createReportRepository({
 } = {}) {
   if (!db) throw new TypeError('db is required')
 
-  function assertAutomaticDuplicateTarget(reportId, errorText) {
+  function assertAutomaticDuplicateTarget(report, errorText) {
     const targetId = summaryAutomaticDuplicateReportId(errorText)
     if (!targetId) return
-    const report = db.getSummaryReport(reportId)
     const target = db.getSummaryReport(targetId)
     if (!report || !target || report.generatedBy !== 'automatic' ||
       !report.sourceHash || target.sourceHash !== report.sourceHash ||
@@ -359,7 +358,6 @@ export function createReportRepository({
       }
       if (safe.errorText !== undefined) {
         safe.errorText = safeErrorText(safe.errorText)
-        assertAutomaticDuplicateTarget(reportId, safe.errorText)
       }
       for (const field of JSON_FIELDS) {
         if (safe[field] === undefined) continue
@@ -369,6 +367,9 @@ export function createReportRepository({
             ? emptyArtifactMetadata(safe[field])
             : jsonObject(safe[field], field)
       }
+      const existing = db.getSummaryReport(reportId)
+      const candidate = existing ? { ...existing, ...safe } : existing
+      assertAutomaticDuplicateTarget(candidate, candidate?.errorText)
       return normalizeReport(await db.updateSummaryReport(reportId, safe))
     },
 

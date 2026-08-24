@@ -1047,7 +1047,8 @@ class Db {
   #updateSummaryReportSync(reportId, fields = {}) {
     assertSummaryReportPatch(fields)
     const existing = this.getSummaryReport(reportId)
-    assertAutomaticDuplicateTarget(this, existing, fields.errorText)
+    const candidate = existing ? { ...existing, ...fields } : existing
+    assertAutomaticDuplicateTarget(this, candidate, candidate?.errorText)
     if (fields.status !== undefined && fields.status !== 'completed' && existing?.isCurrent) {
       throw summaryValidationError(
         'SUMMARY_REPORT_NOT_COMPLETED',

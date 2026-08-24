@@ -380,6 +380,19 @@ test('report repository accepts only bounded safe error machine codes', async ()
   assert.equal((await repository.update(report.id, {
     errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${targetId}`
   })).errorText, `SUMMARY_AUTOMATIC_DUPLICATE:${targetId}`)
+  for (const patch of [
+    { generatedBy: 'manual' },
+    { sourceHash: `sha256:${'b'.repeat(64)}` },
+    {
+      sourceHash: `sha256:${'b'.repeat(64)}`,
+      errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${targetId}`
+    }
+  ]) {
+    await assert.rejects(
+      repository.update(report.id, patch),
+      error => error.code === 'INVALID_SUMMARY_ERROR_CODE'
+    )
+  }
   assert.equal((await repository.update(report.id, { errorText: null })).errorText, null)
 })
 
@@ -712,6 +725,65 @@ test('jobs persist queued and running transitions while executing only one pipel
   ])
 })
 
+test('an initial running-transition failure settles completion and shutdown', async () => {
+  const { service, repository } = createHarness()
+  const originalUpdate = repository.update.bind(repository)
+  repository.update = async (reportId, patch) => {
+    if (patch.status === 'running') {
+      throw Object.assign(new Error('private database detail'), { code: 'PRIVATE_DB_FAILURE' })
+    }
+    return originalUpdate(reportId, patch)
+  }
+  const job = await service.generate(request())
+
+  const report = await Promise.race([
+    job.completion,
+    new Promise(resolve => setTimeout(() => resolve({ status: 'timeout' }), 100))
+  ])
+  assert.equal(report.status, 'failed')
+  assert.equal(report.errorText, 'SUMMARY_GENERATION_FAILED')
+  assert.equal(service.isActive(job.reportId), false)
+  assert.equal(await Promise.race([
+    service.shutdown().then(() => 'settled'),
+    new Promise(resolve => setTimeout(() => resolve('timeout'), 100))
+  ]), 'settled')
+})
+
+test('a confirmed transition plus failure-persistence rejection cannot strand a job', async () => {
+  const { service, repository } = createHarness({
+    pipeline: { async run({ confirmed }) {
+      return confirmed
+        ? pipelineResult()
+        : { requiresConfirmation: true, estimatedCalls: 24, confirmationCallLimit: 24 }
+    } }
+  })
+  const job = await service.generate(request())
+  await waitFor(() => repository.get(job.reportId).status === 'awaiting_confirmation')
+  const originalUpdate = repository.update.bind(repository)
+  repository.update = async (reportId, patch) => {
+    if (['running', 'failed'].includes(patch.status)) {
+      throw Object.assign(new Error('private database detail'), { code: 'PRIVATE_DB_FAILURE' })
+    }
+    return originalUpdate(reportId, patch)
+  }
+
+  await service.confirm(job.reportId, { confirmationCallLimit: 24 })
+  const outcome = await Promise.race([
+    job.completion.then(
+      value => ({ status: 'fulfilled', value }),
+      error => ({ status: 'rejected', error })
+    ),
+    new Promise(resolve => setTimeout(() => resolve({ status: 'timeout' }), 100))
+  ])
+  assert.equal(outcome.status, 'rejected')
+  assert.equal(outcome.error.code, 'SUMMARY_GENERATION_FAILED')
+  assert.equal(service.isActive(job.reportId), false)
+  assert.equal(await Promise.race([
+    service.shutdown().then(() => 'settled'),
+    new Promise(resolve => setTimeout(() => resolve('timeout'), 100))
+  ]), 'settled')
+})
+
 test('pipeline progress is forwarded ephemerally without changing persisted report fields', async () => {
   const events = []
   const { service, repository } = createHarness({
@@ -892,6 +964,7 @@ test('shutdown drains a real database completion already queued behind the trans
   const completeQueued = new Promise(resolve => { markCompleteQueued = resolve })
   try {
     const repository = createReportRepository({ db })
+    const workspace = createSummaryWorkspaceService({ root })
     const originalComplete = db.completeSummaryReport.bind(db)
     db.completeSummaryReport = (id, patch) => {
       const completion = originalComplete(id, patch)
@@ -904,18 +977,16 @@ test('shutdown drains a real database completion already queued behind the trans
       snapshotUsage: async () => ({ totals: {} }),
       pipeline: { async run() { return pipelineResult() } },
       workspaceService: {
-        async create() { return { workDirectory: 'safe-work' } },
-        async writeArtifact() {},
-        async markStage() {},
-        async complete() {
+        ...workspace,
+        async complete(reportId, outputs) {
+          await workspace.complete(reportId, outputs)
           const blocker = db.transaction(async () => {
             markTailStarted()
             await tailGate
           })
           blocker.catch(() => {})
           await tailStarted
-        },
-        async fail() {}
+        }
       }
     })
     const job = await service.generate(request())
@@ -931,6 +1002,10 @@ test('shutdown drains a real database completion already queued behind the trans
     assert.equal((await job.completion).status, 'completed')
     assert.equal(repository.get(job.reportId).isCurrent, true)
     assert.equal(service.isActive(job.reportId), false)
+    const manifest = JSON.parse(readFileSync(
+      join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
+    ))
+    assert.equal(manifest.status, 'completed')
   } finally {
     releaseTail?.()
     db.close()

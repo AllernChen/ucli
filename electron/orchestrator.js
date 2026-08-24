@@ -154,6 +154,7 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   SUMMARY_REPORT_NOT_FOUND: 'Summary report was not found',
   SUMMARY_REPORT_ACTIVE: 'Cancel the active summary before deleting it',
   SUMMARY_REPORT_NOT_COMPLETED: 'Only a completed report can be current',
+  SUMMARY_CONFIRMATION_IN_PROGRESS: 'Summary confirmation is already in progress',
   SUMMARY_AUTOMATION_UNAVAILABLE: 'Automatic summaries require local persistence',
   SUMMARY_EXECUTOR_UNAVAILABLE: 'Select an available default AI CLI',
   SUMMARY_EXECUTOR_AUTH_UNAVAILABLE: 'Selected AI CLI requires an isolated summary credential',

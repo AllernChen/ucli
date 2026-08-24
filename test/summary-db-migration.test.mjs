@@ -672,6 +672,19 @@ test('direct database report writes reject unknown shapes and credential scalars
     assert.equal((await db.updateSummaryReport('safe-update-target', {
       errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${completedTargetId}`
     })).errorText, `SUMMARY_AUTOMATIC_DUPLICATE:${completedTargetId}`)
+    for (const patch of [
+      { generatedBy: 'manual' },
+      { sourceHash: `sha256:${'b'.repeat(64)}` },
+      {
+        sourceHash: `sha256:${'b'.repeat(64)}`,
+        errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${completedTargetId}`
+      }
+    ]) {
+      await assert.rejects(
+        db.updateSummaryReport('safe-update-target', patch),
+        error => error.code === 'INVALID_SUMMARY_ERROR_CODE'
+      )
+    }
     await assert.doesNotReject(db.updateSummaryReport('safe-update-target', {
       coverage: { sessionsIncluded: 1, sources: { transcript: 2, note: 1, nativeDigest: 0 } }
     }))
