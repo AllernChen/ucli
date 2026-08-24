@@ -1303,12 +1303,83 @@ test('job order finalizes the workspace before one atomic database completion', 
   assert.deepEqual(order, ['queued', 'collect', 'usage', 'pipeline', 'workspace', 'complete'])
 })
 
+async function shutdownCancellationFailureScenario(failingPosition) {
+  let markStarted
+  const started = new Promise(resolve => { markStarted = resolve })
+  const { service, repository } = createHarness({
+    pipeline: {
+      run({ signal }) {
+        markStarted()
+        return new Promise((resolve, reject) => signal.addEventListener('abort', () => {
+          reject(Object.assign(new Error('cancelled'), { code: 'SUMMARY_RUNNER_ABORTED' }))
+        }, { once: true }))
+      }
+    }
+  })
+  const running = await service.generate(request())
+  const queued = await service.generate(request())
+  await started
+  const failingId = failingPosition === 'running' ? running.reportId : queued.reportId
+  const originalUpdate = repository.update.bind(repository)
+  repository.update = async (reportId, patch) => {
+    if (reportId === failingId && patch.status === 'cancelled') {
+      throw Object.assign(new Error('private cancellation detail'), {
+        code: 'PRIVATE_DB_FAILURE'
+      })
+    }
+    return originalUpdate(reportId, patch)
+  }
+  const settleWithin = promise => Promise.race([
+    promise.then(
+      value => ({ status: 'fulfilled', value }),
+      error => ({ status: 'rejected', error })
+    ),
+    new Promise(resolve => setTimeout(() => resolve({ status: 'timeout' }), 100))
+  ])
+
+  const [shutdown, runningCompletion, queuedCompletion] = await Promise.all([
+    settleWithin(service.shutdown()),
+    settleWithin(running.completion),
+    settleWithin(queued.completion)
+  ])
+  assert.equal(shutdown.status, 'fulfilled')
+  assert.deepEqual(
+    [runningCompletion.status, queuedCompletion.status].sort(),
+    ['fulfilled', 'rejected']
+  )
+  const rejected = [runningCompletion, queuedCompletion]
+    .find(outcome => outcome.status === 'rejected')
+  assert.equal(rejected.error.code, 'SUMMARY_GENERATION_FAILED')
+  assert.equal(service.isActive(running.reportId), false)
+  assert.equal(service.isActive(queued.reportId), false)
+  const surviving = repository.get(
+    failingPosition === 'running' ? queued.reportId : running.reportId
+  )
+  assert.equal(surviving.status, 'cancelled')
+}
+
+test('shutdown drains other jobs when a running cancellation write fails', async () => {
+  await shutdownCancellationFailureScenario('running')
+})
+
+test('shutdown settles queued ownership when its cancellation write fails', async () => {
+  await shutdownCancellationFailureScenario('queued')
+})
+
 test('shutdown is idempotent, rejects new jobs, cancels active work, and drains its workspace', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ucli-job-shutdown-'))
   let pipelineStarted
   const started = new Promise(resolve => { pipelineStarted = resolve })
+  let workspaceFailCalls = 0
   try {
-    const workspaceService = createSummaryWorkspaceService({ root })
+    const workspace = createSummaryWorkspaceService({ root })
+    const workspaceService = {
+      ...workspace,
+      async fail(...args) {
+        workspaceFailCalls += 1
+        return workspace.fail(...args)
+      }
+    }
     const { service, repository } = createHarness({
       workspaceService,
       pipeline: {
@@ -1331,6 +1402,7 @@ test('shutdown is idempotent, rejects new jobs, cancels active work, and drains 
       join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
     ))
     assert.notEqual(manifest.status, 'running')
+    assert.equal(workspaceFailCalls, 1)
     await assert.rejects(
       service.generate(request()),
       error => error.code === 'SUMMARY_SERVICE_SHUTTING_DOWN'

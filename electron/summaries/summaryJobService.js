@@ -141,14 +141,25 @@ export function createSummaryJobService({
   }
 
   const settleWorkspaceUpdates = job => job.workspaceUpdates.catch(() => {})
-  const failJob = async (job, error) => {
-    if (job.workspace) {
-      await settleWorkspaceUpdates(job)
-      await workspaceService.fail(
-        job.reportId,
-        job.cancelled ? 'SUMMARY_CANCELLED' : safeErrorCode(error)
-      ).catch(() => {})
+  const completeWorkspace = async (job, outputs) => {
+    const manifest = await workspaceService.complete(job.reportId, outputs)
+    job.workspaceSettled = true
+    return manifest
+  }
+  const failWorkspace = async (job, code) => {
+    if (!job.workspace || job.workspaceSettled) return
+    await settleWorkspaceUpdates(job)
+    try {
+      await workspaceService.fail(job.reportId, code)
+      job.workspaceSettled = true
+    } catch {
+      // A failed workspace transition remains eligible for shutdown compensation.
     }
+  }
+  const failJob = async (job, error) => {
+    await failWorkspace(
+      job, job.cancelled ? 'SUMMARY_CANCELLED' : safeErrorCode(error)
+    )
     try {
       if (job.cancelled) {
         const current = repository.get(job.reportId)
@@ -213,7 +224,7 @@ export function createSummaryJobService({
     const artifactMetadata = markdownArtifactMetadata(result.markdown)
     if (job.workspace) {
       await settleWorkspaceUpdates(job)
-      await workspaceService.complete(job.reportId, { markdown: result.markdown })
+      await completeWorkspace(job, { markdown: result.markdown })
     }
     if (job.cancelled) {
       throw Object.assign(new Error('cancelled'), { code: 'SUMMARY_CANCELLED' })
@@ -235,7 +246,12 @@ export function createSummaryJobService({
   }
 
   const runInitial = async job => {
-    if (job.cancelled) return repository.get(job.reportId)
+    if (job.cancelled) {
+      const report = repository.get(job.reportId)
+      return terminal(report?.status)
+        ? finish(job, report)
+        : rejectJob(job, { code: 'SUMMARY_CANCELLED' })
+    }
     try {
       await update(job.reportId, { status: 'running', errorText: null })
       const request = job.request
@@ -278,7 +294,7 @@ export function createSummaryJobService({
       }
       job.context = { evidence, usageSnapshot, sourceHash: hash }
       if (!evidence.blocks?.length) {
-        if (job.workspace) await workspaceService.complete(job.reportId)
+        if (job.workspace) await completeWorkspace(job)
         return finish(job, await update(job.reportId, {
           status: 'skipped_empty',
           errorText: 'SUMMARY_EMPTY_EVIDENCE'
@@ -287,7 +303,7 @@ export function createSummaryJobService({
       if (request.generatedBy === 'automatic') {
         const duplicate = repository.findCompletedBySource(request, hash, job.reportId)
         if (duplicate) {
-          if (job.workspace) await workspaceService.complete(job.reportId)
+          if (job.workspace) await completeWorkspace(job)
           return finish(job, await update(job.reportId, {
             status: 'skipped_empty',
             errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${duplicate.id}`
@@ -301,7 +317,12 @@ export function createSummaryJobService({
   }
 
   const runConfirmed = async (job, confirmationCallLimit) => {
-    if (job.cancelled) return repository.get(job.reportId)
+    if (job.cancelled) {
+      const report = repository.get(job.reportId)
+      return terminal(report?.status)
+        ? finish(job, report)
+        : rejectJob(job, { code: 'SUMMARY_CANCELLED' })
+    }
     try {
       await update(job.reportId, { status: 'running', errorText: null })
       return await completePipeline(job, true, confirmationCallLimit)
@@ -322,19 +343,22 @@ export function createSummaryJobService({
         if (job.finishing) continue
         job.cancelled = true
         job.controller.abort()
-        const cancelled = await update(job.reportId, {
-          status: 'cancelled',
-          errorText: 'SUMMARY_CANCELLED'
-        })
-        if (['queued', 'awaiting_confirmation'].includes(report.status)) finish(job, cancelled)
+        try {
+          const cancelled = await update(job.reportId, {
+            status: 'cancelled',
+            errorText: 'SUMMARY_CANCELLED'
+          })
+          if (['queued', 'awaiting_confirmation'].includes(report.status)) {
+            finish(job, cancelled)
+          }
+        } catch (error) {
+          rejectJob(job, error)
+        }
       }
       await Promise.allSettled(active.map(async job => {
         const settled = await job.done.promise
         if (job.workspace && ['failed', 'cancelled', 'interrupted'].includes(settled?.status)) {
-          await settleWorkspaceUpdates(job)
-          await workspaceService.fail(
-            job.reportId, settled.errorText || 'SUMMARY_CANCELLED'
-          ).catch(() => {})
+          await failWorkspace(job, settled.errorText || 'SUMMARY_CANCELLED')
         }
       }))
     })().then(() => undefined)
@@ -370,6 +394,7 @@ export function createSummaryJobService({
           context: null,
           confirmationCallLimit: null,
           workspace: null,
+          workspaceSettled: false,
           workspaceUpdates: Promise.resolve(),
           done: deferred()
         }
