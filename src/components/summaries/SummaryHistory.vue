@@ -5,7 +5,7 @@
         <a-list-item @click="$emit('select', item.id)">
           <template #actions>
             <a-button v-if="item.status === 'completed' && !item.isCurrent" size="small" @click.stop="$emit('set-current', item.id)">设为当前版本</a-button>
-            <a-button v-if="['failed', 'interrupted'].includes(item.status)" size="small" @click.stop="$emit('retry', item)">重试</a-button>
+            <a-button v-if="['failed', 'interrupted', 'cancelled'].includes(item.status)" size="small" @click.stop="$emit('retry', item)">重试（新版本）</a-button>
             <a-popconfirm
               v-if="!['queued', 'running', 'awaiting_confirmation'].includes(item.status)"
               title="确认删除这个总结版本？"

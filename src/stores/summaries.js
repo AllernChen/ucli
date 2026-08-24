@@ -6,10 +6,6 @@ let unsubscribeProgress = null
 let initPromise = null
 const deletedReportIds = new Set()
 
-function terminalPhase(phase) {
-  return ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(phase)
-}
-
 function withoutMarkdown(report) {
   if (!report) return report
   const { markdown, ...summary } = report
@@ -18,44 +14,34 @@ function withoutMarkdown(report) {
 
 export const useSummariesStore = defineStore('summaries', {
   state: () => ({
-    settings: null,
     reports: [],
-    selectedReport: null,
+    selectedReportId: null,
     versions: [],
-    activeJobs: {},
     progress: {},
     filters: { periodType: null, status: null, generatedBy: null },
     loading: false,
     error: null,
     initialized: false
   }),
+  getters: {
+    selectedReport: state => state.reports.find(report => report.id === state.selectedReportId) || null
+  },
   actions: {
     async init() {
       if (!unsubscribeProgress) {
         unsubscribeProgress = ipc.onSummaryProgress(payload => {
-          if (!payload?.reportId) return
-          this.progress = { ...this.progress, [payload.reportId]: payload }
-          if (terminalPhase(payload.phase)) {
-            const jobs = { ...this.activeJobs }
-            delete jobs[payload.reportId]
-            this.activeJobs = jobs
-            void this.refreshReport(payload.reportId).catch(error => { this.error = error })
-          }
+          this.applyProgress(payload)
         })
       }
       if (this.initialized) return
       if (initPromise) return initPromise
       this.loading = true
       this.error = null
-      initPromise = Promise.all([
-        ipc.getSummarySettings(),
-        ipc.listSummaryReports({})
-      ]).then(([settings, reports]) => {
-        this.settings = settings
+      initPromise = ipc.listSummaryReports({}).then(reports => {
         this.reports = reports
         this.initialized = true
-      }).catch(error => {
-        this.error = error
+      }).catch(() => {
+        this.error = new Error('无法读取总结报告')
         throw error
       }).finally(() => {
         this.loading = false
@@ -71,23 +57,51 @@ export const useSummariesStore = defineStore('summaries', {
       return this.reports
     },
 
+    applyProgress(payload) {
+      if (!payload?.reportId) return
+      const progress = {
+        reportId: payload.reportId,
+        status: payload.status,
+        phase: payload.phase,
+        completed: payload.completed,
+        total: payload.total,
+        text: payload.text
+      }
+      this.progress = { ...this.progress, [progress.reportId]: progress }
+      const report = this.reports.find(item => item.id === progress.reportId)
+      if (report) Object.assign(report, {
+        status: progress.status,
+        runPhase: progress.phase,
+        progressText: progress.text
+      })
+      if (['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(progress.phase)) {
+        void this.refreshReport(progress.reportId).catch(() => { this.error = new Error('无法刷新总结报告') })
+      }
+    },
+
+    upsertReport(report) {
+      const index = this.reports.findIndex(item => item.id === report.id)
+      if (index >= 0) this.reports.splice(index, 1, report)
+      else this.reports.unshift(report)
+      const versionIndex = this.versions.findIndex(item => item.id === report.id)
+      if (versionIndex >= 0) this.versions.splice(versionIndex, 1, withoutMarkdown(report))
+    },
+
     async refreshReport(reportId) {
       if (deletedReportIds.has(reportId)) return null
       const report = await ipc.getSummaryReport(reportId)
       if (deletedReportIds.has(reportId)) return null
-      const index = this.reports.findIndex(item => item.id === reportId)
-      const summary = withoutMarkdown(report)
-      if (index >= 0) this.reports.splice(index, 1, summary)
-      else this.reports.unshift(summary)
-      if (this.selectedReport?.id === reportId) this.selectedReport = report
+      this.upsertReport(report)
+      if (this.selectedReportId === reportId) this.selectedReportId = report.id
       const versionIndex = this.versions.findIndex(item => item.id === reportId)
-      if (versionIndex >= 0) this.versions.splice(versionIndex, 1, summary)
+      if (versionIndex >= 0) this.versions.splice(versionIndex, 1, withoutMarkdown(report))
       return report
     },
 
     async selectReport(reportId) {
       const report = await ipc.getSummaryReport(reportId)
-      this.selectedReport = report
+      this.upsertReport(report)
+      this.selectedReportId = report.id
       this.versions = await ipc.listSummaryReports({
         periodType: report.periodType,
         periodStart: report.periodStart,
@@ -97,20 +111,16 @@ export const useSummariesStore = defineStore('summaries', {
       return report
     },
 
-    async generate(request) {
-      const result = await ipc.generateSummary(request)
-      this.activeJobs = { ...this.activeJobs, [result.reportId]: true }
-      this.progress = {
-        ...this.progress,
-        [result.reportId]: {
-          reportId: result.reportId, phase: 'queued', completed: 0, total: 1, text: '等待生成'
-        }
-      }
-      return result
+    async generateInteractive(request) {
+      const { report, sessionId } = await ipc.startInteractiveSummary(request)
+      const created = { ...report, sessionId: sessionId || report.sessionId || null }
+      this.upsertReport(created)
+      this.selectedReportId = created.id
+      return created
     },
 
     retry(report) {
-      return this.generate({
+      return this.generateInteractive({
         periodType: report.periodType,
         start: report.periodStart,
         endExclusive: report.periodEndExclusive,
@@ -124,16 +134,6 @@ export const useSummariesStore = defineStore('summaries', {
 
     async cancel(reportId) {
       return ipc.cancelSummary(reportId)
-    },
-
-    async confirm(reportId) {
-      const confirmationCallLimit = this.progress[reportId]?.total
-      if (!Number.isInteger(confirmationCallLimit) || confirmationCallLimit < 1) {
-        throw Object.assign(new Error('确认调用数不可用'), { code: 'INVALID_SUMMARY_CONFIRMATION' })
-      }
-      const result = await ipc.confirmSummary(reportId, confirmationCallLimit)
-      this.activeJobs = { ...this.activeJobs, [reportId]: true }
-      return result
     },
 
     async setCurrent(reportId) {
@@ -152,15 +152,12 @@ export const useSummariesStore = defineStore('summaries', {
         deletedReportIds.delete(reportId)
         throw error
       }
-      const jobs = { ...this.activeJobs }
       const progress = { ...this.progress }
-      delete jobs[reportId]
       delete progress[reportId]
-      this.activeJobs = jobs
       this.progress = progress
       this.reports = this.reports.filter(report => report.id !== reportId)
       this.versions = this.versions.filter(report => report.id !== reportId)
-      if (selectedId === reportId) this.selectedReport = null
+      if (selectedId === reportId) this.selectedReportId = null
 
       await this.loadReports()
       const nextId =
@@ -169,7 +166,7 @@ export const useSummariesStore = defineStore('summaries', {
         this.reports[0]?.id || null
       if (nextId) await this.selectReport(nextId)
       else {
-        this.selectedReport = null
+        this.selectedReportId = null
         this.versions = []
       }
       return result

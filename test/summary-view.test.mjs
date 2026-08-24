@@ -25,10 +25,9 @@ globalThis.window = {
       getCalls += 1
       return { id: reportId, status: 'completed', markdown: '# 摘要', version: 1 }
     },
-    generateSummary: async payload => { generatedPayloads.push(payload); return { reportId: 'report-1' } },
-    confirmSummary: async (reportId, confirmationCallLimit) => {
-      generatedPayloads.push({ reportId, confirm: true, confirmationCallLimit })
-      return { reportId }
+    startInteractiveSummary: async payload => {
+      generatedPayloads.push(payload)
+      return { report: { id: 'report-1', status: 'queued', version: 1 }, sessionId: 'session-1' }
     },
     cancelSummary: async () => true,
     setCurrentSummary: async reportId => ({ id: reportId, status: 'completed', isCurrent: true }),
@@ -78,23 +77,27 @@ test('summary store subscribes once and completion refreshes only the affected r
   assert.equal(unsubscriptions, 1)
 })
 
-test('awaiting confirmation retains the actual call estimate and resumes the same report', async () => {
+test('terminal progress refreshes the matching report in version history', async () => {
+  const store = freshStore()
+  await store.init()
+  store.reports = [{ id: 'report-1', status: 'running', version: 2 }]
+  store.versions = [{ id: 'report-1', status: 'running', version: 2 }]
+  progressHandler({ reportId: 'report-1', status: 'completed', phase: 'completed', completed: 1, total: 1, text: '总结已生成' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(store.versions[0].status, 'completed')
+  assert.equal(store.versions[0].markdown, undefined)
+  store.dispose()
+})
+
+test('interactive generation creates and selects the canonical queued report', async () => {
   generatedPayloads = []
   const store = freshStore()
   await store.init()
-  store.activeJobs = { 'report-1': true }
-
-  progressHandler({
-    reportId: 'report-1', phase: 'awaiting_confirmation', completed: 0,
-    total: 5, text: '预计调用 5 次，等待确认'
-  })
-  assert.equal(store.progress['report-1'].total, 5)
-  await store.confirm('report-1')
-
-  assert.deepEqual(generatedPayloads, [{
-    reportId: 'report-1', confirm: true, confirmationCallLimit: 5
-  }])
-  assert.equal(store.activeJobs['report-1'], true)
+  const request = { periodType: 'week', start: 1, endExclusive: 2, timezone: 'Asia/Shanghai', partial: false, executorId: 'claude', profileId: 'p1', model: 'sonnet' }
+  const report = await store.generateInteractive(request)
+  assert.deepEqual(generatedPayloads, [request])
+  assert.equal(report.sessionId, 'session-1')
+  assert.equal(store.selectedReportId, 'report-1')
   store.dispose()
 })
 
@@ -106,12 +109,11 @@ test('deleting the selected report clears stale state and selects the promoted v
   try {
     store.initialized = true
     store.reports = [
-      { id: 'report-v2', status: 'completed', version: 2 },
+      { id: 'report-v2', status: 'completed', version: 2, markdown: '# v2' },
       { id: 'report-v1', status: 'completed', version: 1 }
     ]
-    store.selectedReport = { id: 'report-v2', status: 'completed', version: 2, markdown: '# v2' }
+    store.selectedReportId = 'report-v2'
     store.versions = [...store.reports]
-    store.activeJobs = { 'report-v2': true }
     store.progress = { 'report-v2': { phase: 'completed' } }
 
     window.ucli.deleteSummaryReport = async reportId => ({
@@ -130,7 +132,6 @@ test('deleting the selected report clears stale state and selects the promoted v
       deletedReportId: 'report-v2', currentReportId: 'report-v1'
     })
     assert.equal(store.selectedReport.id, 'report-v1')
-    assert.equal(store.activeJobs['report-v2'], undefined)
     assert.equal(store.progress['report-v2'], undefined)
     assert.deepEqual(store.reports.map(report => report.id), ['report-v1'])
   } finally {
@@ -152,7 +153,7 @@ test('a stale terminal refresh cannot resurrect a report after deletion', async 
   try {
     await store.init()
     store.reports = [{ id: 'deleted-report', status: 'completed', version: 1 }]
-    store.selectedReport = { id: 'deleted-report', status: 'completed', version: 1, markdown: '# old' }
+    store.selectedReportId = 'deleted-report'
     window.ucli.getSummaryReport = async reportId => {
       if (reportId === 'deleted-report' && getCallsForDeleted++ === 0) return stale
       return { id: reportId, status: 'completed', version: 1, markdown: '# next' }
@@ -189,7 +190,7 @@ test('a terminal event arriving after deletion does not surface a not-found erro
   try {
     await store.init()
     store.reports = [{ id: 'late-report', status: 'completed', version: 1 }]
-    store.selectedReport = { id: 'late-report', status: 'completed', version: 1, markdown: '# old' }
+    store.selectedReportId = 'late-report'
     window.ucli.deleteSummaryReport = async reportId => ({
       deletedReportId: reportId, currentReportId: null
     })
@@ -245,29 +246,10 @@ test('summary workspace components cover generation, safe reading, history, retr
   ).join('\n')
   for (const text of [
     'periodType', 'partial', 'executorId', 'profileId', 'model',
-    'coverage', '可能产生费用', '设为当前版本', 'workLogs', 'briefPrompt',
-    '取消生成', '确认继续', '打开总结 CLI', '可能产生费用',
-    '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试',
-    '工作报告', 'listSummaryWorkLogs', 'readSummaryWorkLog',
-    '在浏览器中打开', 'open-html', 'openWorkLogHtml',
-    // Report manager: list-first management page — each row = report + format
-    // badge + actions (preview in a drawer / open / reveal-in-folder / convert).
-    'formatBadge', '在文件夹中显示', 'showItemInFolder',
-    '转换格式', '转换中…', 'convertTargetFileName', 'buildConversionPrompt', '格式转换（',
-    'previewWorkLog', 'previewOpen', 'a-drawer', 'report-table', '报告名称',
-    '还没有生成的工作总结', 'previewReport',
-    // Embedded CLI lives in the conversation drawer: SessionTerminal + auto-send.
-    'SessionTerminal', 'startAdapter', 'sendTurn', 'session:terminal-output',
-    // Task dashboard: cards, detail, and the right-hand conversation drawer.
-    'SummaryTaskCard', 'SummaryTaskDetail', 'SummaryConversationDrawer', 'summaryTaskStatus',
-    'attachTerminal', 'refit', 'getSessionHistory', 'updateSessionNote',
-    'suggestedFileName', 'summaryTasks.addTask', 'setStatus',
-    // Shared-session model: one generation = one card (genId keyed), all
-    // generations for a period reuse ONE session; records live in taskNote JSON.
-    'genId', 'displayName', 'summaryTaskNote', 'parseTaskNote', 'appendGeneration',
-    'buildCardName', 'ensureSessionRunable', 'resetNativeSession',
-    '正在准备材料并启动 CLI', 'AI 正在分析并撰写总结',
-    // HTML work logs preview inline in a sandboxed srcdoc iframe.
+    '可能产生费用', '设为当前版本', '取消生成',
+    '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试（新版本）',
+    'SummaryConversationDrawer', 'attachTerminal', 'refit', 'getSessionHistory',
+    '此报告没有关联的交互会话', 'SessionTerminal',
     'srcdoc', 'sandbox', 'USE_PROFILES'
   ]) assert.match(all, new RegExp(text))
   for (const themeId of ['executive', 'engineering', 'timeline', 'dashboard', 'print']) {
@@ -290,10 +272,7 @@ test('summary workspace components cover generation, safe reading, history, retr
   assert.match(all, /ipc\.sendTerminalInput\s*\(props\.sessionId,\s*data\)/)
   assert.match(all, /evt\.sessionId\s*===\s*props\.sessionId/)
   assert.match(all, /ipc\.terminalResize\s*\(props\.sessionId/)
-  // The summary page waits for adapter readiness before auto-sending the brief.
-  assert.match(all, /await\s+ipc\.startAdapter\(sessionId\)/)
-  assert.match(all, /await\s+ipc\.sendTurn\(sessionId,\s*briefPrompt\)/)
-  assert.match(all, /@open="onSummaryOpen"/)
+  assert.doesNotMatch(readFileSync(new URL('../src/components/summaries/WorkSummaryPanel.vue', import.meta.url), 'utf8'), /prepareSummary|summaryTasks\.addTask|reportProducedByRun|setInterval/)
 })
 
 test('format conversion derives target names, dirname, and safe prompts', () => {
@@ -518,11 +497,11 @@ test('summary store preserves cache-check progress until the existing terminal r
   const store = freshStore()
   await store.init()
   progressHandler({
-    reportId: 'report-cache', phase: 'cache-check', completed: 0, total: 1,
+    reportId: 'report-cache', status: 'running', phase: 'cache-check', completed: 0, total: 1,
     text: '正在检查缓存'
   })
   assert.deepEqual(store.progress['report-cache'], {
-    reportId: 'report-cache', phase: 'cache-check', completed: 0, total: 1,
+    reportId: 'report-cache', status: 'running', phase: 'cache-check', completed: 0, total: 1,
     text: '正在检查缓存'
   })
   assert.equal(getCalls, 0)

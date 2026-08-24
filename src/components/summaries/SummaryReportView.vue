@@ -18,6 +18,7 @@
       :description="generationPerformance"
     />
     <a-alert v-if="coverageWarning" style="margin-top:12px" type="warning" show-icon :message="coverageWarning" />
+    <a-alert v-if="report.status === 'failed'" style="margin-top:12px" type="error" show-icon message="总结生成失败，请重试。" />
     <a-alert
       v-if="awaitingConfirmation"
       style="margin-top:12px"
@@ -36,6 +37,7 @@
       <a-button v-if="active" danger size="small" @click="$emit('cancel', report.id)">取消生成</a-button>
     </div>
     <div class="actions">
+      <a-button @click="$emit('open-conversation', report)">查看关联对话</a-button>
       <a-button @click="copyMarkdown">复制 Markdown</a-button>
       <a-button @click="$emit('export-markdown', report.id)">导出 Markdown</a-button>
       <a-button
@@ -72,7 +74,7 @@ import ipc from '../../ipc.js'
 import { openSummaryReportLink } from '../../summaryLinks.js'
 
 const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean })
-defineEmits(['cancel', 'confirm', 'export-markdown', 'export-html', 'delete-report'])
+defineEmits(['cancel', 'confirm', 'export-markdown', 'export-html', 'delete-report', 'open-conversation'])
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const safeHtml = computed(() => DOMPurify.sanitize(markdown.render(props.report?.markdown || '')))
 const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].includes(props.report?.status))
