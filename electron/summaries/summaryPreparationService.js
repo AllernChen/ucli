@@ -49,9 +49,21 @@ function canStripTrailingSeparators(value) {
     !/^[\\/]{2}[^\\/]+[\\/]+[^\\/]+[\\/]*$/u.test(value)
 }
 
+function isWindowsPath(value) {
+  return /^[A-Za-z]:[\\/]/u.test(value) ||
+    /^[\\/]{2}[^\\/]+[\\/]+[^\\/]+(?:[\\/]|$)/u.test(value)
+}
+
+function windowsPathPattern(value) {
+  return value.split(/([\\/]+)/u).map(part => {
+    if (!/^[\\/]+$/u.test(part)) return escapeRegExp(part)
+    return part.length === 1 ? '[\\\\/]' : `[\\\\/]{${part.length}}`
+  }).join('')
+}
+
 function replaceKnownPaths(value, unsafePaths) {
   let text = String(value || '')
-  const variants = new Set()
+  const matchers = new Map()
   for (const unsafePath of unsafePaths) {
     if (typeof unsafePath !== 'string' || !unsafePath) continue
     if (unsafePath.replaceAll('\\', '/') === '/') continue
@@ -60,17 +72,22 @@ function replaceKnownPaths(value, unsafePaths) {
       rawVariants.push(unsafePath.replace(/[\\/]+$/u, ''))
     }
     for (const variant of rawVariants.filter(Boolean)) {
-      variants.add(variant)
-      variants.add(variant.replaceAll('\\', '/'))
-      variants.add(variant.replaceAll('/', '\\'))
+      const windows = isWindowsPath(variant)
+      const source = windows ? windowsPathPattern(variant) : escapeRegExp(variant)
+      const trailingSeparator = /[\\/]$/u.test(variant)
+      const boundary = trailingSeparator
+        ? ''
+        : windows ? '(?![A-Za-z0-9._-])' : '(?![A-Za-z0-9._-]|\\\\)'
+      const flags = windows ? 'gi' : 'g'
+      matchers.set(`${flags}:${source}${boundary}`, {
+        source: `${source}${boundary}`,
+        flags,
+        length: variant.length
+      })
     }
   }
-  for (const variant of [...variants].sort((left, right) => right.length - left.length)) {
-    const boundary = /[\\/]$/u.test(variant) ? '' : '(?![A-Za-z0-9._-])'
-    text = text.replace(
-      new RegExp(`${escapeRegExp(variant)}${boundary}`, 'gi'),
-      '[REDACTED:path]'
-    )
+  for (const matcher of [...matchers.values()].sort((left, right) => right.length - left.length)) {
+    text = text.replace(new RegExp(matcher.source, matcher.flags), '[REDACTED:path]')
   }
   return text
 }

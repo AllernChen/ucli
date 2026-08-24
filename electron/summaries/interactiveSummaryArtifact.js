@@ -192,7 +192,7 @@ function assertHeadingOrder(markdown) {
       token.children?.some(child => child.type === 'html_block' || child.type === 'html_inline')) {
       throw artifactError()
     }
-    if (token.type !== 'heading_open') continue
+    if (token.type !== 'heading_open' || token.level !== 0) continue
     const inline = tokens[index + 1]
     const required = REQUIRED_HEADING_TOKENS.find(heading =>
       heading.tag === token.tag && heading.content === inline?.content)

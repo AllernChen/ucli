@@ -199,6 +199,37 @@ test('preparation redacts child paths when project roots include trailing separa
   }
 })
 
+test('preparation matches mixed Windows separators without changing POSIX path semantics', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-platform-path-semantics')
+  const sessions = [
+    { id: 'drive', session: { id: 'drive', cwd: 'C:\\work\\Repo\\' } },
+    { id: 'unc', session: { id: 'unc', cwd: '\\\\Server\\Share\\Repo\\' } },
+    { id: 'posix', session: { id: 'posix', cwd: '/srv/repo' } }
+  ]
+  const textBySession = {
+    drive: '读取 c:/WORK\\Repo/secret.txt',
+    unc: '读取 //server\\SHARE/Repo\\secret.txt',
+    posix: '保留 /srv/repo\\notes.txt 和 /SRV/REPO/upper.txt；替换 /srv/repo/secret.txt'
+  }
+  await preparationService(
+    workspaceService,
+    sessions,
+    ({ sessionId }) => textBySession[sessionId]
+  ).prepare({ report: report(workspace.id), workspace })
+  const data = JSON.parse(await readFile(join(workspace.path, 'input', 'data.json'), 'utf8'))
+  const blocks = Object.fromEntries(data.evidenceBlocks.map(block => [block.id.slice('evidence:'.length), block]))
+
+  assert.doesNotMatch(blocks.drive.text, /c:[\\/]/i)
+  assert.match(blocks.drive.text, /\[REDACTED:path\]/)
+  assert.doesNotMatch(blocks.unc.text, /[\\/]server[\\/]share/i)
+  assert.match(blocks.unc.text, /\[REDACTED:path\]/)
+  assert.match(blocks.posix.text, /\/srv\/repo\\notes\.txt/)
+  assert.match(blocks.posix.text, /\/SRV\/REPO\/upper\.txt/)
+  assert.doesNotMatch(blocks.posix.text, /\/srv\/repo\/secret\.txt/)
+  assert.match(blocks.posix.text, /\[REDACTED:path\]\/secret\.txt/)
+})
+
 test('interactive prompt exposes only bounded relative inputs and the canonical output', () => {
   const prompt = buildInteractiveSummaryPrompt({ periodLabel: '2026-W33' })
 
@@ -229,6 +260,31 @@ test('stable canonical markdown returns content metadata without a local path', 
     sha256: `sha256:${createHash('sha256').update(VALID_MARKDOWN).digest('hex')}`
   })
   assert.equal(JSON.stringify(result).includes(workspace.path), false)
+})
+
+test('canonical markdown rejects required headings nested in a blockquote', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-nested-headings-blockquote')
+  const markdown = REQUIRED_HEADINGS.map(heading => `> ${heading}`).join('\n')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), `${markdown}\n`)
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
+})
+
+test('canonical markdown rejects required headings nested in a list', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-nested-headings-list')
+  const markdown = REQUIRED_HEADINGS.map((heading, index) =>
+    `${index === 0 ? '- ' : '  '}${heading}`).join('\n\n')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), `${markdown}\n`)
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
 })
 
 test('canonical markdown rejects invalid size encoding and heading order', async t => {
