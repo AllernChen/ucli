@@ -1,15 +1,9 @@
 import { collectSummaryEvidence } from './evidenceCollector.js'
+import { REQUIRED_HEADINGS } from './interactiveSummaryArtifact.js'
 import { commonPolicy } from './promptBuilder.js'
+import { redactEvidenceText } from './redaction.js'
 
 const SUMMARY_PERIODS = new Set(['day', 'week', 'month', 'quarter', 'year'])
-const CANONICAL_HEADINGS = [
-  '# 摘要',
-  '## 使用量分析',
-  '## 项目进展',
-  '## 跨项目观察',
-  '## 下一步建议',
-  '## 数据覆盖'
-]
 
 function preparationError(code, message) {
   return Object.assign(new Error(message), { code })
@@ -34,7 +28,7 @@ function canonicalTemplate({ period, usage, coverage }) {
     '# 工作总结模板',
     '',
     '请严格按以下标题和顺序撰写一份中文 Markdown 工作总结：',
-    ...CANONICAL_HEADINGS.map(heading => `- ${heading}`),
+    ...REQUIRED_HEADINGS.map(heading => `- ${heading}`),
     '',
     '使用量分析只允许引用 `data.json` 中的 `usage`，不得从会话证据推算。',
     '项目进展与跨项目观察必须能追溯到 `evidenceBlocks`，证据不足时降低结论强度。',
@@ -42,6 +36,43 @@ function canonicalTemplate({ period, usage, coverage }) {
     '',
     commonPolicy({ period, usage, coverage })
   ].join('\n')
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function redactKnownPaths(value, unsafePaths) {
+  let text = redactEvidenceText(value).text
+  const variants = new Set()
+  for (const unsafePath of unsafePaths) {
+    if (typeof unsafePath !== 'string' || !unsafePath) continue
+    variants.add(unsafePath)
+    variants.add(unsafePath.replaceAll('\\', '/'))
+    variants.add(unsafePath.replaceAll('/', '\\'))
+  }
+  for (const variant of [...variants].sort((left, right) => right.length - left.length)) {
+    text = text.replace(new RegExp(escapeRegExp(variant), 'gi'), '[REDACTED:path]')
+  }
+  return text
+}
+
+function safeInteractiveData(data, workspace) {
+  const projectLabels = new Map()
+  return {
+    ...data,
+    evidenceBlocks: data.evidenceBlocks.map((block, index) => {
+      const projectPath = String(block.projectPath || '')
+      if (!projectLabels.has(projectPath)) {
+        projectLabels.set(projectPath, `project-${projectLabels.size + 1}`)
+      }
+      return {
+        ...block,
+        projectPath: projectLabels.get(projectPath) || `project-${index + 1}`,
+        text: redactKnownPaths(block.text, [projectPath, workspace.path, workspace.workDirectory])
+      }
+    })
+  }
 }
 
 function canonicalReadme({ period }) {
@@ -137,7 +168,7 @@ export function createSummaryPreparationService({
       await workspaceService.writeArtifact(
         report.id,
         'input/data.json',
-        `${JSON.stringify(input.data, null, 2)}\n`
+        `${JSON.stringify(safeInteractiveData(input.data, workspace), null, 2)}\n`
       )
       await workspaceService.writeArtifact(report.id, 'input/template.md', input.templateMarkdown)
       await workspaceService.writeArtifact(report.id, 'input/README.md', input.readmeMarkdown)

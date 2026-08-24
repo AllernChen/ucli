@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -46,7 +46,11 @@ function preparationService(workspaceService) {
     }],
     historyService: {
       loadRange: async ({ start }) => ({
-        items: [{ timestamp: start + 1, role: 'assistant', text: `周期-${start}` }],
+        items: [{
+          timestamp: start + 1,
+          role: 'assistant',
+          text: `周期-${start} token=super-secret-value C:\\work\\project\\private.txt`
+        }],
         missing: false,
         truncated: false,
         nativeDigest: null
@@ -86,6 +90,8 @@ test('preparation isolates every report input and writes only the canonical inpu
   assert.equal(secondData.period.start, new Date(END).toISOString())
   assert.equal(firstData.usage.totals.inputTokens, 10)
   assert.equal(secondData.usage.totals.inputTokens, 20)
+  assert.doesNotMatch(JSON.stringify(firstData), /super-secret-value|C:[\\/]work[\\/]project/i)
+  assert.match(firstData.evidenceBlocks[0].projectPath, /^project-\d+$/)
   for (const workspace of [first, second]) {
     assert.match(await readFile(join(workspace.path, 'input', 'template.md'), 'utf8'), /# 摘要/)
     assert.match(await readFile(join(workspace.path, 'input', 'README.md'), 'utf8'), /output\/report\.md/)
@@ -141,11 +147,96 @@ test('canonical markdown rejects invalid size encoding and heading order', async
     const workspace = await workspaceService.create(`report-${id}`)
     await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), content)
     await assert.rejects(
-      waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 100 }),
+      waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
       error => error?.code === 'SUMMARY_ARTIFACT_INVALID',
       id
     )
   }
+})
+
+test('canonical markdown rejects credential material before returning report bytes', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-credential')
+  const markdown = `${VALID_MARKDOWN}\ntoken=super-secret-value\n`
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
+})
+
+test('canonical markdown rejects lexical and real workspace paths case-insensitively', async t => {
+  const { temporaryRoot, workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-workspace-path')
+  const alias = join(temporaryRoot, 'workspace-alias')
+  try {
+    await symlink(workspace.path, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if (process.platform === 'win32' && ['EPERM', 'EACCES'].includes(error?.code)) {
+      t.skip('Windows junction capability unavailable')
+      return
+    }
+    throw error
+  }
+  for (const [name, leakedPath] of [
+    ['lexical', alias],
+    ['real', await realpath(alias)]
+  ]) {
+    const markdown = `${VALID_MARKDOWN}\n${leakedPath.toUpperCase().replaceAll('\\', '/')}\n`
+    await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+    await assert.rejects(
+      waitForCanonicalMarkdown({ workspacePath: alias, deadlineMs: Date.now() + 2500 }),
+      error => error?.code === 'SUMMARY_ARTIFACT_INVALID',
+      name
+    )
+  }
+})
+
+test('canonical markdown ignores headings inside backtick and tilde fenced blocks', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-fenced-headings')
+  const markdown = [
+    '````markdown',
+    '```',
+    ...REQUIRED_HEADINGS,
+    '```',
+    '````',
+    '~~~text',
+    ...REQUIRED_HEADINGS,
+    '~~~~',
+    ''
+  ].join('\n')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
+})
+
+test('canonical markdown rejects a repeated canonical heading', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-repeated-heading')
+  const markdown = `${VALID_MARKDOWN}\n## 使用量分析\n\n重复章节\n`
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
+})
+
+test('canonical markdown rejects an early out-of-order heading followed by a valid sequence', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-early-heading')
+  const markdown = `## 项目进展\n\n提前章节\n\n${VALID_MARKDOWN}`
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
 })
 
 test('canonical markdown rejects a symlink that escapes output', async t => {
@@ -175,7 +266,9 @@ test('canonical markdown waits for a full stable interval after an in-progress w
   const target = workspaceService.resolveArtifact(workspace.id, 'output/report.md')
   await writeFile(target, '# 摘要\n\n正在写入', 'utf8')
   const startedAt = Date.now()
+  let finalWriteAt = 0
   const rewrite = setTimeout(() => {
+    finalWriteAt = Date.now()
     writeFile(target, `${VALID_MARKDOWN}\n补充内容\n`, 'utf8').catch(() => {})
   }, 200)
   t.after(() => clearTimeout(rewrite))
@@ -187,4 +280,94 @@ test('canonical markdown waits for a full stable interval after an in-progress w
 
   assert.equal(result.markdown, `${VALID_MARKDOWN}\n补充内容\n`)
   assert.ok(Date.now() - startedAt >= 1100)
+  assert.ok(Date.now() - finalWriteAt >= 1000)
+})
+
+test('canonical markdown binds validation to the final file after an atomic replacement', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-atomic-replace')
+  const target = workspaceService.resolveArtifact(workspace.id, 'output/report.md')
+  const replacement = join(workspace.path, 'output', 'replacement.md')
+  await writeFile(target, `${VALID_MARKDOWN}\n旧版本\n`, 'utf8')
+  await writeFile(replacement, `${VALID_MARKDOWN}\n新版本\n`, 'utf8')
+  let replacementAt = 0
+  const replacementDone = new Promise((resolve, reject) => {
+    const replace = setTimeout(async () => {
+      try {
+        replacementAt = Date.now()
+        await rm(target)
+        await rename(replacement, target)
+        resolve()
+      } catch (error) {
+        reject(error)
+      }
+    }, 200)
+    t.after(() => clearTimeout(replace))
+  })
+
+  const result = await waitForCanonicalMarkdown({
+    workspacePath: workspace.path,
+    deadlineMs: Date.now() + 4000
+  })
+  await replacementDone
+
+  assert.equal(result.markdown, `${VALID_MARKDOWN}\n新版本\n`)
+  assert.ok(Date.now() - replacementAt >= 1000)
+})
+
+test('canonical markdown rejects an output directory link that escapes the workspace', async t => {
+  const { temporaryRoot, workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-output-link')
+  const output = join(workspace.path, 'output')
+  const outside = join(temporaryRoot, 'outside-output')
+  await rm(output, { recursive: true })
+  await mkdir(outside)
+  await writeFile(join(outside, 'report.md'), VALID_MARKDOWN, 'utf8')
+  try {
+    await symlink(outside, output, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if (process.platform === 'win32' && ['EPERM', 'EACCES'].includes(error?.code)) {
+      t.skip('Windows junction capability unavailable')
+      return
+    }
+    throw error
+  }
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
+})
+
+test('canonical markdown rejects when the deadline expires after the stability wait', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-late-deadline')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), VALID_MARKDOWN)
+  const realNow = Date.now
+  const switchAt = realNow() + 500
+  Date.now = () => realNow() < switchAt ? 1000 : 3000
+  t.after(() => { Date.now = realNow })
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
+})
+
+test('canonical markdown cancellation wins during the final stability window', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-late-cancel')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), VALID_MARKDOWN)
+  const controller = new AbortController()
+  const abort = setTimeout(() => controller.abort(), 900)
+  t.after(() => clearTimeout(abort))
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({
+      workspacePath: workspace.path,
+      signal: controller.signal,
+      deadlineMs: Date.now() + 2500
+    }),
+    error => error?.code === 'ABORT_ERR'
+  )
 })
