@@ -44,7 +44,8 @@ function preparationService(workspaceService, sessions = [
     id: 's3',
     session: { id: 's3', cwd: 'C:\\work\\token=super-secret-value', taskNote: '安全项目' }
   }
-]) {
+], historyText = ({ start, sessionId, projectPath }) =>
+  `周期-${start} session=${sessionId} token=super-secret-value ${projectPath}\\private.txt`) {
   const projectBySession = new Map(sessions.map(entry => [entry.id, entry.session?.cwd || entry.cwd || '']))
   return createSummaryPreparationService({
     workspaceService,
@@ -54,7 +55,7 @@ function preparationService(workspaceService, sessions = [
         items: [{
           timestamp: start + 1,
           role: 'assistant',
-          text: `周期-${start} session=${sessionId} token=super-secret-value ${projectBySession.get(sessionId)}\\private.txt`
+          text: historyText({ start, sessionId, projectPath: projectBySession.get(sessionId) })
         }],
         missing: false,
         truncated: false,
@@ -139,6 +140,32 @@ test('preparation derives stable platform-aware project identities without mergi
   assert.equal(ids['unc-backslash'], ids['unc-slash'])
   assert.notEqual(ids['posix-root'], ids.unknown)
   for (const projectId of Object.values(ids)) assert.match(projectId, /^project-[a-f0-9]{32}$/)
+})
+
+test('preparation preserves URL and command slashes while replacing a short POSIX project token', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-posix-path-boundaries')
+  const sessions = [
+    { id: 'root', session: { id: 'root', cwd: '/' } },
+    { id: 'short', session: { id: 'short', cwd: '/a' } }
+  ]
+  const textBySession = {
+    root: '调用 https://api.example.com/v1 并运行 /usr/bin/node',
+    short: '读取 /a/file，但接口 /api 必须保留'
+  }
+  await preparationService(
+    workspaceService,
+    sessions,
+    ({ sessionId }) => textBySession[sessionId]
+  ).prepare({ report: report(workspace.id), workspace })
+  const data = JSON.parse(await readFile(join(workspace.path, 'input', 'data.json'), 'utf8'))
+  const blocks = Object.fromEntries(data.evidenceBlocks.map(block => [block.id.slice('evidence:'.length), block]))
+
+  assert.match(blocks.root.text, /https:\/\/api\.example\.com\/v1/)
+  assert.match(blocks.root.text, /\/usr\/bin\/node/)
+  assert.doesNotMatch(blocks.short.text, /\/a\/file/)
+  assert.match(blocks.short.text, /\[REDACTED:path\]\/file/)
+  assert.match(blocks.short.text, /\/api/)
 })
 
 test('interactive prompt exposes only bounded relative inputs and the canonical output', () => {
@@ -321,6 +348,58 @@ test('canonical markdown ignores HTML-looking text in inline escaped and indente
     deadlineMs: Date.now() + 2500
   })
   assert.equal(result.markdown, markdown)
+})
+
+test('canonical markdown rejects canonical headings contained only in multiline code spans', async t => {
+  const { workspaceService } = await fixture(t)
+  for (const delimiter of ['`', '``']) {
+    const workspace = await workspaceService.create(`report-multiline-code-${delimiter.length}`)
+    const markdown = [
+      `${delimiter}跨行代码开始`,
+      ...REQUIRED_HEADINGS,
+      `跨行代码结束${delimiter}`,
+      ''
+    ].join('\n')
+    await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+
+    await assert.rejects(
+      waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+      error => error?.code === 'SUMMARY_ARTIFACT_INVALID',
+      `delimiter length ${delimiter.length}`
+    )
+  }
+})
+
+test('canonical markdown counts only headings visible outside multiline code spans', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-visible-headings')
+  const markdown = [
+    VALID_MARKDOWN.trimEnd(),
+    '说明 ``跨行代码开始',
+    '# 摘要',
+    '<div>代码内 HTML</div>',
+    '跨行代码结束``',
+    ''
+  ].join('\n')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+
+  const result = await waitForCanonicalMarkdown({
+    workspacePath: workspace.path,
+    deadlineMs: Date.now() + 2500
+  })
+  assert.equal(result.markdown, markdown)
+})
+
+test('canonical markdown rejects an unclosed inline code delimiter', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-unclosed-code-span')
+  const markdown = `${VALID_MARKDOWN}\n未闭合代码 \`普通文本`
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
 })
 
 test('canonical markdown rejects a repeated canonical heading', async t => {
@@ -519,4 +598,27 @@ test('canonical markdown rejects an asynchronous read hook instead of awaiting i
     }),
     error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
   )
+})
+
+test('canonical markdown consumes a rejected asynchronous read hook before failing closed', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-rejected-read-hook')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), VALID_MARKDOWN)
+  const unhandled = []
+  const onUnhandled = reason => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  t.after(() => process.off('unhandledRejection', onUnhandled))
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({
+      workspacePath: workspace.path,
+      deadlineMs: Date.now() + 2500,
+      onReadChunk() {
+        return Promise.reject(new Error('test hook rejection'))
+      }
+    }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(unhandled, [])
 })

@@ -48,12 +48,16 @@ function replaceKnownPaths(value, unsafePaths) {
   const variants = new Set()
   for (const unsafePath of unsafePaths) {
     if (typeof unsafePath !== 'string' || !unsafePath) continue
+    if (unsafePath.replaceAll('\\', '/') === '/') continue
     variants.add(unsafePath)
     variants.add(unsafePath.replaceAll('\\', '/'))
     variants.add(unsafePath.replaceAll('/', '\\'))
   }
   for (const variant of [...variants].sort((left, right) => right.length - left.length)) {
-    text = text.replace(new RegExp(escapeRegExp(variant), 'gi'), '[REDACTED:path]')
+    text = text.replace(
+      new RegExp(`${escapeRegExp(variant)}(?![A-Za-z0-9._-])`, 'gi'),
+      '[REDACTED:path]'
+    )
   }
   return text
 }

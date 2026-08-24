@@ -173,11 +173,25 @@ function decodeMarkdown(buffer) {
   }
 }
 
-function visibleMarkdownText(line) {
-  if (/^(?: {4}|\t)/.test(line)) return ''
+function visibleMarkdownText(line, inlineContext) {
+  if (!inlineContext.delimiter && /^(?: {4}|\t)/.test(line)) return ''
   let visible = ''
   let index = 0
   while (index < line.length) {
+    if (inlineContext.delimiter) {
+      if (line[index] !== '`') {
+        index += 1
+        continue
+      }
+      let runEnd = index + 1
+      while (line[runEnd] === '`') runEnd += 1
+      if (runEnd - index === inlineContext.delimiter) {
+        inlineContext.delimiter = 0
+        visible += ' '
+      }
+      index = runEnd
+      continue
+    }
     if (line[index] === '\\' && index + 1 < line.length) {
       visible += ' '
       index += 2
@@ -190,35 +204,14 @@ function visibleMarkdownText(line) {
     }
     let openerEnd = index + 1
     while (line[openerEnd] === '`') openerEnd += 1
-    const openerLength = openerEnd - index
-    let closingEnd = -1
-    let cursor = openerEnd
-    while (cursor < line.length) {
-      if (line[cursor] !== '`') {
-        cursor += 1
-        continue
-      }
-      let runEnd = cursor + 1
-      while (line[runEnd] === '`') runEnd += 1
-      if (runEnd - cursor === openerLength) {
-        closingEnd = runEnd
-        break
-      }
-      cursor = runEnd
-    }
-    if (closingEnd < 0) {
-      visible += line.slice(index, openerEnd)
-      index = openerEnd
-      continue
-    }
+    inlineContext.delimiter = openerEnd - index
     visible += ' '
-    index = closingEnd
+    index = openerEnd
   }
   return visible
 }
 
-function containsRawHtml(line) {
-  const visible = visibleMarkdownText(line)
+function containsRawHtml(visible) {
   return /<!--|-->|<\?|<!\[CDATA\[|<![A-Za-z]/.test(visible) ||
     /<\/?[A-Za-z][A-Za-z0-9-]*(?=[\t />]|$)/.test(visible)
 }
@@ -226,6 +219,7 @@ function containsRawHtml(line) {
 function assertHeadingOrder(markdown) {
   const found = []
   let fence = null
+  const inlineContext = { delimiter: 0 }
   for (const line of markdown.replace(/\r\n?/g, '\n').split('\n')) {
     const fenceLine = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
     if (fence) {
@@ -235,14 +229,16 @@ function assertHeadingOrder(markdown) {
       }
       continue
     }
-    if (fenceLine && !(fenceLine[1][0] === '`' && fenceLine[2].includes('`'))) {
+    if (!inlineContext.delimiter && fenceLine &&
+      !(fenceLine[1][0] === '`' && fenceLine[2].includes('`'))) {
       fence = { marker: fenceLine[1][0], length: fenceLine[1].length }
       continue
     }
-    if (containsRawHtml(line)) throw artifactError()
-    if (REQUIRED_HEADINGS.includes(line)) found.push(line)
+    const visible = visibleMarkdownText(line, inlineContext)
+    if (containsRawHtml(visible)) throw artifactError()
+    if (REQUIRED_HEADINGS.includes(visible)) found.push(visible)
   }
-  if (found.length !== REQUIRED_HEADINGS.length ||
+  if (inlineContext.delimiter || found.length !== REQUIRED_HEADINGS.length ||
     found.some((heading, index) => heading !== REQUIRED_HEADINGS[index])) {
     throw artifactError()
   }
@@ -259,7 +255,10 @@ async function readFromHandle(handle, size, signal, deadlineMs, onReadChunk) {
     offset += bytesRead
     if (onReadChunk) {
       const hookResult = onReadChunk({ bytesRead, offset, total: buffer.byteLength })
-      if (hookResult && typeof hookResult.then === 'function') throw artifactError()
+      if (hookResult && typeof hookResult.then === 'function') {
+        Promise.resolve(hookResult).catch(() => {})
+        throw artifactError()
+      }
       checkActive(signal, deadlineMs)
     }
   }
