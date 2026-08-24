@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto'
+
 import { collectSummaryEvidence } from './evidenceCollector.js'
 import { REQUIRED_HEADINGS } from './interactiveSummaryArtifact.js'
 import { commonPolicy } from './promptBuilder.js'
-import { redactEvidenceText } from './redaction.js'
 
 const SUMMARY_PERIODS = new Set(['day', 'week', 'month', 'quarter', 'year'])
 
@@ -34,7 +35,7 @@ function canonicalTemplate({ period, usage, coverage }) {
     '项目进展与跨项目观察必须能追溯到 `evidenceBlocks`，证据不足时降低结论强度。',
     '数据覆盖必须明确缺失、截断和脱敏情况。',
     '',
-    commonPolicy({ period, usage, coverage })
+    commonPolicy({ period, usage, coverage, safeProjectIdentifiers: true })
   ].join('\n')
 }
 
@@ -42,8 +43,8 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function redactKnownPaths(value, unsafePaths) {
-  let text = redactEvidenceText(value).text
+function replaceKnownPaths(value, unsafePaths) {
+  let text = String(value || '')
   const variants = new Set()
   for (const unsafePath of unsafePaths) {
     if (typeof unsafePath !== 'string' || !unsafePath) continue
@@ -57,21 +58,62 @@ function redactKnownPaths(value, unsafePaths) {
   return text
 }
 
-function safeInteractiveData(data, workspace) {
-  const projectLabels = new Map()
+function sessionSource(entry) {
+  return entry?.session && typeof entry.session === 'object' ? entry.session : entry || {}
+}
+
+function projectIdentity(value) {
+  const normalized = String(value || '')
+    .replaceAll('\\', '/')
+    .replace(/\/{2,}/g, '/')
+    .replace(/\/$/, '')
+    .toLowerCase()
+  return `project-${createHash('sha256').update(normalized || '(unknown)').digest('hex').slice(0, 12)}`
+}
+
+function projectSessions(sessions, unsafePaths) {
+  return sessions.map(entry => {
+    const source = sessionSource(entry)
+    const projectId = projectIdentity(source.cwd || source.projectPath || entry?.cwd)
+    const projected = {
+      ...source,
+      cwd: projectId,
+      projectPath: projectId,
+      taskNote: replaceKnownPaths(source.taskNote, unsafePaths),
+      nativeDigest: replaceKnownPaths(source.nativeDigest, unsafePaths),
+      compactSummary: replaceKnownPaths(source.compactSummary, unsafePaths)
+    }
+    return entry?.session && typeof entry.session === 'object'
+      ? { ...entry, session: projected }
+      : { ...entry, ...projected }
+  })
+}
+
+function projectedHistoryService(historyService, unsafePaths) {
+  return {
+    async loadRange(options) {
+      const loaded = await historyService.loadRange(options)
+      const range = loaded && typeof loaded === 'object' ? loaded : {}
+      return {
+        ...range,
+        items: (Array.isArray(range.items) ? range.items : []).map(item => ({
+          ...item,
+          text: replaceKnownPaths(item?.text, unsafePaths)
+        })),
+        nativeDigest: replaceKnownPaths(range.nativeDigest, unsafePaths)
+      }
+    }
+  }
+}
+
+function interactiveData(data) {
   return {
     ...data,
-    evidenceBlocks: data.evidenceBlocks.map((block, index) => {
-      const projectPath = String(block.projectPath || '')
-      if (!projectLabels.has(projectPath)) {
-        projectLabels.set(projectPath, `project-${projectLabels.size + 1}`)
-      }
-      return {
-        ...block,
-        projectPath: projectLabels.get(projectPath) || `project-${index + 1}`,
-        text: redactKnownPaths(block.text, [projectPath, workspace.path, workspace.workDirectory])
-      }
-    })
+    evidenceBlocks: data.evidenceBlocks.map(block => ({
+      id: block.id,
+      projectId: block.projectPath,
+      text: block.text
+    }))
   }
 }
 
@@ -156,19 +198,28 @@ export function createSummaryPreparationService({
         workspace.id !== report.id) {
         throw preparationError('SUMMARY_PREPARE_INVALID', 'Report workspace does not match')
       }
+      const sessions = await listSessions()
+      const unsafePaths = [
+        workspace.path,
+        workspace.workDirectory,
+        ...sessions.map(entry => {
+          const source = sessionSource(entry)
+          return source.cwd || source.projectPath || entry?.cwd
+        })
+      ].filter(Boolean)
       const input = await collectSummaryInput({
         periodType: report.periodType,
         start: report.periodStart,
         endExclusive: report.periodEndExclusive,
         timezone: report.timezone,
-        historyService,
-        listSessions,
+        historyService: projectedHistoryService(historyService, unsafePaths),
+        listSessions: () => projectSessions(sessions, unsafePaths),
         snapshotUsage
       })
       await workspaceService.writeArtifact(
         report.id,
         'input/data.json',
-        `${JSON.stringify(safeInteractiveData(input.data, workspace), null, 2)}\n`
+        `${JSON.stringify(interactiveData(input.data), null, 2)}\n`
       )
       await workspaceService.writeArtifact(report.id, 'input/template.md', input.templateMarkdown)
       await workspaceService.writeArtifact(report.id, 'input/README.md', input.readmeMarkdown)

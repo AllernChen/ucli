@@ -40,16 +40,20 @@ function report(id, start = START) {
 function preparationService(workspaceService) {
   return createSummaryPreparationService({
     workspaceService,
-    listSessions: async () => [{
-      id: 's1',
-      session: { id: 's1', cwd: 'C:\\work\\project', taskNote: '完成主流程' }
-    }],
+    listSessions: async () => [
+      { id: 's1', session: { id: 's1', cwd: 'C:\\work\\R&D', taskNote: '完成主流程' } },
+      { id: 's2', session: { id: 's2', cwd: 'c:/WORK/R&D', taskNote: '继续主流程' } },
+      {
+        id: 's3',
+        session: { id: 's3', cwd: 'C:\\work\\token=super-secret-value', taskNote: '安全项目' }
+      }
+    ],
     historyService: {
-      loadRange: async ({ start }) => ({
+      loadRange: async ({ start, sessionId }) => ({
         items: [{
           timestamp: start + 1,
           role: 'assistant',
-          text: `周期-${start} token=super-secret-value C:\\work\\project\\private.txt`
+          text: `周期-${start} session=${sessionId} token=super-secret-value C:\\work\\R&D\\private.txt`
         }],
         missing: false,
         truncated: false,
@@ -90,10 +94,17 @@ test('preparation isolates every report input and writes only the canonical inpu
   assert.equal(secondData.period.start, new Date(END).toISOString())
   assert.equal(firstData.usage.totals.inputTokens, 10)
   assert.equal(secondData.usage.totals.inputTokens, 20)
-  assert.doesNotMatch(JSON.stringify(firstData), /super-secret-value|C:[\\/]work[\\/]project/i)
-  assert.match(firstData.evidenceBlocks[0].projectPath, /^project-\d+$/)
+  const serializedData = JSON.stringify(firstData)
+  assert.doesNotMatch(serializedData, /super-secret-value|C:[\\/]work[\\/]|R&amp;D/i)
+  assert.equal('projectPath' in firstData.evidenceBlocks[0], false)
+  assert.match(firstData.evidenceBlocks[0].projectId, /^project-[a-f0-9]{12}$/)
+  assert.equal(firstData.evidenceBlocks[0].projectId, firstData.evidenceBlocks[1].projectId)
+  assert.notEqual(firstData.evidenceBlocks[0].projectId, firstData.evidenceBlocks[2].projectId)
   for (const workspace of [first, second]) {
-    assert.match(await readFile(join(workspace.path, 'input', 'template.md'), 'utf8'), /# 摘要/)
+    const template = await readFile(join(workspace.path, 'input', 'template.md'), 'utf8')
+    assert.match(template, /# 摘要/)
+    assert.match(template, /安全项目标识/)
+    assert.doesNotMatch(template, /原样保留项目路径/)
     assert.match(await readFile(join(workspace.path, 'input', 'README.md'), 'utf8'), /output\/report\.md/)
   }
   assert.deepEqual(Object.keys(firstResult).sort(), ['coverage', 'usageSnapshot', 'workspace'])
@@ -203,6 +214,8 @@ test('canonical markdown ignores headings inside backtick and tilde fenced block
     '```',
     '````',
     '~~~text',
+    '<!-- ## 使用量分析 -->',
+    '<div>## 项目进展</div>',
     ...REQUIRED_HEADINGS,
     '~~~~',
     ''
@@ -213,6 +226,51 @@ test('canonical markdown ignores headings inside backtick and tilde fenced block
     waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
     error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
   )
+})
+
+test('canonical markdown rejects headings hidden in single and multiline HTML comments', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-html-comment')
+  const markdown = [
+    VALID_MARKDOWN,
+    '<!-- ## 使用量分析 -->',
+    '<!--',
+    '## 项目进展',
+    '## 跨项目观察',
+    '-->',
+    ''
+  ].join('\n')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
+})
+
+test('canonical markdown rejects raw HTML blocks even with a valid heading sequence', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-html-block')
+  const markdown = `${VALID_MARKDOWN}\n<section><p>原始 HTML</p></section>\n`
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
+})
+
+test('canonical markdown accepts Markdown autolinks while rejecting raw HTML', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-autolink')
+  const markdown = `${VALID_MARKDOWN}\n参考：<https://example.com/report>\n`
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+
+  const result = await waitForCanonicalMarkdown({
+    workspacePath: workspace.path,
+    deadlineMs: Date.now() + 2500
+  })
+  assert.equal(result.markdown, markdown)
 })
 
 test('canonical markdown rejects a repeated canonical heading', async t => {
@@ -370,4 +428,28 @@ test('canonical markdown cancellation wins during the final stability window', a
     }),
     error => error?.code === 'ABORT_ERR'
   )
+})
+
+test('canonical markdown cancellation wins after stability during a chunked 5 MiB read', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-read-cancel')
+  const maximumBytes = 5 * 1024 * 1024
+  const markdown = `${VALID_MARKDOWN}${'x'.repeat(maximumBytes - Buffer.byteLength(VALID_MARKDOWN))}`
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+  const controller = new AbortController()
+  let chunks = 0
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({
+      workspacePath: workspace.path,
+      signal: controller.signal,
+      deadlineMs: Date.now() + 4000,
+      onReadChunk() {
+        chunks += 1
+        controller.abort()
+      }
+    }),
+    error => error?.code === 'ABORT_ERR'
+  )
+  assert.equal(chunks, 1)
 })

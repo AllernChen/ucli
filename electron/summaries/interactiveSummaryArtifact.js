@@ -173,6 +173,11 @@ function decodeMarkdown(buffer) {
   }
 }
 
+function containsRawHtml(line) {
+  return /<!--|-->|<\?|<!\[CDATA\[|<![A-Za-z]/.test(line) ||
+    /<\/?[A-Za-z][A-Za-z0-9-]*(?=[\t />]|$)/.test(line)
+}
+
 function assertHeadingOrder(markdown) {
   const found = []
   let fence = null
@@ -189,6 +194,7 @@ function assertHeadingOrder(markdown) {
       fence = { marker: fenceLine[1][0], length: fenceLine[1].length }
       continue
     }
+    if (containsRawHtml(line)) throw artifactError()
     if (REQUIRED_HEADINGS.includes(line)) found.push(line)
   }
   if (found.length !== REQUIRED_HEADINGS.length ||
@@ -197,7 +203,7 @@ function assertHeadingOrder(markdown) {
   }
 }
 
-async function readFromHandle(handle, size, signal, deadlineMs) {
+async function readFromHandle(handle, size, signal, deadlineMs, onReadChunk) {
   const buffer = Buffer.alloc(size)
   let offset = 0
   while (offset < buffer.byteLength) {
@@ -206,6 +212,10 @@ async function readFromHandle(handle, size, signal, deadlineMs) {
     checkActive(signal, deadlineMs)
     if (bytesRead === 0) return null
     offset += bytesRead
+    if (onReadChunk) {
+      await onReadChunk({ bytesRead, offset, total: buffer.byteLength })
+      checkActive(signal, deadlineMs)
+    }
   }
   checkActive(signal, deadlineMs)
   return buffer
@@ -236,8 +246,10 @@ function delay(ms, signal) {
   })
 }
 
-export async function waitForCanonicalMarkdown({ workspacePath, signal, deadlineMs } = {}) {
-  if (!Number.isFinite(deadlineMs)) throw artifactError()
+export async function waitForCanonicalMarkdown({ workspacePath, signal, deadlineMs, onReadChunk } = {}) {
+  if (!Number.isFinite(deadlineMs) || (onReadChunk !== undefined && typeof onReadChunk !== 'function')) {
+    throw artifactError()
+  }
   while (true) {
     checkActive(signal, deadlineMs)
     const candidate = await openCanonicalTarget(workspacePath, signal, deadlineMs)
@@ -256,7 +268,7 @@ export async function waitForCanonicalMarkdown({ workspacePath, signal, deadline
       if (!sameStableFile(candidate.stat, stableStat) ||
         !await currentPathMatches(candidate, signal, deadlineMs)) continue
       checkActive(signal, deadlineMs)
-      const buffer = await readFromHandle(candidate.handle, stableStat.size, signal, deadlineMs)
+      const buffer = await readFromHandle(candidate.handle, stableStat.size, signal, deadlineMs, onReadChunk)
       checkActive(signal, deadlineMs)
       const finalStat = await candidate.handle.stat()
       checkActive(signal, deadlineMs)
