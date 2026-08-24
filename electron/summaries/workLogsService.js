@@ -25,6 +25,10 @@ function workLogsError(code, message) {
   return Object.assign(new Error(message), { code })
 }
 
+export function isWorkLogsWorkingFile(fileName) {
+  return WORKLOGS_EXCLUDED.has(fileName)
+}
+
 // A human- and file-name-safe stamp for the period, computed in the requested
 // timezone so two machines name the same calendar period identically.
 function periodStamp(periodType, start, timeZone) {
@@ -204,7 +208,7 @@ export function createWorkLogsService({
       const reports = []
       for (const entry of entries) {
         if (!entry.isFile()) continue
-        if (WORKLOGS_EXCLUDED.has(entry.name) || !REPORT_EXTENSION.test(entry.name)) continue
+        if (isWorkLogsWorkingFile(entry.name) || !REPORT_EXTENSION.test(entry.name)) continue
         let safePath
         try {
           safePath = resolveWorkLogsFile(workLogsRoot, entry.name)
@@ -231,7 +235,7 @@ export function createWorkLogsService({
     // Reads a single generated report file, refusing working files and any
     // name that could escape the workLogs root.
     async readReport(fileName) {
-      if (typeof fileName !== 'string' || WORKLOGS_EXCLUDED.has(fileName)) {
+      if (typeof fileName !== 'string' || isWorkLogsWorkingFile(fileName)) {
         throw workLogsError('SUMMARY_WORKLOG_NOT_FOUND', 'Work log not found')
       }
       const safePath = resolveWorkLogsFile(workLogsRoot, fileName)

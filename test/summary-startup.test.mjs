@@ -38,18 +38,41 @@ test('summary startup failure is typed and never blocks the main window', async 
   assert.doesNotMatch(JSON.stringify(errors), /prompt|transcript|credential/)
 })
 
-test('summary lifecycle interrupts stale jobs before recovery, maintenance, and catch-up', async () => {
+test('summary lifecycle interrupts stale jobs before recovery, legacy import, maintenance, and catch-up', async () => {
   const events = []
   const errors = []
   await runSummaryStartupLifecycle({
     recoverWorkspaces: async () => { events.push('workspace-recover'); return { interrupted: 1, removed: 2 } },
+    importLegacyWorkLogs: async () => { events.push('legacy-import'); return { scanned: 1, imported: 1, existing: 0, rejected: 0 } },
     maintainCache: async () => { events.push('cache-prune'); return { removed: 3, bytes: 64 } },
     interruptStaleJobs: async () => { events.push('job-interrupt'); return { interrupted: 1 } },
     startScheduler: async () => { events.push('scheduler') },
     onEvent: event => errors.push(event)
   })
-  assert.deepEqual(events, ['job-interrupt', 'workspace-recover', 'cache-prune', 'scheduler'])
+  assert.deepEqual(events, ['job-interrupt', 'workspace-recover', 'legacy-import', 'cache-prune', 'scheduler'])
   assert.deepEqual(errors, [])
+})
+
+test('legacy work log import failure is safe and does not bypass critical recovery or scheduler', async () => {
+  const events = []
+  const logs = []
+  const result = await runSummaryStartupLifecycle({
+    interruptStaleJobs: async () => { events.push('interrupt') },
+    recoverWorkspaces: async () => { events.push('workspace') },
+    importLegacyWorkLogs: async () => {
+      events.push('legacy-import')
+      throw Object.assign(new Error('C:\\private\\workLogs\\report.md'), {
+        code: 'SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED'
+      })
+    },
+    maintainCache: async () => { events.push('cache') },
+    startScheduler: async () => { events.push('scheduler') },
+    onEvent: event => logs.push(event)
+  })
+  assert.deepEqual(result, { ready: true })
+  assert.deepEqual(events, ['interrupt', 'workspace', 'legacy-import', 'cache', 'scheduler'])
+  assert.deepEqual(logs, [{ phase: 'legacy-worklog-import', code: 'SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED' }])
+  assert.doesNotMatch(JSON.stringify(logs), /private|workLogs|report\.md/i)
 })
 
 test('summary startup maintenance failures are typed and never block scheduler or expose details', async () => {
@@ -149,13 +172,14 @@ test('summary stale interruption and recovery happen before scheduler catch-up a
   const interrupt = orchestrator.indexOf('interruptStaleJobs:', lifecycle)
   const workspaceRecovery = orchestrator.indexOf('recoverWorkspaces:', interrupt)
   const cacheMaintenance = orchestrator.indexOf('maintainCache:', workspaceRecovery)
+  const legacyImport = orchestrator.indexOf('importLegacyWorkLogs:', workspaceRecovery)
   const catchUp = orchestrator.indexOf('startScheduler:', cacheMaintenance)
 
   assert.ok(persistence >= 0 && initializeAutomation > persistence)
   assert.ok(automationFactory >= 0 && jobService > automationFactory)
   assert.ok(scheduler > jobService && lifecycle > scheduler)
   assert.ok(interrupt > lifecycle && workspaceRecovery > interrupt)
-  assert.ok(cacheMaintenance > workspaceRecovery && catchUp > cacheMaintenance)
+  assert.ok(legacyImport > workspaceRecovery && cacheMaintenance > legacyImport && catchUp > cacheMaintenance)
 })
 
 test('orchestrator stops summary catch-up before gateway and database shutdown', () => {

@@ -83,6 +83,7 @@ import { createSummaryPreparationService } from './summaries/summaryPreparationS
 import { createInteractiveSummarySessionRuntime } from './summaries/interactiveSummarySessionRuntime.js'
 import { createInteractiveSummaryJobService } from './summaries/interactiveSummaryJobService.js'
 import { createWorkLogsService } from './summaries/workLogsService.js'
+import { createLegacyWorkLogsImporter } from './summaries/legacyWorkLogsImporter.js'
 import { runSummaryMaintenance, runSummaryStartupLifecycle, safeStartupFailure } from './startupLifecycle.js'
 import { SUMMARY_THEME_IDS } from './summaries/summaryThemeCatalog.js'
 import {
@@ -1059,15 +1060,22 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       sessionRuntime: interactiveSessionRuntime,
       onOperationalEvent: event => log('summary-operation', event)
     })
+    const workLogsRoot = resolveSummaryWorkLogsRoot({
+      platform: process.platform,
+      env: process.env,
+      homeDirectory: homedir()
+    })
     workLogsService = createWorkLogsService({
-      workLogsRoot: resolveSummaryWorkLogsRoot({
-        platform: process.platform,
-        env: process.env,
-        homeDirectory: homedir()
-      }),
+      workLogsRoot,
       historyService,
       listSessions,
       snapshotUsage: snapshotSummaryUsage
+    })
+    const legacyWorkLogsImporter = createLegacyWorkLogsImporter({
+      workLogsRoot,
+      repository: summaryRepository,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      onEvent: event => log('summary-startup', event)
     })
     summaryJobService.subscribe((report, pipelineProgress) => {
       log('summary-operation', createSummaryOperationalLogEntry(report, pipelineProgress))
@@ -1144,6 +1152,9 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       recoverWorkspaces: typeof summaryStartup.recoverWorkspaces === 'function'
         ? summaryStartup.recoverWorkspaces
         : () => summaryWorkspaceService.recover(),
+      importLegacyWorkLogs: typeof summaryStartup.importLegacyWorkLogs === 'function'
+        ? summaryStartup.importLegacyWorkLogs
+        : () => legacyWorkLogsImporter.run(),
       maintainCache: async () => {
         const verified = summarySettings.cacheEnabled ? await cache.verify() : null
         const maintained = await summaryStorageMaintenance()
