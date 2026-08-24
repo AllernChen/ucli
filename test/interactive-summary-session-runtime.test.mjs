@@ -37,16 +37,21 @@ class FakeAdapter extends EventEmitter {
   }
 }
 
-function harness({ adapter = new FakeAdapter(), startResult = true } = {}) {
+function harness({ adapter = new FakeAdapter(), startResult = true, onStart } = {}) {
   const entries = new Map([['session-1', { adapter }]])
   const stopped = []
+  let startCalls = 0
   const runtime = createInteractiveSummarySessionRuntime({
     createSession(config) {
       const sessionId = config.sessionId || 'session-created'
       entries.set(sessionId, { adapter: new FakeAdapter(sessionId), config })
       return { sessionId }
     },
-    startAdapter: async () => startResult,
+    startAdapter: async sessionId => {
+      startCalls += 1
+      onStart?.(entries.get(sessionId)?.adapter)
+      return startResult
+    },
     stopSession: async (sessionId) => {
       stopped.push(sessionId)
       const entry = entries.get(sessionId)
@@ -55,7 +60,7 @@ function harness({ adapter = new FakeAdapter(), startResult = true } = {}) {
     },
     getEntry: sessionId => entries.get(sessionId)
   })
-  return { adapter, entries, runtime, stopped }
+  return { adapter, entries, runtime, stopped, get startCalls() { return startCalls } }
 }
 
 test('create, start and stop delegate without deleting the persisted session entry', async () => {
@@ -83,6 +88,31 @@ test('waitReady resolves only from the requested session and removes listeners',
   assert.equal(adapter.listenerCount('event'), 0)
 })
 
+test('start pre-arms ready so a synchronous ready event is cached for later waitReady', async () => {
+  const state = harness({ onStart: adapter => adapter.emitEvent('ready') })
+
+  assert.equal(await state.runtime.start('session-1'), true)
+  assert.deepEqual(await state.runtime.waitReady('session-1', { timeoutMs: 5 }), {
+    ready: true
+  })
+  assert.equal(state.startCalls, 1)
+  assert.equal(state.adapter.listenerCount('event'), 0)
+})
+
+test('start and stop are idempotent and a stopped session cannot restart', async () => {
+  const state = harness({ onStart: adapter => adapter.emitEvent('ready') })
+
+  assert.equal(await state.runtime.start('session-1'), true)
+  assert.equal(await state.runtime.start('session-1'), true)
+  assert.equal(state.startCalls, 1)
+  assert.equal(await state.runtime.stop('session-1'), true)
+  assert.equal(await state.runtime.stop('session-1'), true)
+  assert.deepEqual(state.stopped, ['session-1'])
+  await assert.rejects(state.runtime.start('session-1'), {
+    code: 'SUMMARY_SESSION_STOPPED'
+  })
+})
+
 test('invalid wait timeout fails without installing listeners', async () => {
   const { adapter, runtime } = harness()
 
@@ -102,14 +132,21 @@ test('waitReady rejects with a typed timeout and removes listeners', async () =>
   assert.equal(adapter.listenerCount('event'), 0)
 })
 
-test('waitReady rejects when the process fails before becoming ready', async () => {
-  const { adapter, runtime } = harness()
-  const pending = runtime.waitReady('session-1', { timeoutMs: 100 })
+test('waitReady caches error and exit terminals and removes its monitor', async t => {
+  for (const terminal of ['error', 'exit']) {
+    await t.test(terminal, async () => {
+      const { adapter, runtime } = harness()
+      const pending = runtime.waitReady('session-1', { timeoutMs: 100 })
 
-  adapter.emitEvent('error', { message: 'provider secret must not escape' })
+      adapter.emitEvent(terminal, { message: 'provider secret must not escape' })
 
-  await assert.rejects(pending, { code: 'SUMMARY_RUN_FAILED' })
-  assert.equal(adapter.listenerCount('event'), 0)
+      await assert.rejects(pending, { code: 'SUMMARY_RUN_FAILED' })
+      await assert.rejects(runtime.waitReady('session-1', { timeoutMs: 100 }), {
+        code: 'SUMMARY_RUN_FAILED'
+      })
+      assert.equal(adapter.listenerCount('event'), 0)
+    })
+  }
 })
 
 test('delivery installs confirmation listener before send and confirms same-session turn_started', async () => {
@@ -163,6 +200,44 @@ test('delivery timeout is typed and removes every waiter resource', async () => 
   })
   assert.equal(adapter.listenerCount('gateway-event'), 0)
   assert.equal(adapter.listenerCount('event'), 0)
+})
+
+test('delivery deadline includes a hung send after turn_started confirmation', async () => {
+  const { adapter, runtime } = harness()
+  adapter.sendTurn = () => {
+    adapter.emitGateway('turn_started', { turnId: 'turn-1' })
+    return new Promise(() => {})
+  }
+
+  await assert.rejects(runtime.deliver('session-1', 'prompt', { timeoutMs: 5 }), {
+    code: 'SUMMARY_TURN_NOT_CONFIRMED'
+  })
+  assert.equal(adapter.listenerCount('gateway-event'), 0)
+  assert.equal(adapter.listenerCount('event'), 0)
+})
+
+test('stop cancels pending waits and late send settlement stays inert', async t => {
+  for (const outcome of ['false', 'throw']) {
+    await t.test(outcome, async () => {
+      const { adapter, runtime } = harness()
+      let settleSend
+      adapter.sendTurn = () => new Promise((resolve, reject) => {
+        settleSend = outcome === 'false'
+          ? () => resolve(false)
+          : () => reject(new Error('late private rejection'))
+      })
+      const ready = runtime.waitReady('session-1', { timeoutMs: 100 })
+      const delivery = runtime.deliver('session-1', 'prompt', { timeoutMs: 100 })
+
+      await runtime.stop('session-1')
+      await assert.rejects(ready, { code: 'SUMMARY_SESSION_STOPPED' })
+      await assert.rejects(delivery, { code: 'SUMMARY_TURN_NOT_CONFIRMED' })
+      settleSend()
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(adapter.listenerCount('gateway-event'), 0)
+      assert.equal(adapter.listenerCount('event'), 0)
+    })
+  }
 })
 
 test('delivery rejects if the requested turn fails or process exits before confirmation', async t => {

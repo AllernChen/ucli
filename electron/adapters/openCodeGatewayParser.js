@@ -92,9 +92,6 @@ function eventKey(type, id, state = '') {
   return `${type}:${id || 'unknown'}:${state}`
 }
 
-const INTERRUPTED_FINISHES = new Set(['abort', 'cancelled', 'interrupted'])
-const FAILED_FINISHES = new Set(['error', 'failed'])
-
 export function parseOpenCodeGatewayState(source = {}, previousCursor = [], identity = {}) {
   const displayName = identity.displayName || 'OpenCode'
   const messages = messagesOf(source)
@@ -145,22 +142,15 @@ export function parseOpenCodeGatewayState(source = {}, previousCursor = [], iden
       })
     }
 
-    if (INTERRUPTED_FINISHES.has(info.finish)) {
-      pushNew(eventKey('interrupted', info.id, info.time?.completed), {
-        type: 'turn_interrupted',
-        sessionId: '',
-        turnId: currentTurnId,
-        occurredAt: occurredAt(message, true)
-      })
-      continue
-    }
-    if (FAILED_FINISHES.has(info.finish)) {
-      pushNew(eventKey('failed', info.id, info.time?.completed), {
-        type: 'turn_failed',
+    if (info.error && typeof info.error === 'object' &&
+      typeof info.error.name === 'string' && info.error.name) {
+      const interrupted = info.error.name === 'MessageAbortedError'
+      pushNew(eventKey(interrupted ? 'interrupted' : 'failed', info.id, info.time?.completed), {
+        type: interrupted ? 'turn_interrupted' : 'turn_failed',
         sessionId: '',
         turnId: currentTurnId,
         occurredAt: occurredAt(message, true),
-        errorCode: 'opencode_turn_failed'
+        ...(interrupted ? {} : { errorCode: 'opencode_turn_failed' })
       })
       continue
     }

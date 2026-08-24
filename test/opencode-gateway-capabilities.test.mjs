@@ -55,10 +55,10 @@ test('OpenCode explicit stop produces completion and a scoped result snapshot', 
   })
 })
 
-test('OpenCode explicit error and interruption finishes emit terminal lifecycle events', async () => {
+test('OpenCode AssistantMessage error union emits failed and interrupted lifecycle events', async () => {
   const { parseOpenCodeGatewayState } = await parser()
   const source = fixture('opencode-result-export')
-  const terminal = finish => parseOpenCodeGatewayState({
+  const terminal = error => parseOpenCodeGatewayState({
     ...source,
     messages: [
       source.messages[0],
@@ -66,15 +66,22 @@ test('OpenCode explicit error and interruption finishes emit terminal lifecycle 
         ...source.messages[1],
         info: {
           ...source.messages[1].info,
-          finish,
+          finish: 'stop',
+          error,
           time: { ...source.messages[1].info.time, completed: 1785385003000 }
         }
       }
     ]
   }).events.map(event => event.type)
 
-  assert.deepEqual(terminal('error'), ['turn_started', 'turn_failed'])
-  assert.deepEqual(terminal('abort'), ['turn_started', 'turn_interrupted'])
+  assert.deepEqual(terminal({
+    name: 'ProviderAuthError',
+    data: { message: 'private provider detail' }
+  }), ['turn_started', 'turn_failed'])
+  assert.deepEqual(terminal({
+    name: 'MessageAbortedError',
+    data: { message: 'cancelled by operator' }
+  }), ['turn_started', 'turn_interrupted'])
 })
 
 test('OpenCode pending question and permission tool states become decisions', async () => {

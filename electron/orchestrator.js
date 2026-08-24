@@ -101,7 +101,8 @@ import { GatewayManager } from './gateway/manager.js'
 import {
   createGatewayPort,
   createGatewaySessionOperations,
-  describeGatewaySessionEligibility
+  describeGatewaySessionEligibility,
+  sendAdapterTurn
 } from './gateway/orchestratorPort.js'
 import { SessionSignalBus } from './gateway/sessionSignalBus.js'
 import {
@@ -3022,9 +3023,7 @@ export function createOrchestrator() {
         })
       }
       if (!e.adapter) throw new Error('会话已离线，请先重新启动')
-      e.status = 'running'
-      e._gatewayTurnActive = true
-      return e.adapter.sendTurn(text)
+      return sendAdapterTurn(e, text)
     })
     ipcMain.handle('session:send-terminal-input', async (_e, sessionId, data) => {
       const e = sessions.get(sessionId)

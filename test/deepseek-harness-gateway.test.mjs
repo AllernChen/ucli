@@ -98,6 +98,25 @@ test('Gateway operations never call a DSH adapter, including snapshot reads', as
   assert.deepEqual(calls, [])
 })
 
+test('Gateway turn delivery rejects false adapter acceptance without changing running state', async () => {
+  const entry = {
+    status: 'idle',
+    _gatewayTurnActive: false,
+    adapter: { sendTurn: async () => false }
+  }
+  const operations = createGatewaySessionOperations({
+    getEntry: () => entry,
+    getSession: () => ({ id: 'session-1', adapterId: 'claude' })
+  })
+
+  assert.deepEqual(await operations.sendTurn('session-1', 'prompt'), {
+    accepted: false,
+    reason: 'turn_not_accepted'
+  })
+  assert.equal(entry.status, 'idle')
+  assert.equal(entry._gatewayTurnActive, false)
+})
+
 test('Gateway manager exposes stable DSH reasons and rejects mutations before runtime', async () => {
   const sessions = [dshSession('web', 'web'), dshSession('legacy', 'legacy-tui')]
   let mutations = 0
