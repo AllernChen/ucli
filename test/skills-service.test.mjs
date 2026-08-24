@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 
+import { symlinkOrSkip } from './helpers/fsCapabilities.mjs'
 import { openDb } from '../electron/persistence/db.js'
 import { createSkillsService } from '../electron/skills/service.js'
 import { createSkillSourceLoader } from '../electron/skills/sourceLoader.js'
@@ -24,9 +25,9 @@ function findSource(state, name, adapterId) {
   return findSources(state, name).find((source) => source.adapterId === adapterId) || null
 }
 
-function createDirectoryLink(target, entry) {
+function createDirectoryLink(t, target, entry) {
   mkdirSync(dirname(entry), { recursive: true })
-  symlinkSync(target, entry, process.platform === 'win32' ? 'junction' : 'dir')
+  return symlinkOrSkip(t, target, entry, process.platform === 'win32' ? 'junction' : 'dir')
 }
 
 async function withService(work, overrides = {}) {
@@ -1062,7 +1063,7 @@ test('ordinary Codex installation never adopts or deletes an unrelated same-cont
   })
 })
 
-test('DSH migration ignores a pre-positioned project journal junction and never touches its target', async () => {
+test('DSH migration ignores a pre-positioned project journal junction and never touches its target', async (t) => {
   await withService(async ({ root, service }) => {
     const source = join(root, 'source')
     const project = join(root, 'project')
@@ -1074,7 +1075,7 @@ test('DSH migration ignores a pre-positioned project journal junction and never 
       targetAdapterIds: ['deepseek-harness'], scopeType: 'project', projectPath: project
     })
     const journalRoot = join(project, '.dsh', '.ucli-skill-migrations')
-    symlinkSync(external, journalRoot, process.platform === 'win32' ? 'junction' : 'dir')
+    if (!symlinkOrSkip(t, external, journalRoot, process.platform === 'win32' ? 'junction' : 'dir')) return
 
     const migrated = await service.applyToAdapter(installed.id, 'codex')
     assert.deepEqual(readdirSync(external), [])
@@ -1083,7 +1084,7 @@ test('DSH migration ignores a pre-positioned project journal junction and never 
   })
 })
 
-test('DSH migration never invokes a project journal rename that can be swapped externally', async () => {
+test('DSH migration never invokes a project journal rename that can be swapped externally', async (t) => {
   let renameCalls = 0
   let external
   let heldJournal
@@ -1112,7 +1113,7 @@ test('DSH migration never invokes a project journal rename that can be swapped e
           renameCalls += 1
           const journalRoot = dirname(target)
           renameSync(journalRoot, heldJournal)
-          symlinkSync(external, journalRoot, process.platform === 'win32' ? 'junction' : 'dir')
+          if (!symlinkOrSkip(t, external, journalRoot, process.platform === 'win32' ? 'junction' : 'dir')) return
         }
         renameSync(source, target)
       }
@@ -1314,12 +1315,12 @@ test('updating the effective DSH installation never overwrites a shadowed agents
   })
 })
 
-test('Claude root remains Claude-owned when its entry links into agents storage', async () => {
+test('Claude root remains Claude-owned when its entry links into agents storage', async (t) => {
   await withService(async ({ root, service }) => {
     const target = join(root, 'home', '.agents', 'skills', 'diagnose')
     const entry = join(root, 'home', '.claude', 'skills', 'diagnose')
     createSkill(target, 'Diagnose bugs', 'diagnose')
-    createDirectoryLink(target, entry)
+    if (!createDirectoryLink(t, target, entry)) return
 
     const sources = findSources(await service.getState(), 'diagnose')
     const claude = sources.find((source) => source.adapterId === 'claude')
@@ -1343,16 +1344,16 @@ test('Codex system Skills are visible as read-only bundled entries', async () =>
   })
 })
 
-test('Claude user Skills expose valid and broken links without treating broken targets as visible', async () => {
+test('Claude user Skills expose valid and broken links without treating broken targets as visible', async (t) => {
   await withService(async ({ root, service }) => {
     const shared = join(root, 'home', '.agents', 'skills')
     createSkill(join(shared, 'lark-doc'), 'Lark document helper', 'lark-doc')
     // Claude Code keeps ~/.claude/skills entries as symlinks into a shared store.
     const claudeSkills = join(root, 'home', '.claude', 'skills')
     mkdirSync(claudeSkills, { recursive: true })
-    symlinkSync(join(shared, 'lark-doc'), join(claudeSkills, 'lark-doc'), 'dir')
+    if (!symlinkOrSkip(t, join(shared, 'lark-doc'), join(claudeSkills, 'lark-doc'), 'dir')) return
     const missingTarget = join(shared, 'missing-target')
-    symlinkSync(missingTarget, join(claudeSkills, 'lark-gone'), 'dir')
+    if (!symlinkOrSkip(t, missingTarget, join(claudeSkills, 'lark-gone'), 'dir')) return
 
     const state = await service.getState()
     const discovered = state.discovered
@@ -1662,13 +1663,13 @@ test('GitLab-installed Skills retain their GitLab source when checking for updat
   }, { sourceLoader })
 })
 
-test('Claude plugin Skills remain discoverable through an aliased install root', async () => {
+test('Claude plugin Skills remain discoverable through an aliased install root', async (t) => {
   await withService(async ({ root, service }) => {
     const pluginsRoot = join(root, 'home', '.claude', 'plugins')
     const actualInstall = join(root, 'plugin-store', 'superpowers', '5.1.0')
     const aliasedInstall = join(pluginsRoot, 'cache', 'superpowers', '5.1.0')
     createSkill(join(actualInstall, 'skills', 'writing-plans'), 'Write implementation plans', 'writing-plans')
-    createDirectoryLink(actualInstall, aliasedInstall)
+    if (!createDirectoryLink(t, actualInstall, aliasedInstall)) return
     writeFileSync(join(pluginsRoot, 'installed_plugins.json'), JSON.stringify({
       version: 2,
       plugins: {
@@ -1776,7 +1777,7 @@ test('commands and MCP-only plugins do not create fake Skills', async () => {
   })
 })
 
-test('plugin discovery cannot escape its install root or loop through directory links', async () => {
+test('plugin discovery cannot escape its install root or loop through directory links', async (t) => {
   await withService(async ({ root, service }) => {
     const pluginsRoot = join(root, 'home', '.claude', 'plugins')
     const installed = join(pluginsRoot, 'cache', 'safe-plugin', '1.0.0')
@@ -1784,8 +1785,8 @@ test('plugin discovery cannot escape its install root or loop through directory 
     const outside = join(root, 'outside-plugin')
     createSkill(join(outside, 'escaped-skill'), 'Must not be scanned', 'escaped-skill')
     mkdirSync(skillsRoot, { recursive: true })
-    createDirectoryLink(outside, join(skillsRoot, 'escape'))
-    createDirectoryLink(skillsRoot, join(skillsRoot, 'cycle'))
+    if (!createDirectoryLink(t, outside, join(skillsRoot, 'escape'))) return
+    if (!createDirectoryLink(t, skillsRoot, join(skillsRoot, 'cycle'))) return
     writeFileSync(join(pluginsRoot, 'installed_plugins.json'), JSON.stringify({
       version: 2,
       plugins: {

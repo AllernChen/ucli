@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { symlinkOrSkip } from './helpers/fsCapabilities.mjs'
 import { auditSkills } from '../scripts/audit-skill-discovery.mjs'
 
 function createSkill(root, name, description) {
@@ -17,7 +18,7 @@ function snapshotDirectory(root) {
     .sort()
 }
 
-test('Skill audit summarizes source kinds and health without mutation', async () => {
+test('Skill audit summarizes source kinds and health without mutation', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ucli-skills-audit-'))
   const home = join(root, 'home')
   const projectPath = join(root, 'project')
@@ -26,7 +27,7 @@ test('Skill audit summarizes source kinds and health without mutation', async ()
 
     const claudeSkills = join(home, '.claude', 'skills')
     mkdirSync(claudeSkills, { recursive: true })
-    symlinkSync(join(home, '.agents', 'skills', 'missing-lark'), join(claudeSkills, 'lark-doc'), 'dir')
+    if (!symlinkOrSkip(t, join(home, '.agents', 'skills', 'missing-lark'), join(claudeSkills, 'lark-doc'), 'dir')) return
 
     const pluginsRoot = join(home, '.claude', 'plugins')
     const pluginRoot = join(pluginsRoot, 'cache', 'mattpocock-skills', '1.0.0')
