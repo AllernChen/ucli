@@ -974,10 +974,34 @@ class Db {
         'Completed summary reports require the dedicated completion or import path'
       )
     }
-    return this.transactionSync(() => this._insertSummaryReportSync(report))
+    return this.transactionSync(() => this.#insertSummaryReportSync(report))
   }
 
-  _insertSummaryReportSync(report) {
+  async createQueuedSummaryReport(report) {
+    if (report?.version !== undefined) {
+      throw summaryValidationError('INVALID_SUMMARY_VERSION', 'Invalid summary report version')
+    }
+    const candidate = { ...report, version: 1 }
+    assertSummaryReport(candidate)
+    if (candidate.status !== 'queued' || candidate.isCurrent === true) {
+      throw summaryValidationError('INVALID_SUMMARY_STATUS', 'Invalid queued summary report')
+    }
+    return this.transactionSync(() => {
+      const latest = rows(this.sql.exec(
+        `SELECT COALESCE(MAX(version), 0) AS version FROM summary_reports
+         WHERE period_type = ? AND period_start = ?
+           AND period_end_exclusive = ? AND timezone = ?`,
+        [candidate.periodType, candidate.periodStart,
+          candidate.periodEndExclusive, candidate.timezone]
+      ))[0]
+      return this.#insertSummaryReportSync({
+        ...candidate,
+        version: Number(latest?.version || 0) + 1
+      })
+    })
+  }
+
+  #insertSummaryReportSync(report) {
     assertSummaryReport(report)
     assertAutomaticDuplicateTarget(this, report, report.errorText)
     const createdAt = Number.isFinite(report.createdAt) ? report.createdAt : Date.now()
@@ -1017,10 +1041,10 @@ class Db {
         'Completed summary reports require the dedicated completion path'
       )
     }
-    return this.transactionSync(() => this._updateSummaryReportSync(reportId, fields))
+    return this.transactionSync(() => this.#updateSummaryReportSync(reportId, fields))
   }
 
-  _updateSummaryReportSync(reportId, fields = {}) {
+  #updateSummaryReportSync(reportId, fields = {}) {
     assertSummaryReportPatch(fields)
     const existing = this.getSummaryReport(reportId)
     assertAutomaticDuplicateTarget(this, existing, fields.errorText)
@@ -1092,7 +1116,7 @@ class Db {
           code: 'SUMMARY_REPORT_NOT_RUNNING'
         })
       }
-      this._updateSummaryReportSync(reportId, fields)
+      this.#updateSummaryReportSync(reportId, fields)
       this.sql.run(
         `UPDATE summary_reports SET is_current = 0
          WHERE period_type = ? AND period_start = ?
@@ -1122,7 +1146,7 @@ class Db {
            AND period_end_exclusive = ? AND timezone = ?`,
         [report.periodType, report.periodStart, report.periodEndExclusive, report.timezone]
       ))[0]
-      const created = this._insertSummaryReportSync({
+      const created = this.#insertSummaryReportSync({
         ...report,
         version: Number(latest?.version || 0) + 1,
         status: 'completed',
@@ -2247,7 +2271,9 @@ function assertAutomaticDuplicateTarget(db, report, errorText) {
   const targetId = summaryAutomaticDuplicateReportId(errorText)
   if (!targetId) return
   const target = db.getSummaryReport(targetId)
-  if (!report || !target || target.status !== 'completed' ||
+  if (!report || !target || report.generatedBy !== 'automatic' ||
+    !report.sourceHash || target.sourceHash !== report.sourceHash ||
+    target.status !== 'completed' ||
     target.periodType !== report.periodType || target.periodStart !== report.periodStart ||
     target.periodEndExclusive !== report.periodEndExclusive || target.timezone !== report.timezone) {
     throw summaryValidationError('INVALID_SUMMARY_ERROR_CODE', 'Invalid summary error code')

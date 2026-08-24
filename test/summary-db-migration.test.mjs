@@ -283,6 +283,8 @@ test('direct create and update cannot bypass the dedicated completion path', asy
   const root = await mkdtemp(join(tmpdir(), 'ucli-summary-completion-bypass-'))
   const db = await openDb(join(root, 'ucli.db'))
   try {
+    assert.equal(db._insertSummaryReportSync, undefined)
+    assert.equal(db._updateSummaryReportSync, undefined)
     const markdown = '# Bypass'
     await assert.rejects(db.createSummaryReport(summaryReport({
       id: 'direct-completed', status: 'completed', markdown, sourceHash: SOURCE_HASH,
@@ -379,6 +381,97 @@ test('real database imports are concurrent-idempotent and allocate same-period v
     assert.equal(next.report.isCurrent, false)
     assert.equal(repository.get('existing-current').isCurrent, true)
     assert.equal(repository.listForKey(imported()).length, 3)
+  } finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('real repository queued creates allocate same-period versions atomically', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-real-queued-versions-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  let id = 0
+  const repository = createReportRepository({
+    db, now: () => 1000, idFactory: () => `queued-${++id}`
+  })
+  const input = {
+    periodType: 'week', start: 100, endExclusive: 200, timezone: 'Asia/Shanghai',
+    partial: false, generatedBy: 'manual'
+  }
+  try {
+    const results = await Promise.allSettled([
+      repository.createQueued(input), repository.createQueued(input)
+    ])
+
+    assert.deepEqual(results.map(result => result.status), ['fulfilled', 'fulfilled'])
+    assert.deepEqual(
+      results.map(result => result.value.version).sort((left, right) => left - right),
+      [1, 2]
+    )
+  } finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('real repository queued creates allocate different logical keys independently', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-real-queued-keys-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  let id = 0
+  const repository = createReportRepository({
+    db, now: () => 1000, idFactory: () => `queued-key-${++id}`
+  })
+  const input = {
+    periodType: 'week', start: 100, endExclusive: 200, timezone: 'Asia/Shanghai',
+    partial: false, generatedBy: 'manual'
+  }
+  try {
+    const [week, day] = await Promise.all([
+      repository.createQueued(input),
+      repository.createQueued({
+        ...input, periodType: 'day', start: 300, endExclusive: 400
+      })
+    ])
+
+    assert.deepEqual([week.version, day.version], [1, 1])
+    assert.deepEqual(repository.list().map(report => report.id).sort(), [week.id, day.id].sort())
+  } finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a failed atomic queued create rolls back before later queued writes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-real-queued-rollback-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  const ids = ['reject-queued', 'surviving-week', 'surviving-day']
+  const repository = createReportRepository({
+    db, now: () => 1000, idFactory: () => ids.shift()
+  })
+  const input = {
+    periodType: 'week', start: 100, endExclusive: 200, timezone: 'Asia/Shanghai',
+    partial: false, generatedBy: 'manual'
+  }
+  try {
+    db.sql.run(`CREATE TRIGGER reject_queued_create
+      BEFORE INSERT ON summary_reports WHEN NEW.id = 'reject-queued'
+      BEGIN SELECT RAISE(ABORT, 'queued create failed'); END`)
+    const results = await Promise.allSettled([
+      repository.createQueued(input),
+      repository.createQueued(input),
+      repository.createQueued({
+        ...input, periodType: 'day', start: 300, endExclusive: 400
+      })
+    ])
+
+    assert.deepEqual(results.map(result => result.status), ['rejected', 'fulfilled', 'fulfilled'])
+    assert.match(results[0].reason.message, /queued create failed/)
+    assert.equal(results[1].value.version, 1)
+    assert.equal(results[2].value.version, 1)
+    assert.deepEqual(
+      repository.list().map(report => report.id).sort(),
+      ['surviving-day', 'surviving-week']
+    )
   } finally {
     db.close()
     await rm(root, { recursive: true, force: true })
@@ -566,6 +659,16 @@ test('direct database report writes reject unknown shapes and credential scalars
         errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${targetId}`
       }), error => error.code === 'INVALID_SUMMARY_ERROR_CODE')
     }
+    await assert.rejects(db.updateSummaryReport('safe-update-target', {
+      errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${completedTargetId}`
+    }), error => error.code === 'INVALID_SUMMARY_ERROR_CODE')
+    await db.updateSummaryReport('safe-update-target', {
+      generatedBy: 'automatic', sourceHash: `sha256:${'b'.repeat(64)}`
+    })
+    await assert.rejects(db.updateSummaryReport('safe-update-target', {
+      errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${completedTargetId}`
+    }), error => error.code === 'INVALID_SUMMARY_ERROR_CODE')
+    await db.updateSummaryReport('safe-update-target', { sourceHash: SOURCE_HASH })
     assert.equal((await db.updateSummaryReport('safe-update-target', {
       errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${completedTargetId}`
     })).errorText, `SUMMARY_AUTOMATIC_DUPLICATE:${completedTargetId}`)

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { openDb } from '../electron/persistence/db.js'
 import { createReportRepository } from '../electron/summaries/reportRepository.js'
 import { createSummaryJobService } from '../electron/summaries/summaryJobService.js'
 import { createSummaryWorkspaceService } from '../electron/summaries/summaryWorkspaceService.js'
@@ -27,6 +28,16 @@ class MemoryDb {
   createSummaryReport(report) {
     this.rows.push(structuredClone(report))
     return structuredClone(report)
+  }
+
+  createQueuedSummaryReport(report) {
+    const version = this.rows
+      .filter(item => item.periodType === report.periodType &&
+        item.periodStart === report.periodStart &&
+        item.periodEndExclusive === report.periodEndExclusive &&
+        item.timezone === report.timezone)
+      .reduce((max, item) => Math.max(max, item.version), 0) + 1
+    return this.createSummaryReport({ ...report, version })
   }
 
   updateSummaryReport(id, patch) {
@@ -356,6 +367,16 @@ test('report repository accepts only bounded safe error machine codes', async ()
       errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${duplicateTargetId}`
     }), error => error.code === 'INVALID_SUMMARY_ERROR_CODE')
   }
+  await assert.rejects(repository.update(report.id, {
+    errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${targetId}`
+  }), error => error.code === 'INVALID_SUMMARY_ERROR_CODE')
+  await repository.update(report.id, {
+    generatedBy: 'automatic', sourceHash: `sha256:${'b'.repeat(64)}`
+  })
+  await assert.rejects(repository.update(report.id, {
+    errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${targetId}`
+  }), error => error.code === 'INVALID_SUMMARY_ERROR_CODE')
+  await repository.update(report.id, { sourceHash: SOURCE_HASH })
   assert.equal((await repository.update(report.id, {
     errorText: `SUMMARY_AUTOMATIC_DUPLICATE:${targetId}`
   })).errorText, `SUMMARY_AUTOMATIC_DUPLICATE:${targetId}`)
@@ -805,6 +826,118 @@ test('cancellation wins while usage snapshot is resolving on an empty report', a
   assert.equal(report.isCurrent, false)
 })
 
+test('cancel waits for a real database completion already queued behind the transaction tail', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-finishing-cancel-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  let releaseTail
+  let markTailStarted
+  let markCompleteQueued
+  const tailGate = new Promise(resolve => { releaseTail = resolve })
+  const tailStarted = new Promise(resolve => { markTailStarted = resolve })
+  const completeQueued = new Promise(resolve => { markCompleteQueued = resolve })
+  let tailBlocker
+  try {
+    const repository = createReportRepository({ db })
+    const originalComplete = db.completeSummaryReport.bind(db)
+    db.completeSummaryReport = (id, patch) => {
+      const completion = originalComplete(id, patch)
+      markCompleteQueued()
+      return completion
+    }
+    const service = createSummaryJobService({
+      repository,
+      evidenceCollector: { async collect() { return evidence() } },
+      snapshotUsage: async () => ({ totals: {} }),
+      pipeline: { async run() { return pipelineResult() } },
+      workspaceService: {
+        async create() { return { workDirectory: 'safe-work' } },
+        async writeArtifact() {},
+        async markStage() {},
+        async complete() {
+          tailBlocker = db.transaction(async () => {
+            markTailStarted()
+            await tailGate
+          })
+          await tailStarted
+        },
+        async fail() {}
+      }
+    })
+    const job = await service.generate(request())
+    await completeQueued
+
+    const cancelling = service.cancel(job.reportId)
+    releaseTail()
+
+    assert.equal(await cancelling, false)
+    assert.equal((await job.completion).status, 'completed')
+    assert.equal(repository.get(job.reportId).isCurrent, true)
+    await tailBlocker
+    await service.shutdown()
+  } finally {
+    releaseTail?.()
+    db.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('shutdown drains a real database completion already queued behind the transaction tail', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-finishing-shutdown-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  let releaseTail
+  let markTailStarted
+  let markCompleteQueued
+  const tailGate = new Promise(resolve => { releaseTail = resolve })
+  const tailStarted = new Promise(resolve => { markTailStarted = resolve })
+  const completeQueued = new Promise(resolve => { markCompleteQueued = resolve })
+  try {
+    const repository = createReportRepository({ db })
+    const originalComplete = db.completeSummaryReport.bind(db)
+    db.completeSummaryReport = (id, patch) => {
+      const completion = originalComplete(id, patch)
+      markCompleteQueued()
+      return completion
+    }
+    const service = createSummaryJobService({
+      repository,
+      evidenceCollector: { async collect() { return evidence() } },
+      snapshotUsage: async () => ({ totals: {} }),
+      pipeline: { async run() { return pipelineResult() } },
+      workspaceService: {
+        async create() { return { workDirectory: 'safe-work' } },
+        async writeArtifact() {},
+        async markStage() {},
+        async complete() {
+          const blocker = db.transaction(async () => {
+            markTailStarted()
+            await tailGate
+          })
+          blocker.catch(() => {})
+          await tailStarted
+        },
+        async fail() {}
+      }
+    })
+    const job = await service.generate(request())
+    await completeQueued
+
+    let shutdownSettled = false
+    const shutdown = service.shutdown().finally(() => { shutdownSettled = true })
+    await Promise.resolve()
+    assert.equal(shutdownSettled, false)
+    releaseTail()
+
+    await shutdown
+    assert.equal((await job.completion).status, 'completed')
+    assert.equal(repository.get(job.reportId).isCurrent, true)
+    assert.equal(service.isActive(job.reportId), false)
+  } finally {
+    releaseTail?.()
+    db.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('repository startup recovery marks stale queued, running, and awaiting reports interrupted', async () => {
   const db = new MemoryDb()
   let id = 0
@@ -964,6 +1097,35 @@ test('manual preflight persists awaiting_confirmation and resumes only through e
   assert.equal(service.getConfirmationCallLimit(job.reportId), null)
 })
 
+test('concurrent confirmation admits exactly one confirmed pipeline run', async () => {
+  let confirmedRuns = 0
+  const { service, repository } = createHarness({
+    pipeline: {
+      async run({ confirmed }) {
+        if (!confirmed) {
+          return { requiresConfirmation: true, estimatedCalls: 24, confirmationCallLimit: 24 }
+        }
+        confirmedRuns += 1
+        return pipelineResult()
+      }
+    }
+  })
+  const job = await service.generate(request())
+  await waitFor(() => repository.get(job.reportId).status === 'awaiting_confirmation')
+
+  const results = await Promise.allSettled([
+    service.confirm(job.reportId), service.confirm(job.reportId)
+  ])
+
+  assert.deepEqual(results.map(result => result.status).sort(), ['fulfilled', 'rejected'])
+  const rejected = results.find(result => result.status === 'rejected')
+  assert.equal(rejected.reason.code, 'SUMMARY_CONFIRMATION_IN_PROGRESS')
+  const admitted = results.find(result => result.status === 'fulfilled').value
+  await admitted.completion
+  assert.equal(confirmedRuns, 1)
+  assert.equal(repository.get(job.reportId).status, 'completed')
+})
+
 test('a dynamic confirmation error fails safely instead of pretending a costly restart is continuation', async () => {
   let calls = 0
   const { service, repository } = createHarness({
@@ -1040,8 +1202,8 @@ test('workspace finalization failure never persists a completed non-current repo
 test('job order finalizes the workspace before one atomic database completion', async () => {
   const order = []
   const db = new MemoryDb()
-  const originalCreate = db.createSummaryReport.bind(db)
-  db.createSummaryReport = report => { order.push('queued'); return originalCreate(report) }
+  const originalCreate = db.createQueuedSummaryReport.bind(db)
+  db.createQueuedSummaryReport = report => { order.push('queued'); return originalCreate(report) }
   const originalComplete = db.completeSummaryReport.bind(db)
   db.completeSummaryReport = async (id, patch) => {
     order.push('complete')
@@ -1101,6 +1263,38 @@ test('shutdown is idempotent, rejects new jobs, cancels active work, and drains 
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('shutdown waits for an in-flight generate admission and safely terminates its queued row', async () => {
+  const { service, repository } = createHarness()
+  const originalCreateQueued = repository.createQueued.bind(repository)
+  let releaseCreate
+  let markCreateStarted
+  const createStarted = new Promise(resolve => { markCreateStarted = resolve })
+  const createGate = new Promise(resolve => { releaseCreate = resolve })
+  repository.createQueued = async input => {
+    markCreateStarted()
+    await createGate
+    return originalCreateQueued(input)
+  }
+
+  const generating = service.generate(request())
+  await createStarted
+  let shutdownSettled = false
+  const shutdown = service.shutdown().finally(() => { shutdownSettled = true })
+  await Promise.resolve()
+  assert.equal(shutdownSettled, false)
+
+  releaseCreate()
+  await assert.rejects(
+    generating,
+    error => error.code === 'SUMMARY_SERVICE_SHUTTING_DOWN'
+  )
+  await shutdown
+
+  const reports = repository.list()
+  assert.equal(reports.some(report => ['queued', 'running'].includes(report.status)), false)
+  assert.equal(reports.every(report => !service.isActive(report.id)), true)
 })
 
 test('shutdown compacts an awaiting-confirmation workspace instead of leaving it running', async () => {

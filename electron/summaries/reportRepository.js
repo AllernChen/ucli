@@ -275,7 +275,9 @@ export function createReportRepository({
     if (!targetId) return
     const report = db.getSummaryReport(reportId)
     const target = db.getSummaryReport(targetId)
-    if (!report || !target || target.status !== 'completed' ||
+    if (!report || !target || report.generatedBy !== 'automatic' ||
+      !report.sourceHash || target.sourceHash !== report.sourceHash ||
+      target.status !== 'completed' ||
       target.periodType !== report.periodType || target.periodStart !== report.periodStart ||
       target.periodEndExclusive !== report.periodEndExclusive || target.timezone !== report.timezone) {
       throw repositoryError('INVALID_SUMMARY_ERROR_CODE', 'Invalid summary error code')
@@ -287,14 +289,12 @@ export function createReportRepository({
     async createQueued(input) {
       const key = keyFilters(input)
       assertQueuedInput(input, key)
-      const version = listForKey(key).reduce((max, report) => Math.max(max, report.version), 0) + 1
       const timestamp = now()
       const executionMode = input.executionMode || SUMMARY_EXECUTION_MODE.ISOLATED_RUNNER
-      return normalizeReport(await db.createSummaryReport({
+      return normalizeReport(await db.createQueuedSummaryReport({
         id: idFactory(),
         ...key,
         partial: input.partial === true,
-        version,
         status: 'queued',
         markdown: null,
         executorId: input.executorId || null,

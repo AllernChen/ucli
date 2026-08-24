@@ -104,6 +104,7 @@ export function createSummaryJobService({
 
   const listeners = new Set()
   const jobs = new Map()
+  const admissions = new Set()
   let queue = Promise.resolve()
   let shuttingDown = false
   let shutdownPromise = null
@@ -200,6 +201,10 @@ export function createSummaryJobService({
       await settleWorkspaceUpdates(job)
       await workspaceService.complete(job.reportId, { markdown: result.markdown })
     }
+    if (job.cancelled) {
+      throw Object.assign(new Error('cancelled'), { code: 'SUMMARY_CANCELLED' })
+    }
+    job.finishing = true
     const current = await repository.complete(job.reportId, {
       markdown: result.markdown,
       usageSnapshot: context.usageSnapshot,
@@ -294,11 +299,13 @@ export function createSummaryJobService({
   const shutdown = () => {
     if (shutdownPromise) return shutdownPromise
     shuttingDown = true
-    const active = [...jobs.values()]
     shutdownPromise = (async () => {
+      await Promise.allSettled([...admissions])
+      const active = [...jobs.values()]
       for (const job of active) {
         const report = repository.get(job.reportId)
         if (!report || terminal(report.status)) continue
+        if (job.finishing) continue
         job.cancelled = true
         job.controller.abort()
         const cancelled = await update(job.reportId, {
@@ -325,29 +332,52 @@ export function createSummaryJobService({
           code: 'SUMMARY_SERVICE_SHUTTING_DOWN'
         })
       }
-      const request = { ...input, timezone: input.timezone || defaultTimezone }
-      const queued = await repository.createQueued(request)
-      const job = {
-        reportId: queued.id,
-        request,
-        controller: new AbortController(),
-        cancelled: false,
-        context: null,
-        confirmationCallLimit: null,
-        workspace: null,
-        workspaceUpdates: Promise.resolve(),
-        done: deferred()
+      const admission = (async () => {
+        const request = { ...input, timezone: input.timezone || defaultTimezone }
+        const queued = await repository.createQueued(request)
+        if (shuttingDown) {
+          await repository.update(queued.id, {
+            status: 'cancelled',
+            errorText: 'SUMMARY_CANCELLED'
+          })
+          throw Object.assign(new Error('Summary service is shutting down'), {
+            code: 'SUMMARY_SERVICE_SHUTTING_DOWN'
+          })
+        }
+        const job = {
+          reportId: queued.id,
+          request,
+          controller: new AbortController(),
+          cancelled: false,
+          confirming: false,
+          finishing: false,
+          context: null,
+          confirmationCallLimit: null,
+          workspace: null,
+          workspaceUpdates: Promise.resolve(),
+          done: deferred()
+        }
+        jobs.set(job.reportId, job)
+        publish(queued)
+        enqueue(() => runInitial(job))
+        return { reportId: job.reportId, completion: job.done.promise }
+      })()
+      admissions.add(admission)
+      try {
+        return await admission
+      } finally {
+        admissions.delete(admission)
       }
-      jobs.set(job.reportId, job)
-      publish(queued)
-      enqueue(() => runInitial(job))
-      return { reportId: job.reportId, completion: job.done.promise }
     },
 
     async cancel(reportId) {
       const report = repository.get(reportId)
       if (!report || terminal(report.status)) return false
       const job = jobs.get(reportId)
+      if (job?.finishing) {
+        await job.done.promise
+        return false
+      }
       if (job) {
         job.cancelled = true
         job.controller.abort()
@@ -363,6 +393,11 @@ export function createSummaryJobService({
     async confirm(reportId, { confirmationCallLimit } = {}) {
       const job = jobs.get(reportId)
       const report = repository.get(reportId)
+      if (job?.confirming) {
+        throw Object.assign(new Error('Summary confirmation is already in progress'), {
+          code: 'SUMMARY_CONFIRMATION_IN_PROGRESS'
+        })
+      }
       if (!job || !job.context || report?.status !== 'awaiting_confirmation') {
         throw Object.assign(new Error('Confirmation context is unavailable'), {
           code: 'SUMMARY_CONFIRMATION_CONTEXT_MISSING'
@@ -371,8 +406,16 @@ export function createSummaryJobService({
       const limit = Number.isFinite(confirmationCallLimit)
         ? confirmationCallLimit
         : job.confirmationCallLimit
-      publish(await repository.update(reportId, { status: 'queued', errorText: null }))
-      enqueue(() => runConfirmed(job, limit))
+      job.confirming = true
+      try {
+        publish(await repository.update(reportId, { status: 'queued', errorText: null }))
+      } catch (error) {
+        job.confirming = false
+        throw error
+      }
+      enqueue(async () => {
+        try { return await runConfirmed(job, limit) } finally { job.confirming = false }
+      })
       return { reportId, completion: job.done.promise }
     },
 
