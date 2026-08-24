@@ -1300,6 +1300,21 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     throw Object.assign(new Error(), { code: 'SUMMARY_PROFILE_UNAVAILABLE' })
   }
 
+  function interactiveProfileReadiness(snapshot) {
+    if (!snapshot?.profileId) return null
+    return Object.freeze({
+      profileId: snapshot.profileId,
+      runtimeRevision: snapshot.runtimeRevision || null
+    })
+  }
+
+  function clearInteractiveProfileCapability(entry) {
+    if (!entry) return
+    entry._interactiveProfileSnapshot = null
+    entry._interactiveProfileReadiness = null
+    entry._interactiveProfileToken = null
+  }
+
   function resolveInteractiveSummarySelection(input) {
     if (input.model && !isSafeClaudeModel(input.model)) throw invalidSummaryIpc()
     if (['opencode', 'ucode'].includes(input.executorId)) {
@@ -1346,8 +1361,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   }
 
   function armClaudeSessionLaunch(entry) {
-    if (entry._interactiveProfileSnapshot) {
-      assertInteractiveProfileSnapshotCurrent(entry._interactiveProfileSnapshot)
+    if (entry._interactiveProfileReadiness) {
+      assertInteractiveProfileSnapshotCurrent(entry._interactiveProfileReadiness)
       Object.assign(entry.session, {
         activeProfileId: entry.session.profileId || null,
         pendingProfileId: null,
@@ -1907,7 +1922,18 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     }
   }
 
-  async function createSession(config, { interactiveProfileSnapshot = null } = {}) {
+  async function rejectInteractiveProfileConstruction(adapter, sessionId, error) {
+    try {
+      await adapter.dispose?.()
+    } catch (cleanupError) {
+      log('interactive-profile-construction-cleanup-failed',
+        safeSummaryErrorCode(cleanupError?.code, 'SUMMARY_PROFILE_CLEANUP_FAILED'))
+    }
+    engine.removeSession(sessionId)
+    throw error
+  }
+
+  function createSession(config, { interactiveProfileSnapshot = null } = {}) {
     if (config.cliSessionId && !isSafeNativeSessionId(config.cliSessionId)) {
       throw new Error('invalid native session id')
     }
@@ -1995,15 +2021,9 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     try {
       assertInteractiveProfileSnapshotCurrent(pinnedProfile)
     } catch (error) {
-      try {
-        await adapter.dispose?.()
-      } catch (cleanupError) {
-        log('interactive-profile-construction-cleanup-failed',
-          safeSummaryErrorCode(cleanupError?.code, 'SUMMARY_PROFILE_CLEANUP_FAILED'))
-      }
-      engine.removeSession(sessionId)
-      throw error
+      return rejectInteractiveProfileConstruction(adapter, sessionId, error)
     }
+    const pinnedProfileReadiness = interactiveProfileReadiness(pinnedProfile)
     const costAvailable = descriptor.costAvailable !== false
     const entry = {
       adapter, session,
@@ -2029,7 +2049,9 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       _claudeProfileLaunchStamp: adapterId === 'claude'
         ? claudeProfileLaunchStamp(session)
         : null,
-      _interactiveProfileSnapshot: pinnedProfile
+      _interactiveProfileSnapshot: null,
+      _interactiveProfileReadiness: pinnedProfileReadiness,
+      _interactiveProfileToken: null
     }
     sessions.set(sessionId, entry)
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
@@ -3029,81 +3051,94 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     const e = sessions.get(sessionId)
     if (e) assertDshSessionStartable(e.session)
     if (!e || !e.adapter) return false
-    assertInteractiveProfileSnapshotCurrent(e._interactiveProfileSnapshot)
-    if (e.session.adapterId === 'codex') {
-      if (e._interactiveProfileSnapshot) {
-        e.adapter.setProfileEnvironment?.(e._interactiveProfileSnapshot.profileEnvironment)
-      } else if (e.session.profileId) {
-        const prepared = prepareCodexSessionRuntime(e.session, {
-          imported: Boolean(e.session.cliSessionId),
-          explicitProfileId: e.session.profileId
-        })
-        Object.assign(e.session, prepared.session)
-        e.adapter.setProfileEnvironment?.(prepared.profileEnvironment)
-      } else {
-        const next = refreshCodexProviderRuntime(e, {
-          imported: Boolean(e.session.cliSessionId),
-          isActive: false
-        })
-        send('session:event', {
-          sessionId,
-          type: 'codex-runtime',
-          provider: next.provider,
-          providerPolicy: next.providerPolicy,
-          explicitProvider: next.explicitProvider,
-          providerWarning: next.providerWarning,
-          pendingProvider: next.pendingProvider,
-          pendingProviderWarning: next.pendingProviderWarning,
-          restartRequired: next.restartRequired,
-          canStart: next.canStart
-        })
-        assertCodexSessionCanStart(next)
-      }
-    }
-    await hookReady
-    assertInteractiveProfileSnapshotCurrent(e._interactiveProfileSnapshot)
-    e.adapter.hookPort = hookPort
-    if (e.session.adapterId === 'claude') armClaudeSessionLaunch(e)
-    let started
+    let pinnedProfileReadiness = e._interactiveProfileReadiness
     try {
-      assertInteractiveProfileSnapshotCurrent(e._interactiveProfileSnapshot)
-      started = await e.adapter.start()
-    } catch (error) {
-      let disposed = false
+      assertInteractiveProfileSnapshotCurrent(pinnedProfileReadiness)
+      if (e.session.adapterId === 'codex' && !pinnedProfileReadiness) {
+        if (e.session.profileId) {
+          const prepared = prepareCodexSessionRuntime(e.session, {
+            imported: Boolean(e.session.cliSessionId),
+            explicitProfileId: e.session.profileId
+          })
+          Object.assign(e.session, prepared.session)
+          e.adapter.setProfileEnvironment?.(prepared.profileEnvironment)
+        } else {
+          const next = refreshCodexProviderRuntime(e, {
+            imported: Boolean(e.session.cliSessionId),
+            isActive: false
+          })
+          send('session:event', {
+            sessionId,
+            type: 'codex-runtime',
+            provider: next.provider,
+            providerPolicy: next.providerPolicy,
+            explicitProvider: next.explicitProvider,
+            providerWarning: next.providerWarning,
+            pendingProvider: next.pendingProvider,
+            pendingProviderWarning: next.pendingProviderWarning,
+            restartRequired: next.restartRequired,
+            canStart: next.canStart
+          })
+          assertCodexSessionCanStart(next)
+        }
+      }
+      await hookReady
+      assertInteractiveProfileSnapshotCurrent(pinnedProfileReadiness)
+      e.adapter.hookPort = hookPort
+      if (e.session.adapterId === 'claude') armClaudeSessionLaunch(e)
+      let started
       try {
-        await e.adapter.dispose()
-        disposed = true
-      } catch (cleanupError) {
-        error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
+        try {
+          assertInteractiveProfileSnapshotCurrent(pinnedProfileReadiness)
+        } finally {
+          clearInteractiveProfileCapability(e)
+          pinnedProfileReadiness = null
+        }
+        started = await e.adapter.start()
+      } catch (error) {
+        clearInteractiveProfileCapability(e)
+        let disposed = false
+        try {
+          await e.adapter.dispose()
+          disposed = true
+        } catch (cleanupError) {
+          error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
+        } finally {
+          clearInteractiveProfileCapability(e)
+        }
+        if (disposed) e.adapter = null
+        e.status = 'error'
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+        throw error
       }
-      if (disposed) e.adapter = null
-      e.status = 'error'
-      const db = getDb()
-      if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
-      throw error
-    }
-    if (started === false) {
-      e.status = 'error'
-      const db = getDb()
-      if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
-      return false
-    }
-    if (['codex', 'claude'].includes(e.session.adapterId)) {
-      if (e.session.adapterId === 'codex') {
-        e.session.activeProfileId = e.session.profileId || null
-        e.session.pendingProfileId = null
-        e.session.pendingProfileRuntimeRevision = null
-        e.session.restartRequired = false
+      if (started === false) {
+        e.status = 'error'
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+        return false
       }
-      publishProfileRuntime(sessionId, e.session)
+      if (['codex', 'claude'].includes(e.session.adapterId)) {
+        if (e.session.adapterId === 'codex') {
+          e.session.activeProfileId = e.session.profileId || null
+          e.session.pendingProfileId = null
+          e.session.pendingProfileRuntimeRevision = null
+          e.session.restartRequired = false
+        }
+        publishProfileRuntime(sessionId, e.session)
+      }
+      await gatewayManager?.resyncSession(sessionId)
+      return true
+    } finally {
+      clearInteractiveProfileCapability(e)
+      pinnedProfileReadiness = null
     }
-    await gatewayManager?.resyncSession(sessionId)
-    return true
   }
 
   async function stopSession(sessionId, _reason = null) {
     const e = sessions.get(sessionId)
     if (e) {
+      clearInteractiveProfileCapability(e)
       engine.removeSession(sessionId)
       const cleanup = e.adapter?.dispose()
       gatewaySignals.publish({
@@ -3111,7 +3146,11 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         sessionId,
         occurredAt: Date.now()
       })
-      await cleanup
+      try {
+        await cleanup
+      } finally {
+        clearInteractiveProfileCapability(e)
+      }
       e.adapter = null
       interactiveAdapterFacades.delete(sessionId)
       e.status = 'offline'
@@ -3457,6 +3496,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     ipcMain.handle('session:delete', async (_e, sessionId) => {
       const e = sessions.get(sessionId)
       if (e) {
+        clearInteractiveProfileCapability(e)
         engine.removeSession(sessionId)
         gatewaySignals.publish({
           type: 'session_stopped',
@@ -3469,6 +3509,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         } catch (error) {
           cleanupError = error
         } finally {
+          clearInteractiveProfileCapability(e)
           interactiveAdapterFacades.delete(sessionId)
           sessions.delete(sessionId)
           historyService.invalidate(sessionId)
@@ -3703,10 +3744,12 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       await gatewayManager?.shutdown()
       const db = getDb()
       for (const [id, entry] of sessions) {
+        clearInteractiveProfileCapability(entry)
         engine.removeSession(id)
         if (entry.adapter) {
           try { await Promise.resolve(entry.adapter.dispose()) }
           catch (error) { console.error(`Failed to dispose session ${id}:`, error) }
+          finally { clearInteractiveProfileCapability(entry) }
           entry.adapter = null
         }
         entry.status = 'offline'

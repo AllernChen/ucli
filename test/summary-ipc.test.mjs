@@ -605,8 +605,79 @@ test('interactive summary aborts bound Claude and Codex startup when profiles be
       })
       assert.equal(persisted.model, profile.model, executorId)
       assert.equal(adapter.startCalls || 0, 0, executorId)
+      assert.equal(adapter.sent.length, 0, executorId)
       await waitUntil(() => adapter.disposed)
       assert.equal(adapter.disposeCalls, 1, executorId)
+    })
+  }
+})
+
+test('interactive summary consumes its pinned profile capability after a successful start and terminal cleanup', async t => {
+  for (const executorId of ['claude', 'codex']) {
+    await withInteractiveOrchestrator(t, {}, async ({ handlers, instances, codexHome }) => {
+      const profile = await createBoundProfile(handlers, executorId)
+      const response = await handlers.get('summary:start-interactive')({}, interactiveRequest({
+        executorId, profileId: profile.id, model: null
+      }))
+      const adapter = await waitUntil(() => instances.find(candidate =>
+        candidate.session.id === response.value.sessionId
+      ))
+      await waitUntil(() => adapter.sent.length === 1)
+      await handlers.get('summary:cancel')({}, response.value.report.id)
+      await waitUntil(() => adapter.disposed)
+
+      const updatedModel = mutateBoundProfile({ profile, executorId, codexHome })
+      await handlers.get('session:restart')({}, response.value.sessionId)
+      const restarted = await waitUntil(() => instances.find(candidate =>
+        candidate !== adapter && candidate.session.id === response.value.sessionId
+      ))
+      assert.equal(restarted.session.model, updatedModel, executorId)
+      assert.equal(restarted.startCalls, 1, executorId)
+      assert.equal(
+        await handlers.get('session:start-adapter')({}, response.value.sessionId),
+        true,
+        executorId
+      )
+      assert.equal(restarted.startCalls, 2, executorId)
+    })
+  }
+})
+
+test('interactive summary rejects changed-but-ready profiles held at hook readiness without retaining capability', async t => {
+  for (const executorId of ['claude', 'codex']) {
+    const hookReady = holdHookReady()
+    await withInteractiveOrchestrator(t, { hookReady }, async ({ handlers, instances, codexHome }) => {
+      const profile = await createBoundProfile(handlers, executorId)
+      const response = await handlers.get('summary:start-interactive')({}, interactiveRequest({
+        executorId, profileId: profile.id, model: null
+      }))
+      const adapter = await waitUntil(() => instances.find(candidate =>
+        candidate.session.id === response.value.sessionId
+      ))
+      await waitUntil(() => hookReady.observed, { timeoutMs: 500 })
+      const updatedModel = mutateBoundProfile({ profile, executorId, codexHome })
+      hookReady.release()
+      await waitUntil(async () => {
+        const result = await handlers.get('summary:get-report')({}, response.value.report.id)
+        return result.value?.status === 'failed'
+      })
+      assert.equal(adapter.startCalls || 0, 0, executorId)
+      assert.equal(adapter.sent.length, 0, executorId)
+      await waitUntil(() => adapter.disposed)
+      assert.equal(adapter.disposeCalls, 1, executorId)
+
+      await handlers.get('session:restart')({}, response.value.sessionId)
+      const restarted = await waitUntil(() => instances.find(candidate =>
+        candidate !== adapter && candidate.session.id === response.value.sessionId
+      ))
+      assert.equal(restarted.session.model, updatedModel, executorId)
+      assert.equal(restarted.startCalls, 1, executorId)
+      assert.equal(
+        await handlers.get('session:start-adapter')({}, response.value.sessionId),
+        true,
+        executorId
+      )
+      assert.equal(restarted.startCalls, 2, executorId)
     })
   }
 })
@@ -625,6 +696,15 @@ test('public session creation rejects forged interactive profile capabilities', 
           profileEnvironment: { API_KEY: 'renderer-secret' },
           profileLaunch: { args: ['--dangerous-renderer-arg'], env: { TOKEN: 'renderer-secret' } }
         }
+      }),
+      /interactive profile capability/i
+    )
+    assert.throws(
+      () => handlers.get('session:create')({}, {
+        adapterId: 'claude',
+        cwd: process.cwd(),
+        profileId: 'renderer-profile-id',
+        interactiveProfileToken: 'forged-renderer-token'
       }),
       /interactive profile capability/i
     )
