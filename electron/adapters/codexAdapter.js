@@ -747,7 +747,7 @@ export class CodexAdapter extends BaseAdapter {
   }
 
   async sendTurn(text) {
-    this.writeInput(text + '\r')
+    return this.writeInput(text + '\r')
   }
 
   async interrupt() {

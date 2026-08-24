@@ -55,6 +55,28 @@ test('OpenCode explicit stop produces completion and a scoped result snapshot', 
   })
 })
 
+test('OpenCode explicit error and interruption finishes emit terminal lifecycle events', async () => {
+  const { parseOpenCodeGatewayState } = await parser()
+  const source = fixture('opencode-result-export')
+  const terminal = finish => parseOpenCodeGatewayState({
+    ...source,
+    messages: [
+      source.messages[0],
+      {
+        ...source.messages[1],
+        info: {
+          ...source.messages[1].info,
+          finish,
+          time: { ...source.messages[1].info.time, completed: 1785385003000 }
+        }
+      }
+    ]
+  }).events.map(event => event.type)
+
+  assert.deepEqual(terminal('error'), ['turn_started', 'turn_failed'])
+  assert.deepEqual(terminal('abort'), ['turn_started', 'turn_interrupted'])
+})
+
 test('OpenCode pending question and permission tool states become decisions', async () => {
   const { parseOpenCodeGatewayState } = await parser()
   const source = fixture('opencode-result-export')
@@ -148,5 +170,18 @@ test('OpenCode adapter verifies current decisions and uses provider-native plan 
     { accepted: true }
   )
   assert.deepEqual(writes, ['\t', 'Implement the approved plan.\r'])
+  await adapter.dispose()
+})
+
+test('OpenCode sendTurn returns the PTY write acceptance result', async () => {
+  const adapter = new OpenCodeAdapter({
+    session: { id: 'session-1', cwd: 'F:\\projects\\ucli' },
+    engine: null,
+    settings: {}
+  })
+  adapter.writeInput = value => value === 'accepted\r'
+
+  assert.equal(await adapter.sendTurn('accepted'), true)
+  assert.equal(await adapter.sendTurn('rejected'), false)
   await adapter.dispose()
 })

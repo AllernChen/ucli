@@ -212,6 +212,21 @@ test('Claude adapter verifies the current decision before writing native input',
   await adapter.dispose()
 })
 
+test('Claude sendTurn reports whether transcript delivery was accepted', async () => {
+  const adapter = new ClaudeAdapter({
+    session: { id: 'session-1', cwd: 'F:\\projects\\ucli' },
+    engine: null,
+    settings: {}
+  })
+  const writes = []
+  adapter.ptyProc = { write: value => writes.push(value), kill() {} }
+  adapter._waitTurnDelivered = async () => true
+
+  assert.equal(await adapter.sendTurn('summary prompt'), true)
+  assert.deepEqual(writes, ['summary prompt\r'])
+  await adapter.dispose()
+})
+
 test('Claude hook passes user-decision tools through to the native prompt', () => {
   const runner = fileURLToPath(new URL('../resources/claudeHook.runner.mjs', import.meta.url))
   for (const toolName of ['AskUserQuestion', 'ExitPlanMode']) {

@@ -92,6 +92,9 @@ function eventKey(type, id, state = '') {
   return `${type}:${id || 'unknown'}:${state}`
 }
 
+const INTERRUPTED_FINISHES = new Set(['abort', 'cancelled', 'interrupted'])
+const FAILED_FINISHES = new Set(['error', 'failed'])
+
 export function parseOpenCodeGatewayState(source = {}, previousCursor = [], identity = {}) {
   const displayName = identity.displayName || 'OpenCode'
   const messages = messagesOf(source)
@@ -142,6 +145,25 @@ export function parseOpenCodeGatewayState(source = {}, previousCursor = [], iden
       })
     }
 
+    if (INTERRUPTED_FINISHES.has(info.finish)) {
+      pushNew(eventKey('interrupted', info.id, info.time?.completed), {
+        type: 'turn_interrupted',
+        sessionId: '',
+        turnId: currentTurnId,
+        occurredAt: occurredAt(message, true)
+      })
+      continue
+    }
+    if (FAILED_FINISHES.has(info.finish)) {
+      pushNew(eventKey('failed', info.id, info.time?.completed), {
+        type: 'turn_failed',
+        sessionId: '',
+        turnId: currentTurnId,
+        occurredAt: occurredAt(message, true),
+        errorCode: 'opencode_turn_failed'
+      })
+      continue
+    }
     if (info.finish !== 'stop') continue
     if (info.agent === 'plan') {
       const markdown = messageText(message)
