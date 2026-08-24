@@ -9,6 +9,7 @@ const DEFAULT_FAILED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const ARTIFACT_ROOTS = new Set(['input', 'output', 'work'])
 const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,127}$/
 const SAFE_STAGE = /^[a-z][a-z0-9-]{0,63}$/
+const RETAINED_FAILURE_STATUSES = new Set(['failed', 'interrupted', 'cancelled'])
 
 function workspaceError(code) {
   return Object.assign(new Error(code), { code })
@@ -181,11 +182,15 @@ export function createSummaryWorkspaceService({
     return manifest
   }
 
-  async function fail(reportId, code) {
+  async function fail(reportId, code, { status = 'failed', stage = status } = {}) {
+    if (!RETAINED_FAILURE_STATUSES.has(status) || !SAFE_STAGE.test(String(stage || ''))) {
+      throw workspaceError('SUMMARY_WORKSPACE_STAGE_INVALID')
+    }
     const workspace = workspacePath(root, reportId)
     const manifest = await readManifest(workspace)
     const failedAt = now()
-    manifest.status = 'failed'
+    manifest.status = status
+    manifest.stage = stage
     manifest.errorCode = safeFailureCode(code, 'SUMMARY_WORKSPACE_FAILED')
     manifest.updatedAt = new Date(failedAt).toISOString()
     manifest.expiresAt = new Date(failedAt + failedRetentionMs).toISOString()
@@ -228,7 +233,7 @@ export function createSummaryWorkspaceService({
         await writeManifest(workspace, manifest)
         result.interrupted += 1
       } else if (
-        ['failed', 'interrupted'].includes(manifest.status) &&
+        RETAINED_FAILURE_STATUSES.has(manifest.status) &&
         typeof manifest.expiresAt === 'string' &&
         Date.parse(manifest.expiresAt) <= currentTime
       ) {
@@ -248,7 +253,7 @@ export function createSummaryWorkspaceService({
         const manifest = await readManifest(workspacePath(root, reportId))
         bytes += Number.isSafeInteger(manifest.bytes) && manifest.bytes >= 0 ? manifest.bytes : 0
         workspaces += 1
-        if (['failed', 'interrupted'].includes(manifest.status)) failedWorkspaces += 1
+        if (RETAINED_FAILURE_STATUSES.has(manifest.status)) failedWorkspaces += 1
       } catch {
         // Ignore untrusted or incomplete directory entries.
       }
@@ -264,7 +269,7 @@ export function createSummaryWorkspaceService({
       try {
         const workspace = workspacePath(root, reportId)
         const manifest = await readManifest(workspace)
-        if (!['failed', 'interrupted'].includes(manifest?.status)) continue
+        if (!RETAINED_FAILURE_STATUSES.has(manifest?.status)) continue
         await remove(reportId)
         removed += 1
       } catch {
@@ -283,7 +288,7 @@ export function createSummaryWorkspaceService({
     for (const reportId of await listWorkspaceIds()) {
       try {
         const manifest = await readManifest(workspacePath(root, reportId))
-        if (!['completed', 'failed', 'interrupted'].includes(manifest?.status)) continue
+        if (manifest?.status !== 'completed' && !RETAINED_FAILURE_STATUSES.has(manifest?.status)) continue
         if (await isProtected(reportId) !== false) continue
         const retainedBytes = Number.isSafeInteger(manifest.bytes) && manifest.bytes >= 0
           ? manifest.bytes
@@ -306,7 +311,7 @@ export function createSummaryWorkspaceService({
       try {
         const manifest = await readManifest(workspacePath(root, reportId))
         const expiresAt = Date.parse(manifest?.expiresAt)
-        if (!['failed', 'interrupted'].includes(manifest?.status) ||
+        if (!RETAINED_FAILURE_STATUSES.has(manifest?.status) ||
           typeof manifest.expiresAt !== 'string' || !Number.isFinite(expiresAt) ||
           expiresAt > currentTime) continue
         const retainedBytes = Number.isSafeInteger(manifest.bytes) && manifest.bytes >= 0 ? manifest.bytes : 0
