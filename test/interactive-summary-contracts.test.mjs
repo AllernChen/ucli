@@ -40,16 +40,52 @@ test('interactive summary contracts are closed and safe for consumers', () => {
     () => assertInteractiveSummaryPhase('waiting-forever'),
     { code: 'SUMMARY_RUN_PHASE_INVALID' }
   )
+})
 
-  assert.deepEqual(
-    safeInteractiveSummaryError(
-      Object.assign(new Error('C:\\secret\\prompt.txt'), { code: 'SUMMARY_READY_TIMEOUT' }),
+test('terminal summary phases are an immutable read-only collection', () => {
+  const expected = ['completed', 'failed', 'interrupted', 'cancelled']
+
+  assert.equal(INTERACTIVE_SUMMARY_TERMINAL_PHASES.size, expected.length)
+  assert.equal(INTERACTIVE_SUMMARY_TERMINAL_PHASES.has('completed'), true)
+  assert.equal(INTERACTIVE_SUMMARY_TERMINAL_PHASES.has('running'), false)
+  assert.throws(() => INTERACTIVE_SUMMARY_TERMINAL_PHASES.add('running'), TypeError)
+  assert.throws(() => INTERACTIVE_SUMMARY_TERMINAL_PHASES.delete('completed'), TypeError)
+  assert.throws(() => INTERACTIVE_SUMMARY_TERMINAL_PHASES.clear(), TypeError)
+  assert.deepEqual([...INTERACTIVE_SUMMARY_TERMINAL_PHASES], expected)
+})
+
+test('interactive summary errors expose only whitelisted codes and messages', () => {
+  const safeErrors = [
+    ['SUMMARY_READY_TIMEOUT', 'AI CLI 启动超时'],
+    ['SUMMARY_TURN_NOT_CONFIRMED', '生成指令未确认送达'],
+    ['SUMMARY_RUN_TIMEOUT', '工作总结生成超时'],
+    ['SUMMARY_ARTIFACT_INVALID', '生成的 Markdown 报告无效'],
+    ['SUMMARY_RUN_FAILED', '工作总结生成失败']
+  ]
+
+  for (const [code, message] of safeErrors) {
+    const result = safeInteractiveSummaryError(
+      Object.assign(new Error(`C:\\secret\\${code}.txt`), { code }),
       'SUMMARY_RUN_FAILED'
-    ),
-    { code: 'SUMMARY_READY_TIMEOUT', message: 'AI CLI 启动超时' }
+    )
+    assert.deepEqual(result, { code, message })
+    assert.doesNotMatch(JSON.stringify(result), /secret|\.txt/i)
+  }
+
+  const unknownErrorCode = safeInteractiveSummaryError(
+    Object.assign(new Error('C:\\secret\\prompt.txt'), { code: 'SUMMARY_PRIVATE_FAILURE' }),
+    'SUMMARY_RUN_FAILED'
   )
-  assert.deepEqual(
-    safeInteractiveSummaryError(new Error('C:\\secret\\prompt.txt'), 'SUMMARY_RUN_FAILED'),
-    { code: 'SUMMARY_RUN_FAILED', message: '工作总结生成失败' }
+  const unknownFallbackCode = safeInteractiveSummaryError(
+    new Error('C:\\secret\\transcript.txt'),
+    'SUMMARY_PRIVATE_FALLBACK'
   )
+
+  for (const result of [unknownErrorCode, unknownFallbackCode]) {
+    assert.deepEqual(result, {
+      code: 'SUMMARY_RUN_FAILED',
+      message: '工作总结生成失败'
+    })
+    assert.doesNotMatch(JSON.stringify(result), /secret|prompt|transcript|\.txt/i)
+  }
 })
