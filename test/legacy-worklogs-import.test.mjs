@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { symlinkOrSkip } from './helpers/fsCapabilities.mjs'
 import { openDb } from '../electron/persistence/db.js'
 import { createLegacyWorkLogsImporter } from '../electron/summaries/legacyWorkLogsImporter.js'
 import { createReportRepository } from '../electron/summaries/reportRepository.js'
@@ -32,17 +33,6 @@ async function createHarness(t, overrides = {}) {
       now: () => NOW,
       ...overrides
     })
-  }
-}
-
-async function symlinkOrSkip(t, target, link, type = 'file') {
-  try {
-    await symlink(target, link, type)
-    return true
-  } catch (error) {
-    if (!['EPERM', 'EACCES'].includes(error?.code)) throw error
-    t.skip('symlink creation is unavailable on this host')
-    return false
   }
 }
 
@@ -172,7 +162,7 @@ test('legacy importer rejects a symlink workLogs root', async t => {
   const linkedRoot = join(sandbox, 'workLogs')
   await mkdir(target)
   t.after(() => rm(sandbox, { recursive: true, force: true }))
-  if (!await symlinkOrSkip(t, target, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir')) return
+  if (!symlinkOrSkip(t, target, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir')) return
 
   const repository = { async importCompleted() { throw new Error('must not import') } }
   const importer = createLegacyWorkLogsImporter({
@@ -187,7 +177,7 @@ test('legacy importer rejects a report swapped to a symlink before open', async 
   const backup = join(root, 'original-summary.md')
   const probe = join(root, 'symlink-capability-probe')
   await writeFile(file, validMarkdown)
-  if (!await symlinkOrSkip(t, file, probe)) return
+  if (!symlinkOrSkip(t, file, probe)) return
   await unlink(probe)
   let swapped = false
   const importer = createLegacyWorkLogsImporter({
@@ -236,7 +226,7 @@ test('legacy importer rejects a root swapped to a link after enumeration', async
   t.after(() => rm(sandbox, { recursive: true, force: true }))
   const linkType = process.platform === 'win32' ? 'junction' : 'dir'
   const probe = join(sandbox, 'capability-probe')
-  if (!await symlinkOrSkip(t, external, probe, linkType)) return
+  if (!symlinkOrSkip(t, external, probe, linkType)) return
   await unlink(probe)
   let swapped = false
   const imported = []

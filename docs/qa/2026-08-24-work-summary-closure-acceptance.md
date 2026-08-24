@@ -2,7 +2,7 @@
 
 日期：2026-08-25
 版本：`0.11.6`
-状态：**BLOCKED — automated preparation is recorded; package and manual acceptance are incomplete.**
+状态：**BLOCKED — automated release preparation passes; controlled manual and installed-app acceptance is not executed.**
 
 本记录不包含提示词、转录、Provider 输出、凭据或绝对工作区路径。
 
@@ -15,6 +15,8 @@
 | symlink helper RED | `node --test test/fs-capabilities.test.mjs` | exit 1；`ERR_MODULE_NOT_FOUND`，缺少 helper。 |
 | symlink helper GREEN | `node --test test/fs-capabilities.test.mjs` | exit 0；2 pass、0 fail、0 skip。创建成功后断言真实链接；`ENOENT` 不被转换为 skip。 |
 | Skills 回归 | `node --test test/fs-capabilities.test.mjs test/skills-audit.test.mjs test/skills-service.test.mjs` | exit 0；69 pass、0 fail、0 skip。 |
+| 版本契约 RED | `node --test test/app-version.test.mjs test/release-verification.test.mjs` | exit 1；25 pass、2 fail、0 skip。两个断言仍期望 `0.11.5`，实际 package version 为 `0.11.6`。 |
+| 版本/打包/legacy GREEN | `node --test test/app-version.test.mjs test/release-verification.test.mjs test/dsh-bridge-package.test.mjs test/fs-capabilities.test.mjs test/legacy-worklogs-import.test.mjs` | exit 0；50 pass、0 fail、0 skip。 |
 
 Windows 符号链接能力在上述实际测试中可用，未发生 capability skip。Node 记录了既有 `MODULE_TYPELESS_PACKAGE_JSON` 性能警告；未记录 active-handle 或 timer warning。
 
@@ -23,13 +25,19 @@ Windows 符号链接能力在上述实际测试中可用，未发生 capability 
 | 命令 | 日期 | exit | pass / fail / skip | 结果 |
 | --- | --- | ---: | --- | --- |
 | `node --test test/interactive-summary-contracts.test.mjs test/summary-db-migration.test.mjs test/interactive-summary-artifact.test.mjs test/interactive-summary-session-runtime.test.mjs test/interactive-summary-job-service.test.mjs test/legacy-worklogs-import.test.mjs test/summary-ipc.test.mjs test/summary-startup.test.mjs test/summary-scheduler.test.mjs test/summary-export.test.mjs test/summary-view-mounted.test.mjs test/summary-view.test.mjs` | 2026-08-25 | 0 | 246 / 0 / 0 | PASS；无 active-handle/timer warning。 |
-| `npm test` | 2026-08-25 | 0 | 两个顺序批次均为 0 fail；pretest 为 112 / 0 / 0；完整汇总计数待保留的 runner 输出复核 | PASS；不以截断的控制台输出猜测总数。 |
-| `npm run build` | 2026-08-25 | 0 | 不适用 | PASS；main、preload、renderer 三个目标均完成。 |
-| `npm run dist:win` | 2026-08-25 | 1 | 不适用 | 首次普通 sandbox 运行在预打包 DSH bridge 创建临时 tgz 时得到 `EPERM`。提升 sandbox 后 bridge 和三项编译完成，但没有写出 `dist/` 安装包；因此没有可验证的 Windows artifact。 |
-| `npm run verify:release` | 2026-08-25 | 1 | 不适用 | **预期失败**：`dist:win` 未产生发行物，验证器准确报告缺少 `UCLI-Portable-0.11.6-x64.exe`。 |
+| `npm test` | 2026-08-25 | 0 | 1589 / 0 / 11 | PASS；11 个明确平台 skip。 |
+| `npm run build` | 2026-08-25 | 0 | 不适用 | PASS；main、preload、renderer 三个目标完成。普通 sandbox 的 DSH 临时写入 `EPERM` 仅为环境诊断；获批环境可完成正常预打包。 |
+| `npm run dist:win` | 2026-08-25 | 0（获批环境） | 不适用 | PASS。普通 sandbox 首次因 DSH 临时 tgz 写入 `EPERM` 失败；获批/提升环境随后完成 Windows 打包。 |
+| `npm run verify:release` | 2026-08-25 | 0 | 不适用 | PASS；验证 `UCLI-Setup-0.11.6-x64.exe`、`UCLI-Portable-0.11.6-x64.exe` 与 `resources/deepseek-harness/ucli-dsh-bridge-0.11.0.tgz`。 |
 | `git diff --check` | 2026-08-25 | 0 | 不适用 | PASS；无 whitespace error。 |
 
-构建时正常生成的 DSH bridge 包为 `ucli-dsh-bridge-0.11.0.tgz`（legacy bridge package version）；由于 Windows 打包未生成安装包，没有可验证的 `0.11.6` 安装包元数据或版本化产物。
+Windows package artifacts:
+
+- `UCLI-Setup-0.11.6-x64.exe` — 134,179,386 bytes
+- `UCLI-Setup-0.11.6-x64.exe.blockmap` — 137,363 bytes
+- `UCLI-Portable-0.11.6-x64.exe` — 133,925,168 bytes
+
+`ucli-dsh-bridge-0.11.0.tgz` 是 quarantined legacy bridge 的包版本；应用和 Windows artifact 版本为 `0.11.6`。
 
 ## CLI 可用性与人工验收
 
@@ -44,8 +52,8 @@ Windows 符号链接能力在上述实际测试中可用，未发生 capability 
 
 ## Windows 安装态验收
 
-PENDING — not executed. `dist:win` did not produce an installer. Consequently there is no installed `0.11.6` application to validate Claude/Codex generation, existing-target export, restart recovery, old-DB migration, or one-time legacy import while preserving original `workLogs`.
+PENDING — not executed. A verified installer exists, but it was not installed or exercised. Claude/Codex generation, existing-target export, restart recovery, old-DB migration, and one-time legacy import while preserving original `workLogs` remain unobserved.
 
 ## Release decision
 
-The final release commit is forbidden. Resolve the package-artifact failure, produce and verify the `0.11.6` Windows artifacts, then execute and record all four controlled CLI workflows and the installed Windows workflow before changing this status.
+The final release commit is forbidden until all four controlled CLI workflows and the installed Windows workflow are observed and recorded as PASS.
