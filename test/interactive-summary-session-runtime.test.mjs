@@ -180,6 +180,30 @@ test('one ready timeout does not poison a longer waiter for the same session', a
   assert.equal(adapter.listenerCount('event'), 0)
 })
 
+test('last ready timeout keeps the monitor while session start is still in flight', async () => {
+  let releaseStart
+  const startGate = {
+    promise: new Promise(resolve => { releaseStart = resolve })
+  }
+  const state = harness({
+    startGate,
+    onStart: adapter => adapter.emitEvent('ready')
+  })
+  const starting = state.runtime.start('session-1')
+
+  await assert.rejects(
+    state.runtime.waitReady('session-1', { timeoutMs: 5 }),
+    { code: 'SUMMARY_READY_TIMEOUT' }
+  )
+  releaseStart()
+  assert.equal(await starting, true)
+  assert.deepEqual(
+    await state.runtime.waitReady('session-1', { timeoutMs: 10 }),
+    { ready: true }
+  )
+  assert.equal(state.adapter.listenerCount('event'), 0)
+})
+
 test('waitReady caches error and exit terminals and removes its monitor', async t => {
   for (const terminal of ['error', 'exit']) {
     await t.test(terminal, async () => {

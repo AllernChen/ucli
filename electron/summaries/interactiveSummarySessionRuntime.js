@@ -154,7 +154,9 @@ export function createInteractiveSummarySessionRuntime({
       waiter.timer = setTimeout(() => {
         if (!state.readyWaiters.delete(waiter)) return
         reject(typed('SUMMARY_READY_TIMEOUT'))
-        if (state.readyWaiters.size === 0) state.readyCleanup?.()
+        if (state.readyWaiters.size === 0 && !state.startPromise) {
+          state.readyCleanup?.()
+        }
       }, delayMs)
     })
   }
