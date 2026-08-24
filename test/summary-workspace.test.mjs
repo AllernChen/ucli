@@ -58,6 +58,18 @@ test('creates a compact running manifest without leaking local paths', async t =
   assert.equal(serialized.includes(temporaryPathFragment(root)), false)
 })
 
+test('create removes a partial workspace when its initial manifest write fails', async t => {
+  const { root, service } = await withWorkspace(t, {
+    writeAtomicFile: async () => {
+      throw new Error('initial manifest unavailable')
+    }
+  })
+
+  await assert.rejects(service.create('report-partial-create'))
+
+  assert.equal(existsSync(join(root, 'workspaces', 'report-partial-create')), false)
+})
+
 test('atomically replaces artifacts without leaving temporary files', async t => {
   const { service } = await withWorkspace(t)
   const workspace = await service.create('report-atomic')
@@ -139,15 +151,14 @@ test('completion persists a terminal manifest before best-effort cleanup of lock
   await service.writeArtifact('report-complete-locked', 'input/project.md', 'evidence')
   await service.writeArtifact('report-complete-locked', 'work/prompt.md', 'prompt')
 
-  await assert.doesNotReject(
-    service.complete('report-complete-locked', { markdown: '# Completed' })
-  )
+  const outcome = await service.complete('report-complete-locked', { markdown: '# Completed' })
 
   const completed = await readManifest(workspace.path)
   assert.equal(completed.status, 'completed')
   assert.equal(completed.stage, 'completed')
   assert.equal(existsSync(join(workspace.path, 'input')), true)
   assert.equal(existsSync(join(workspace.path, 'work')), true)
+  assert.deepEqual(outcome.cleanup, { ok: false, code: 'SUMMARY_RUN_FAILED' })
 })
 
 test('failure retains bounded inputs for seven days without persisting secrets', async t => {

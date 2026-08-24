@@ -48,10 +48,24 @@ function requireMethod(owner, method, label) {
   }
 }
 
-function deferred() {
+function deferred({ consumeRejection = false } = {}) {
   let resolve
-  const promise = new Promise(done => { resolve = done })
-  return { promise, resolve }
+  let reject
+  let settled = false
+  const promise = new Promise((done, fail) => {
+    resolve = value => {
+      if (settled) return
+      settled = true
+      done(value)
+    }
+    reject = error => {
+      if (settled) return
+      settled = true
+      fail(error)
+    }
+  })
+  if (consumeRejection) promise.catch(() => {})
+  return { promise, resolve, reject, get settled() { return settled } }
 }
 
 function phaseText(phase, error) {
@@ -128,10 +142,16 @@ export function createInteractiveSummaryJobService({
 
   function operational(reportId, code = 'SUMMARY_RUN_FAILED') {
     const event = Object.freeze({ type: 'operational', reportId, code })
-    try { onOperationalEvent(event) } catch {}
+    try { Promise.resolve(onOperationalEvent(event)).catch(() => {}) } catch {}
     for (const listener of [...listeners]) {
-      try { listener(event) } catch {}
+      try { Promise.resolve(listener(event)).catch(() => {}) } catch {}
     }
+  }
+
+  function reportOperational(job) {
+    if (job.operationalReported) return
+    job.operationalReported = true
+    operational(job.reportId)
   }
 
   function clearJobTimer(job, key) {
@@ -169,6 +189,13 @@ export function createInteractiveSummaryJobService({
     return outcome
   }
 
+  function compensate(job, operation) {
+    Promise.resolve().then(async () => {
+      const outcome = await bounded(job, Promise.resolve().then(operation))
+      if (!outcome.ok) reportOperational(job)
+    }).catch(() => reportOperational(job))
+  }
+
   function clearOwnedResources(job) {
     clearJobTimer(job, 'totalTimer')
     clearJobTimer(job, 'missingTimer')
@@ -192,7 +219,7 @@ export function createInteractiveSummaryJobService({
     const pending = Promise.resolve().then(operation)
     pending.then(
       value => {
-        if (job.terminal) Promise.resolve(onLateValue?.(value)).catch(() => {})
+        if (job.terminal && onLateValue) compensate(job, () => onLateValue(value))
       },
       () => {}
     )
@@ -261,25 +288,89 @@ export function createInteractiveSummaryJobService({
     return report
   }
 
+  function canonicalCompletedReport(job) {
+    const report = repository.get(job.reportId)
+    return report?.status === 'completed' &&
+      report.runPhase === INTERACTIVE_SUMMARY_PHASE.COMPLETED
+      ? report
+      : null
+  }
+
+  function reconcileLateCompletion(job) {
+    if (!job.terminal) return false
+    const current = repository.get(job.reportId)
+    if (current?.status === job.terminal.phase && current.runPhase === job.terminal.phase) {
+      return true
+    }
+    return repository.update(job.reportId, {
+      status: job.terminal.phase,
+      runPhase: job.terminal.phase,
+      errorText: job.terminal.code,
+      updatedAt: now()
+    })
+  }
+
+  async function settleCompleted(job, report, artifact) {
+    if (job.canonicalCompletionPromise) return job.canonicalCompletionPromise
+    job.completionCommitted = true
+    job.terminal = null
+    job.canonicalCompletionPromise = (async () => {
+      job.phase = INTERACTIVE_SUMMARY_PHASE.COMPLETED
+      job.report = report
+      clearOwnedResources(job)
+      const stopped = await stopOwnedSession(job)
+      if (!stopped.ok) reportOperational(job)
+      const finalized = await bounded(
+        job,
+        Promise.resolve().then(() => workspaceService.complete(job.reportId, {
+          markdown: artifact.markdown
+        }))
+      )
+      if (!finalized.ok || finalized.value?.cleanup?.ok === false) reportOperational(job)
+      publish(report)
+      active.delete(job.reportId)
+      job.done.resolve(report)
+      return report
+    })()
+    job.canonicalCompletionPromise.catch(() => {})
+    return job.canonicalCompletionPromise
+  }
+
   async function finishTerminal(job, phase, code) {
-    if (job.completionCommitted || job.commitStarted) return job.done.promise
+    if (job.completionCommitted) return job.done.promise
     if (job.finishPromise) return job.finishPromise
     job.terminal = { phase, code }
     job.terminalSignal.resolve(job.terminal)
     clearOwnedResources(job)
     job.finishPromise = (async () => {
       const error = typed(code)
-      let report
+      let report = null
+      let databaseFailed = false
       try {
         job.phase = phase
+        if (job.repositoryCompletionOperation) {
+          await bounded(job, job.repositoryCompletionOperation)
+        }
+        const completedBeforeTerminal = canonicalCompletedReport(job)
+        if (completedBeforeTerminal) {
+          return settleCompleted(job, completedBeforeTerminal, job.completionArtifact)
+        }
         if (job.repositoryOperation) await bounded(job, job.repositoryOperation)
-        report = await repository.update(job.reportId, {
-          status: phase,
-          runPhase: phase,
-          errorText: code,
-          updatedAt: now()
-        })
-        job.report = report
+        try {
+          report = await repository.update(job.reportId, {
+            status: phase,
+            runPhase: phase,
+            errorText: code,
+            updatedAt: now()
+          })
+          job.report = report
+        } catch {
+          const completed = canonicalCompletedReport(job)
+          if (completed) return settleCompleted(job, completed, job.completionArtifact)
+          databaseFailed = true
+          reportOperational(job)
+        }
+
         const cleanup = []
         if (job.workspace) {
           if (job.workspaceOperation) await bounded(job, job.workspaceOperation)
@@ -291,15 +382,22 @@ export function createInteractiveSummaryJobService({
         }
         if (job.sessionId) cleanup.push(stopOwnedSession(job))
         const outcomes = await Promise.all(cleanup)
-        if (outcomes.some(outcome => !outcome.ok)) operational(job.reportId)
+        if (outcomes.some(outcome => !outcome.ok)) reportOperational(job)
+
+        if (databaseFailed) {
+          const safeError = typed('SUMMARY_RUN_FAILED')
+          job.done.reject(safeError)
+          throw safeError
+        }
         publish(report, error)
+        job.done.resolve(report)
         return report
       } finally {
         clearOwnedResources(job)
         active.delete(job.reportId)
-        job.done.resolve(report || repository.get(job.reportId))
       }
     })()
+    job.finishPromise.catch(() => {})
     return job.finishPromise
   }
 
@@ -309,8 +407,8 @@ export function createInteractiveSummaryJobService({
       try {
         await transition(job, INTERACTIVE_SUMMARY_PHASE.VALIDATING)
         if (job.terminal) return job.done.promise
-        job.commitStarted = true
-        const report = await repository.complete(job.reportId, {
+        job.completionArtifact = artifact
+        const completionOperation = Promise.resolve().then(() => repository.complete(job.reportId, {
           markdown: artifact.markdown,
           sourceHash: artifact.sha256,
           usageSnapshot: job.preparation.usageSnapshot,
@@ -321,44 +419,47 @@ export function createInteractiveSummaryJobService({
             sha256: artifact.sha256
           },
           updatedAt: now()
-        })
-        job.completionCommitted = true
-        job.commitStarted = false
-        job.phase = INTERACTIVE_SUMMARY_PHASE.COMPLETED
-        job.report = report
-        clearOwnedResources(job)
-        const stopped = await stopOwnedSession(job)
-        if (!stopped.ok) operational(job.reportId)
-        const finalized = await bounded(
-          job,
-          Promise.resolve().then(() => workspaceService.complete(job.reportId, {
-            markdown: artifact.markdown
-          }))
+        }))
+        job.repositoryCompletionOperation = completionOperation
+        completionOperation.then(
+          () => {
+            if (job.repositoryCompletionOperation === completionOperation) {
+              job.repositoryCompletionOperation = null
+            }
+            if (job.terminal) compensate(job, () => reconcileLateCompletion(job))
+          },
+          () => {
+            if (job.repositoryCompletionOperation === completionOperation) {
+              job.repositoryCompletionOperation = null
+            }
+            if (job.terminal) compensate(job, () => reconcileLateCompletion(job))
+          }
         )
-        if (!finalized.ok) operational(job.reportId)
-        publish(report)
-        active.delete(job.reportId)
-        job.done.resolve(report)
-        return report
+        await ownedStep(job, () => completionOperation)
+        const completed = canonicalCompletedReport(job)
+        if (!completed) throw typed('SUMMARY_RUN_FAILED')
+        return settleCompleted(job, completed, artifact)
       } catch (error) {
-        job.commitStarted = false
         if (job.terminal) return job.done.promise
         return finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, safeTerminalCode(error))
-      } finally {
-        if (job.completionCommitted) clearOwnedResources(job)
       }
     })()
+    job.completionPromise.catch(() => {})
     return job.completionPromise
   }
 
   function acceptLifecycle(job, event) {
     if (job.terminal || job.completionCommitted) return
     if (['error', 'exit'].includes(event?.type)) {
-      void finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, 'SUMMARY_RUN_FAILED')
+      finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, 'SUMMARY_RUN_FAILED').catch(() => {})
       return
     }
     if (event?.type === 'session_stopped') {
-      void finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.INTERRUPTED, 'SUMMARY_RUN_FAILED')
+      finishTerminal(
+        job,
+        INTERACTIVE_SUMMARY_PHASE.INTERRUPTED,
+        'SUMMARY_RUN_FAILED'
+      ).catch(() => {})
       return
     }
     if (!['turn_completed', 'turn_failed', 'turn_interrupted'].includes(event?.type)) return
@@ -368,16 +469,20 @@ export function createInteractiveSummaryJobService({
     }
     if (event.turnId !== job.turnId) return
     if (event.type === 'turn_failed') {
-      void finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, 'SUMMARY_RUN_FAILED')
+      finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, 'SUMMARY_RUN_FAILED').catch(() => {})
     } else if (event.type === 'turn_interrupted') {
-      void finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.INTERRUPTED, 'SUMMARY_RUN_FAILED')
+      finishTerminal(
+        job,
+        INTERACTIVE_SUMMARY_PHASE.INTERRUPTED,
+        'SUMMARY_RUN_FAILED'
+      ).catch(() => {})
     } else {
       schedule(job, 'missingTimer', limits.missingMs, () => {
-        void finishTerminal(
+        finishTerminal(
           job,
           INTERACTIVE_SUMMARY_PHASE.FAILED,
           'SUMMARY_ARTIFACT_MISSING'
-        )
+        ).catch(() => {})
       })
     }
   }
@@ -452,31 +557,41 @@ export function createInteractiveSummaryJobService({
       phase: INTERACTIVE_SUMMARY_PHASE.PREPARING,
       sessionId: null,
       turnId: null,
-      prompt: buildPrompt({ periodLabel: PERIOD_LABELS[queued.periodType] }),
+      prompt: null,
       abortController: new AbortController(),
       bufferedEvents: [],
       terminalSignal: deferred(),
       terminal: null,
-      done: deferred(),
+      done: deferred({ consumeRejection: true }),
       unsubscribe: null,
       totalTimer: null,
       missingTimer: null,
       cleanupTimers: new Set(),
       workspaceOperation: null,
       repositoryOperation: null,
+      repositoryCompletionOperation: null,
       stopPromise: null,
       finishPromise: null,
       completionPromise: null,
-      commitStarted: false,
+      canonicalCompletionPromise: null,
+      completionArtifact: null,
       completionCommitted: false,
+      operationalReported: false,
       deadlineMs: now() + limits.runMs
     }
     active.set(queued.id, job)
     schedule(job, 'totalTimer', limits.runMs, () => {
-      void finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, 'SUMMARY_RUN_TIMEOUT')
+      finishTerminal(
+        job,
+        INTERACTIVE_SUMMARY_PHASE.FAILED,
+        'SUMMARY_RUN_TIMEOUT'
+      ).catch(() => {})
     })
 
     try {
+      job.prompt = await ownedStep(job, () => buildPrompt({
+        periodLabel: PERIOD_LABELS[queued.periodType]
+      }))
       job.workspace = await ownedStep(
         job,
         () => workspaceService.create(queued.id),
@@ -489,10 +604,21 @@ export function createInteractiveSummaryJobService({
           }
         )
       )
-      job.preparation = await ownedStep(job, () => preparationService.prepare({
-        report: queued,
-        workspace: job.workspace
-      }))
+      job.preparation = await ownedStep(
+        job,
+        () => preparationService.prepare({
+          report: queued,
+          workspace: job.workspace
+        }),
+        () => workspaceService.fail(
+          queued.id,
+          job.terminal?.code || 'SUMMARY_RUN_FAILED',
+          {
+            status: job.terminal?.phase || 'failed',
+            stage: job.terminal?.phase || 'failed'
+          }
+        )
+      )
       await transition(job, INTERACTIVE_SUMMARY_PHASE.STARTING)
       const created = await ownedStep(
         job,
@@ -510,7 +636,7 @@ export function createInteractiveSummaryJobService({
         sessionId: job.sessionId,
         updatedAt: now()
       }))
-      void execute(job)
+      execute(job).catch(() => {})
       return {
         report: job.report,
         sessionId: job.sessionId,
@@ -519,9 +645,9 @@ export function createInteractiveSummaryJobService({
     } catch (error) {
       const code = job.terminal?.code || safeTerminalCode(error)
       if (!job.terminal) {
-        await finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, code)
+        await finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, code).catch(() => {})
       } else {
-        await job.done.promise
+        await job.done.promise.catch(() => {})
       }
       throw typed(code)
     }

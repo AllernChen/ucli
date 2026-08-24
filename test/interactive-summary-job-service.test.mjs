@@ -54,6 +54,14 @@ function deferred() {
   return { promise, resolve, reject }
 }
 
+function captureUnhandledRejections(t) {
+  const errors = []
+  const listener = error => errors.push(error)
+  process.prependListener('unhandledRejection', listener)
+  t.after(() => process.removeListener('unhandledRejection', listener))
+  return errors
+}
+
 async function watchdog(promise, timeoutMs = 2_000) {
   let timer
   try {
@@ -105,17 +113,31 @@ async function fixture(t, {
   timeouts = {},
   fakeOptions = {},
   workspaceRunningGate = null,
+  workspaceRemoveTree = undefined,
   workspaceCreateError = null,
   workspaceCompleteError = null,
+  repositoryCompleteGate = null,
+  repositoryCompleteMode = 'real',
+  terminalUpdateError = null,
+  preparationGate = null,
+  latePreparationStage = null,
   preparationError = null,
-  sessionIdPatchError = null
+  sessionIdPatchError = null,
+  buildPromptError = null,
+  operationalHandler = null
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'ucli-interactive-job-'))
   const db = await openDb(join(root, 'ucli.db'))
   const repository = createReportRepository({ db })
-  const workspaceService = createSummaryWorkspaceService({ root: join(root, 'summaries') })
+  const workspaceService = createSummaryWorkspaceService({
+    root: join(root, 'summaries'),
+    ...(workspaceRemoveTree ? { removeTree: workspaceRemoveTree } : {})
+  })
   const order = []
   const operational = []
+  const workspaceObservations = []
+  const repositoryCompleteSettled = deferred()
+  const preparationSettled = deferred()
   const fake = createSummaryFakeAdapterHarness({
     workspaceService,
     ...fakeOptions,
@@ -129,11 +151,30 @@ async function fixture(t, {
     ...repository,
     async update(reportId, patch) {
       if (sessionIdPatchError && Object.hasOwn(patch, 'sessionId')) throw sessionIdPatchError
+      if (terminalUpdateError && ['failed', 'cancelled', 'interrupted'].includes(patch.runPhase)) {
+        throw terminalUpdateError
+      }
       return repository.update(reportId, patch)
     },
     async complete(...args) {
       order.push('repository.complete')
-      return repository.complete(...args)
+      try {
+        await repositoryCompleteGate?.promise
+        if (repositoryCompleteMode === 'resolve-stale') {
+          return {
+            ...repository.get(args[0]),
+            status: 'completed',
+            runPhase: 'completed',
+            errorText: null
+          }
+        }
+        if (repositoryCompleteMode === 'reject-late') {
+          throw new Error('C:\\private\\late-complete')
+        }
+        return await repository.complete(...args)
+      } finally {
+        repositoryCompleteSettled.resolve()
+      }
     }
   }
   const jobWorkspaceService = {
@@ -151,6 +192,7 @@ async function fixture(t, {
       order.push(`workspace.mark:${args[1]}:start`)
       if (args[1] === 'running') await workspaceRunningGate?.promise
       const value = await workspaceService.markStage(...args)
+      workspaceObservations.push({ requested: args[1], status: value.status, stage: value.stage })
       order.push(`workspace.mark:${args[1]}:end`)
       return value
     },
@@ -166,15 +208,29 @@ async function fixture(t, {
     workspaceService: jobWorkspaceService,
     preparationService: {
       async prepare({ report, workspace }) {
-        if (preparationError) throw preparationError
-        await workspaceService.writeArtifact(report.id, 'input/data.json', '{}\n')
-        return { coverage: { sessionsIncluded: 1 }, usageSnapshot: {}, workspace }
+        try {
+          await preparationGate?.promise
+          if (preparationError) throw preparationError
+          await workspaceService.writeArtifact(report.id, 'input/data.json', '{}\n')
+          if (latePreparationStage) {
+            await workspaceService.markStage(report.id, latePreparationStage)
+          }
+          return { coverage: { sessionsIncluded: 1 }, usageSnapshot: {}, workspace }
+        } finally {
+          preparationSettled.resolve()
+        }
       }
     },
     sessionRuntime: fake.runtime,
     waitForArtifact: realArtifact ? undefined : quickArtifact,
+    buildPrompt: buildPromptError
+      ? () => { throw buildPromptError }
+      : undefined,
     timers,
-    onOperationalEvent: event => operational.push(event),
+    onOperationalEvent: event => {
+      operational.push(event)
+      return operationalHandler?.(event)
+    },
     timeouts: {
       readyMs: 40,
       deliveryMs: 40,
@@ -189,12 +245,30 @@ async function fixture(t, {
     db.close()
     await rm(root, { recursive: true, force: true })
   })
-  return { root, db, repository, workspaceService, fake, timers, service, order, operational }
+  return {
+    root,
+    db,
+    repository,
+    workspaceService,
+    fake,
+    timers,
+    service,
+    order,
+    operational,
+    workspaceObservations,
+    repositoryCompleteSettled,
+    preparationSettled
+  }
 }
 
 async function beginRunning(state, run, turnId = 'turn-1') {
   state.fake.emitReady(run.sessionId)
-  await state.fake.waitForSend(run.sessionId)
+  try {
+    await watchdog(state.fake.waitForSend(run.sessionId), 2_000)
+  } catch (error) {
+    const persisted = state.repository.get(run.report.id)
+    throw new Error(`${error.message}: send db=${persisted?.runPhase}/${persisted?.errorText} order=${state.order.join(',')}`)
+  }
   state.fake.emitTurnStarted(run.sessionId, turnId)
   try {
     await waitUntil(() => {
@@ -220,7 +294,14 @@ async function assertSettled(state, run, {
   code = null,
   expectNoTimers = true
 }) {
-  const settled = await run.done
+  let settled
+  try {
+    settled = await watchdog(run.done, 6_000)
+  } catch (error) {
+    const persisted = state.repository.get(run.report.id)
+    const workspace = await manifest(state, run.report.id)
+    throw new Error(`${error.message}: db=${persisted?.runPhase} workspace=${workspace.stage} order=${state.order.join(',')}`)
+  }
   const persisted = state.repository.get(run.report.id)
   const workspace = await manifest(state, run.report.id)
   assert.equal(settled.status, status)
@@ -601,4 +682,229 @@ test('completion commits the database then releases native cwd before workspace 
   ].includes(value)), [
     'repository.complete', 'session.stop', 'workspace.complete'
   ])
+})
+
+for (const repositoryCompleteMode of ['resolve-stale', 'reject-late']) {
+  test(`hung repository completion settles by deadline and consumes a ${repositoryCompleteMode} result`, async t => {
+    const repositoryCompleteGate = deferred()
+    t.after(() => repositoryCompleteGate.resolve())
+    const state = await fixture(t, {
+      repositoryCompleteGate,
+      repositoryCompleteMode,
+      timeouts: { runMs: 800, cleanupMs: 100 }
+    })
+    const run = await state.service.start(request())
+    await beginRunning(state, run)
+    await state.fake.writeCanonicalMarkdown(run.report.id, VALID_MARKDOWN)
+    await waitUntil(() => state.order.includes('repository.complete'), 1_000)
+
+    const completed = await watchdog(run.done, 2_000)
+    assert.equal(completed.status, 'failed')
+    assert.equal(completed.errorText, 'SUMMARY_RUN_TIMEOUT')
+    assert.equal(state.service.isActive(run.report.id), false)
+    assert.equal(state.fake.listenerCount(run.sessionId), 0)
+    assert.equal(state.timers.activeCount, 0)
+
+    repositoryCompleteGate.resolve()
+    await watchdog(state.repositoryCompleteSettled.promise)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(state.repository.get(run.report.id).status, 'failed')
+    assert.equal((await manifest(state, run.report.id)).status, 'failed')
+  })
+}
+
+for (const [label, phase, terminate] of [
+  ['cancel', 'cancelled', (state, reportId) => state.service.cancel(reportId)],
+  ['shutdown', 'interrupted', state => state.service.interruptAll('SUMMARY_APP_SHUTDOWN')]
+]) {
+  test(`${label} owns a repository completion that never settles`, async t => {
+    const repositoryCompleteGate = deferred()
+    t.after(() => repositoryCompleteGate.resolve())
+    const state = await fixture(t, {
+      repositoryCompleteGate,
+      repositoryCompleteMode: 'reject-late',
+      timeouts: { cleanupMs: 100 }
+    })
+    const run = await state.service.start(request())
+    await beginRunning(state, run)
+    await state.fake.writeCanonicalMarkdown(run.report.id, VALID_MARKDOWN)
+    await waitUntil(() => state.order.includes('repository.complete'))
+
+    await watchdog(terminate(state, run.report.id), 1_000)
+    const completed = await watchdog(run.done)
+    assert.equal(completed.status, phase)
+    assert.equal(state.repository.get(run.report.id).status, phase)
+    assert.equal((await manifest(state, run.report.id)).status, phase)
+    assert.equal(state.service.isActive(run.report.id), false)
+    assert.equal(state.timers.activeCount, 0)
+
+    repositoryCompleteGate.resolve()
+    await watchdog(state.repositoryCompleteSettled.promise)
+    assert.equal(state.repository.get(run.report.id).status, phase)
+  })
+}
+
+test('terminal repository failure rejects done safely and still releases every owner', async t => {
+  const unhandled = captureUnhandledRejections(t)
+  const state = await fixture(t, {
+    terminalUpdateError: new Error('C:\\private\\terminal-database')
+  })
+  const run = await state.service.start(request())
+  await beginRunning(state, run)
+  state.fake.emitExit(run.sessionId)
+
+  await assert.rejects(
+    watchdog(run.done),
+    error => error?.code === 'SUMMARY_RUN_FAILED' && !error.message.includes('private')
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(state.service.isActive(run.report.id), false)
+  assert.equal(state.fake.listenerCount(run.sessionId), 0)
+  assert.equal(state.fake.stopRequests.filter(id => id === run.sessionId).length, 1)
+  assert.equal((await manifest(state, run.report.id)).status, 'failed')
+  assert.equal(state.timers.activeCount, 0)
+  assert.deepEqual(state.operational, [{
+    type: 'operational', reportId: run.report.id, code: 'SUMMARY_RUN_FAILED'
+  }])
+  assert.deepEqual(unhandled, [])
+})
+
+test('real workspace cleanup rejection completes canonically and emits one safe operational event', async t => {
+  const state = await fixture(t, {
+    workspaceRemoveTree: async () => {
+      throw new Error('C:\\private\\locked-cleanup')
+    }
+  })
+  const run = await state.service.start(request())
+  await completeRun(state, run)
+
+  assert.equal(state.repository.get(run.report.id).status, 'completed')
+  assert.equal((await manifest(state, run.report.id)).status, 'completed')
+  assert.deepEqual(state.operational, [{
+    type: 'operational', reportId: run.report.id, code: 'SUMMARY_RUN_FAILED'
+  }])
+})
+
+test('late preparation cannot restore a running workspace after its deadline terminal', async t => {
+  const preparationGate = deferred()
+  t.after(() => preparationGate.resolve())
+  const state = await fixture(t, {
+    preparationGate,
+    latePreparationStage: 'starting',
+    timeouts: { runMs: 300, cleanupMs: 100 }
+  })
+  const starting = state.service.start(request())
+  await waitUntil(() => state.repository.list().length === 1)
+  const [queued] = state.repository.list()
+
+  await assert.rejects(
+    watchdog(starting, 1_000),
+    error => error?.code === 'SUMMARY_RUN_TIMEOUT'
+  )
+  assert.equal((await manifest(state, queued.id)).status, 'failed')
+  preparationGate.resolve()
+  await watchdog(state.preparationSettled.promise)
+  await new Promise(resolve => setImmediate(resolve))
+
+  const workspace = await manifest(state, queued.id)
+  assert.equal(workspace.status, 'failed')
+  assert.equal(workspace.stage, 'failed')
+  assert.equal(state.service.isActive(queued.id), false)
+  await waitUntil(() => state.timers.activeCount === 0, 1_000)
+  assert.equal(state.timers.activeCount, 0)
+})
+
+test('a running workspace mutation resolving after cleanup timeout stays terminal', async t => {
+  const workspaceRunningGate = deferred()
+  t.after(() => workspaceRunningGate.resolve())
+  const state = await fixture(t, {
+    workspaceRunningGate,
+    timeouts: { cleanupMs: 100 }
+  })
+  const run = await state.service.start(request())
+  await beginRunning(state, run)
+  await waitUntil(() => state.order.includes('workspace.mark:running:start'))
+  state.fake.emitExit(run.sessionId)
+
+  await watchdog(run.done, 1_000)
+  assert.equal((await manifest(state, run.report.id)).stage, 'failed')
+  workspaceRunningGate.resolve()
+  await waitUntil(() => state.workspaceObservations.some(item => item.requested === 'running'))
+
+  assert.deepEqual(
+    state.workspaceObservations.find(item => item.requested === 'running'),
+    { requested: 'running', status: 'failed', stage: 'failed' }
+  )
+  assert.equal((await manifest(state, run.report.id)).stage, 'failed')
+})
+
+test('buildPrompt failure is terminalized after queued ownership is registered', async t => {
+  const state = await fixture(t, {
+    buildPromptError: new Error('C:\\private\\prompt-source')
+  })
+
+  await assert.rejects(
+    state.service.start(request()),
+    error => error?.code === 'SUMMARY_RUN_FAILED' && !error.message.includes('private')
+  )
+  const [report] = state.repository.list()
+  assert.equal(report.status, 'failed')
+  assert.equal(report.runPhase, 'failed')
+  assert.equal(report.errorText, 'SUMMARY_RUN_FAILED')
+  assert.equal(state.service.isActive(report.id), false)
+  assert.equal(state.timers.activeCount, 0)
+})
+
+for (const stopMode of ['reject', 'hang']) {
+  test(`late session created after interrupt has bounded ${stopMode} cleanup`, async t => {
+    const unhandled = captureUnhandledRejections(t)
+    const createGate = deferred()
+    const stopGate = stopMode === 'hang' ? deferred() : null
+    t.after(() => {
+      createGate.resolve()
+      stopGate?.resolve()
+    })
+    const state = await fixture(t, {
+      fakeOptions: {
+        createGate,
+        ...(stopGate ? { stopGate } : { stopError: new Error('private native stop') })
+      },
+      timeouts: { cleanupMs: 100 }
+    })
+    const starting = state.service.start(request())
+    await waitUntil(() => state.fake.createRequests.length === 1)
+    const [queued] = state.repository.list()
+    assert.equal(await state.service.interruptAll('SUMMARY_APP_SHUTDOWN'), 1)
+    await assert.rejects(starting, error => error?.code === 'SUMMARY_APP_SHUTDOWN')
+
+    createGate.resolve()
+    await waitUntil(() => state.fake.stopRequests.length === 1, 1_000)
+    await waitUntil(() => state.operational.length === 1, 1_000)
+    stopGate?.resolve()
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepEqual(state.operational, [{
+      type: 'operational', reportId: queued.id, code: 'SUMMARY_RUN_FAILED'
+    }])
+    assert.deepEqual(unhandled, [])
+    assert.equal(state.service.isActive(queued.id), false)
+  })
+}
+
+test('rejected asynchronous operational observer is always consumed', async t => {
+  const unhandled = captureUnhandledRejections(t)
+  const state = await fixture(t, {
+    workspaceRemoveTree: async () => {
+      throw new Error('trigger safe operational event')
+    },
+    operationalHandler: async () => {
+      throw new Error('C:\\private\\observer')
+    }
+  })
+  const run = await state.service.start(request())
+  await completeRun(state, run)
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(state.operational.length, 1)
+  assert.deepEqual(unhandled, [])
 })

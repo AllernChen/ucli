@@ -80,7 +80,8 @@ export function createSummaryWorkspaceService({
   now = Date.now,
   maxWorkspaceBytes = DEFAULT_MAX_WORKSPACE_BYTES,
   failedRetentionMs = DEFAULT_FAILED_RETENTION_MS,
-  removeTree = rm
+  removeTree = rm,
+  writeAtomicFile = atomicWrite
 } = {}) {
   if (!Number.isSafeInteger(maxWorkspaceBytes) || maxWorkspaceBytes < 1) {
     throw workspaceError('SUMMARY_WORKSPACE_LIMIT')
@@ -88,45 +89,70 @@ export function createSummaryWorkspaceService({
   if (!Number.isSafeInteger(failedRetentionMs) || failedRetentionMs < 0) {
     throw workspaceError('SUMMARY_WORKSPACE_RETENTION_INVALID')
   }
-  if (typeof removeTree !== 'function') {
+  if (typeof removeTree !== 'function' || typeof writeAtomicFile !== 'function') {
     throw workspaceError('SUMMARY_WORKSPACE_CLEANUP_INVALID')
+  }
+  const mutations = new Map()
+
+  function serialize(reportId, operation) {
+    const previous = mutations.get(reportId) || Promise.resolve()
+    const current = previous.then(operation, operation)
+    const tail = current.then(() => undefined, () => undefined)
+    mutations.set(reportId, tail)
+    tail.then(() => {
+      if (mutations.get(reportId) === tail) mutations.delete(reportId)
+    })
+    return current
+  }
+
+  async function persistManifest(workspace, manifest) {
+    await writeAtomicFile(
+      path.join(workspace, 'manifest.json'),
+      `${JSON.stringify(manifest, null, 2)}\n`
+    )
   }
 
   async function create(reportId) {
     const workspace = workspacePath(root, reportId)
-    await mkdir(path.dirname(workspace), { recursive: true, mode: 0o700 })
-    await mkdir(workspace, { mode: 0o700 })
-    await Promise.all([
-      mkdir(path.join(workspace, 'input'), { mode: 0o700 }),
-      mkdir(path.join(workspace, 'output'), { mode: 0o700 }),
-      mkdir(path.join(workspace, 'work'), { mode: 0o700 })
-    ])
-    const createdAt = timestamp(now)
-    const manifest = {
-      version: 1,
-      reportId,
-      status: 'running',
-      stage: 'collecting',
-      createdAt,
-      updatedAt: createdAt,
-      expiresAt: null,
-      bytes: 0,
-      artifacts: []
-    }
-    await writeManifest(workspace, manifest)
-    return {
-      id: reportId,
-      path: workspace,
-      workDirectory: path.join(workspace, 'work'),
-      manifest
+    try {
+      await mkdir(path.dirname(workspace), { recursive: true, mode: 0o700 })
+      await mkdir(workspace, { mode: 0o700 })
+      await Promise.all([
+        mkdir(path.join(workspace, 'input'), { mode: 0o700 }),
+        mkdir(path.join(workspace, 'output'), { mode: 0o700 }),
+        mkdir(path.join(workspace, 'work'), { mode: 0o700 })
+      ])
+      const createdAt = timestamp(now)
+      const manifest = {
+        version: 1,
+        reportId,
+        status: 'running',
+        stage: 'collecting',
+        createdAt,
+        updatedAt: createdAt,
+        expiresAt: null,
+        bytes: 0,
+        artifacts: []
+      }
+      await persistManifest(workspace, manifest)
+      return {
+        id: reportId,
+        path: workspace,
+        workDirectory: path.join(workspace, 'work'),
+        manifest
+      }
+    } catch (error) {
+      await removeTree(workspace, { recursive: true, force: true }).catch(() => {})
+      throw error
     }
   }
 
-  async function writeArtifact(reportId, relativePath, content) {
+  async function writeArtifactUnlocked(reportId, relativePath, content) {
     const workspace = workspacePath(root, reportId)
     const target = artifactPath(workspace, relativePath)
     const artifact = storedArtifactPath(workspace, target)
     const manifest = await readManifest(workspace)
+    if (manifest.status !== 'running') return target
     const data = Buffer.isBuffer(content) ? content : Buffer.from(String(content), 'utf8')
     const previous = manifest.artifacts.find(entry => entry.path === artifact)?.bytes || 0
     const nextBytes = manifest.bytes - previous + data.byteLength
@@ -141,8 +167,12 @@ export function createSummaryWorkspaceService({
       { path: artifact, bytes: data.byteLength }
     ]
     manifest.updatedAt = timestamp(now)
-    await writeManifest(workspace, manifest)
+    await persistManifest(workspace, manifest)
     return target
+  }
+
+  function writeArtifact(reportId, relativePath, content) {
+    return serialize(reportId, () => writeArtifactUnlocked(reportId, relativePath, content))
   }
 
   function resolveArtifact(reportId, relativePath) {
@@ -152,24 +182,29 @@ export function createSummaryWorkspaceService({
     return artifactPath(workspacePath(root, reportId), relativePath)
   }
 
-  async function markStage(reportId, stage, patch) {
+  async function markStageUnlocked(reportId, stage, patch) {
     if (!SAFE_STAGE.test(String(stage || ''))) {
       throw workspaceError('SUMMARY_WORKSPACE_STAGE_INVALID')
     }
     const workspace = workspacePath(root, reportId)
     const manifest = await readManifest(workspace)
+    if (manifest.status !== 'running') return manifest
     manifest.stage = stage
     const progress = compactProgress(patch)
     if (progress) manifest.progress = progress
     manifest.updatedAt = timestamp(now)
-    await writeManifest(workspace, manifest)
+    await persistManifest(workspace, manifest)
     return manifest
   }
 
-  async function complete(reportId, outputs = {}) {
+  async function completeUnlocked(reportId, outputs = {}) {
     const workspace = workspacePath(root, reportId)
+    const current = await readManifest(workspace)
+    if (current.status !== 'running') {
+      return { ...current, cleanup: { ok: true, code: null } }
+    }
     if (typeof outputs.markdown === 'string') {
-      await writeArtifact(reportId, 'output/summary.md', outputs.markdown)
+      await writeArtifactUnlocked(reportId, 'output/summary.md', outputs.markdown)
     }
     const manifest = await readManifest(workspace)
     manifest.status = 'completed'
@@ -179,15 +214,25 @@ export function createSummaryWorkspaceService({
     manifest.bytes = manifest.artifacts.reduce((total, entry) => total + entry.bytes, 0)
     manifest.updatedAt = timestamp(now)
     delete manifest.errorCode
-    await writeManifest(workspace, manifest)
-    await Promise.allSettled([
+    await persistManifest(workspace, manifest)
+    const cleanup = await Promise.allSettled([
       removeTree(artifactPath(workspace, 'input'), { recursive: true, force: true }),
       removeTree(artifactPath(workspace, 'work'), { recursive: true, force: true })
     ])
-    return manifest
+    const ok = cleanup.every(outcome => outcome.status === 'fulfilled')
+    return {
+      ...manifest,
+      cleanup: ok
+        ? { ok: true, code: null }
+        : { ok: false, code: 'SUMMARY_RUN_FAILED' }
+    }
   }
 
-  async function fail(reportId, code, { status = 'failed', stage = status } = {}) {
+  function complete(reportId, outputs = {}) {
+    return serialize(reportId, () => completeUnlocked(reportId, outputs))
+  }
+
+  async function failUnlocked(reportId, code, { status = 'failed', stage = status } = {}) {
     if (!RETAINED_FAILURE_STATUSES.has(status) || !SAFE_STAGE.test(String(stage || ''))) {
       throw workspaceError('SUMMARY_WORKSPACE_STAGE_INVALID')
     }
@@ -199,8 +244,16 @@ export function createSummaryWorkspaceService({
     manifest.errorCode = safeFailureCode(code, 'SUMMARY_WORKSPACE_FAILED')
     manifest.updatedAt = new Date(failedAt).toISOString()
     manifest.expiresAt = new Date(failedAt + failedRetentionMs).toISOString()
-    await writeManifest(workspace, manifest)
+    await persistManifest(workspace, manifest)
     return manifest
+  }
+
+  function markStage(reportId, stage, patch) {
+    return serialize(reportId, () => markStageUnlocked(reportId, stage, patch))
+  }
+
+  function fail(reportId, code, options) {
+    return serialize(reportId, () => failUnlocked(reportId, code, options))
   }
 
   async function remove(reportId) {
@@ -235,7 +288,7 @@ export function createSummaryWorkspaceService({
         manifest.errorCode = 'SUMMARY_WORKSPACE_INTERRUPTED'
         manifest.updatedAt = new Date(currentTime).toISOString()
         manifest.expiresAt = new Date(currentTime + failedRetentionMs).toISOString()
-        await writeManifest(workspace, manifest)
+        await persistManifest(workspace, manifest)
         result.interrupted += 1
       } else if (
         RETAINED_FAILURE_STATUSES.has(manifest.status) &&
