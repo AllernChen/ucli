@@ -3,6 +3,7 @@ import { lstat, open, realpath } from 'node:fs/promises'
 import path from 'node:path'
 
 import { redactEvidenceText } from './redaction.js'
+import { createSummaryMarkdownParser } from './summaryMarkdownParser.js'
 
 const MAX_MARKDOWN_BYTES = 5 * 1024 * 1024
 const STABILITY_INTERVAL_MS = 1000
@@ -16,6 +17,15 @@ export const REQUIRED_HEADINGS = Object.freeze([
   '## 下一步建议',
   '## 数据覆盖'
 ])
+
+const REQUIRED_HEADING_TOKENS = Object.freeze(REQUIRED_HEADINGS.map(heading => {
+  const markerEnd = heading.indexOf(' ')
+  return Object.freeze({
+    tag: `h${markerEnd}`,
+    content: heading.slice(markerEnd + 1)
+  })
+}))
+const validationMarkdownParser = createSummaryMarkdownParser({ html: true })
 
 function artifactError() {
   return Object.assign(new Error('Invalid canonical summary artifact'), {
@@ -173,73 +183,23 @@ function decodeMarkdown(buffer) {
   }
 }
 
-function visibleMarkdownText(line, inlineContext) {
-  if (!inlineContext.delimiter && /^(?: {4}|\t)/.test(line)) return ''
-  let visible = ''
-  let index = 0
-  while (index < line.length) {
-    if (inlineContext.delimiter) {
-      if (line[index] !== '`') {
-        index += 1
-        continue
-      }
-      let runEnd = index + 1
-      while (line[runEnd] === '`') runEnd += 1
-      if (runEnd - index === inlineContext.delimiter) {
-        inlineContext.delimiter = 0
-        visible += ' '
-      }
-      index = runEnd
-      continue
-    }
-    if (line[index] === '\\' && index + 1 < line.length) {
-      visible += ' '
-      index += 2
-      continue
-    }
-    if (line[index] !== '`') {
-      visible += line[index]
-      index += 1
-      continue
-    }
-    let openerEnd = index + 1
-    while (line[openerEnd] === '`') openerEnd += 1
-    inlineContext.delimiter = openerEnd - index
-    visible += ' '
-    index = openerEnd
-  }
-  return visible
-}
-
-function containsRawHtml(visible) {
-  return /<!--|-->|<\?|<!\[CDATA\[|<![A-Za-z]/.test(visible) ||
-    /<\/?[A-Za-z][A-Za-z0-9-]*(?=[\t />]|$)/.test(visible)
-}
-
 function assertHeadingOrder(markdown) {
+  const tokens = validationMarkdownParser.parse(markdown, {})
   const found = []
-  let fence = null
-  const inlineContext = { delimiter: 0 }
-  for (const line of markdown.replace(/\r\n?/g, '\n').split('\n')) {
-    const fenceLine = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
-    if (fence) {
-      if (fenceLine && fenceLine[1][0] === fence.marker &&
-        fenceLine[1].length >= fence.length && /^[\t ]*$/.test(fenceLine[2])) {
-        fence = null
-      }
-      continue
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (token.type === 'html_block' || token.type === 'html_inline' ||
+      token.children?.some(child => child.type === 'html_block' || child.type === 'html_inline')) {
+      throw artifactError()
     }
-    if (!inlineContext.delimiter && fenceLine &&
-      !(fenceLine[1][0] === '`' && fenceLine[2].includes('`'))) {
-      fence = { marker: fenceLine[1][0], length: fenceLine[1].length }
-      continue
-    }
-    const visible = visibleMarkdownText(line, inlineContext)
-    if (containsRawHtml(visible)) throw artifactError()
-    if (REQUIRED_HEADINGS.includes(visible)) found.push(visible)
+    if (token.type !== 'heading_open') continue
+    const inline = tokens[index + 1]
+    const required = REQUIRED_HEADING_TOKENS.find(heading =>
+      heading.tag === token.tag && heading.content === inline?.content)
+    if (required) found.push(required)
   }
-  if (inlineContext.delimiter || found.length !== REQUIRED_HEADINGS.length ||
-    found.some((heading, index) => heading !== REQUIRED_HEADINGS[index])) {
+  if (found.length !== REQUIRED_HEADING_TOKENS.length ||
+    found.some((heading, index) => heading !== REQUIRED_HEADING_TOKENS[index])) {
     throw artifactError()
   }
 }

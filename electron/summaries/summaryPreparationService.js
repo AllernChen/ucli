@@ -43,19 +43,32 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+function canStripTrailingSeparators(value) {
+  return !/^\/+$/u.test(value) &&
+    !/^[A-Za-z]:[\\/]+$/u.test(value) &&
+    !/^[\\/]{2}[^\\/]+[\\/]+[^\\/]+[\\/]*$/u.test(value)
+}
+
 function replaceKnownPaths(value, unsafePaths) {
   let text = String(value || '')
   const variants = new Set()
   for (const unsafePath of unsafePaths) {
     if (typeof unsafePath !== 'string' || !unsafePath) continue
     if (unsafePath.replaceAll('\\', '/') === '/') continue
-    variants.add(unsafePath)
-    variants.add(unsafePath.replaceAll('\\', '/'))
-    variants.add(unsafePath.replaceAll('/', '\\'))
+    const rawVariants = [unsafePath]
+    if (canStripTrailingSeparators(unsafePath)) {
+      rawVariants.push(unsafePath.replace(/[\\/]+$/u, ''))
+    }
+    for (const variant of rawVariants.filter(Boolean)) {
+      variants.add(variant)
+      variants.add(variant.replaceAll('\\', '/'))
+      variants.add(variant.replaceAll('/', '\\'))
+    }
   }
   for (const variant of [...variants].sort((left, right) => right.length - left.length)) {
+    const boundary = /[\\/]$/u.test(variant) ? '' : '(?![A-Za-z0-9._-])'
     text = text.replace(
-      new RegExp(`${escapeRegExp(variant)}(?![A-Za-z0-9._-])`, 'gi'),
+      new RegExp(`${escapeRegExp(variant)}${boundary}`, 'gi'),
       '[REDACTED:path]'
     )
   }

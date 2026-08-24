@@ -168,6 +168,37 @@ test('preparation preserves URL and command slashes while replacing a short POSI
   assert.match(blocks.short.text, /\/api/)
 })
 
+test('preparation redacts child paths when project roots include trailing separators', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-trailing-path-separators')
+  const sessions = [
+    { id: 'windows', session: { id: 'windows', cwd: 'C:\\work\\Repo\\' } },
+    { id: 'posix', session: { id: 'posix', cwd: '/srv/repo/' } },
+    { id: 'unc-project', session: { id: 'unc-project', cwd: '\\\\Server\\Share\\Repo\\' } },
+    { id: 'unc-root', session: { id: 'unc-root', cwd: '\\\\Server\\Share\\' } },
+    { id: 'drive-root', session: { id: 'drive-root', cwd: 'C:\\' } }
+  ]
+  const textBySession = {
+    windows: '读取 C:/work/Repo 与 C:/work/Repo/secret.txt',
+    posix: '读取 /srv/repo 与 /srv/repo/secret.txt',
+    'unc-project': '读取 //Server/Share/Repo 与 //Server/Share/Repo/secret.txt',
+    'unc-root': '读取 //Server/Share/secret.txt',
+    'drive-root': '读取 C:/secret.txt'
+  }
+  await preparationService(
+    workspaceService,
+    sessions,
+    ({ sessionId }) => textBySession[sessionId]
+  ).prepare({ report: report(workspace.id), workspace })
+  const data = JSON.parse(await readFile(join(workspace.path, 'input', 'data.json'), 'utf8'))
+
+  assert.equal(data.evidenceBlocks.length, sessions.length)
+  for (const block of data.evidenceBlocks) {
+    assert.doesNotMatch(block.text, /(?:C:|\/srv\/repo|\/\/Server\/Share)/i, block.id)
+    assert.match(block.text, /\[REDACTED:path\]/, block.id)
+  }
+})
+
 test('interactive prompt exposes only bounded relative inputs and the canonical output', () => {
   const prompt = buildInteractiveSummaryPrompt({ periodLabel: '2026-W33' })
 
@@ -337,6 +368,7 @@ test('canonical markdown ignores HTML-looking text in inline escaped and indente
     '使用 `<div>` 作为示例。',
     '使用 ``<span data-value="`">`` 作为双反引号示例。',
     String.raw`使用 \<div> 作为转义文本。`,
+    '',
     '    <div>四空格缩进代码</div>',
     '\t<div>Tab 缩进代码</div>',
     ''
@@ -350,35 +382,31 @@ test('canonical markdown ignores HTML-looking text in inline escaped and indente
   assert.equal(result.markdown, markdown)
 })
 
-test('canonical markdown rejects canonical headings contained only in multiline code spans', async t => {
+test('canonical markdown treats a heading after an unmatched paragraph backtick as a real duplicate', async t => {
   const { workspaceService } = await fixture(t)
-  for (const delimiter of ['`', '``']) {
-    const workspace = await workspaceService.create(`report-multiline-code-${delimiter.length}`)
-    const markdown = [
-      `${delimiter}跨行代码开始`,
-      ...REQUIRED_HEADINGS,
-      `跨行代码结束${delimiter}`,
-      ''
-    ].join('\n')
-    await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+  const workspace = await workspaceService.create('report-unmatched-backtick-duplicate')
+  const markdown = [
+    VALID_MARKDOWN.trimEnd(),
+    '普通段落 `未闭合',
+    '# 摘要',
+    '后续段落 `收尾',
+    ''
+  ].join('\n')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
 
-    await assert.rejects(
-      waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
-      error => error?.code === 'SUMMARY_ARTIFACT_INVALID',
-      `delimiter length ${delimiter.length}`
-    )
-  }
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
 })
 
-test('canonical markdown counts only headings visible outside multiline code spans', async t => {
+test('canonical markdown accepts a multiline code span within one Markdown paragraph', async t => {
   const { workspaceService } = await fixture(t)
-  const workspace = await workspaceService.create('report-visible-headings')
+  const workspace = await workspaceService.create('report-multiline-code-span')
   const markdown = [
     VALID_MARKDOWN.trimEnd(),
     '说明 ``跨行代码开始',
-    '# 摘要',
-    '<div>代码内 HTML</div>',
-    '跨行代码结束``',
+    '仍在同一段落内`` 结束。',
     ''
   ].join('\n')
   await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
@@ -388,18 +416,6 @@ test('canonical markdown counts only headings visible outside multiline code spa
     deadlineMs: Date.now() + 2500
   })
   assert.equal(result.markdown, markdown)
-})
-
-test('canonical markdown rejects an unclosed inline code delimiter', async t => {
-  const { workspaceService } = await fixture(t)
-  const workspace = await workspaceService.create('report-unclosed-code-span')
-  const markdown = `${VALID_MARKDOWN}\n未闭合代码 \`普通文本`
-  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
-
-  await assert.rejects(
-    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
-    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
-  )
 })
 
 test('canonical markdown rejects a repeated canonical heading', async t => {

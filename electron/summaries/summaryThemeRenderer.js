@@ -1,12 +1,7 @@
-import MarkdownIt from 'markdown-it'
-
 import { getSummaryTheme } from './summaryThemeCatalog.js'
+import { createSummaryMarkdownParser } from './summaryMarkdownParser.js'
 
-const markdownRenderer = new MarkdownIt({
-  html: false,
-  linkify: false,
-  typographer: false
-})
+const markdownRenderer = createSummaryMarkdownParser()
 
 // Shared base stylesheet. Exported so the workLogs template can hand the same
 // CSS to an interactive AI CLI for generating a structurally identical HTML.
