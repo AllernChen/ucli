@@ -238,6 +238,7 @@ test('mounted work summary panel uses canonical reports for generation, progress
     assert.match(wrapper.get('[data-testid="conversation"]').text(), /此报告没有关联的交互会话/)
 
     const { useSummariesStore } = await import('../src/stores/summaries.js')
+    const panelStore = wrapper.vm.summaries
     setActivePinia(createPinia())
     const otherStore = useSummariesStore()
     await otherStore.init()
@@ -245,6 +246,7 @@ test('mounted work summary panel uses canonical reports for generation, progress
     wrapper = null
     await flushPromises()
     for (const listener of progressListeners) listener({ reportId: 'other-store', status: 'running', phase: 'running', completed: 0, total: 1, text: '另一页仍在生成' })
+    assert.equal(panelStore.progress['other-store'], undefined)
     assert.equal(otherStore.progress['other-store'].text, '另一页仍在生成')
     otherStore.dispose()
   } finally {

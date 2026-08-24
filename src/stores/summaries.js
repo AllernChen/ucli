@@ -20,10 +20,11 @@ function samePeriod(report) {
 const storeMetadata = new WeakMap()
 
 function metadata(store) {
-  let value = storeMetadata.get(store)
+  const state = store.$state
+  let value = storeMetadata.get(state)
   if (!value) {
     value = { unsubscribe: null, initPromise: null, selectionEpoch: 0, terminalReports: new Set(), deletedReports: new Set() }
-    storeMetadata.set(store, value)
+    storeMetadata.set(state, value)
   }
   return value
 }
@@ -225,7 +226,7 @@ export const useSummariesStore = defineStore('summaries', {
       meta.unsubscribe?.()
       meta.unsubscribe = null
       meta.initPromise = null
-      storeMetadata.delete(this)
+      storeMetadata.delete(this.$state)
       this.$dispose()
     }
   }
