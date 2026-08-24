@@ -173,9 +173,54 @@ function decodeMarkdown(buffer) {
   }
 }
 
+function visibleMarkdownText(line) {
+  if (/^(?: {4}|\t)/.test(line)) return ''
+  let visible = ''
+  let index = 0
+  while (index < line.length) {
+    if (line[index] === '\\' && index + 1 < line.length) {
+      visible += ' '
+      index += 2
+      continue
+    }
+    if (line[index] !== '`') {
+      visible += line[index]
+      index += 1
+      continue
+    }
+    let openerEnd = index + 1
+    while (line[openerEnd] === '`') openerEnd += 1
+    const openerLength = openerEnd - index
+    let closingEnd = -1
+    let cursor = openerEnd
+    while (cursor < line.length) {
+      if (line[cursor] !== '`') {
+        cursor += 1
+        continue
+      }
+      let runEnd = cursor + 1
+      while (line[runEnd] === '`') runEnd += 1
+      if (runEnd - cursor === openerLength) {
+        closingEnd = runEnd
+        break
+      }
+      cursor = runEnd
+    }
+    if (closingEnd < 0) {
+      visible += line.slice(index, openerEnd)
+      index = openerEnd
+      continue
+    }
+    visible += ' '
+    index = closingEnd
+  }
+  return visible
+}
+
 function containsRawHtml(line) {
-  return /<!--|-->|<\?|<!\[CDATA\[|<![A-Za-z]/.test(line) ||
-    /<\/?[A-Za-z][A-Za-z0-9-]*(?=[\t />]|$)/.test(line)
+  const visible = visibleMarkdownText(line)
+  return /<!--|-->|<\?|<!\[CDATA\[|<![A-Za-z]/.test(visible) ||
+    /<\/?[A-Za-z][A-Za-z0-9-]*(?=[\t />]|$)/.test(visible)
 }
 
 function assertHeadingOrder(markdown) {
@@ -213,7 +258,8 @@ async function readFromHandle(handle, size, signal, deadlineMs, onReadChunk) {
     if (bytesRead === 0) return null
     offset += bytesRead
     if (onReadChunk) {
-      await onReadChunk({ bytesRead, offset, total: buffer.byteLength })
+      const hookResult = onReadChunk({ bytesRead, offset, total: buffer.byteLength })
+      if (hookResult && typeof hookResult.then === 'function') throw artifactError()
       checkActive(signal, deadlineMs)
     }
   }

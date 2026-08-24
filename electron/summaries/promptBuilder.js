@@ -4,7 +4,7 @@
 export function commonPolicy({ period, usage, coverage, safeProjectIdentifiers = false }) {
   return [
     safeProjectIdentifiers
-      ? '请使用中文撰写分析，并原样保留输入中已提供的安全项目标识；不得猜测或还原绝对项目路径。'
+      ? '请使用中文撰写分析，并原样保留输入中已提供的安全项目标识、模型名、命令、API 名称和其他 identifier；不得猜测或还原绝对项目路径。'
       : '请使用中文撰写分析，但必须原样保留项目路径、模型名、命令、API 名称和其他 identifier。',
     `精确周期：start=${period?.start}；endExclusive=${period?.endExclusive}；timezone=${period?.timezone}。`,
     `UCLI 提供的确定性使用量（唯一可信用量来源）：${JSON.stringify(usage || {})}`,

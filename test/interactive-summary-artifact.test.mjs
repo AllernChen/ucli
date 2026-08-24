@@ -37,23 +37,24 @@ function report(id, start = START) {
   }
 }
 
-function preparationService(workspaceService) {
+function preparationService(workspaceService, sessions = [
+  { id: 's1', session: { id: 's1', cwd: 'C:\\work\\R&D', taskNote: '完成主流程' } },
+  { id: 's2', session: { id: 's2', cwd: 'c:/WORK/R&D', taskNote: '继续主流程' } },
+  {
+    id: 's3',
+    session: { id: 's3', cwd: 'C:\\work\\token=super-secret-value', taskNote: '安全项目' }
+  }
+]) {
+  const projectBySession = new Map(sessions.map(entry => [entry.id, entry.session?.cwd || entry.cwd || '']))
   return createSummaryPreparationService({
     workspaceService,
-    listSessions: async () => [
-      { id: 's1', session: { id: 's1', cwd: 'C:\\work\\R&D', taskNote: '完成主流程' } },
-      { id: 's2', session: { id: 's2', cwd: 'c:/WORK/R&D', taskNote: '继续主流程' } },
-      {
-        id: 's3',
-        session: { id: 's3', cwd: 'C:\\work\\token=super-secret-value', taskNote: '安全项目' }
-      }
-    ],
+    listSessions: async () => sessions,
     historyService: {
       loadRange: async ({ start, sessionId }) => ({
         items: [{
           timestamp: start + 1,
           role: 'assistant',
-          text: `周期-${start} session=${sessionId} token=super-secret-value C:\\work\\R&D\\private.txt`
+          text: `周期-${start} session=${sessionId} token=super-secret-value ${projectBySession.get(sessionId)}\\private.txt`
         }],
         missing: false,
         truncated: false,
@@ -97,19 +98,47 @@ test('preparation isolates every report input and writes only the canonical inpu
   const serializedData = JSON.stringify(firstData)
   assert.doesNotMatch(serializedData, /super-secret-value|C:[\\/]work[\\/]|R&amp;D/i)
   assert.equal('projectPath' in firstData.evidenceBlocks[0], false)
-  assert.match(firstData.evidenceBlocks[0].projectId, /^project-[a-f0-9]{12}$/)
+  assert.match(firstData.evidenceBlocks[0].projectId, /^project-[a-f0-9]{32}$/)
   assert.equal(firstData.evidenceBlocks[0].projectId, firstData.evidenceBlocks[1].projectId)
   assert.notEqual(firstData.evidenceBlocks[0].projectId, firstData.evidenceBlocks[2].projectId)
   for (const workspace of [first, second]) {
     const template = await readFile(join(workspace.path, 'input', 'template.md'), 'utf8')
     assert.match(template, /# 摘要/)
     assert.match(template, /安全项目标识/)
+    assert.match(template, /模型名、命令、API 名称和其他 identifier/)
     assert.doesNotMatch(template, /原样保留项目路径/)
     assert.match(await readFile(join(workspace.path, 'input', 'README.md'), 'utf8'), /output\/report\.md/)
   }
   assert.deepEqual(Object.keys(firstResult).sort(), ['coverage', 'usageSnapshot', 'workspace'])
   assert.equal(firstResult.workspace, first)
   assert.equal(secondResult.workspace, second)
+})
+
+test('preparation derives stable platform-aware project identities without merging root and unknown', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-project-identities')
+  const sessions = [
+    { id: 'posix-upper', session: { id: 'posix-upper', cwd: '/srv/Repo' } },
+    { id: 'posix-lower', session: { id: 'posix-lower', cwd: '/srv/repo' } },
+    { id: 'drive-upper', session: { id: 'drive-upper', cwd: 'C:\\Repo' } },
+    { id: 'drive-lower', session: { id: 'drive-lower', cwd: 'c:/repo' } },
+    { id: 'unc-backslash', session: { id: 'unc-backslash', cwd: '\\\\Server\\Share\\Repo' } },
+    { id: 'unc-slash', session: { id: 'unc-slash', cwd: '//server/share/repo' } },
+    { id: 'posix-root', session: { id: 'posix-root', cwd: '/' } },
+    { id: 'unknown', session: { id: 'unknown' } }
+  ]
+  await preparationService(workspaceService, sessions).prepare({
+    report: report(workspace.id),
+    workspace
+  })
+  const data = JSON.parse(await readFile(join(workspace.path, 'input', 'data.json'), 'utf8'))
+  const ids = Object.fromEntries(data.evidenceBlocks.map(block => [block.id.slice('evidence:'.length), block.projectId]))
+
+  assert.notEqual(ids['posix-upper'], ids['posix-lower'])
+  assert.equal(ids['drive-upper'], ids['drive-lower'])
+  assert.equal(ids['unc-backslash'], ids['unc-slash'])
+  assert.notEqual(ids['posix-root'], ids.unknown)
+  for (const projectId of Object.values(ids)) assert.match(projectId, /^project-[a-f0-9]{32}$/)
 })
 
 test('interactive prompt exposes only bounded relative inputs and the canonical output', () => {
@@ -264,6 +293,27 @@ test('canonical markdown accepts Markdown autolinks while rejecting raw HTML', a
   const { workspaceService } = await fixture(t)
   const workspace = await workspaceService.create('report-autolink')
   const markdown = `${VALID_MARKDOWN}\n参考：<https://example.com/report>\n`
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
+
+  const result = await waitForCanonicalMarkdown({
+    workspacePath: workspace.path,
+    deadlineMs: Date.now() + 2500
+  })
+  assert.equal(result.markdown, markdown)
+})
+
+test('canonical markdown ignores HTML-looking text in inline escaped and indented code contexts', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-markdown-code-contexts')
+  const markdown = [
+    VALID_MARKDOWN.trimEnd(),
+    '使用 `<div>` 作为示例。',
+    '使用 ``<span data-value="`">`` 作为双反引号示例。',
+    String.raw`使用 \<div> 作为转义文本。`,
+    '    <div>四空格缩进代码</div>',
+    '\t<div>Tab 缩进代码</div>',
+    ''
+  ].join('\n')
   await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown)
 
   const result = await waitForCanonicalMarkdown({
@@ -452,4 +502,21 @@ test('canonical markdown cancellation wins after stability during a chunked 5 Mi
     error => error?.code === 'ABORT_ERR'
   )
   assert.equal(chunks, 1)
+})
+
+test('canonical markdown rejects an asynchronous read hook instead of awaiting it with an open handle', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-async-read-hook')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), VALID_MARKDOWN)
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({
+      workspacePath: workspace.path,
+      deadlineMs: Date.now() + 2500,
+      onReadChunk() {
+        return Promise.resolve()
+      }
+    }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
 })

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 
-import { collectSummaryEvidence } from './evidenceCollector.js'
+import { canonicalProjectKey, collectSummaryEvidence } from './evidenceCollector.js'
 import { REQUIRED_HEADINGS } from './interactiveSummaryArtifact.js'
 import { commonPolicy } from './promptBuilder.js'
 
@@ -63,12 +63,9 @@ function sessionSource(entry) {
 }
 
 function projectIdentity(value) {
-  const normalized = String(value || '')
-    .replaceAll('\\', '/')
-    .replace(/\/{2,}/g, '/')
-    .replace(/\/$/, '')
-    .toLowerCase()
-  return `project-${createHash('sha256').update(normalized || '(unknown)').digest('hex').slice(0, 12)}`
+  const canonical = canonicalProjectKey(value)
+  const identity = canonical ? `path:${canonical}` : 'unknown'
+  return `project-${createHash('sha256').update(identity).digest('hex').slice(0, 32)}`
 }
 
 function projectSessions(sessions, unsafePaths) {

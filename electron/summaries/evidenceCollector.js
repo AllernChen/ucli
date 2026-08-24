@@ -21,14 +21,16 @@ function canonicalProjectPath(value) {
   return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized
 }
 
-function canonicalProjectKey(value) {
+export function canonicalProjectKey(value) {
   const original = String(value || '').trim()
   if (!original) return ''
+  const windowsDrive = /^[A-Za-z]:[\\/]/.test(original)
+  const windowsUnc = /^[\\/]{2}[^\\/]/.test(original)
   let normalized = original.replace(/\\/g, '/').replace(/\/+/g, '/')
   if (normalized.length > 1 && !/^[A-Za-z]:\/$/.test(normalized)) {
     normalized = normalized.replace(/\/+$/, '')
   }
-  return /^[A-Za-z]:\//.test(normalized) || original.startsWith('\\\\')
+  return windowsDrive || windowsUnc
     ? normalized.toLowerCase()
     : normalized
 }
