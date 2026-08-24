@@ -23,6 +23,20 @@ Result: 66 pass, 5 fail, 4 skipped. Expected behavior failures proved the old co
 - `npm run build`
   - PASS: Electron main, preload, and renderer builds completed successfully.
 
+## Review fix round 2 — RED/GREEN
+
+### RED
+
+Ran `node --test test/summary-view-mounted.test.mjs` before production edits.
+
+Result: 7 pass, 1 fail. A Markdown save failure propagated the raw `C:\\private\\... provider failure` through the Vue event handler instead of setting a safe panel error.
+
+### GREEN
+
+After adding the completed-report-checked panel export handler, the same mounted suite passed: 8 pass, 0 fail, 0 skipped. The failure test proves the raw save/provider details never reach the UI and the safe export error is shown.
+
+Final round-2 verification: focused summary/export/IPC/view/workspace/import tests passed with 111 pass, 0 fail, 0 skipped; `npm run build` passed.
+
 ## Changes
 
 - HTML and Markdown export now read only the selected completed report, use an atomic write, return the report id/byte count, and do not accept renderer-controlled CLI identity.

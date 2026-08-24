@@ -18,7 +18,7 @@
           <SummaryHistory :versions="summaries.versions" @select="select" @retry="retry" @set-current="setCurrent" @delete-report="remove" />
         </a-col>
         <a-col :span="17">
-          <SummaryReportView :report="summaries.selectedReport" :progress="selectedProgress" :html-exporting="htmlExporting" @cancel="cancel" @export-markdown="summaries.exportMarkdown" @export-html="openHtmlExport" @delete-report="remove" @open-conversation="openConversation" />
+          <SummaryReportView :report="summaries.selectedReport" :progress="selectedProgress" :html-exporting="htmlExporting" @cancel="cancel" @export-markdown="exportMarkdown" @export-html="openHtmlExport" @delete-report="remove" @open-conversation="openConversation" />
         </a-col>
       </a-row>
     </a-spin>
@@ -78,6 +78,15 @@ async function cancel(reportId) { await summaries.cancel(reportId) }
 async function setCurrent(reportId) { await summaries.setCurrent(reportId) }
 async function remove(reportId) { await summaries.deleteReport(reportId) }
 function openConversation(report) { conversationReport.value = report; drawerOpen.value = true }
+async function exportMarkdown(reportId) {
+  const report = summaries.reports.find(item => item.id === reportId)
+  if (report?.status !== 'completed') return
+  try {
+    await summaries.exportMarkdown(report.id)
+  } catch {
+    summaries.error = new Error('无法导出总结报告')
+  }
+}
 function openHtmlExport(reportId) {
   const report = summaries.reports.find(item => item.id === reportId)
   if (report?.status !== 'completed' || htmlExporting.value) return

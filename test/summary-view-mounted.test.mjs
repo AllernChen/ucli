@@ -379,6 +379,55 @@ test('mounted panel submits selected HTML style for the completed report without
   }
 })
 
+test('mounted panel maps Markdown export failures to a safe error without leaking the save error', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ createPinia } = await import('pinia'))
+  ;({ defineComponent } = Vue)
+  ;({ flushPromises, shallowMount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const report = {
+    id: 'completed-markdown', version: 1, status: 'completed', runPhase: 'completed', markdown: '# 已完成',
+    periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai', isCurrent: true
+  }
+  const stubs = createStubs()
+  stubs.ReportViewStub = defineComponent({
+    name: 'SummaryReportView', props: { report: Object }, emits: ['export-markdown'],
+    template: '<button data-testid="summary-export-markdown" @click="$emit(\'export-markdown\', report.id)">导出 Markdown</button>'
+  })
+  const api = window.ucli
+  const originalApi = { ...api }
+  Object.assign(api, {
+    listSummaryReports: async () => [report], getSummaryReport: async () => report,
+    exportSummaryMarkdown: async () => { throw new Error('C:\\private\\save\密钥.md provider failure') },
+    exportSummaryHtml: async () => ({ canceled: false }), onSummaryProgress: () => () => {}
+  })
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    wrapper = shallowMount(await loadMountedPanel(vite, stubs), {
+      global: { plugins: [createPinia()], stubs: {
+        SummaryGenerateDialog: stubs.GenerateDialogStub, SummaryReportView: stubs.ReportViewStub, SummaryHistory: stubs.HistoryStub,
+        SummaryConversationDrawer: stubs.ConversationStub, SummaryHtmlStyleDialog: stubs.HtmlStyleDialogStub,
+        'a-button': { template: '<button><slot /></button>' }, 'a-alert': { props: ['message'], template: '<p>{{ message }}</p>' },
+        'a-list': { template: '<div><slot /></div>' }, 'a-list-item': { template: '<div><slot /></div>' }, 'a-list-item-meta': true,
+        'a-row': { template: '<div><slot /></div>' }, 'a-col': { template: '<div><slot /></div>' }, 'a-spin': { template: '<div><slot /></div>' }
+      } }
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="summary-export-markdown"]').trigger('click').catch(() => {})
+    await flushPromises()
+    assert.equal(wrapper.vm.summaries.error?.message, '无法导出总结报告')
+    assert.match(wrapper.text(), /无法完成总结操作/)
+    assert.doesNotMatch(wrapper.text(), /private|provider|密钥/i)
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+    Object.assign(api, originalApi)
+  }
+})
+
 test('mounted panel unmount preserves a pending initialization for the next mount without obsolete selection', async () => {
   Vue = await import('vue')
   ;({ createServer } = await import('vite'))
