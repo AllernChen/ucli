@@ -169,24 +169,29 @@ export function createInteractiveSummaryJobService({
   }
 
   async function bounded(job, operation, timeoutMs = limits.cleanupMs) {
-    let handle
+    const deadlineOwner = { handle: null, resolve: null, settled: false }
     const work = Promise.resolve(operation).then(
       value => ({ ok: true, value }),
       error => ({ ok: false, error })
     )
     const deadline = new Promise(resolve => {
-      handle = timers.setTimeout(() => {
-        job.cleanupTimers.delete(handle)
-        resolve({ ok: false, timeout: true })
+      deadlineOwner.resolve = resolve
+      deadlineOwner.handle = timers.setTimeout(() => {
+        settleCleanupDeadline(job, deadlineOwner, { ok: false, timeout: true })
       }, timeoutMs)
-      job.cleanupTimers.add(handle)
+      job.cleanupTimers.add(deadlineOwner)
     })
     const outcome = await Promise.race([work, deadline])
-    if (handle) {
-      timers.clearTimeout(handle)
-      job.cleanupTimers.delete(handle)
-    }
+    settleCleanupDeadline(job, deadlineOwner, { ok: false, cancelled: true })
     return outcome
+  }
+
+  function settleCleanupDeadline(job, owner, outcome) {
+    if (owner.settled) return
+    owner.settled = true
+    if (owner.handle) timers.clearTimeout(owner.handle)
+    job.cleanupTimers.delete(owner)
+    owner.resolve(outcome)
   }
 
   function compensate(job, operation) {
@@ -199,8 +204,9 @@ export function createInteractiveSummaryJobService({
   function clearOwnedResources(job) {
     clearJobTimer(job, 'totalTimer')
     clearJobTimer(job, 'missingTimer')
-    for (const handle of job.cleanupTimers) timers.clearTimeout(handle)
-    job.cleanupTimers.clear()
+    for (const owner of [...job.cleanupTimers]) {
+      settleCleanupDeadline(job, owner, { ok: false, cancelled: true })
+    }
     job.abortController.abort()
     job.unsubscribe?.()
     job.unsubscribe = null
@@ -288,17 +294,32 @@ export function createInteractiveSummaryJobService({
     return report
   }
 
-  function canonicalCompletedReport(job) {
-    const report = repository.get(job.reportId)
-    return report?.status === 'completed' &&
-      report.runPhase === INTERACTIVE_SUMMARY_PHASE.COMPLETED
-      ? report
-      : null
+  function repositoryReadOutcome(job) {
+    try {
+      return { ok: true, value: repository.get(job.reportId) }
+    } catch (error) {
+      return { ok: false, error }
+    }
+  }
+
+  function canonicalCompletedOutcome(job) {
+    const outcome = repositoryReadOutcome(job)
+    if (!outcome.ok) return outcome
+    const report = outcome.value
+    return {
+      ok: true,
+      value: report?.status === 'completed' &&
+        report.runPhase === INTERACTIVE_SUMMARY_PHASE.COMPLETED
+        ? report
+        : null
+    }
   }
 
   function reconcileLateCompletion(job) {
     if (!job.terminal) return false
-    const current = repository.get(job.reportId)
+    const outcome = repositoryReadOutcome(job)
+    if (!outcome.ok) throw typed('SUMMARY_RUN_FAILED')
+    const current = outcome.value
     if (current?.status === job.terminal.phase && current.runPhase === job.terminal.phase) {
       return true
     }
@@ -346,14 +367,23 @@ export function createInteractiveSummaryJobService({
       const error = typed(code)
       let report = null
       let databaseFailed = false
+      let handedOff = false
       try {
         job.phase = phase
         if (job.repositoryCompletionOperation) {
           await bounded(job, job.repositoryCompletionOperation)
         }
-        const completedBeforeTerminal = canonicalCompletedReport(job)
-        if (completedBeforeTerminal) {
-          return settleCompleted(job, completedBeforeTerminal, job.completionArtifact)
+        const completedBeforeTerminal = canonicalCompletedOutcome(job)
+        if (!completedBeforeTerminal.ok) {
+          databaseFailed = true
+          reportOperational(job)
+        } else if (completedBeforeTerminal.value) {
+          handedOff = true
+          return await settleCompleted(
+            job,
+            completedBeforeTerminal.value,
+            job.completionArtifact
+          )
         }
         if (job.repositoryOperation) await bounded(job, job.repositoryOperation)
         try {
@@ -365,8 +395,11 @@ export function createInteractiveSummaryJobService({
           })
           job.report = report
         } catch {
-          const completed = canonicalCompletedReport(job)
-          if (completed) return settleCompleted(job, completed, job.completionArtifact)
+          const completed = canonicalCompletedOutcome(job)
+          if (completed.ok && completed.value) {
+            handedOff = true
+            return await settleCompleted(job, completed.value, job.completionArtifact)
+          }
           databaseFailed = true
           reportOperational(job)
         }
@@ -393,8 +426,10 @@ export function createInteractiveSummaryJobService({
         job.done.resolve(report)
         return report
       } finally {
-        clearOwnedResources(job)
-        active.delete(job.reportId)
+        if (!handedOff) {
+          clearOwnedResources(job)
+          active.delete(job.reportId)
+        }
       }
     })()
     job.finishPromise.catch(() => {})
@@ -436,9 +471,9 @@ export function createInteractiveSummaryJobService({
           }
         )
         await ownedStep(job, () => completionOperation)
-        const completed = canonicalCompletedReport(job)
-        if (!completed) throw typed('SUMMARY_RUN_FAILED')
-        return settleCompleted(job, completed, artifact)
+        const completed = canonicalCompletedOutcome(job)
+        if (!completed.ok || !completed.value) throw typed('SUMMARY_RUN_FAILED')
+        return settleCompleted(job, completed.value, artifact)
       } catch (error) {
         if (job.terminal) return job.done.promise
         return finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.FAILED, safeTerminalCode(error))

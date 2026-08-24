@@ -25,6 +25,14 @@ function request(overrides = {}) {
   }
 }
 
+function artifactMetadata(markdown) {
+  return {
+    canonical: 'markdown',
+    bytes: Buffer.byteLength(markdown),
+    sha256: `sha256:${createHash('sha256').update(markdown).digest('hex')}`
+  }
+}
+
 function timerTracker() {
   const active = new Set()
   return {
@@ -116,8 +124,10 @@ async function fixture(t, {
   workspaceRemoveTree = undefined,
   workspaceCreateError = null,
   workspaceCompleteError = null,
+  workspaceFailGate = null,
   repositoryCompleteGate = null,
   repositoryCompleteMode = 'real',
+  repositoryGetError = null,
   terminalUpdateError = null,
   preparationGate = null,
   latePreparationStage = null,
@@ -137,6 +147,7 @@ async function fixture(t, {
   const operational = []
   const workspaceObservations = []
   const repositoryCompleteSettled = deferred()
+  const repositoryCanonicalCommitted = deferred()
   const preparationSettled = deferred()
   const fake = createSummaryFakeAdapterHarness({
     workspaceService,
@@ -149,6 +160,10 @@ async function fixture(t, {
   const timers = timerTracker()
   const jobRepository = {
     ...repository,
+    get(reportId) {
+      if (repositoryGetError) throw repositoryGetError
+      return repository.get(reportId)
+    },
     async update(reportId, patch) {
       if (sessionIdPatchError && Object.hasOwn(patch, 'sessionId')) throw sessionIdPatchError
       if (terminalUpdateError && ['failed', 'cancelled', 'interrupted'].includes(patch.runPhase)) {
@@ -159,6 +174,12 @@ async function fixture(t, {
     async complete(...args) {
       order.push('repository.complete')
       try {
+        if (repositoryCompleteMode === 'commit-then-hang') {
+          const completed = await repository.complete(...args)
+          repositoryCanonicalCommitted.resolve(completed)
+          await repositoryCompleteGate?.promise
+          return completed
+        }
         await repositoryCompleteGate?.promise
         if (repositoryCompleteMode === 'resolve-stale') {
           return {
@@ -198,6 +219,7 @@ async function fixture(t, {
     },
     async fail(...args) {
       order.push(`workspace.fail:${args[2]?.status || 'failed'}:start`)
+      await workspaceFailGate?.promise
       const value = await workspaceService.fail(...args)
       order.push(`workspace.fail:${args[2]?.status || 'failed'}:end`)
       return value
@@ -257,6 +279,7 @@ async function fixture(t, {
     operational,
     workspaceObservations,
     repositoryCompleteSettled,
+    repositoryCanonicalCommitted,
     preparationSettled
   }
 }
@@ -682,6 +705,142 @@ test('completion commits the database then releases native cwd before workspace 
   ].includes(value)), [
     'repository.complete', 'session.stop', 'workspace.complete'
   ])
+})
+
+test('canonical completion handoff keeps cleanup deadlines owned until done settles', async t => {
+  const repositoryCompleteGate = deferred()
+  const stopGate = deferred()
+  t.after(() => {
+    repositoryCompleteGate.resolve()
+    stopGate.resolve()
+  })
+  const state = await fixture(t, {
+    repositoryCompleteGate,
+    repositoryCompleteMode: 'commit-then-hang',
+    fakeOptions: { stopGate },
+    timeouts: { runMs: 500, cleanupMs: 100 }
+  })
+  const run = await state.service.start(request())
+  await beginRunning(state, run)
+  await state.fake.writeCanonicalMarkdown(run.report.id, VALID_MARKDOWN)
+  await watchdog(state.repositoryCanonicalCommitted.promise)
+
+  const completed = await watchdog(run.done, 2_000)
+  assert.equal(completed.status, 'completed')
+  assert.equal(state.repository.get(run.report.id).status, 'completed')
+  assert.equal((await manifest(state, run.report.id)).status, 'completed')
+  assert.equal(state.service.isActive(run.report.id), false)
+  assert.equal(state.fake.listenerCount(run.sessionId), 0)
+  assert.equal(state.fake.stopRequests.filter(id => id === run.sessionId).length, 1)
+  assert.equal(state.timers.activeCount, 0)
+  assert.deepEqual(state.operational, [{
+    type: 'operational', reportId: run.report.id, code: 'SUMMARY_RUN_FAILED'
+  }])
+})
+
+test('canonical read failure rejects done safely and still releases every owner', async t => {
+  const unhandled = captureUnhandledRejections(t)
+  const state = await fixture(t, {
+    repositoryGetError: new Error('C:\\private\\canonical-read')
+  })
+  const run = await state.service.start(request())
+  await beginRunning(state, run)
+  state.fake.emitExit(run.sessionId)
+
+  await assert.rejects(
+    watchdog(run.done, 1_000),
+    error => error?.code === 'SUMMARY_RUN_FAILED' && !error.message.includes('private')
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(state.repository.get(run.report.id).status, 'failed')
+  assert.equal((await manifest(state, run.report.id)).status, 'failed')
+  assert.equal(state.service.isActive(run.report.id), false)
+  assert.equal(state.fake.listenerCount(run.sessionId), 0)
+  assert.equal(state.fake.stopRequests.filter(id => id === run.sessionId).length, 1)
+  assert.equal(state.timers.activeCount, 0)
+  assert.deepEqual(state.operational, [{
+    type: 'operational', reportId: run.report.id, code: 'SUMMARY_RUN_FAILED'
+  }])
+  assert.deepEqual(unhandled, [])
+})
+
+test('late real completion cannot replace a timed-out report or demote its prior current', async t => {
+  const repositoryCompleteGate = deferred()
+  t.after(() => repositoryCompleteGate.resolve())
+  const state = await fixture(t, {
+    repositoryCompleteGate,
+    repositoryCompleteMode: 'real',
+    timeouts: { runMs: 500, cleanupMs: 100 }
+  })
+  const previous = await state.repository.createQueued({
+    ...request(),
+    generatedBy: 'manual',
+    runPhase: 'preparing'
+  })
+  await state.repository.update(previous.id, { status: 'running', runPhase: 'running' })
+  const previousCompleted = await state.repository.complete(previous.id, {
+    markdown: VALID_MARKDOWN,
+    sourceHash: artifactMetadata(VALID_MARKDOWN).sha256,
+    usageSnapshot: {},
+    coverage: {},
+    artifactMetadata: artifactMetadata(VALID_MARKDOWN)
+  })
+  await state.repository.setCurrent(previousCompleted.id)
+
+  const run = await state.service.start(request())
+  await beginRunning(state, run)
+  await state.fake.writeCanonicalMarkdown(run.report.id, VALID_MARKDOWN)
+  await waitUntil(() => state.order.includes('repository.complete'))
+  const timedOut = await watchdog(run.done, 2_000)
+  assert.equal(timedOut.status, 'failed')
+  assert.equal(timedOut.errorText, 'SUMMARY_RUN_TIMEOUT')
+
+  repositoryCompleteGate.resolve()
+  await watchdog(state.repositoryCompleteSettled.promise)
+  await new Promise(resolve => setImmediate(resolve))
+  const oldCurrent = state.repository.get(previousCompleted.id)
+  const failed = state.repository.get(run.report.id)
+  assert.equal(oldCurrent.isCurrent, true)
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.isCurrent, false)
+  assert.equal(failed.markdown, null)
+  assert.equal(failed.sourceHash, null)
+  assert.deepEqual(failed.artifactMetadata, {})
+})
+
+test('concurrent late session creation keeps its hung stop deadline observable', async t => {
+  const createGate = deferred()
+  const stopGate = deferred()
+  const workspaceFailGate = deferred()
+  t.after(() => {
+    createGate.resolve()
+    stopGate.resolve()
+    workspaceFailGate.resolve()
+  })
+  const state = await fixture(t, {
+    fakeOptions: { createGate, stopGate },
+    workspaceFailGate,
+    timeouts: { cleanupMs: 100 }
+  })
+  const starting = state.service.start(request())
+  await waitUntil(() => state.fake.createRequests.length === 1)
+  const [queued] = state.repository.list()
+
+  const interrupting = state.service.interruptAll('SUMMARY_APP_SHUTDOWN')
+  createGate.resolve()
+  await waitUntil(() => state.fake.stopRequests.length === 1, 1_000)
+  workspaceFailGate.resolve()
+  assert.equal(await watchdog(interrupting), 1)
+  await assert.rejects(starting, error => error?.code === 'SUMMARY_APP_SHUTDOWN')
+  await waitUntil(() => state.operational.length === 1, 1_000)
+
+  assert.deepEqual(state.operational, [{
+    type: 'operational', reportId: queued.id, code: 'SUMMARY_RUN_FAILED'
+  }])
+  assert.equal(state.repository.get(queued.id).status, 'interrupted')
+  assert.equal((await manifest(state, queued.id)).status, 'interrupted')
+  assert.equal(state.service.isActive(queued.id), false)
+  assert.equal(state.timers.activeCount, 0)
 })
 
 for (const repositoryCompleteMode of ['resolve-stale', 'reject-late']) {
