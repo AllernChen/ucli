@@ -24,15 +24,30 @@ function repositoryError(code, message) {
   return Object.assign(new TypeError(message), { code })
 }
 
+function absolutePathValue(value) {
+  return typeof value === 'string' && (
+    /^[a-z]:[\\/]/i.test(value) || /^\\\\/.test(value) || /^\/{1,2}/.test(value) ||
+    /^file:\/\//i.test(value)
+  )
+}
+
 function hasSensitiveJson(value, path = []) {
+  if (absolutePathValue(value)) return true
   if (!value || typeof value !== 'object') return false
   if (Array.isArray(value)) return value.some((child, index) => hasSensitiveJson(child, [...path, index]))
   return Object.entries(value).some(([key, child]) => {
+    const normalizedKey = key.replace(/[^a-z0-9]/gi, '').toLowerCase()
     const coverageTranscriptCount = path.length === 2 && path[0] === 'coverage' &&
       path[1] === 'sources' && key === 'transcript' &&
       typeof child === 'number' && Number.isFinite(child) && child >= 0
-    return (!coverageTranscriptCount &&
-      /^(?:evidence|prompt|raw(?:output|metadata)?|transcript|messages?|.*path)$/i.test(key)) ||
+    const numericTokenCounter = normalizedKey.endsWith('tokens') &&
+      typeof child === 'number' && Number.isFinite(child) && child >= 0
+    return (!coverageTranscriptCount && (
+      /(?:credential|password|passphrase|secret|apikey|evidence|prompt|transcript|message|toolpayload|rawoutput|rawmetadata)/
+        .test(normalizedKey) ||
+      normalizedKey.endsWith('path') ||
+      (normalizedKey.includes('token') && !numericTokenCounter)
+    )) ||
       hasSensitiveJson(child, [...path, key])
   })
 }
@@ -45,16 +60,74 @@ function jsonObject(value, field) {
     }
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw repositoryError('INVALID_SUMMARY_REPORT_JSON', `${field} must be a JSON object`)
+    throw repositoryError('INVALID_SUMMARY_REPORT_JSON', 'Summary JSON must be an object')
   }
   if (hasSensitiveJson(parsed, [field])) {
-    throw repositoryError('SUMMARY_SENSITIVE_JSON_FORBIDDEN', `${field} contains sensitive content`)
+    throw repositoryError('SUMMARY_SENSITIVE_JSON_FORBIDDEN', 'Sensitive summary JSON is forbidden')
   }
   try {
     return JSON.parse(JSON.stringify(parsed))
   } catch {
-    throw repositoryError('INVALID_SUMMARY_REPORT_JSON', `${field} must be serializable`)
+    throw repositoryError('INVALID_SUMMARY_REPORT_JSON', 'Summary JSON must be serializable')
   }
+}
+
+const SAFE_HASH = /^(?:sha256:)?[a-f0-9]{64}$/
+const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{2,80}(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?$/
+
+function safeHash(value) {
+  if (typeof value !== 'string' || !SAFE_HASH.test(value)) {
+    throw repositoryError('INVALID_SUMMARY_CANONICAL_REPORT', 'Invalid canonical summary report')
+  }
+  return value
+}
+
+function safeErrorText(value) {
+  const suffix = typeof value === 'string' && value.includes(':')
+    ? value.slice(value.indexOf(':') + 1)
+    : ''
+  if (value !== null && value !== undefined &&
+    (typeof value !== 'string' || !SAFE_ERROR_CODE.test(value) ||
+      /^(?:sk-)|(?:credential|password|secret|apikey|prompt|transcript|message|toolpayload|token)/i
+        .test(suffix))) {
+    throw repositoryError('INVALID_SUMMARY_ERROR_CODE', 'Invalid summary error code')
+  }
+  return value ?? null
+}
+
+function emptyArtifactMetadata(value) {
+  const metadata = jsonObject(value ?? {}, 'artifactMetadata')
+  if (Object.keys(metadata).length !== 0) {
+    throw repositoryError(
+      'INVALID_SUMMARY_ARTIFACT_METADATA',
+      'Invalid summary artifact metadata'
+    )
+  }
+  return metadata
+}
+
+function completedArtifactMetadata(value) {
+  let metadata = value
+  if (typeof metadata === 'string') {
+    try { metadata = JSON.parse(metadata) } catch { metadata = null }
+  }
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw repositoryError(
+      'INVALID_SUMMARY_ARTIFACT_METADATA',
+      'Invalid summary artifact metadata'
+    )
+  }
+  const keys = Object.keys(metadata)
+  if (keys.length !== 3 || !keys.every(key => ['canonical', 'bytes', 'sha256'].includes(key)) ||
+    metadata.canonical !== 'markdown' || !Number.isSafeInteger(metadata.bytes) ||
+    metadata.bytes <= 0 || typeof metadata.sha256 !== 'string' ||
+    !SAFE_HASH.test(metadata.sha256)) {
+    throw repositoryError(
+      'INVALID_SUMMARY_ARTIFACT_METADATA',
+      'Invalid summary artifact metadata'
+    )
+  }
+  return jsonObject(metadata, 'artifactMetadata')
 }
 
 const METRIC_FIELDS = new Set([
@@ -108,6 +181,7 @@ function normalizeReport(report) {
     throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report record')
   }
   if (normalized.runPhase !== null) assertInteractiveSummaryPhase(normalized.runPhase)
+  normalized.errorText = safeErrorText(report.errorText)
   for (const field of JSON_FIELDS) {
     normalized[field] = field === 'generationMetrics'
       ? persistedGenerationMetrics(report[field] ?? {})
@@ -142,7 +216,7 @@ function assertQueuedInput(input, key) {
 
 function requiredString(value, field) {
   if (typeof value !== 'string' || !value.trim()) {
-    throw repositoryError('INVALID_SUMMARY_REPORT', `${field} is required`)
+    throw repositoryError('INVALID_SUMMARY_REPORT', 'Required summary value is missing')
   }
   return value
 }
@@ -212,7 +286,7 @@ export function createReportRepository({
     update(reportId, patch = {}) {
       const forbidden = Object.keys(patch).find(field => !PATCH_FIELDS.has(field))
       if (forbidden) {
-        throw repositoryError('SUMMARY_REPORT_FIELD_FORBIDDEN', `Cannot persist ${forbidden}`)
+        throw repositoryError('SUMMARY_REPORT_FIELD_FORBIDDEN', 'Summary report field is not persistable')
       }
       const safe = { ...patch }
       if (safe.status !== undefined && !STATUSES.has(safe.status)) {
@@ -228,17 +302,21 @@ export function createReportRepository({
       if (safe.runPhase !== undefined && safe.runPhase !== null) {
         assertInteractiveSummaryPhase(safe.runPhase)
       }
+      if (safe.errorText !== undefined) safe.errorText = safeErrorText(safe.errorText)
       for (const field of JSON_FIELDS) {
-        if (safe[field] !== undefined) safe[field] = field === 'generationMetrics'
+        if (safe[field] === undefined) continue
+        safe[field] = field === 'generationMetrics'
           ? generationMetrics(safe[field], { allowEmpty: true })
-          : jsonObject(safe[field], field)
+          : field === 'artifactMetadata'
+            ? emptyArtifactMetadata(safe[field])
+            : jsonObject(safe[field], field)
       }
       return normalizeReport(db.updateSummaryReport(reportId, safe))
     },
 
     async complete(reportId, result = {}) {
       const markdown = requiredString(result.markdown, 'markdown')
-      const sourceHash = requiredString(result.sourceHash, 'sourceHash')
+      const sourceHash = safeHash(result.sourceHash)
       const updatedAt = result.updatedAt ?? now()
       return normalizeReport(await db.completeSummaryReport(reportId, {
         status: 'completed',
@@ -247,7 +325,11 @@ export function createReportRepository({
         sourceHash,
         usageSnapshot: jsonObject(result.usageSnapshot ?? {}, 'usageSnapshot'),
         coverage: jsonObject(result.coverage ?? {}, 'coverage'),
-        artifactMetadata: jsonObject(result.artifactMetadata ?? {}, 'artifactMetadata'),
+        generationUsage: jsonObject(result.generationUsage ?? {}, 'generationUsage'),
+        generationMetrics: generationMetrics(result.generationMetrics ?? {}, { allowEmpty: true }),
+        generationCostUsd: result.generationCostUsd ?? null,
+        promptVersion: result.promptVersion || null,
+        artifactMetadata: completedArtifactMetadata(result.artifactMetadata),
         errorText: null,
         updatedAt
       }))
@@ -276,14 +358,14 @@ export function createReportRepository({
         generationMetrics: generationMetrics(input.generationMetrics ?? {}, { allowEmpty: true }),
         generationCostUsd: input.generationCostUsd ?? null,
         promptVersion: input.promptVersion || null,
-        sourceHash: requiredString(input.sourceHash, 'sourceHash'),
+        sourceHash: safeHash(input.sourceHash),
         isCurrent: false,
         generatedBy: input.generatedBy || 'manual',
         errorText: null,
         executionMode: SUMMARY_EXECUTION_MODE.LEGACY_WORKLOG_IMPORT,
         sessionId: null,
         runPhase: 'completed',
-        artifactMetadata: jsonObject(input.artifactMetadata ?? {}, 'artifactMetadata'),
+        artifactMetadata: completedArtifactMetadata(input.artifactMetadata),
         legacyImportKey: requiredString(input.legacyImportKey, 'legacyImportKey'),
         createdAt: timestamp,
         updatedAt: input.updatedAt ?? timestamp

@@ -29,6 +29,19 @@ function jsonArtifact(value) {
   return `${JSON.stringify(value, null, 2)}\n`
 }
 
+function markdownArtifactMetadata(markdown) {
+  if (typeof markdown !== 'string' || !markdown.trim()) {
+    throw Object.assign(new TypeError('Invalid summary Markdown artifact'), {
+      code: 'SUMMARY_ARTIFACT_INVALID'
+    })
+  }
+  return {
+    canonical: 'markdown',
+    bytes: Buffer.byteLength(markdown),
+    sha256: `sha256:${createHash('sha256').update(markdown).digest('hex')}`
+  }
+}
+
 function evidenceArtifacts(evidence) {
   const projects = new Map()
   for (const block of evidence?.blocks || []) {
@@ -180,22 +193,22 @@ export function createSummaryJobService({
       return null
     }
 
-    update(job.reportId, {
-      status: 'completed',
+    const artifactMetadata = markdownArtifactMetadata(result.markdown)
+    if (job.workspace) {
+      await settleWorkspaceUpdates(job)
+      await workspaceService.complete(job.reportId, { markdown: result.markdown })
+    }
+    const current = await repository.complete(job.reportId, {
       markdown: result.markdown,
       usageSnapshot: context.usageSnapshot,
       coverage: context.evidence.coverage || {},
       generationUsage: result.generationUsage || {},
       generationMetrics: safeGenerationMetrics(result.generationMetrics),
       generationCostUsd: result.generationUsage?.costUsd ?? null,
+      promptVersion: request.promptVersion || 'summary-v1',
       sourceHash: context.sourceHash,
-      errorText: null
-    }, { notify: false })
-    if (job.workspace) {
-      await settleWorkspaceUpdates(job)
-      await workspaceService.complete(job.reportId, { markdown: result.markdown })
-    }
-    const current = await repository.setCurrent(job.reportId)
+      artifactMetadata
+    })
     publish(current)
     return finish(job, current)
   }

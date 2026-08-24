@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,6 +8,9 @@ import test from 'node:test'
 import { createReportRepository } from '../electron/summaries/reportRepository.js'
 import { createSummaryJobService } from '../electron/summaries/summaryJobService.js'
 import { createSummaryWorkspaceService } from '../electron/summaries/summaryWorkspaceService.js'
+
+const SOURCE_HASH = `sha256:${'a'.repeat(64)}`
+const MARKDOWN_HASH = `sha256:${'b'.repeat(64)}`
 
 class MemoryDb {
   constructor() {
@@ -237,6 +241,98 @@ test('report repository normalizes interactive defaults and rejects invalid run 
   )
 })
 
+test('report repository rejects recursive secrets, tool payloads, and absolute path values', () => {
+  const repository = createReportRepository({
+    db: new MemoryDb(), now: () => 1000, idFactory: () => 'r-sensitive'
+  })
+  const report = repository.createQueued(request())
+  const unsafePatches = [
+    { artifactMetadata: { apiKey: 'sk-secret' } },
+    { coverage: { nested: { toolPayload: { command: 'rm -rf data' } } } },
+    { usageSnapshot: { location: 'C:\\private\\workspace\\report.md' } },
+    { coverage: { credential: 'secret' } },
+    { coverage: { nested: { prompt: 'raw prompt' } } },
+    { coverage: { transcript: 'raw transcript' } },
+    { coverage: { message: 'raw message' } },
+    { coverage: { nested: { password: 'secret' } } },
+    { coverage: { location: '\\\\server\\share\\report.md' } },
+    { coverage: { location: '/private/workspace/report.md' } },
+    { coverage: { location: 'file:///private/workspace/report.md' } }
+  ]
+
+  for (const patch of unsafePatches) {
+    const rejectedKey = Object.keys(patch)[0]
+    assert.throws(
+      () => repository.update(report.id, patch),
+      error => error.code === 'SUMMARY_SENSITIVE_JSON_FORBIDDEN' &&
+        !error.message.includes(rejectedKey)
+    )
+  }
+  assert.deepEqual(repository.update(report.id, {
+    usageSnapshot: { inputTokens: 10, outputTokens: 2, totalTokens: 12 }
+  }).usageSnapshot, { inputTokens: 10, outputTokens: 2, totalTokens: 12 })
+})
+
+test('report repository accepts only bounded safe error machine codes', () => {
+  const repository = createReportRepository({
+    db: new MemoryDb(), now: () => 1000, idFactory: () => 'r-errors'
+  })
+  const report = repository.createQueued(request())
+
+  for (const errorText of [
+    'C:\\private\\workspace\\report.md',
+    'apiKey=sk-secret',
+    'raw prompt text',
+    'SUMMARY_RUN_FAILED:sk-secret',
+    'SUMMARY_AUTOMATIC_DUPLICATE:../../private/report'
+  ]) {
+    assert.throws(
+      () => repository.update(report.id, { errorText }),
+      error => error.code === 'INVALID_SUMMARY_ERROR_CODE' &&
+        !error.message.includes(errorText)
+    )
+  }
+  assert.equal(repository.update(report.id, {
+    errorText: 'SUMMARY_AUTOMATIC_DUPLICATE:safe-report_1.2-abc'
+  }).errorText, 'SUMMARY_AUTOMATIC_DUPLICATE:safe-report_1.2-abc')
+  assert.equal(repository.update(report.id, { errorText: null }).errorText, null)
+})
+
+test('completed and imported artifact metadata is exact while active metadata stays empty', async () => {
+  const db = new MemoryDb()
+  let id = 0
+  const repository = createReportRepository({
+    db, now: () => 1000, idFactory: () => `r-artifact-${++id}`
+  })
+  const queued = repository.createQueued(request({
+    executionMode: 'interactive-cli', sessionId: 'session-1'
+  }))
+  assert.throws(
+    () => repository.update(queued.id, {
+      artifactMetadata: { canonical: 'markdown', bytes: 1, sha256: MARKDOWN_HASH }
+    }),
+    error => error.code === 'INVALID_SUMMARY_ARTIFACT_METADATA'
+  )
+  repository.update(queued.id, { status: 'running', runPhase: 'running' })
+  for (const artifactMetadata of [
+    {},
+    { canonical: 'html', bytes: 1, sha256: MARKDOWN_HASH },
+    { canonical: 'markdown', bytes: 0, sha256: MARKDOWN_HASH },
+    { canonical: 'markdown', bytes: 1, sha256: 'not-a-safe-hash' },
+    { canonical: 'markdown', bytes: 1, sha256: MARKDOWN_HASH, path: '/private/report.md' }
+  ]) {
+    await assert.rejects(repository.complete(queued.id, {
+      markdown: '# Completed', sourceHash: SOURCE_HASH, usageSnapshot: {}, coverage: {},
+      artifactMetadata
+    }), error => error.code === 'INVALID_SUMMARY_ARTIFACT_METADATA')
+  }
+  await assert.rejects(repository.importCompleted({
+    ...request(), markdown: '# Imported', legacyImportKey: 'legacy-invalid-artifact',
+    sourceHash: SOURCE_HASH,
+    artifactMetadata: { canonical: 'markdown', bytes: 1, sha256: MARKDOWN_HASH, extra: true }
+  }), error => error.code === 'INVALID_SUMMARY_ARTIFACT_METADATA')
+})
+
 test('report repository forbids identity and raw-path patches', () => {
   const repository = createReportRepository({
     db: new MemoryDb(), now: () => 1000, idFactory: () => 'r1'
@@ -270,8 +366,8 @@ test('report repository imports legacy markdown idempotently without changing cu
     ...request(),
     markdown: '# Imported',
     legacyImportKey: 'legacy-key-1',
-    sourceHash: 'sha256-1',
-    artifactMetadata: { canonical: 'markdown', bytes: 10, sha256: 'sha256-1' }
+    sourceHash: SOURCE_HASH,
+    artifactMetadata: { canonical: 'markdown', bytes: 10, sha256: MARKDOWN_HASH }
   }
 
   const first = await repository.importCompleted(input)
@@ -298,10 +394,10 @@ test('report repository completes only running reports with canonical metadata',
 
   const report = await repository.complete(queued.id, {
     markdown: '# Completed',
-    sourceHash: 'sha256-completed',
+    sourceHash: SOURCE_HASH,
     usageSnapshot: { inputTokens: 1 },
     coverage: { sessionsIncluded: 1 },
-    artifactMetadata: { canonical: 'markdown', bytes: 11, sha256: 'sha256-completed' }
+    artifactMetadata: { canonical: 'markdown', bytes: 11, sha256: MARKDOWN_HASH }
   })
 
   assert.equal(report.status, 'completed')
@@ -311,8 +407,8 @@ test('report repository completes only running reports with canonical metadata',
   assert.equal(report.errorText, null)
   await assert.rejects(
     repository.complete(report.id, {
-      markdown: '# Replaced', sourceHash: 'sha256-replaced', usageSnapshot: {}, coverage: {},
-      artifactMetadata: { canonical: 'markdown', bytes: 10, sha256: 'sha256-replaced' }
+      markdown: '# Replaced', sourceHash: SOURCE_HASH, usageSnapshot: {}, coverage: {},
+      artifactMetadata: { canonical: 'markdown', bytes: 10, sha256: MARKDOWN_HASH }
     }),
     error => error.code === 'SUMMARY_REPORT_NOT_RUNNING'
   )
@@ -381,6 +477,11 @@ test('successful jobs use an opaque persistent workspace then compact it to outp
 
     assert.equal(pipelineCalls[0].workspaceDirectory, join(workspace, 'work'))
     assert.equal(report.generationMetrics.aiCalls, 1)
+    assert.deepEqual(report.artifactMetadata, {
+      canonical: 'markdown',
+      bytes: Buffer.byteLength('workspace summary'),
+      sha256: `sha256:${createHash('sha256').update('workspace summary').digest('hex')}`
+    })
     assert.equal(manifest.status, 'completed')
     assert.deepEqual(manifest.artifacts.map(item => item.path), ['output/summary.md'])
     assert.equal(readFileSync(join(workspace, 'output', 'summary.md'), 'utf8'), 'workspace summary')
@@ -780,23 +881,65 @@ test('a dynamic confirmation error fails safely instead of pretending a costly r
   assert.equal(repository.get(job.reportId).status, 'failed')
 })
 
-test('job order is queued persistence, evidence coverage, usage snapshot, pipeline, then current', async () => {
+test('workspace finalization failure never persists a completed non-current report', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-job-workspace-finalize-failure-'))
+  try {
+    const workspace = createSummaryWorkspaceService({ root })
+    const workspaceService = {
+      ...workspace,
+      async complete() {
+        throw Object.assign(new Error('workspace output failed'), {
+          code: 'SUMMARY_WORKSPACE_WRITE_FAILED'
+        })
+      }
+    }
+    const { db, service, repository } = createHarness({ workspaceService })
+    const statuses = []
+    const originalUpdate = db.updateSummaryReport.bind(db)
+    db.updateSummaryReport = (id, patch) => {
+      if (patch.status) statuses.push(patch.status)
+      return originalUpdate(id, patch)
+    }
+
+    const job = service.generate(request())
+    const report = await job.completion
+
+    assert.equal(report.status, 'failed')
+    assert.equal(report.isCurrent, false)
+    assert.equal(repository.get(job.reportId).status, 'failed')
+    assert.doesNotMatch(statuses.join(','), /completed/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('job order finalizes the workspace before one atomic database completion', async () => {
   const order = []
   const db = new MemoryDb()
   const originalCreate = db.createSummaryReport.bind(db)
   db.createSummaryReport = report => { order.push('queued'); return originalCreate(report) }
-  const originalCurrent = db.setCurrentSummaryReport.bind(db)
-  db.setCurrentSummaryReport = async id => { order.push('current'); return originalCurrent(id) }
+  const originalComplete = db.completeSummaryReport.bind(db)
+  db.completeSummaryReport = async (id, patch) => {
+    order.push('complete')
+    return originalComplete(id, patch)
+  }
   const repository = createReportRepository({ db, idFactory: () => 'ordered' })
   const service = createSummaryJobService({
     repository,
     evidenceCollector: { async collect() { order.push('collect'); return evidence() } },
     snapshotUsage: async () => { order.push('usage'); return { totals: {} } },
-    pipeline: { async run() { order.push('pipeline'); return pipelineResult() } }
+    pipeline: { async run() { order.push('pipeline'); return pipelineResult() } },
+    workspaceService: {
+      async create() { return { workDirectory: 'safe-work' } },
+      async writeArtifact() {},
+      async markStage() {},
+      async complete() { order.push('workspace') },
+      async fail() {}
+    }
   })
   const job = service.generate(request())
   await job.completion
-  assert.deepEqual(order, ['queued', 'collect', 'usage', 'pipeline', 'current'])
+  assert.deepEqual(order, ['queued', 'collect', 'usage', 'pipeline', 'workspace', 'complete'])
 })
 
 test('shutdown is idempotent, rejects new jobs, cancels active work, and drains its workspace', async () => {
