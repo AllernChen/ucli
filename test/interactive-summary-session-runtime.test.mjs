@@ -37,7 +37,13 @@ class FakeAdapter extends EventEmitter {
   }
 }
 
-function harness({ adapter = new FakeAdapter(), startResult = true, onStart } = {}) {
+function harness({
+  adapter = new FakeAdapter(),
+  startResult = true,
+  onStart,
+  startGate,
+  stopError
+} = {}) {
   const entries = new Map([['session-1', { adapter }]])
   const stopped = []
   let startCalls = 0
@@ -49,10 +55,12 @@ function harness({ adapter = new FakeAdapter(), startResult = true, onStart } = 
     },
     startAdapter: async sessionId => {
       startCalls += 1
+      await startGate?.promise
       onStart?.(entries.get(sessionId)?.adapter)
       return startResult
     },
     stopSession: async (sessionId) => {
+      if (stopError) throw stopError
       stopped.push(sessionId)
       const entry = entries.get(sessionId)
       if (entry) entry.stopped = true
@@ -113,6 +121,34 @@ test('start and stop are idempotent and a stopped session cannot restart', async
   })
 })
 
+test('stop waits for an in-flight start then stops exactly once', async () => {
+  let releaseStart
+  const startGate = {
+    promise: new Promise(resolve => { releaseStart = resolve })
+  }
+  const state = harness({
+    startGate,
+    onStart: adapter => adapter.emitEvent('ready')
+  })
+  const starting = state.runtime.start('session-1')
+  const stopping = state.runtime.stop('session-1')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(state.stopped, [])
+
+  releaseStart()
+  await assert.rejects(starting, { code: 'SUMMARY_SESSION_STOPPED' })
+  assert.equal(await stopping, true)
+  assert.equal(await state.runtime.stop('session-1'), true)
+  assert.deepEqual(state.stopped, ['session-1'])
+  assert.equal(state.adapter.listenerCount('event'), 0)
+})
+
+test('stop maps dependency failure to a stable typed error', async () => {
+  const { runtime } = harness({ stopError: new Error('private stop detail') })
+
+  await assert.rejects(runtime.stop('session-1'), { code: 'SUMMARY_RUN_FAILED' })
+})
+
 test('invalid wait timeout fails without installing listeners', async () => {
   const { adapter, runtime } = harness()
 
@@ -129,6 +165,18 @@ test('waitReady rejects with a typed timeout and removes listeners', async () =>
   await assert.rejects(runtime.waitReady('session-1', { timeoutMs: 5 }), {
     code: 'SUMMARY_READY_TIMEOUT'
   })
+  assert.equal(adapter.listenerCount('event'), 0)
+})
+
+test('one ready timeout does not poison a longer waiter for the same session', async () => {
+  const { adapter, runtime } = harness()
+  const short = runtime.waitReady('session-1', { timeoutMs: 5 })
+  const long = runtime.waitReady('session-1', { timeoutMs: 100 })
+
+  setTimeout(() => adapter.emitEvent('ready'), 20)
+
+  await assert.rejects(short, { code: 'SUMMARY_READY_TIMEOUT' })
+  assert.deepEqual(await long, { ready: true })
   assert.equal(adapter.listenerCount('event'), 0)
 })
 
@@ -284,4 +332,40 @@ test('subscribe scopes lifecycle events to one session and unsubscribe removes l
   assert.deepEqual(observed, ['turn_started', 'turn_completed', 'exit'])
   assert.equal(adapter.listenerCount('gateway-event'), 0)
   assert.equal(adapter.listenerCount('event'), 0)
+})
+
+test('adapter replacement tears down old pending work and allows the new adapter to start', async () => {
+  const state = harness({ onStart: adapter => adapter.emitEvent('ready') })
+  const oldAdapter = state.adapter
+  const ready = state.runtime.waitReady('session-1', { timeoutMs: 100 })
+  const delivery = state.runtime.deliver('session-1', 'prompt', { timeoutMs: 100 })
+  const unsubscribe = state.runtime.subscribe('session-1', () => {})
+  const readyRejected = assert.rejects(ready, { code: 'SUMMARY_SESSION_UNAVAILABLE' })
+  const deliveryRejected = assert.rejects(delivery, { code: 'SUMMARY_TURN_NOT_CONFIRMED' })
+  const newAdapter = new FakeAdapter('session-1')
+
+  state.entries.set('session-1', { adapter: newAdapter })
+  assert.equal(await state.runtime.start('session-1'), true)
+  await Promise.all([readyRejected, deliveryRejected])
+  assert.deepEqual(await state.runtime.waitReady('session-1'), { ready: true })
+  assert.equal(oldAdapter.listenerCount('gateway-event'), 0)
+  assert.equal(oldAdapter.listenerCount('event'), 0)
+  unsubscribe()
+
+  assert.equal(await state.runtime.stop('session-1'), true)
+  assert.equal(newAdapter.listenerCount('gateway-event'), 0)
+  assert.equal(newAdapter.listenerCount('event'), 0)
+})
+
+test('offline entry rejects cached adapter use and releases its listeners', async () => {
+  const state = harness()
+  const unsubscribe = state.runtime.subscribe('session-1', () => {})
+  state.entries.set('session-1', { adapter: null })
+
+  await assert.rejects(state.runtime.waitReady('session-1'), {
+    code: 'SUMMARY_SESSION_UNAVAILABLE'
+  })
+  assert.equal(state.adapter.listenerCount('gateway-event'), 0)
+  assert.equal(state.adapter.listenerCount('event'), 0)
+  unsubscribe()
 })

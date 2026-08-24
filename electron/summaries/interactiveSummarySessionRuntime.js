@@ -30,6 +30,7 @@ export function createInteractiveSummarySessionRuntime({
   }
 
   const states = new Map()
+  const stoppedIds = new Set()
 
   function makeState(sessionId, adapter = getEntry(sessionId)?.adapter || null) {
     const state = {
@@ -38,6 +39,7 @@ export function createInteractiveSummarySessionRuntime({
       startPromise: null,
       stopPromise: null,
       stopped: false,
+      retired: false,
       readyOutcome: null,
       readyCleanup: null,
       readyWaiters: new Set(),
@@ -48,23 +50,46 @@ export function createInteractiveSummarySessionRuntime({
     return state
   }
 
-  function stateFor(sessionId, { adapterRequired = true } = {}) {
+  function rejectReadyWaiters(state, error) {
+    for (const waiter of [...state.readyWaiters]) {
+      clearTimeout(waiter.timer)
+      state.readyWaiters.delete(waiter)
+      waiter.reject(error)
+    }
+  }
+
+  function retireState(state, {
+    readyError = typed('SUMMARY_SESSION_UNAVAILABLE'),
+    deliveryError = typed('SUMMARY_TURN_NOT_CONFIRMED')
+  } = {}) {
+    if (state.retired) return
+    state.retired = true
+    state.readyCleanup?.()
+    rejectReadyWaiters(state, readyError)
+    for (const cancel of [...state.deliveries]) cancel(deliveryError)
+    for (const unsubscribe of [...state.subscriptions]) unsubscribe()
+    state.adapter = null
+    if (states.get(state.sessionId) === state) states.delete(state.sessionId)
+  }
+
+  function stateFor(sessionId) {
+    if (stoppedIds.has(sessionId)) throw typed('SUMMARY_SESSION_STOPPED')
     let state = states.get(sessionId)
     const adapter = getEntry(sessionId)?.adapter || null
-    if (!state) state = makeState(sessionId, adapter)
-    if (!state.stopped && adapter && state.adapter !== adapter) {
-      state.readyCleanup?.()
-      state = makeState(sessionId, adapter)
+    if (state?.stopped) throw typed('SUMMARY_SESSION_STOPPED')
+    if (state && state.adapter !== adapter) {
+      retireState(state)
+      state = null
     }
-    if (state.stopped) throw typed('SUMMARY_SESSION_STOPPED')
-    if (adapterRequired && (!state.adapter || typeof state.adapter.on !== 'function')) {
+    if (!adapter || typeof adapter.on !== 'function') {
       throw typed('SUMMARY_SESSION_UNAVAILABLE')
     }
+    if (!state) state = makeState(sessionId, adapter)
     return state
   }
 
   function settleReady(state, outcome) {
-    if (state.readyOutcome) return
+    if (state.readyOutcome || state.retired) return
     state.readyOutcome = outcome
     state.readyCleanup?.()
     for (const waiter of [...state.readyWaiters]) {
@@ -103,9 +128,13 @@ export function createInteractiveSummarySessionRuntime({
     state.startPromise = (async () => {
       try {
         const accepted = await startAdapter(sessionId)
+        if (state.stopped) throw typed('SUMMARY_SESSION_STOPPED')
+        if (state.retired) throw typed('SUMMARY_SESSION_UNAVAILABLE')
         if (accepted !== true) settleReady(state, { error: typed('SUMMARY_RUN_FAILED') })
         return accepted === true
-      } catch {
+      } catch (error) {
+        if (error?.code === 'SUMMARY_SESSION_STOPPED' ||
+          error?.code === 'SUMMARY_SESSION_UNAVAILABLE') throw error
         settleReady(state, { error: typed('SUMMARY_RUN_FAILED') })
         throw typed('SUMMARY_RUN_FAILED')
       }
@@ -120,14 +149,13 @@ export function createInteractiveSummarySessionRuntime({
     if (state.readyOutcome) return state.readyOutcome.value
     armReady(state)
     return new Promise((resolve, reject) => {
-      const waiter = {
-        resolve,
-        reject,
-        timer: setTimeout(() => {
-          settleReady(state, { error: typed('SUMMARY_READY_TIMEOUT') })
-        }, delayMs)
-      }
+      const waiter = { resolve, reject, timer: null }
       state.readyWaiters.add(waiter)
+      waiter.timer = setTimeout(() => {
+        if (!state.readyWaiters.delete(waiter)) return
+        reject(typed('SUMMARY_READY_TIMEOUT'))
+        if (state.readyWaiters.size === 0) state.readyCleanup?.()
+      }, delayMs)
     })
   }
 
@@ -184,7 +212,7 @@ export function createInteractiveSummarySessionRuntime({
     const cancellation = new Promise((_resolve, reject) => {
       rejectCancellation = reject
     })
-    const cancel = () => rejectCancellation(typed('SUMMARY_TURN_NOT_CONFIRMED'))
+    const cancel = (error = typed('SUMMARY_TURN_NOT_CONFIRMED')) => rejectCancellation(error)
     state.deliveries.add(cancel)
 
     try {
@@ -220,17 +248,33 @@ export function createInteractiveSummarySessionRuntime({
   }
 
   async function stop(sessionId) {
+    if (stoppedIds.has(sessionId)) return true
     let state = states.get(sessionId)
     if (!state) state = makeState(sessionId)
     if (state.stopPromise) return state.stopPromise
     state.stopped = true
     state.readyCleanup?.()
-    if (!state.readyOutcome) {
-      settleReady(state, { error: typed('SUMMARY_SESSION_STOPPED') })
+    rejectReadyWaiters(state, typed('SUMMARY_SESSION_STOPPED'))
+    for (const cancel of [...state.deliveries]) {
+      cancel(typed('SUMMARY_TURN_NOT_CONFIRMED'))
     }
-    for (const cancel of [...state.deliveries]) cancel()
     for (const unsubscribe of [...state.subscriptions]) unsubscribe()
-    state.stopPromise = Promise.resolve().then(() => stopSession(sessionId))
+    const activeStart = state.startPromise
+    state.stopPromise = (async () => {
+      if (activeStart) {
+        try { await activeStart } catch {}
+      }
+      try {
+        const stopped = await stopSession(sessionId)
+        if (stopped !== true) throw typed('SUMMARY_RUN_FAILED')
+        stoppedIds.add(sessionId)
+        retireState(state, { readyError: typed('SUMMARY_SESSION_STOPPED') })
+        return true
+      } catch {
+        state.stopPromise = null
+        throw typed('SUMMARY_RUN_FAILED')
+      }
+    })()
     return state.stopPromise
   }
 
