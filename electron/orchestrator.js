@@ -1248,6 +1248,60 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
     return prepareClaudeProfileSession({ session, selection, launch })
   }
 
+  function interactiveProfileSnapshot(adapterId, prepared) {
+    const session = prepared.session
+    if (!session.profileId) return null
+    return Object.freeze({
+      adapterId,
+      profileId: session.profileId,
+      runtimeRevision: session.profileRuntimeRevision || null,
+      session: Object.freeze({
+        profileId: session.profileId,
+        nativeProfileName: session.nativeProfileName || null,
+        model: session.model || null,
+        provider: session.provider || null,
+        sourceProvider: session.sourceProvider || null,
+        providerPolicy: session.providerPolicy || null,
+        explicitProvider: session.explicitProvider || null,
+        providerOverride: session.providerOverride || null,
+        providerWarning: session.providerWarning || null,
+        profileStatus: session.profileStatus || null,
+        profileRuntimeRevision: session.profileRuntimeRevision || null,
+        pendingProfileRuntimeRevision: session.pendingProfileRuntimeRevision || null,
+        pendingProfileId: session.pendingProfileId || null,
+        restartRequired: Boolean(session.restartRequired),
+        canStart: session.canStart !== false,
+        actualModel: session.actualModel || null,
+        profileWarning: session.profileWarning || null
+      }),
+      profileEnvironment: Object.freeze({ ...(prepared.profileEnvironment || {}) }),
+      profileLaunch: prepared.profileLaunch
+        ? Object.freeze({
+            args: Object.freeze([...(prepared.profileLaunch.args || [])]),
+            env: Object.freeze({ ...(prepared.profileLaunch.env || {}) }),
+            ...(Array.isArray(prepared.profileLaunch.settingSources)
+              ? { settingSources: Object.freeze([...prepared.profileLaunch.settingSources]) }
+              : {})
+          })
+        : null
+    })
+  }
+
+  function isInteractiveProfileSnapshotCurrent(snapshot) {
+    if (!snapshot?.profileId) return true
+    const current = snapshot.adapterId === 'claude'
+      ? profileService.getClaudeProfileLaunchStamp(snapshot.profileId)
+      : profileService.resolveCodexProfileRuntime(snapshot.profileId)
+    return current?.canStart !== false &&
+      current?.profileId === snapshot.profileId &&
+      (current?.runtimeRevision || null) === snapshot.runtimeRevision
+  }
+
+  function assertInteractiveProfileSnapshotCurrent(snapshot) {
+    if (isInteractiveProfileSnapshotCurrent(snapshot)) return
+    throw Object.assign(new Error(), { code: 'SUMMARY_PROFILE_UNAVAILABLE' })
+  }
+
   function resolveInteractiveSummarySelection(input) {
     if (input.model && !isSafeClaudeModel(input.model)) throw invalidSummaryIpc()
     if (['opencode', 'ucode'].includes(input.executorId)) {
@@ -1281,7 +1335,10 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
       return {
         ...input,
         profileId: prepared.session.profileId || null,
-        model
+        model,
+        ...(prepared.session.profileId
+          ? { interactiveProfileSnapshot: interactiveProfileSnapshot(input.executorId, prepared) }
+          : {})
       }
     } catch {
       throw Object.assign(new Error(), {
@@ -1291,6 +1348,17 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
   }
 
   function armClaudeSessionLaunch(entry) {
+    if (entry._interactiveProfileSnapshot) {
+      assertInteractiveProfileSnapshotCurrent(entry._interactiveProfileSnapshot)
+      Object.assign(entry.session, {
+        activeProfileId: entry.session.profileId || null,
+        pendingProfileId: null,
+        pendingProfileRuntimeRevision: null,
+        restartRequired: false
+      })
+      entry.status = 'launching'
+      return false
+    }
     const desiredStamp = profileService.getClaudeProfileLaunchStamp(entry.session.profileId || null)
     return armClaudeProfileLaunch({
       entry,
@@ -1863,7 +1931,24 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
     }
     let profileEnvironment = {}
     let profileLaunch = null
-    if (adapterId === 'codex') {
+    const pinnedProfile = config.interactiveProfileSnapshot || null
+    if (pinnedProfile) {
+      if (pinnedProfile.adapterId !== adapterId ||
+        pinnedProfile.profileId !== config.profileId ||
+        !isInteractiveProfileSnapshotCurrent(pinnedProfile)) {
+        throw Object.assign(new Error(), { code: 'SUMMARY_PROFILE_UNAVAILABLE' })
+      }
+      session = { ...session, ...pinnedProfile.session }
+      profileEnvironment = { ...pinnedProfile.profileEnvironment }
+      profileLaunch = pinnedProfile.profileLaunch && {
+        ...pinnedProfile.profileLaunch,
+        args: [...pinnedProfile.profileLaunch.args],
+        env: { ...pinnedProfile.profileLaunch.env },
+        ...(Array.isArray(pinnedProfile.profileLaunch.settingSources)
+          ? { settingSources: [...pinnedProfile.profileLaunch.settingSources] }
+          : {})
+      }
+    } else if (adapterId === 'codex') {
       const prepared = prepareCodexSessionRuntime(session, {
         imported: Boolean(session.cliSessionId),
         explicitProfileId: config.profileId || null,
@@ -1900,6 +1985,13 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
         }
       }
     })
+    try {
+      assertInteractiveProfileSnapshotCurrent(pinnedProfile)
+    } catch (error) {
+      Promise.resolve(adapter.dispose?.()).catch(() => {})
+      engine.removeSession(sessionId)
+      throw error
+    }
     const costAvailable = descriptor.costAvailable !== false
     const entry = {
       adapter, session,
@@ -1924,7 +2016,8 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
       _gatewayTurnActive: false,
       _claudeProfileLaunchStamp: adapterId === 'claude'
         ? claudeProfileLaunchStamp(session)
-        : null
+        : null,
+      _interactiveProfileSnapshot: pinnedProfile
     }
     sessions.set(sessionId, entry)
     adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
@@ -2919,8 +3012,11 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
     const e = sessions.get(sessionId)
     if (e) assertDshSessionStartable(e.session)
     if (!e || !e.adapter) return false
+    assertInteractiveProfileSnapshotCurrent(e._interactiveProfileSnapshot)
     if (e.session.adapterId === 'codex') {
-      if (e.session.profileId) {
+      if (e._interactiveProfileSnapshot) {
+        e.adapter.setProfileEnvironment?.(e._interactiveProfileSnapshot.profileEnvironment)
+      } else if (e.session.profileId) {
         const prepared = prepareCodexSessionRuntime(e.session, {
           imported: Boolean(e.session.cliSessionId),
           explicitProfileId: e.session.profileId
@@ -3051,7 +3147,9 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
           return report
         },
         generate: async input => {
-          if (!summaryJobService) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          if (!summaryJobService || !summaryAutomationReady) {
+            throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          }
           if (input.action === 'confirm') {
             const required = summaryJobService.getConfirmationCallLimit(input.reportId)
             if (!Number.isInteger(required) || input.confirmationCallLimit < required) {
@@ -3061,9 +3159,6 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
               confirmationCallLimit: input.confirmationCallLimit
             })
             return { reportId }
-          }
-          if (!summaryAutomationReady) {
-            throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
           }
           const { action: _action, ...request } = input
           const availableExecutors = await inspectCliTools()

@@ -43,6 +43,7 @@ const SAFE_MESSAGES = Object.freeze({
   SUMMARY_RUN_TIMEOUT: '工作总结生成超时',
   SUMMARY_ARTIFACT_MISSING: '未生成 Markdown 报告',
   SUMMARY_ARTIFACT_INVALID: '生成的 Markdown 报告无效',
+  SUMMARY_PROFILE_UNAVAILABLE: '所选 AI CLI 配置不可用',
   SUMMARY_APP_SHUTDOWN: '应用关闭，工作总结已中断',
   SUMMARY_RUN_FAILED: '工作总结生成失败'
 })

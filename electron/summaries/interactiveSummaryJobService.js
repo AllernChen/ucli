@@ -661,6 +661,9 @@ export function createInteractiveSummaryJobService({
           adapterId: request.executorId,
           profileId: request.profileId || null,
           ...(request.profileId ? {} : { profileSelection: 'system' }),
+          ...(request.interactiveProfileSnapshot
+            ? { interactiveProfileSnapshot: request.interactiveProfileSnapshot }
+            : {}),
           model: request.model || null,
           name: `工作总结（${PERIOD_LABELS[queued.periodType]}）v${queued.version}`,
           cwd: job.workspace.workDirectory

@@ -11,6 +11,7 @@ import { claudeDescriptor } from '../electron/adapters/claudeAdapter.js'
 import { codexDescriptor } from '../electron/adapters/codexAdapter.js'
 import { openCodeDescriptor } from '../electron/adapters/openCodeAdapter.js'
 import { ucodeDescriptor } from '../electron/adapters/ucodeAdapter.js'
+import { writeCodexProfileFileAtomic } from '../electron/aiCliProfiles/codexProfileFile.js'
 import { getDb } from '../electron/persistence/db.js'
 import { runSummaryMaintenance } from '../electron/startupLifecycle.js'
 import { createSummaryWorkspaceService } from '../electron/summaries/summaryWorkspaceService.js'
@@ -40,7 +41,7 @@ function interactiveRequest(overrides = {}) {
 async function waitUntil(predicate, { timeoutMs = 5000 } = {}) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const value = predicate()
+    const value = await predicate()
     if (value) return value
     await new Promise(resolve => setTimeout(resolve, 10))
   }
@@ -51,11 +52,13 @@ class FakeInteractiveAdapter extends EventEmitter {
   constructor(options) {
     super()
     this.session = options.session
+    this.settings = options.settings
     this.sent = []
     this.throwOnDispose = false
   }
 
   async start() {
+    this.startCalls = (this.startCalls || 0) + 1
     this.emit('event', {
       type: 'ready', sessionId: this.session.id, ts: Date.now()
     })
@@ -71,21 +74,33 @@ class FakeInteractiveAdapter extends EventEmitter {
     return true
   }
 
+  setProfileLaunch(profileLaunch) {
+    this.settings.profileLaunch = profileLaunch
+  }
+
+  setProfileEnvironment(profileEnvironment) {
+    this.settings.profileEnvironment = profileEnvironment
+  }
+
   async dispose() {
     if (this.throwOnDispose) throw new Error('private adapter disposal failure')
   }
 }
 
-async function withInteractiveOrchestrator(t, { summaryStartup } = {}, callback) {
+async function withInteractiveOrchestrator(t, { summaryStartup, onAdapterCreated } = {}, callback) {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'ucli-summary-orchestrator-'))
   const userData = join(temporaryRoot, 'user-data')
   const localAppData = join(temporaryRoot, 'local-app-data')
+  const codexHome = join(temporaryRoot, 'codex-home')
   await mkdir(userData, { recursive: true })
   await mkdir(localAppData, { recursive: true })
+  await mkdir(codexHome, { recursive: true })
   const previousUserData = process.env.UCLI_TEST_USER_DATA
   const previousLocalAppData = process.env.LOCALAPPDATA
+  const previousCodexHome = process.env.CODEX_HOME
   process.env.UCLI_TEST_USER_DATA = userData
   process.env.LOCALAPPDATA = localAppData
+  process.env.CODEX_HOME = codexHome
   const electron = await import('electron')
   const handlers = new Map()
   electron.ipcMain.handle = (channel, handler) => handlers.set(channel, handler)
@@ -96,6 +111,7 @@ async function withInteractiveOrchestrator(t, { summaryStartup } = {}, callback)
     descriptor.create = options => {
       const adapter = new FakeInteractiveAdapter(options)
       instances.push(adapter)
+      onAdapterCreated?.({ adapter, config: options, instances, codexHome })
       return adapter
     }
   }
@@ -104,7 +120,7 @@ async function withInteractiveOrchestrator(t, { summaryStartup } = {}, callback)
     orchestrator = createOrchestrator({ summaryStartup })
     await orchestrator.initPersistence()
     orchestrator.registerIpc()
-    await callback({ handlers, instances, orchestrator })
+    await callback({ handlers, instances, orchestrator, codexHome })
   } finally {
     for (const descriptor of descriptors) descriptor.create = originalCreates.get(descriptor)
     await orchestrator?.shutdown()
@@ -113,8 +129,41 @@ async function withInteractiveOrchestrator(t, { summaryStartup } = {}, callback)
     else process.env.UCLI_TEST_USER_DATA = previousUserData
     if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA
     else process.env.LOCALAPPDATA = previousLocalAppData
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME
+    else process.env.CODEX_HOME = previousCodexHome
     await rm(temporaryRoot, { recursive: true, force: true })
   }
+}
+
+async function createBoundProfile(handlers, executorId) {
+  const draft = executorId === 'claude'
+    ? {
+        adapterId: 'claude', name: 'Summary Claude Profile',
+        connectionMode: 'subscription', model: 'claude-3-7-sonnet'
+      }
+    : {
+        adapterId: 'codex', name: 'Summary Codex Profile', kind: 'reference',
+        providerId: 'openai', model: 'gpt-5.4'
+      }
+  return handlers.get('ai-cli-profiles:create')({}, draft)
+}
+
+function mutateBoundProfile({ profile, executorId, codexHome }) {
+  const db = getDb()
+  const updatedAt = Number(profile.updatedAt) + 1
+  const model = executorId === 'claude' ? 'claude-3-7-haiku' : 'gpt-5.5'
+  if (executorId === 'codex') {
+    const stored = db.getAiCliProfile(profile.id)
+    const written = writeCodexProfileFileAtomic({
+      codexHome,
+      profile: { ...stored, model },
+      expectedSha256: stored.fileSha256
+    })
+    db.updateAiCliProfile(profile.id, { model, fileSha256: written.sha256, updatedAt })
+    return model
+  }
+  db.updateAiCliProfile(profile.id, { model, updatedAt })
+  return model
 }
 
 const CHANNELS = [
@@ -375,9 +424,81 @@ test('critical summary recovery failure keeps the app usable but gates scheduler
       const headless = await handlers.get('summary:generate')({}, interactiveRequest({ model: null }))
       assert.equal(headless.ok, false)
       assert.equal(headless.error.code, 'SUMMARY_SERVICE_UNAVAILABLE')
+      const confirmation = await handlers.get('summary:generate')({}, {
+        confirm: true, reportId: '550e8400-e29b-41d4-a716-446655440000', confirmationCallLimit: 1
+      })
+      assert.equal(confirmation.ok, false)
+      assert.equal(confirmation.error.code, 'SUMMARY_SERVICE_UNAVAILABLE')
       const reports = await handlers.get('summary:list-reports')({}, {})
       assert.deepEqual(reports.value, [])
       assert.equal(instances.length, 0)
+    })
+  }
+})
+
+test('interactive summaries persist the effective identity of valid bound Claude and Codex profiles', async t => {
+  await withInteractiveOrchestrator(t, {}, async ({ handlers, instances }) => {
+    for (const executorId of ['claude', 'codex']) {
+      const profile = await createBoundProfile(handlers, executorId)
+      const response = await handlers.get('summary:start-interactive')({}, interactiveRequest({
+        executorId, profileId: profile.id, model: null
+      }))
+      assert.equal(response.ok, true, executorId)
+      const adapter = await waitUntil(() => instances.find(candidate =>
+        candidate.session.id === response.value.sessionId
+      ))
+      await waitUntil(() => adapter.sent.length === 1)
+      assert.equal(response.value.report.profileId, profile.id, executorId)
+      assert.equal(response.value.report.model, profile.model, executorId)
+      assert.equal(adapter.session.profileId, profile.id, executorId)
+      assert.equal(adapter.session.model, profile.model, executorId)
+    }
+  })
+})
+
+test('interactive summary rejects a bound profile changed during session construction', async t => {
+  for (const executorId of ['claude', 'codex']) {
+    let profile = null
+    await withInteractiveOrchestrator(t, {
+      onAdapterCreated: ({ codexHome }) => {
+        if (profile) {
+          mutateBoundProfile({ profile, executorId, codexHome })
+        }
+      }
+    }, async ({ handlers }) => {
+      profile = await createBoundProfile(handlers, executorId)
+      const response = await handlers.get('summary:start-interactive')({}, interactiveRequest({
+        executorId, profileId: profile.id, model: null
+      }))
+      assert.equal(response.ok, false, executorId)
+      assert.equal(response.error.code, 'SUMMARY_PROFILE_UNAVAILABLE', executorId)
+    })
+  }
+})
+
+test('interactive summary fails closed when a bound profile changes before adapter startup', async t => {
+  for (const executorId of ['claude', 'codex']) {
+    let profile = null
+    await withInteractiveOrchestrator(t, {
+      onAdapterCreated: ({ codexHome }) => {
+        if (profile) queueMicrotask(() => mutateBoundProfile({ profile, executorId, codexHome }))
+      }
+    }, async ({ handlers, instances }) => {
+      profile = await createBoundProfile(handlers, executorId)
+      const response = await handlers.get('summary:start-interactive')({}, interactiveRequest({
+        executorId, profileId: profile.id, model: null
+      }))
+      assert.equal(response.ok, true, executorId)
+      const adapter = await waitUntil(() => instances.find(candidate =>
+        candidate.session.id === response.value.sessionId
+      ))
+      const persisted = await waitUntil(async () => {
+        const result = await handlers.get('summary:get-report')({}, response.value.report.id)
+        return result.value?.status === 'failed' ? result.value : null
+      })
+      assert.equal(persisted.model, profile.model, executorId)
+      assert.equal(adapter.startCalls || 0, 0, executorId)
+      assert.equal(adapter.sent.length, 0, executorId)
     })
   }
 })
