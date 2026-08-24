@@ -11,7 +11,10 @@ import { claudeDescriptor } from '../electron/adapters/claudeAdapter.js'
 import { codexDescriptor } from '../electron/adapters/codexAdapter.js'
 import { openCodeDescriptor } from '../electron/adapters/openCodeAdapter.js'
 import { ucodeDescriptor } from '../electron/adapters/ucodeAdapter.js'
-import { writeCodexProfileFileAtomic } from '../electron/aiCliProfiles/codexProfileFile.js'
+import {
+  removeCodexProfileFile,
+  writeCodexProfileFileAtomic
+} from '../electron/aiCliProfiles/codexProfileFile.js'
 import { getDb } from '../electron/persistence/db.js'
 import { runSummaryMaintenance } from '../electron/startupLifecycle.js'
 import { createSummaryWorkspaceService } from '../electron/summaries/summaryWorkspaceService.js'
@@ -48,6 +51,28 @@ async function waitUntil(predicate, { timeoutMs = 5000 } = {}) {
   assert.fail('timed out waiting for orchestrator behavior')
 }
 
+function deferred() {
+  let resolve
+  const promise = new Promise(done => { resolve = done })
+  return { promise, resolve }
+}
+
+function holdHookReady() {
+  const reached = deferred()
+  const release = deferred()
+  let observed = false
+  return {
+    reached: reached.promise,
+    release: release.resolve,
+    get observed() { return observed },
+    then(onFulfilled, onRejected) {
+      observed = true
+      reached.resolve()
+      return release.promise.then(onFulfilled, onRejected)
+    }
+  }
+}
+
 class FakeInteractiveAdapter extends EventEmitter {
   constructor(options) {
     super()
@@ -55,6 +80,9 @@ class FakeInteractiveAdapter extends EventEmitter {
     this.settings = options.settings
     this.sent = []
     this.throwOnDispose = false
+    this.disposeCalls = 0
+    this.disposed = false
+    this.disposeGate = null
   }
 
   async start() {
@@ -83,11 +111,18 @@ class FakeInteractiveAdapter extends EventEmitter {
   }
 
   async dispose() {
+    this.disposeCalls += 1
+    if (this.disposeGate) await this.disposeGate
     if (this.throwOnDispose) throw new Error('private adapter disposal failure')
+    this.disposed = true
   }
 }
 
-async function withInteractiveOrchestrator(t, { summaryStartup, onAdapterCreated } = {}, callback) {
+async function withInteractiveOrchestrator(t, {
+  summaryStartup,
+  onAdapterCreated,
+  hookReady
+} = {}, callback) {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'ucli-summary-orchestrator-'))
   const userData = join(temporaryRoot, 'user-data')
   const localAppData = join(temporaryRoot, 'local-app-data')
@@ -117,7 +152,7 @@ async function withInteractiveOrchestrator(t, { summaryStartup, onAdapterCreated
   }
   let orchestrator
   try {
-    orchestrator = createOrchestrator({ summaryStartup })
+    orchestrator = createOrchestrator({ summaryStartup, hookReady })
     await orchestrator.initPersistence()
     orchestrator.registerIpc()
     await callback({ handlers, instances, orchestrator, codexHome })
@@ -164,6 +199,20 @@ function mutateBoundProfile({ profile, executorId, codexHome }) {
   }
   db.updateAiCliProfile(profile.id, { model, updatedAt })
   return model
+}
+
+function makeBoundProfileUnavailable({ profile, executorId, codexHome }) {
+  const db = getDb()
+  if (executorId === 'codex') {
+    const stored = db.getAiCliProfile(profile.id)
+    removeCodexProfileFile({
+      codexHome,
+      profile: stored,
+      expectedSha256: stored.fileSha256
+    })
+    return
+  }
+  db.deleteAiCliProfile(profile.id)
 }
 
 const CHANNELS = [
@@ -476,6 +525,39 @@ test('interactive summary rejects a bound profile changed during session constru
   }
 })
 
+test('interactive summary awaits construction cleanup before reporting a bound-profile failure', async t => {
+  for (const executorId of ['claude', 'codex']) {
+    let profile = null
+    const cleanup = deferred()
+    await withInteractiveOrchestrator(t, {
+      onAdapterCreated: ({ adapter, codexHome }) => {
+        if (!profile) return
+        mutateBoundProfile({ profile, executorId, codexHome })
+        adapter.disposeGate = cleanup.promise
+      }
+    }, async ({ handlers, instances }) => {
+      profile = await createBoundProfile(handlers, executorId)
+      const pending = handlers.get('summary:start-interactive')({}, interactiveRequest({
+        executorId, profileId: profile.id, model: null
+      }))
+      const adapter = await waitUntil(() => instances[0])
+      await waitUntil(() => adapter.disposeCalls === 1)
+      let settled = false
+      pending.finally(() => { settled = true })
+      try {
+        await new Promise(resolve => setTimeout(resolve, 20))
+        assert.equal(settled, false, executorId)
+      } finally {
+        cleanup.resolve()
+      }
+      const response = await pending
+      assert.equal(response.ok, false, executorId)
+      assert.equal(response.error.code, 'SUMMARY_PROFILE_UNAVAILABLE', executorId)
+      assert.equal(adapter.disposed, true, executorId)
+    })
+  }
+})
+
 test('interactive summary fails closed when a bound profile changes before adapter startup', async t => {
   for (const executorId of ['claude', 'codex']) {
     let profile = null
@@ -501,6 +583,53 @@ test('interactive summary fails closed when a bound profile changes before adapt
       assert.equal(adapter.sent.length, 0, executorId)
     })
   }
+})
+
+test('interactive summary aborts bound Claude and Codex startup when profiles become unavailable while hook readiness is pending', async t => {
+  for (const executorId of ['claude', 'codex']) {
+    const hookReady = holdHookReady()
+    await withInteractiveOrchestrator(t, { hookReady }, async ({ handlers, instances, codexHome }) => {
+      const profile = await createBoundProfile(handlers, executorId)
+      const response = await handlers.get('summary:start-interactive')({}, interactiveRequest({
+        executorId, profileId: profile.id, model: null
+      }))
+      const adapter = await waitUntil(() => instances.find(candidate =>
+        candidate.session.id === response.value.sessionId
+      ))
+      await waitUntil(() => hookReady.observed, { timeoutMs: 500 })
+      makeBoundProfileUnavailable({ profile, executorId, codexHome })
+      hookReady.release()
+      const persisted = await waitUntil(async () => {
+        const result = await handlers.get('summary:get-report')({}, response.value.report.id)
+        return result.value?.status === 'failed' ? result.value : null
+      })
+      assert.equal(persisted.model, profile.model, executorId)
+      assert.equal(adapter.startCalls || 0, 0, executorId)
+      await waitUntil(() => adapter.disposed)
+      assert.equal(adapter.disposeCalls, 1, executorId)
+    })
+  }
+})
+
+test('public session creation rejects forged interactive profile capabilities', async t => {
+  await withInteractiveOrchestrator(t, {}, async ({ handlers, instances }) => {
+    assert.throws(
+      () => handlers.get('session:create')({}, {
+        adapterId: 'claude',
+        cwd: process.cwd(),
+        profileId: 'renderer-profile-id',
+        interactiveProfileSnapshot: {
+          adapterId: 'claude',
+          profileId: 'renderer-profile-id',
+          runtimeRevision: 'forged',
+          profileEnvironment: { API_KEY: 'renderer-secret' },
+          profileLaunch: { args: ['--dangerous-renderer-arg'], env: { TOKEN: 'renderer-secret' } }
+        }
+      }),
+      /interactive profile capability/i
+    )
+    assert.equal(instances.length, 0)
+  })
 })
 
 test('session deletion clears ownership even when adapter disposal rejects', async t => {

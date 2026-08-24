@@ -779,7 +779,7 @@ export async function assertDshQuiescent(entries) {
   return true
 }
 
-export function createOrchestrator({ summaryStartup = {} } = {}) {
+export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOverride = null } = {}) {
   initLogger()
   log('createOrchestrator() — starting')
   const adapters = createAdapterMap()
@@ -1047,7 +1047,7 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
       workspaceService: summaryWorkspaceService
     })
     const interactiveSessionRuntime = createInteractiveSummarySessionRuntime({
-      createSession,
+      createSession: createInteractiveSummarySession,
       startAdapter: startAdapterSession,
       stopSession,
       getEntry: interactiveSummarySessionEntry
@@ -1289,9 +1289,7 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
 
   function isInteractiveProfileSnapshotCurrent(snapshot) {
     if (!snapshot?.profileId) return true
-    const current = snapshot.adapterId === 'claude'
-      ? profileService.getClaudeProfileLaunchStamp(snapshot.profileId)
-      : profileService.resolveCodexProfileRuntime(snapshot.profileId)
+    const current = profileService.resolveProfileRuntime(snapshot.profileId)
     return current?.canStart !== false &&
       current?.profileId === snapshot.profileId &&
       (current?.runtimeRevision || null) === snapshot.runtimeRevision
@@ -1771,7 +1769,7 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
   // ---- hook HTTP server ----
   let hookPort = null
   let hookServer = null
-  const hookReady = startHookServer().then((srv) => {
+  const hookReady = hookReadyOverride || startHookServer().then((srv) => {
     hookServer = srv
     hookPort = srv.port
     srv.setHandler(async (payload) => {
@@ -1900,7 +1898,16 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
     })
   }
 
-  function createSession(config) {
+  function assertPublicSessionConfig(config) {
+    if (config && typeof config === 'object' && (
+      Object.hasOwn(config, 'interactiveProfileSnapshot') ||
+      Object.hasOwn(config, 'interactiveProfileToken')
+    )) {
+      throw new Error('interactive profile capability is reserved for main-process session creation')
+    }
+  }
+
+  async function createSession(config, { interactiveProfileSnapshot = null } = {}) {
     if (config.cliSessionId && !isSafeNativeSessionId(config.cliSessionId)) {
       throw new Error('invalid native session id')
     }
@@ -1931,7 +1938,7 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
     }
     let profileEnvironment = {}
     let profileLaunch = null
-    const pinnedProfile = config.interactiveProfileSnapshot || null
+    const pinnedProfile = interactiveProfileSnapshot
     if (pinnedProfile) {
       if (pinnedProfile.adapterId !== adapterId ||
         pinnedProfile.profileId !== config.profileId ||
@@ -1988,7 +1995,12 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
     try {
       assertInteractiveProfileSnapshotCurrent(pinnedProfile)
     } catch (error) {
-      Promise.resolve(adapter.dispose?.()).catch(() => {})
+      try {
+        await adapter.dispose?.()
+      } catch (cleanupError) {
+        log('interactive-profile-construction-cleanup-failed',
+          safeSummaryErrorCode(cleanupError?.code, 'SUMMARY_PROFILE_CLEANUP_FAILED'))
+      }
       engine.removeSession(sessionId)
       throw error
     }
@@ -2049,6 +2061,11 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
       capabilities: normalizeAdapterCapabilities(entry.session.capabilities),
       surfaceState: entry.surfaceState || null
     }
+  }
+
+  function createInteractiveSummarySession(config) {
+    const { interactiveProfileSnapshot = null, ...sessionConfig } = config || {}
+    return createSession(sessionConfig, { interactiveProfileSnapshot })
   }
 
   async function handleAdapterEvent(sessionId, evt) {
@@ -3044,10 +3061,12 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
       }
     }
     await hookReady
+    assertInteractiveProfileSnapshotCurrent(e._interactiveProfileSnapshot)
     e.adapter.hookPort = hookPort
     if (e.session.adapterId === 'claude') armClaudeSessionLaunch(e)
     let started
     try {
+      assertInteractiveProfileSnapshotCurrent(e._interactiveProfileSnapshot)
       started = await e.adapter.start()
     } catch (error) {
       let disposed = false
@@ -3331,6 +3350,7 @@ export function createOrchestrator({ summaryStartup = {} } = {}) {
     })
 
     ipcMain.handle('session:create', (_e, config) => {
+      assertPublicSessionConfig(config)
       return createSession(config)
     })
 
