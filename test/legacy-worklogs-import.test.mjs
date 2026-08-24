@@ -8,6 +8,7 @@ import test from 'node:test'
 import { openDb } from '../electron/persistence/db.js'
 import { createLegacyWorkLogsImporter } from '../electron/summaries/legacyWorkLogsImporter.js'
 import { createReportRepository } from '../electron/summaries/reportRepository.js'
+import { assertSafeSummaryMarkdown } from '../electron/summaries/summaryMarkdownSafety.js'
 
 const NOW = Date.parse('2026-08-25T08:00:00.000Z')
 const ONE_MEBIBYTE = 1024 * 1024
@@ -205,6 +206,137 @@ test('legacy importer rejects a report swapped to a symlink before open', async 
         }
         return open(candidate, 'r')
       }
+    }
+  })
+
+  assert.deepEqual(await importer.run(), { scanned: 1, imported: 0, existing: 0, rejected: 1 })
+  assert.equal(repository.list({ executionMode: 'legacy-worklog-import' }).length, 0)
+})
+
+test('summary markdown safety rejects Windows and POSIX lexical root aliases', () => {
+  assert.throws(
+    () => assertSafeSummaryMarkdown('# Summary\nC:\\safe\\segment\\..\\workLogs', ['C:\\safe\\workLogs']),
+    { code: 'SUMMARY_MARKDOWN_UNSAFE' }
+  )
+  assert.throws(
+    () => assertSafeSummaryMarkdown('# Summary\n/var/lib/ucli/segment/../workLogs', ['/var/lib/ucli/workLogs']),
+    { code: 'SUMMARY_MARKDOWN_UNSAFE' }
+  )
+})
+
+test('legacy importer rejects a root swapped to a link after enumeration', async t => {
+  const sandbox = await mkdtemp(join(tmpdir(), 'ucli-legacy-root-swap-'))
+  const root = join(sandbox, 'workLogs')
+  const moved = join(sandbox, 'moved-workLogs')
+  const external = join(sandbox, 'external')
+  await mkdir(root)
+  await mkdir(external)
+  await writeFile(join(root, '2026-W33-summary.md'), validMarkdown)
+  await writeFile(join(external, '2026-W33-summary.md'), validMarkdown)
+  t.after(() => rm(sandbox, { recursive: true, force: true }))
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir'
+  const probe = join(sandbox, 'capability-probe')
+  if (!await symlinkOrSkip(t, external, probe, linkType)) return
+  await unlink(probe)
+  let swapped = false
+  const imported = []
+  const importer = createLegacyWorkLogsImporter({
+    workLogsRoot: root,
+    repository: { async importCompleted(input) { imported.push(input); return { imported: true } } },
+    timezone: 'Asia/Shanghai',
+    now: () => NOW,
+    fileSystem: {
+      lstat,
+      open,
+      readdir: async (...args) => {
+        const entries = await readdir(...args)
+        if (!swapped) {
+          swapped = true
+          await rename(root, moved)
+          await symlink(external, root, linkType)
+        }
+        return entries
+      }
+    }
+  })
+
+  await assert.rejects(() => importer.run(), error => error?.code === 'SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED')
+  assert.equal(imported.length, 0)
+})
+
+test('legacy importer bounds an oversized opened handle before any read', async t => {
+  const { root, repository } = await createHarness(t)
+  const file = join(root, '2026-W33-summary.md')
+  await writeFile(file, validMarkdown)
+  const pre = await lstat(file)
+  const oversized = {
+    dev: pre.dev,
+    ino: pre.ino,
+    size: 5 * ONE_MEBIBYTE + 2,
+    mtimeMs: pre.mtimeMs,
+    ctimeMs: pre.ctimeMs,
+    birthtimeMs: pre.birthtimeMs,
+    isFile: () => true,
+    isSymbolicLink: () => false
+  }
+  const reads = []
+  const importer = createLegacyWorkLogsImporter({
+    workLogsRoot: root,
+    repository,
+    timezone: 'Asia/Shanghai',
+    now: () => NOW,
+    fileSystem: {
+      lstat,
+      readdir,
+      open: async () => ({
+        async stat() { return oversized },
+        async read(buffer, offset, length) {
+          reads.push(length)
+          return { bytesRead: 0 }
+        },
+        async close() {}
+      })
+    }
+  })
+
+  assert.deepEqual(await importer.run(), { scanned: 1, imported: 0, existing: 0, rejected: 1 })
+  assert.deepEqual(reads, [])
+  assert.equal(reads.every(bytes => bytes <= 5 * ONE_MEBIBYTE + 1), true)
+  assert.equal(repository.list({ executionMode: 'legacy-worklog-import' }).length, 0)
+})
+
+test('legacy importer rejects a handle whose final stat changes during reading', async t => {
+  const { root, repository } = await createHarness(t)
+  const file = join(root, '2026-W33-summary.md')
+  await writeFile(file, validMarkdown)
+  const pre = await lstat(file)
+  const initial = {
+    dev: pre.dev, ino: pre.ino, size: pre.size, mtimeMs: pre.mtimeMs,
+    ctimeMs: pre.ctimeMs, birthtimeMs: pre.birthtimeMs,
+    isFile: () => true, isSymbolicLink: () => false
+  }
+  const changed = { ...initial, mtimeMs: pre.mtimeMs + 1 }
+  const source = Buffer.from(validMarkdown)
+  let statCalls = 0
+  let sent = false
+  const importer = createLegacyWorkLogsImporter({
+    workLogsRoot: root,
+    repository,
+    timezone: 'Asia/Shanghai',
+    now: () => NOW,
+    fileSystem: {
+      lstat,
+      readdir,
+      open: async () => ({
+        async stat() { return ++statCalls === 1 ? initial : changed },
+        async read(buffer, offset) {
+          if (sent) return { bytesRead: 0 }
+          sent = true
+          source.copy(buffer, offset)
+          return { bytesRead: source.length }
+        },
+        async close() {}
+      })
     }
   })
 

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { lstat, open, readdir } from 'node:fs/promises'
+import { lstat, open, readdir, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { bucketStart, nextBucketStart } from '../usage/periods.js'
 import { isWorkLogsWorkingFile } from './workLogsService.js'
@@ -108,22 +108,55 @@ function sameOrdinaryFile(first, second) {
   if (!first?.isFile() || first.isSymbolicLink?.() || !second?.isFile() || second.isSymbolicLink?.()) {
     return false
   }
-  if (process.platform !== 'win32' || (first.ino !== 0 && second.ino !== 0)) {
+  const identityKnown = Number.isSafeInteger(first.dev) && Number.isSafeInteger(second.dev) &&
+    Number.isSafeInteger(first.ino) && Number.isSafeInteger(second.ino)
+  if (process.platform !== 'win32') {
+    return identityKnown && first.dev === second.dev && first.ino === second.ino
+  }
+  if (identityKnown && first.ino !== 0 && second.ino !== 0) {
     return first.dev === second.dev && first.ino === second.ino
   }
   return first.size === second.size && first.mtimeMs === second.mtimeMs &&
     first.ctimeMs === second.ctimeMs && first.birthtimeMs === second.birthtimeMs
 }
 
-async function readHandle(handle, size) {
-  const bytes = Buffer.alloc(size)
+function sameStableOrdinaryFile(first, second) {
+  return sameOrdinaryFile(first, second) && first.size === second.size &&
+    first.mtimeMs === second.mtimeMs && first.ctimeMs === second.ctimeMs
+}
+
+function sameRoot(first, second) {
+  if (!first?.isDirectory() || first.isSymbolicLink?.() || !second?.isDirectory() || second.isSymbolicLink?.()) {
+    return false
+  }
+  const identityKnown = Number.isSafeInteger(first.dev) && Number.isSafeInteger(second.dev) &&
+    Number.isSafeInteger(first.ino) && Number.isSafeInteger(second.ino)
+  if (process.platform !== 'win32') {
+    return identityKnown && first.dev === second.dev && first.ino === second.ino
+  }
+  if (identityKnown && first.ino !== 0 && second.ino !== 0) {
+    return first.dev === second.dev && first.ino === second.ino
+  }
+  return first.mtimeMs === second.mtimeMs && first.ctimeMs === second.ctimeMs &&
+    first.birthtimeMs === second.birthtimeMs
+}
+
+function sameRootPath(first, second) {
+  return process.platform === 'win32'
+    ? String(first).replaceAll('/', '\\').toLowerCase() === String(second).replaceAll('/', '\\').toLowerCase()
+    : first === second
+}
+
+async function readHandle(handle, expectedSize) {
+  const bytes = Buffer.alloc(Math.min(MAX_LEGACY_BYTES + 1, expectedSize + 1))
   let offset = 0
   while (offset < bytes.length) {
     const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset)
-    if (bytesRead === 0) throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
+    if (bytesRead === 0) break
     offset += bytesRead
   }
-  return bytes
+  if (offset !== expectedSize) throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
+  return bytes.subarray(0, offset)
 }
 
 export function createLegacyWorkLogsImporter({
@@ -132,7 +165,7 @@ export function createLegacyWorkLogsImporter({
   timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
   now = Date.now,
   onEvent = () => {},
-  fileSystem = { lstat, open, readdir }
+  fileSystem = { lstat, open, readdir, realpath }
 } = {}) {
   if (typeof workLogsRoot !== 'string' || !workLogsRoot.trim()) throw new TypeError('workLogsRoot is required')
   if (!repository || typeof repository.importCompleted !== 'function') {
@@ -144,16 +177,29 @@ export function createLegacyWorkLogsImporter({
   if (!fileSystem || ['lstat', 'open', 'readdir'].some(method => typeof fileSystem[method] !== 'function')) {
     throw new TypeError('fileSystem must provide lstat, open, and readdir')
   }
+  const fs = { ...fileSystem, realpath: fileSystem.realpath || realpath }
+
+  async function captureRoot() {
+    const stat = await fs.lstat(workLogsRoot)
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw importerError('SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED')
+    return { stat, realPath: await fs.realpath(workLogsRoot) }
+  }
+
+  async function assertRootUnchanged(root) {
+    const current = await captureRoot()
+    if (!sameRoot(root.stat, current.stat) || !sameRootPath(root.realPath, current.realPath)) {
+      throw importerError('SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED')
+    }
+  }
 
   return {
     async run() {
       let entries
+      let root
       try {
-        const rootStat = await fileSystem.lstat(workLogsRoot)
-        if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-          throw importerError('SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED')
-        }
-        entries = await fileSystem.readdir(workLogsRoot, { withFileTypes: true })
+        root = await captureRoot()
+        entries = await fs.readdir(workLogsRoot, { withFileTypes: true })
+        await assertRootUnchanged(root)
       } catch (error) {
         if (error?.code === 'SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED') throw error
         if (error?.code === 'ENOENT') return { scanned: 0, imported: 0, existing: 0, rejected: 0 }
@@ -167,7 +213,8 @@ export function createLegacyWorkLogsImporter({
         try {
           const period = parsePeriod(entry.name, timezone)
           const filePath = join(workLogsRoot, entry.name)
-          const metadata = await fileSystem.lstat(filePath)
+          await assertRootUnchanged(root)
+          const metadata = await fs.lstat(filePath)
           if (!metadata.isFile() || metadata.isSymbolicLink() ||
             metadata.size < ONE_MEBIBYTE || metadata.size > MAX_LEGACY_BYTES) {
             throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
@@ -175,16 +222,23 @@ export function createLegacyWorkLogsImporter({
           let handle
           let bytes
           try {
-            handle = await fileSystem.open(filePath, 'r')
+            await assertRootUnchanged(root)
+            handle = await fs.open(filePath, 'r')
             const opened = await handle.stat()
-            if (!sameOrdinaryFile(metadata, opened)) throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
-            const current = await fileSystem.lstat(filePath)
+            if (!sameOrdinaryFile(metadata, opened) || opened.size !== metadata.size ||
+              opened.size < ONE_MEBIBYTE || opened.size > MAX_LEGACY_BYTES) {
+              throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
+            }
+            await assertRootUnchanged(root)
+            const current = await fs.lstat(filePath)
             if (!sameOrdinaryFile(metadata, current)) throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
             bytes = await readHandle(handle, opened.size)
             const final = await handle.stat()
-            if (final.size !== bytes.length || final.size < ONE_MEBIBYTE || final.size > MAX_LEGACY_BYTES) {
+            if (!sameStableOrdinaryFile(opened, final) || final.size !== bytes.length ||
+              final.size < ONE_MEBIBYTE || final.size > MAX_LEGACY_BYTES) {
               throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
             }
+            await assertRootUnchanged(root)
           } finally {
             await handle?.close().catch(() => {})
           }
@@ -193,7 +247,7 @@ export function createLegacyWorkLogsImporter({
             throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
           }
           if (!MARKDOWN_HEADING.test(markdown)) throw importerError('SUMMARY_LEGACY_WORKLOG_REJECTED')
-          try { assertSafeSummaryMarkdown(markdown, [workLogsRoot]) } catch {
+          try { assertSafeSummaryMarkdown(markdown, [workLogsRoot, root.realPath]) } catch {
             throw importerError('SUMMARY_LEGACY_WORKLOG_UNSAFE')
           }
           const sourceHash = `sha256:${sha256(markdown)}`
