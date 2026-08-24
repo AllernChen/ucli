@@ -1013,21 +1013,36 @@ test('shutdown drains a real database completion already queued behind the trans
   }
 })
 
-test('repository startup recovery marks stale queued, running, and awaiting reports interrupted', async () => {
+test('repository startup recovery terminates interactive stale phases without inventing phases for other modes', async () => {
   const db = new MemoryDb()
   let id = 0
   const repository = createReportRepository({ db, idFactory: () => `stale-${++id}` })
-  const queued = await repository.createQueued(request())
-  const running = await repository.createQueued(request())
-  await repository.update(running.id, { status: 'running' })
-  const awaiting = await repository.createQueued(request())
-  await repository.update(awaiting.id, { status: 'awaiting_confirmation' })
+  const queued = await repository.createQueued(request({
+    executionMode: 'interactive-cli', sessionId: 'stale-queued'
+  }))
+  const running = await repository.createQueued(request({
+    executionMode: 'interactive-cli', sessionId: 'stale-running'
+  }))
+  await repository.update(running.id, { status: 'running', runPhase: 'validating' })
+  const awaiting = await repository.createQueued(request({
+    executionMode: 'interactive-cli', sessionId: 'stale-awaiting'
+  }))
+  await repository.update(awaiting.id, {
+    status: 'awaiting_confirmation', runPhase: 'awaiting-delivery'
+  })
+  const isolated = await repository.createQueued(request())
+  const legacy = await repository.createQueued(request({ executionMode: 'legacy-worklog-import' }))
 
   await repository.interruptStale()
 
   assert.equal(repository.get(queued.id).status, 'interrupted')
   assert.equal(repository.get(running.id).status, 'interrupted')
   assert.equal(repository.get(awaiting.id).status, 'interrupted')
+  assert.equal(repository.get(queued.id).runPhase, 'interrupted')
+  assert.equal(repository.get(running.id).runPhase, 'interrupted')
+  assert.equal(repository.get(awaiting.id).runPhase, 'interrupted')
+  assert.equal(repository.get(isolated.id).runPhase, null)
+  assert.equal(repository.get(legacy.id).runPhase, null)
   assert.equal(repository.get(running.id).errorText, 'SUMMARY_PROCESS_RESTARTED')
 })
 

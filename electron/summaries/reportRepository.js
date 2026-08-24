@@ -458,6 +458,9 @@ export function createReportRepository({
         for (const report of repository.list({ status })) {
           interrupted.push(await repository.update(report.id, {
             status: 'interrupted',
+            ...(report.executionMode === SUMMARY_EXECUTION_MODE.INTERACTIVE_CLI
+              ? { runPhase: 'interrupted' }
+              : {}),
             errorText: 'SUMMARY_PROCESS_RESTARTED',
             updatedAt: now()
           }))
