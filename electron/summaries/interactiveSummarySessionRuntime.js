@@ -1,5 +1,6 @@
+import { INTERACTIVE_SUMMARY_DELIVERY_TIMEOUT_MS } from './interactiveSummaryContracts.js'
+
 const DEFAULT_READY_TIMEOUT_MS = 60_000
-const DEFAULT_DELIVERY_TIMEOUT_MS = 12_000
 const DELIVERY_TERMINALS = new Set([
   'turn_failed',
   'turn_interrupted',
@@ -161,7 +162,9 @@ export function createInteractiveSummarySessionRuntime({
     })
   }
 
-  async function deliver(sessionId, text, { timeoutMs = DEFAULT_DELIVERY_TIMEOUT_MS } = {}) {
+  async function deliver(sessionId, text, {
+    timeoutMs = INTERACTIVE_SUMMARY_DELIVERY_TIMEOUT_MS
+  } = {}) {
     const delayMs = requireTimeout(timeoutMs)
     const state = stateFor(sessionId)
     const { adapter } = state

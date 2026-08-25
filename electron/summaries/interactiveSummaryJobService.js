@@ -3,6 +3,7 @@ import {
   waitForCanonicalMarkdown
 } from './interactiveSummaryArtifact.js'
 import {
+  INTERACTIVE_SUMMARY_DELIVERY_TIMEOUT_MS,
   INTERACTIVE_SUMMARY_PHASE,
   SUMMARY_EXECUTION_MODE,
   safeInteractiveSummaryError
@@ -10,7 +11,7 @@ import {
 
 const DEFAULT_TIMEOUTS = Object.freeze({
   readyMs: 60_000,
-  deliveryMs: 12_000,
+  deliveryMs: INTERACTIVE_SUMMARY_DELIVERY_TIMEOUT_MS,
   runMs: 20 * 60_000,
   missingMs: 5_000,
   cleanupMs: 5_000

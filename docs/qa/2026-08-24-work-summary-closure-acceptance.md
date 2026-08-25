@@ -41,11 +41,11 @@ Windows package artifacts:
 
 ## CLI 可用性与人工验收
 
-只做了非凭据、非交互的命令可用性/版本检查。四个 PowerShell shim 均可发现；Claude 为 `2.1.220`，OpenCode 为 `1.18.18`。Codex 与 U-Code 的 `--version` 未在有界检查内返回，因此版本保持 PENDING。没有执行配置档案、模型调用、受控应用、安装态或人工生成流程。
+非凭据命令检查发现四个 PowerShell shim；Claude 为 `2.1.220`，OpenCode 为 `1.18.18`。Codex 与 U-Code 的 `--version` 未在最初的有界检查内返回。随后在 dev 应用中用 Claude system selection 连续执行两次周总结步骤 1；两次均未出现可确认的 `turn_started`，以安全码 `SUMMARY_TURN_NOT_CONFIRMED` 结束。诊断确认主状态机的 12 秒外层门禁短于 Claude 冷启动最多两轮、每轮 8 秒的 transcript 投递确认周期；修复后的自动化门禁为 20 秒，但真实模型流程尚未重跑。
 
 | CLI | CLI version | profile / model | reportId / sessionId | start / end | 受控人工验收 |
 | --- | --- | --- | --- | --- | --- |
-| Claude | `2.1.220` | PENDING — not executed: no controlled application profile/model session | PENDING — not executed | PENDING — not executed | PENDING — not executed: weekly `turn_started`, v2 isolation, concurrent report, interruption/restart, existing-target export, and scheduler restart were not observed. |
+| Claude | `2.1.220` | system selection / model not persisted before confirmation | v1 `38d1c0b7-5ce1-42dd-a32e-431f7d1d3426` / `61bac628-68dc-4b95-9e15-c7a8acc71ec7`; v2 `1715f699-ea9a-4da5-83b7-82aeb5acf0d3` / `a5568d4e-774e-4b81-8a7e-1eb6181cf989` | v1 `2026-08-25T01:13:25.038Z` / `2026-08-25T01:14:24.064Z`; v2 `2026-08-25T01:14:41.599Z` / `2026-08-25T01:15:06.497Z` | **FAIL** — both weekly attempts ended `SUMMARY_TURN_NOT_CONFIRMED`; no Markdown was produced. Timeout remediation is automated but not yet verified with a real rerun. Remaining concurrency, interruption/restart, export, and scheduler steps were not executed. |
 | Codex | PENDING — `--version` did not return in bounded read-only check | PENDING — not executed: no controlled application profile/model session | PENDING — not executed | PENDING — not executed | PENDING — not executed: no manual CLI workflow observed. |
 | OpenCode | `1.18.18` | PENDING — not executed: no controlled application profile/model session | PENDING — not executed | PENDING — not executed | PENDING — not executed: no manual CLI workflow observed. |
 | U-Code | PENDING — `--version` did not return in bounded read-only check | PENDING — not executed: no controlled application profile/model session | PENDING — not executed | PENDING — not executed | PENDING — not executed: no manual CLI workflow observed. |

@@ -234,6 +234,29 @@ test('delivery installs confirmation listener before send and confirms same-sess
   assert.equal(adapter.listenerCount('event'), 0)
 })
 
+test('default delivery window allows a slow cold-start turn to confirm', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { adapter, runtime } = harness()
+  adapter.sendTurn = () => new Promise(resolve => {
+    setTimeout(() => {
+      adapter.emitGateway('turn_started', { turnId: 'turn-cold-start' })
+      resolve(true)
+    }, 17_000)
+  })
+
+  const delivery = runtime.deliver('session-1', 'prompt')
+  await Promise.resolve()
+  t.mock.timers.tick(17_000)
+
+  assert.deepEqual(await delivery, {
+    accepted: true,
+    confirmed: true,
+    turnId: 'turn-cold-start'
+  })
+  assert.equal(adapter.listenerCount('gateway-event'), 0)
+  assert.equal(adapter.listenerCount('event'), 0)
+})
+
 test('delivery ignores another session turn_started until the requested session confirms', async () => {
   const { adapter, runtime } = harness()
   const pending = runtime.deliver('session-1', 'prompt', { timeoutMs: 100 })
