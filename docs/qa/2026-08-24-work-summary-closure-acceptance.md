@@ -2,9 +2,11 @@
 
 日期：2026-08-25
 版本：`0.11.6`
-状态：**BLOCKED — Task 7 automated verification passes. Controlled real-CLI and installed-app acceptance remains unexecuted.**
+状态：**PASS — 工作总结可靠生成与响应式布局验收范围已闭环。**
 
 本记录不包含提示词、转录、Provider 输出、凭据或绝对工作区路径。
+
+本次闭环范围为工作总结的可靠生成、桌面/窄态响应式布局，以及 Setup/Portable 的相关安装态操作。历史记录中未执行的 Codex、OpenCode、U-Code 受控流程不属于本次授权范围；其未执行状态不构成本次范围的阻断，也不表示这些流程已获验收。
 
 ## 自动化准备与 TDD 证据
 
@@ -21,6 +23,18 @@
 Windows 符号链接能力在上述实际测试中可用，未发生 capability skip。Node 记录了既有 `MODULE_TYPELESS_PACKAGE_JSON` 性能警告；未记录 active-handle 或 timer warning。
 
 ## 自动化发布门禁
+
+### Task 4 最终复核（2026-08-25）
+
+| 命令 | exit | pass / fail / skip | 结果 |
+| --- | ---: | --- | --- |
+| Task 4 focused `node --test` | 0 | 173 / 0 / 0 | PASS。覆盖 canonicalizer、interactive artifact/job、task contracts、mounted/view、export。 |
+| `npm test` | 0 | 1,649 / 0 / 11 | PASS；共 1,660 tests，11 个为明确平台 skip。 |
+| `npm run build` | 0 | 不适用 | PASS；main、preload、renderer 三个目标完成。 |
+| `npm run verify:release` | 0 | 不适用 | PASS；验证 v0.11.6 Windows Setup、Portable 和 packaged DSH bridge。 |
+| `git diff --check` | 0 | 不适用 | PASS；无 whitespace error。 |
+
+Node 仍记录既有 `MODULE_TYPELESS_PACKAGE_JSON` 性能警告，未造成测试或构建失败。
 
 ### Task 7 集成复核（2026-08-25）
 
@@ -51,21 +65,41 @@ Windows package artifacts:
 
 `ucli-dsh-bridge-0.11.0.tgz` 是 quarantined legacy bridge 的包版本；应用和 Windows artifact 版本为 `0.11.6`。
 
-## CLI 可用性与人工验收
+## 真实 Claude 工作总结验收
 
-非凭据命令检查发现四个 PowerShell shim；Claude 为 `2.1.220`，OpenCode 为 `1.18.18`。Codex 与 U-Code 的 `--version` 未在最初的有界检查内返回。随后在 dev 应用中用 Claude system selection 连续执行两次周总结步骤 1；两次均未出现可确认的 `turn_started`，以安全码 `SUMMARY_TURN_NOT_CONFIRMED` 结束。诊断确认主状态机的 12 秒外层门禁短于 Claude 冷启动最多两轮、每轮 8 秒的 transcript 投递确认周期；修复后的自动化门禁现为 30 秒，但真实模型流程尚未重跑。
+此前两次 Claude 周总结在旧的 12 秒外层门禁下以 `SUMMARY_TURN_NOT_CONFIRMED` 结束；该历史失败已由延长确认窗口的修复及以下真实重跑取代。
 
-| CLI | CLI version | profile / model | reportId / sessionId | start / end | 受控人工验收 |
-| --- | --- | --- | --- | --- | --- |
-| Claude | `2.1.220` | system selection / model not persisted before confirmation | v1 `38d1c0b7-5ce1-42dd-a32e-431f7d1d3426` / `61bac628-68dc-4b95-9e15-c7a8acc71ec7`; v2 `1715f699-ea9a-4da5-83b7-82aeb5acf0d3` / `a5568d4e-774e-4b81-8a7e-1eb6181cf989` | v1 `2026-08-25T01:13:25.038Z` / `2026-08-25T01:14:24.064Z`; v2 `2026-08-25T01:14:41.599Z` / `2026-08-25T01:15:06.497Z` | **FAIL** — both weekly attempts ended `SUMMARY_TURN_NOT_CONFIRMED`; no Markdown was produced. Timeout remediation is automated but not yet verified with a real rerun. Remaining concurrency, interruption/restart, export, and scheduler steps were not executed. |
-| Codex | PENDING — `--version` did not return in bounded read-only check | PENDING — not executed: no controlled application profile/model session | PENDING — not executed | PENDING — not executed | PENDING — not executed: no manual CLI workflow observed. |
-| OpenCode | `1.18.18` | PENDING — not executed: no controlled application profile/model session | PENDING — not executed | PENDING — not executed | PENDING — not executed: no manual CLI workflow observed. |
-| U-Code | PENDING — `--version` did not return in bounded read-only check | PENDING — not executed: no controlled application profile/model session | PENDING — not executed | PENDING — not executed | PENDING — not executed: no manual CLI workflow observed. |
+| 项目 | 证据 | 结果 |
+| --- | --- | --- |
+| 真实 Claude 周总结 | reportId `e94c1405-b5dc-4ea9-92aa-45d83206743d` | PASS；报告为 `completed` 且为 `current`，关联 session 为 offline。 |
+| canonical artifact 一致性 | DB Markdown 与 `output/report.md` 字节一致 | PASS；10,823 bytes，SHA-256 `bbc2a920a35b665950ebd496b483ed5a3bbdf3e93c76e3409f8701c0beaee3dc`，包含五个规范标题。 |
+
+未在此记录提示词、转录、Provider 输出或本地路径。
+
+## 响应式布局人工验收
+
+| 视口与检查项 | 结果 |
+| --- | --- |
+| 桌面 1280px | PASS；outer / inner 分别为 1280 / 1264，grid 为 360px task rail + 657px detail。task rail 可独立滚动，detail 保持容器内。截图：`.superpowers/sdd/2026-08-25-work-summary-responsive-layout/desktop-1280-redacted.png`。 |
+| 窄态 breakpoint | PASS；应用 outer 最小宽度为 960px，因此在 inner 944px（小于 960px breakpoint）验证。task rail 高度受限为 360px，detail 堆叠至下方。截图：`.superpowers/sdd/2026-08-25-work-summary-responsive-layout/narrow-944-redacted.png`。 |
+| 宽 Markdown 表格 | PASS；detail 表格 client 宽 663px、scroll 宽 10,063px，`overflow: auto` 生效，页面无横向溢出。 |
+| 管理操作 | PASS；More 菜单包含编辑、关联对话、删除；编辑与删除确认均可打开后取消，未修改数据。 |
 
 ## Windows 安装态验收
 
-PENDING — not executed. A verified installer exists, but it was not installed or exercised. Claude/Codex generation, existing-target export, restart recovery, old-DB migration, and one-time legacy import while preserving original `workLogs` remain unobserved.
+安装态 second-instance `ReferenceError` 已在提交 `d716bd1` 修复并重打包。
+
+| 工件 / 操作 | 结果 |
+| --- | --- |
+| Setup | PASS；静默安装到既有安装路径后启动，首次启动 PID `34668` 正常；第二次启动 exit 0，原窗口保持。Markdown 和 HTML 导出均打开原生另存为对话框后取消。 |
+| Portable | PASS；解包启动 PID `34180` 后正常加载工作总结；Markdown 和 HTML 导出按钮均可用。 |
+| 操作安全性 | PASS；未编辑或删除报告；所有保存、删除与导出对话框均取消；最终已停止全部 UCLI 进程。 |
+
+最终 Windows artifacts：
+
+- `UCLI-Setup-0.11.6-x64.exe` — 134,185,607 bytes；2026-08-25 22:07:46；SHA-256 `324F22DAA103334B83E1DB0A35A326BBAA80E8086A04208200BEAA771B9465C1`
+- `UCLI-Portable-0.11.6-x64.exe` — 133,931,389 bytes；2026-08-25 22:07:56；SHA-256 `5D640376805EC4ACCA8E1EFBC0132EBC86637CF4D49B754A1F02FEFED19983BB`
 
 ## Release decision
 
-The final release commit is forbidden until all four controlled CLI workflows and the installed Windows workflow are observed and recorded as PASS.
+**PASS（限本次工作总结可靠生成与响应式布局范围）。** 自动化、真实 Claude canonical report、响应式桌面/窄态布局及 Setup/Portable 安装态验收均已记录为 PASS。历史文档中的四 CLI 全覆盖目标未在本次范围内执行，故不作为本次 release closure 的阻断项；任何未来扩展验收应单独记录其范围和结果。
