@@ -140,7 +140,7 @@ async function loadMountedListItem(vite) {
   assert.deepEqual(errors, [])
   const compiledScript = compileScript(descriptor, { id: 'summary-list-item-mounted' })
   let code = compiledScript.content.replace(/^import[^\n]*\n/gm, '').replace('export default', 'return')
-  code = `const { computed } = Vue\n${code}`
+  code = `const { computed, ref } = Vue\n${code}`
   code = code.replace(/\bsummaryTaskStatusMeta\b/g, 'statusMeta').replace(/\bsummaryTaskErrorMeta\b/g, 'errorMeta')
   const { summaryTaskStatusMeta, summaryTaskErrorMeta } = await import('../shared/summaryTaskContracts.js')
   const item = new Function('Vue', 'statusMeta', 'errorMeta', code)(Vue, summaryTaskStatusMeta, summaryTaskErrorMeta)
@@ -173,47 +173,115 @@ async function loadMountedHistory(vite) {
   return attachClientRender(history, fileName, compiledScript.bindings)
 }
 
-test('summary task card presents terminal status and exposes edit/delete controls', async () => {
+test('summary task card keeps secondary actions behind the compact menu and preserves their payloads', async () => {
   Vue = await import('vue')
+  ;({ defineComponent } = Vue)
   ;({ createServer } = await import('vite'))
   ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
-  ;({ mount } = await import('@vue/test-utils'))
+  ;({ flushPromises, mount } = await import('@vue/test-utils'))
   ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
   const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
   let wrapper
   try {
     const report = {
-      id: 'legacy-completed', title: '工作总结（每日）2026-08-19 11:28', taskNote: '',
-      version: 1, status: 'completed', runPhase: null, markdown: '# 摘要',
-      periodType: 'day', periodStart: Date.UTC(2026, 7, 19),
-      periodEndExclusive: Date.UTC(2026, 7, 19, 3, 28), timezone: 'Asia/Shanghai'
+      id: 'failed-report', title: '需要截断的工作总结标题', taskNote: '需要截断的任务备注',
+      version: 3, status: 'failed', errorText: 'SUMMARY_ARTIFACT_INVALID', markdown: null,
+      createdAt: Date.UTC(2026, 7, 25, 9, 50),
+      periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai'
     }
-    const deleteCalls = []
+    const MenuStub = defineComponent({ name: 'TaskCardMenuStub', emits: ['click'], template: '<div><slot /></div>' })
     wrapper = mount(await loadMountedListItem(vite), {
-      props: { report, progress: null, selected: false, deleteReport: async reportId => { deleteCalls.push(reportId) } },
+      props: { report, progress: null, selected: false },
       global: { stubs: {
-        'a-list-item': { template: '<section><slot /><slot name="actions" /></section>' },
-        'a-list-item-meta': { template: '<div><slot /><slot name="title" /><slot name="description" /></div>' },
+        'a-list-item': { template: '<section><slot /></section>' },
         'a-tag': { template: '<span><slot /></span>' },
-        'a-button': { template: '<button :title="$attrs.title"><slot /></button>' },
-        'a-popconfirm': { emits: ['confirm'], template: '<div><button data-testid="confirm-delete" @click="$emit(\'confirm\')">确认</button><slot /></div>' }
+        'a-button': { template: '<button v-bind="$attrs"><slot /></button>' },
+        'a-dropdown': defineComponent({
+          setup: () => ({ open: Vue.ref(false) }),
+          template: '<div @click.capture="open = true"><slot /><div v-if="open"><slot name="overlay" /></div></div>'
+        }),
+        'a-menu': MenuStub,
+        'a-menu-item': { template: '<button><slot /></button>' },
+        'a-menu-divider': { template: '<hr />' },
+        'a-modal': { props: ['open', 'title'], emits: ['ok', 'cancel'], template: '<section v-if="open" data-testid="delete-confirm"><p>{{ title }}</p><button @click="$emit(\'ok\')">确认删除</button></section>' }
       } }
     })
-    assert.match(wrapper.text(), /已完成/)
-    assert.doesNotMatch(wrapper.text(), /等待生成/)
-    await wrapper.get('[data-testid="summary-task-edit-legacy-completed"]').trigger('click')
-    assert.deepEqual(wrapper.emitted('edit'), [[report]])
-    await wrapper.get('[data-testid="summary-task-delete-legacy-completed"]').trigger('click')
-    assert.equal(wrapper.get('[data-testid="summary-task-delete-legacy-completed"]').attributes('title'), '删除这个总结任务？')
-    await wrapper.get('[data-testid="confirm-delete"]').trigger('click')
-    assert.deepEqual(deleteCalls, ['legacy-completed'])
+    assert.match(wrapper.get('.summary-task-card__title').text(), /需要截断的工作总结标题/)
+    assert.match(wrapper.get('.summary-task-card__note').text(), /需要截断的任务备注/)
+    assert.match(wrapper.text(), /生成失败/)
+    assert.match(wrapper.text(), /v3/)
+    assert.match(wrapper.get('.summary-task-card__meta').text(), /2026/)
+    assert.equal(wrapper.findComponent(MenuStub).exists(), false)
 
-    await wrapper.setProps({
-      report: { ...report, id: 'active-report', status: 'running', runPhase: 'starting' },
-      progress: { reportId: 'active-report', status: 'running', phase: 'starting', completed: 0, total: 1, text: '正在启动 AI CLI' }
+    await wrapper.get('.summary-task-card').trigger('click')
+    assert.deepEqual(wrapper.emitted('select'), [['failed-report']])
+    await wrapper.get('[aria-label="重试生成总结"]').trigger('click')
+    assert.deepEqual(wrapper.emitted('retry'), [[report]])
+    await wrapper.get('[aria-label="更多操作"]').trigger('click')
+    assert.equal(wrapper.emitted('select').length, 1)
+    assert.equal(wrapper.findComponent(MenuStub).exists(), true)
+
+    await wrapper.findComponent(MenuStub).vm.$emit('click', { key: 'edit' })
+    assert.deepEqual(wrapper.emitted('edit'), [[report]])
+    await wrapper.findComponent(MenuStub).vm.$emit('click', { key: 'conversation' })
+    assert.deepEqual(wrapper.emitted('open-conversation'), [[report]])
+    await wrapper.findComponent(MenuStub).vm.$emit('click', { key: 'delete' })
+    await flushPromises()
+    assert.match(wrapper.get('[data-testid="delete-confirm"]').text(), /删除这个总结任务？/)
+    await wrapper.get('[data-testid="delete-confirm"] button').trigger('click')
+    await flushPromises()
+    assert.deepEqual(wrapper.emitted('delete-report'), [['failed-report']])
+    assert.equal(wrapper.find('[data-testid="delete-confirm"]').exists(), false)
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+  }
+})
+
+test('summary task card keeps deletion confirmation open while deletion is pending or fails', async () => {
+  Vue = await import('vue')
+  ;({ defineComponent } = Vue)
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ flushPromises, mount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    const report = { id: 'deleting-report', title: '删除任务', taskNote: '', version: 1, status: 'completed', createdAt: Date.UTC(2026, 7, 25), periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai' }
+    let resolveDelete
+    let rejectDelete
+    const deleteCalls = []
+    const MenuStub = defineComponent({ name: 'PendingDeleteMenuStub', emits: ['click'], template: '<div><slot /></div>' })
+    wrapper = mount(await loadMountedListItem(vite), {
+      props: { report, progress: null, selected: false, deleteReport: reportId => {
+        deleteCalls.push(reportId)
+        return new Promise((resolve, reject) => { resolveDelete = resolve; rejectDelete = reject })
+      } },
+      global: { stubs: {
+        'a-list-item': { template: '<section><slot /></section>' }, 'a-tag': { template: '<span><slot /></span>' },
+        'a-button': { template: '<button v-bind="$attrs"><slot /></button>' },
+        'a-dropdown': defineComponent({ setup: () => ({ open: Vue.ref(false) }), template: '<div @click.capture="open = true"><slot /><div v-if="open"><slot name="overlay" /></div></div>' }),
+        'a-menu': MenuStub, 'a-menu-item': { template: '<button><slot /></button>' }, 'a-menu-divider': { template: '<hr />' },
+        'a-modal': { props: ['open'], emits: ['ok'], template: '<section v-if="open" data-testid="delete-confirm"><button @click="$emit(\'ok\')">确认删除</button></section>' }
+      } }
     })
-    assert.match(wrapper.text(), /正在启动 AI CLI/)
-    assert.equal(wrapper.get('[data-testid="summary-task-delete-active-report"]').attributes('title'), '取消并删除这个总结任务？')
+    await wrapper.get('[aria-label="更多操作"]').trigger('click')
+    await wrapper.findComponent(MenuStub).vm.$emit('click', { key: 'delete' })
+    await wrapper.get('[data-testid="delete-confirm"] button').trigger('click')
+    await flushPromises()
+    assert.deepEqual(deleteCalls, ['deleting-report'])
+    assert.equal(wrapper.find('[data-testid="delete-confirm"]').exists(), true)
+
+    rejectDelete(new Error('delete failed'))
+    await flushPromises()
+    assert.equal(wrapper.find('[data-testid="delete-confirm"]').exists(), true)
+
+    await wrapper.get('[data-testid="delete-confirm"] button').trigger('click')
+    await flushPromises()
+    resolveDelete()
+    await flushPromises()
+    assert.equal(wrapper.find('[data-testid="delete-confirm"]').exists(), false)
   } finally {
     wrapper?.unmount()
     await vite.close()
@@ -239,9 +307,9 @@ test('mounted failed task presents mapped safe reason without persisted raw erro
     listItem = mount(await loadMountedListItem(vite), {
       props: { report, progress: null, selected: false },
       global: { stubs: {
-        'a-list-item': { template: '<section><slot /><slot name="actions" /></section>' },
-        'a-list-item-meta': { template: '<div><slot /><slot name="title" /><slot name="description" /></div>' },
-        'a-tag': { template: '<span><slot /></span>' }, 'a-button': true, 'a-popconfirm': true
+        'a-list-item': { template: '<section><slot /></section>' },
+        'a-tag': { template: '<span><slot /></span>' }, 'a-button': true,
+        'a-dropdown': true, 'a-menu': true, 'a-menu-item': true, 'a-menu-divider': true, 'a-modal': true
       } }
     })
     detail = mount(await loadMountedReport(vite), {

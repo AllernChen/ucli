@@ -1,46 +1,57 @@
 <template>
-  <a-list-item :class="{ selected }" @click="emit('select', report.id)">
-    <a-list-item-meta>
-      <template #title>
-        <span>{{ report.title }}</span>
+  <a-list-item
+    class="summary-task-card"
+    :class="{ 'is-selected': selected }"
+    tabindex="0"
+    @click="emit('select', report.id)"
+    @keydown.enter.prevent="emit('select', report.id)"
+  >
+    <div class="summary-task-card__body">
+      <div class="summary-task-card__title-row">
+        <span class="summary-task-card__title">{{ report.title }}</span>
         <a-tag>v{{ report.version }}</a-tag>
         <a-tag v-if="report.isCurrent" color="blue">当前</a-tag>
-      </template>
-      <template #description>
+      </div>
+      <div class="summary-task-card__meta">
         <a-tag :color="status.color">{{ status.label }}</a-tag>
-        <span>{{ failed ? error.message : status.detail }}</span>
-        <span v-if="failed">{{ error.action }}</span>
         <span>{{ report.executorId || '—' }} · {{ createdAt }}</span>
-        <span v-if="report.taskNote">{{ report.taskNote }}</span>
-      </template>
-    </a-list-item-meta>
-    <template #actions>
-      <a-button :data-testid="`summary-task-edit-${report.id}`" aria-label="编辑总结任务" @click.stop="emit('edit', report)">编辑</a-button>
-      <a-button v-if="retryable" aria-label="重试生成总结" @click.stop="emit('retry', report)">重试</a-button>
-      <a-button aria-label="查看关联对话" @click.stop="emit('open-conversation', report)">查看对话</a-button>
-      <a-popconfirm
-        :title="deleteTitle"
-        ok-text="确认删除"
-        cancel-text="取消"
-        :disabled="deleting"
-        @confirm="confirmDelete"
-      >
+      </div>
+      <div v-if="failed" class="summary-task-card__failure">{{ error.message }}</div>
+      <div v-if="report.taskNote" class="summary-task-card__note">{{ report.taskNote }}</div>
+      <div class="summary-task-card__actions">
         <a-button
-          danger
-          :loading="deleting"
-          :disabled="deleting"
-          :data-testid="`summary-task-delete-${report.id}`"
-          :title="deleteTitle"
-          :aria-label="deleteTitle"
-          @click.stop
-        >删除</a-button>
-      </a-popconfirm>
-    </template>
+          v-if="retryable"
+          size="small"
+          aria-label="重试生成总结"
+          @click.stop="emit('retry', report)"
+        >重试</a-button>
+        <a-dropdown :trigger="['click']">
+          <template #overlay>
+            <a-menu @click="handleMenuClick">
+              <a-menu-item key="edit">编辑任务</a-menu-item>
+              <a-menu-item key="conversation">查看关联对话</a-menu-item>
+              <a-menu-divider />
+              <a-menu-item key="delete" danger>删除任务</a-menu-item>
+            </a-menu>
+          </template>
+          <a-button size="small" aria-label="更多操作" @click.stop>更多</a-button>
+        </a-dropdown>
+      </div>
+    </div>
   </a-list-item>
+  <a-modal
+    :open="deleteConfirmOpen"
+    :title="deleteTitle"
+    ok-text="确认删除"
+    cancel-text="取消"
+    :confirm-loading="deleting"
+    @ok="confirmDelete"
+    @cancel="deleteConfirmOpen = false"
+  />
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { summaryTaskErrorMeta, summaryTaskStatusMeta } from '../../../shared/summaryTaskContracts.js'
 
 const props = defineProps({
@@ -51,6 +62,7 @@ const props = defineProps({
   deleteReport: Function
 })
 const emit = defineEmits(['select', 'edit', 'delete-report', 'retry', 'open-conversation'])
+const deleteConfirmOpen = ref(false)
 const status = computed(() => summaryTaskStatusMeta(props.report, props.progress))
 const failed = computed(() => props.report.status === 'failed')
 const error = computed(() => summaryTaskErrorMeta(props.report.errorText))
@@ -58,13 +70,87 @@ const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].inc
 const retryable = computed(() => ['failed', 'interrupted', 'cancelled'].includes(props.report.status))
 const deleteTitle = computed(() => active.value ? '取消并删除这个总结任务？' : '删除这个总结任务？')
 const createdAt = computed(() => props.report.createdAt ? new Date(props.report.createdAt).toLocaleString() : '—')
-function confirmDelete() {
-  if (props.deleting) return Promise.resolve()
-  if (props.deleteReport) return props.deleteReport(props.report.id)
-  emit('delete-report', props.report.id)
+
+function handleMenuClick({ key }) {
+  if (key === 'edit') emit('edit', props.report)
+  if (key === 'conversation') emit('open-conversation', props.report)
+  if (key === 'delete' && !props.deleting) deleteConfirmOpen.value = true
+}
+
+async function confirmDelete() {
+  if (props.deleting) return
+  try {
+    if (props.deleteReport) await props.deleteReport(props.report.id)
+    else emit('delete-report', props.report.id)
+    deleteConfirmOpen.value = false
+  } catch {
+    // The parent owns deletion errors; preserve the confirmation for a retry.
+  }
 }
 </script>
 
 <style scoped>
-.selected { background:#e6f4ff; }
+.summary-task-card {
+  cursor: pointer;
+  transition: background-color .2s ease, box-shadow .2s ease;
+}
+
+.summary-task-card:hover,
+.summary-task-card.is-selected {
+  background: #e6f4ff;
+}
+
+.summary-task-card:focus-visible {
+  outline: 2px solid #1677ff;
+  outline-offset: -2px;
+}
+
+.summary-task-card__body {
+  min-width: 0;
+  width: 100%;
+}
+
+.summary-task-card__title-row,
+.summary-task-card__meta,
+.summary-task-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.summary-task-card__title-row {
+  align-items: flex-start;
+}
+
+.summary-task-card__title,
+.summary-task-card__note {
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.summary-task-card__title {
+  flex: 1;
+  font-weight: 500;
+}
+
+.summary-task-card__meta,
+.summary-task-card__failure,
+.summary-task-card__note {
+  margin-top: 4px;
+  color: rgba(0, 0, 0, .65);
+  font-size: 12px;
+}
+
+.summary-task-card__failure {
+  color: #cf1322;
+}
+
+.summary-task-card__actions {
+  justify-content: flex-end;
+  margin-top: 8px;
+}
 </style>
