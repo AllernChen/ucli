@@ -211,7 +211,9 @@ test('summary task card keeps secondary actions behind the compact menu and pres
     assert.match(wrapper.text(), /生成失败/)
     assert.match(wrapper.text(), /v3/)
     assert.match(wrapper.get('.summary-task-card__meta').text(), /2026/)
-    assert.equal(wrapper.get('.summary-task-card').attributes('aria-selected'), 'false')
+    assert.equal(wrapper.get('.summary-task-card').attributes('aria-current'), undefined)
+    assert.equal(wrapper.get('.summary-task-card').attributes('role'), undefined)
+    assert.equal(wrapper.get('.summary-task-card').attributes('aria-selected'), undefined)
     assert.match(wrapper.get('.summary-task-card__failure-action').text(), /请检查生成内容后重试/)
     assert.equal(wrapper.findComponent(MenuStub).exists(), false)
 
@@ -244,7 +246,7 @@ test('summary task card keeps secondary actions behind the compact menu and pres
       progress: { reportId: report.id, status: 'running', phase: 'starting', completed: 0, total: 1, text: '正在启动 AI CLI' },
       selected: true
     })
-    assert.equal(wrapper.get('.summary-task-card').attributes('aria-selected'), 'true')
+    assert.equal(wrapper.get('.summary-task-card').attributes('aria-current'), 'true')
     assert.match(wrapper.get('.summary-task-card__detail').text(), /正在启动 AI CLI/)
     await wrapper.get('.summary-task-card').trigger('keydown', { key: ' ' })
     assert.deepEqual(wrapper.emitted('select'), [['failed-report'], ['failed-report']])
@@ -265,8 +267,8 @@ test('summary task card keeps deletion confirmation open while deletion is pendi
   let wrapper
   try {
     const report = { id: 'deleting-report', title: '删除任务', taskNote: '', version: 1, status: 'completed', createdAt: Date.UTC(2026, 7, 25), periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai' }
-    let resolveDelete
     let rejectDelete
+    let deleteAttempt = 0
     const deleteCalls = []
     const MenuStub = defineComponent({ name: 'PendingDeleteMenuStub', emits: ['click'], template: '<div><slot /></div>' })
     const ModalStub = defineComponent({
@@ -278,7 +280,10 @@ test('summary task card keeps deletion confirmation open while deletion is pendi
     wrapper = mount(await loadMountedListItem(vite), {
       props: { report, progress: null, selected: false, deleteReport: reportId => {
         deleteCalls.push(reportId)
-        return new Promise((resolve, reject) => { resolveDelete = resolve; rejectDelete = reject })
+        deleteAttempt += 1
+        if (deleteAttempt === 2) return false
+        if (deleteAttempt === 3) return undefined
+        return new Promise((resolve, reject) => { rejectDelete = reject })
       } },
       global: { stubs: {
         'a-list-item': { template: '<section><slot /></section>' }, 'a-tag': { template: '<span><slot /></span>' },
@@ -315,7 +320,8 @@ test('summary task card keeps deletion confirmation open while deletion is pendi
 
     await wrapper.get('[data-testid="delete-confirm"] button').trigger('click')
     await flushPromises()
-    resolveDelete()
+    assert.equal(wrapper.find('[data-testid="delete-confirm"]').exists(), true)
+    await wrapper.get('[data-testid="delete-confirm"] button').trigger('click')
     await flushPromises()
     assert.equal(wrapper.find('[data-testid="delete-confirm"]').exists(), false)
   } finally {
@@ -439,13 +445,15 @@ test('mounted panel keeps the real task-card deletion confirmation open when del
   const report = { id: 'undeletable-report', title: '无法删除的任务', taskNote: '', status: 'completed', version: 1, periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai' }
   const api = window.ucli || {}
   const originalApi = { ...api }
-  let rejectDelete
   const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
   let wrapper
+  let history
+  let detail
+  let remove
   try {
     Object.assign(api, {
       listSummaryReports: async () => [report], getSummaryReport: async () => report,
-      deleteSummaryReport: () => new Promise((resolve, reject) => { rejectDelete = reject }),
+      deleteSummaryReport: async () => { throw new Error('delete failed') },
       onSummaryProgress: () => () => {}
     })
     window.ucli = api
@@ -471,11 +479,34 @@ test('mounted panel keeps the real task-card deletion confirmation open when del
     await card.findComponent(MenuStub).vm.$emit('click', { key: 'delete' })
     await card.get('[data-testid="delete-confirm"] button').trigger('click')
     await flushPromises()
-    rejectDelete(new Error('delete failed'))
-    await flushPromises()
     assert.equal(card.find('[data-testid="delete-confirm"]').exists(), true)
     assert.equal(wrapper.vm.summaries.error.message, '无法删除总结任务')
+    remove = wrapper.vm.remove
+    assert.equal(await remove(report.id), false)
+    wrapper.unmount()
+    wrapper = null
+
+    history = mount(await loadMountedHistory(vite), {
+      props: { versions: [report], progress: {}, deletingReportIds: new Set(), deleteReport: remove },
+      global: { stubs: {
+        'a-card': { template: '<section><slot /></section>' }, 'a-list': { props: ['dataSource'], template: '<div><slot v-for="item in dataSource" name="renderItem" :item="item" /></div>' },
+        'a-list-item': { template: '<section><slot /><slot name="actions" /></section>' }, 'a-list-item-meta': true,
+        'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': true
+      } }
+    })
+    detail = mount(await loadMountedReport(vite), {
+      props: { report, progress: null, deleting: false, deleteReport: remove },
+      global: { stubs: {
+        'a-card': { template: '<section><slot /><slot name="extra" /></section>' }, 'a-tag': true,
+        'a-descriptions': { template: '<div><slot /></div>' }, 'a-descriptions-item': { template: '<div><slot /></div>' },
+        'a-alert': true, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': true, 'a-empty': true
+      } }
+    })
+    assert.equal(await history.vm.confirmDelete(report), false)
+    assert.equal(await detail.vm.confirmDelete(), false)
   } finally {
+    history?.unmount()
+    detail?.unmount()
     wrapper?.unmount()
     await vite.close()
     Object.assign(api, originalApi)

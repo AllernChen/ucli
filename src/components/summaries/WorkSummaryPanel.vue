@@ -8,7 +8,7 @@
     <a-spin :spinning="summaries.loading">
       <a-row :gutter="14">
         <a-col :span="7">
-          <a-list role="listbox" aria-label="工作总结任务" :data-source="summaries.reports" row-key="id" :locale="{ emptyText: '还没有生成的工作总结' }">
+          <a-list :data-source="summaries.reports" row-key="id" :locale="{ emptyText: '还没有生成的工作总结' }">
             <template #renderItem="{ item }">
               <SummaryReportListItem
                 :report="item"
@@ -94,13 +94,14 @@ async function retry(report) {
 async function cancel(reportId) { await summaries.cancel(reportId) }
 async function setCurrent(reportId) { await summaries.setCurrent(reportId) }
 async function remove(reportId) {
-  if (deletingReportIds.value.has(reportId)) return
+  if (deletingReportIds.value.has(reportId)) return false
   deletingReportIds.value = new Set(deletingReportIds.value).add(reportId)
   try {
-    return await summaries.deleteReport(reportId)
-  } catch (error) {
+    await summaries.deleteReport(reportId)
+    return true
+  } catch {
     summaries.error = new Error('无法删除总结任务')
-    throw error
+    return false
   } finally {
     const next = new Set(deletingReportIds.value)
     next.delete(reportId)

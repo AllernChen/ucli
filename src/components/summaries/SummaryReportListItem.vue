@@ -2,8 +2,7 @@
   <a-list-item
     class="summary-task-card"
     :class="{ 'is-selected': selected }"
-    role="option"
-    :aria-selected="selected"
+    :aria-current="selected ? 'true' : undefined"
     tabindex="0"
     @click="selectCard"
     @keydown="handleCardKeydown"
@@ -101,9 +100,10 @@ async function confirmDelete() {
   if (deleteConfirmLoading.value) return
   deletePending.value = true
   try {
-    if (props.deleteReport) await props.deleteReport(props.report.id)
-    else emit('delete-report', props.report.id)
-    deleteConfirmOpen.value = false
+    const outcome = props.deleteReport
+      ? await props.deleteReport(props.report.id)
+      : emit('delete-report', props.report.id)
+    if (outcome !== false) deleteConfirmOpen.value = false
   } catch {
     // The parent owns deletion errors; preserve the confirmation for a retry.
   } finally {
