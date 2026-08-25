@@ -2,7 +2,7 @@
 
 日期：2026-08-25
 版本：`0.11.6`
-状态：**BLOCKED — automated release preparation passes; controlled manual and installed-app acceptance is not executed.**
+状态：**BLOCKED — Task 7 automated verification passes. Controlled real-CLI and installed-app acceptance remains unexecuted.**
 
 本记录不包含提示词、转录、Provider 输出、凭据或绝对工作区路径。
 
@@ -21,6 +21,18 @@
 Windows 符号链接能力在上述实际测试中可用，未发生 capability skip。Node 记录了既有 `MODULE_TYPELESS_PACKAGE_JSON` 性能警告；未记录 active-handle 或 timer warning。
 
 ## 自动化发布门禁
+
+### Task 7 集成复核（2026-08-25）
+
+| 命令 | 起止（Asia/Shanghai） | exit | pass / fail / skip | 结果 |
+| --- | --- | ---: | --- | --- |
+| `node --test test/claude-gateway-capabilities.test.mjs test/claude-turn-delivery.test.mjs test/interactive-summary-contracts.test.mjs test/interactive-summary-session-runtime.test.mjs test/interactive-summary-job-service.test.mjs test/summary-task-contracts.test.mjs test/summary-db-migration.test.mjs test/usage-ledger-db.test.mjs test/summary-ipc.test.mjs test/summary-view.test.mjs test/summary-view-mounted.test.mjs` | `2026-08-25T14:22:01.4155065+08:00` — `2026-08-25T14:22:23.1677281+08:00` | 0 | 236 / 0 / 0 | PASS；仅有既有 `MODULE_TYPELESS_PACKAGE_JSON` 性能警告。 |
+| `npm test` | 2026-08-25（控制器独立完整复核；168,198.8903 ms） | 0 | 1,619 / 0 / 11 | PASS。此前本线程的执行封装在父 shell 返回前截断输出，未作为该结论的证据。 |
+| `npm run build` | 2026-08-25（先前完整构建与随后获批重跑） | 0（获批环境） | 不适用 | PASS；main、preload、renderer 三个目标完成。普通 sandbox 的重跑在 DSH 临时 tgz 写入处报 `EPERM`；获批环境以相同命令通过，确认是环境写入限制。 |
+| `npm run verify:release` | `2026-08-25T14:23:49.5336196+08:00` — `2026-08-25T14:23:50.5918359+08:00` | 0 | 不适用 | PASS；验证当前版本的 Setup、Portable 与 packaged DSH bridge。 |
+| `git diff --check`; `git diff 5e35792 --check` | 2026-08-25 | 0 | 不适用 | PASS；无 whitespace error。 |
+
+Task 7 只验证自动化契约和发布工件；它没有执行真实模型调用、真实 CLI 工作流或安装态工作流。
 
 | 命令 | 日期 | exit | pass / fail / skip | 结果 |
 | --- | --- | ---: | --- | --- |
@@ -41,7 +53,7 @@ Windows package artifacts:
 
 ## CLI 可用性与人工验收
 
-非凭据命令检查发现四个 PowerShell shim；Claude 为 `2.1.220`，OpenCode 为 `1.18.18`。Codex 与 U-Code 的 `--version` 未在最初的有界检查内返回。随后在 dev 应用中用 Claude system selection 连续执行两次周总结步骤 1；两次均未出现可确认的 `turn_started`，以安全码 `SUMMARY_TURN_NOT_CONFIRMED` 结束。诊断确认主状态机的 12 秒外层门禁短于 Claude 冷启动最多两轮、每轮 8 秒的 transcript 投递确认周期；修复后的自动化门禁为 20 秒，但真实模型流程尚未重跑。
+非凭据命令检查发现四个 PowerShell shim；Claude 为 `2.1.220`，OpenCode 为 `1.18.18`。Codex 与 U-Code 的 `--version` 未在最初的有界检查内返回。随后在 dev 应用中用 Claude system selection 连续执行两次周总结步骤 1；两次均未出现可确认的 `turn_started`，以安全码 `SUMMARY_TURN_NOT_CONFIRMED` 结束。诊断确认主状态机的 12 秒外层门禁短于 Claude 冷启动最多两轮、每轮 8 秒的 transcript 投递确认周期；修复后的自动化门禁现为 30 秒，但真实模型流程尚未重跑。
 
 | CLI | CLI version | profile / model | reportId / sessionId | start / end | 受控人工验收 |
 | --- | --- | --- | --- | --- | --- |
