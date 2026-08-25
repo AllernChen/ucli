@@ -198,6 +198,37 @@ test('task editing updates report and version projections without changing selec
   }
 })
 
+test('a stale refresh response cannot overwrite a newer task edit', async () => {
+  const originalGet = window.ucli.getSummaryReport
+  const originalUpdate = window.ucli.updateSummaryTask
+  let resolveRefresh
+  const staleReport = new Promise(resolve => { resolveRefresh = resolve })
+  const store = freshStore()
+  try {
+    store.reports = [{ id: 'report-1', title: '旧名称', taskNote: '', version: 1 }]
+    store.versions = [{ id: 'report-1', title: '旧名称', taskNote: '', version: 1 }]
+    store.selectedReportId = 'report-1'
+    window.ucli.getSummaryReport = () => staleReport
+    window.ucli.updateSummaryTask = async value => ({
+      id: value.reportId, title: value.title, taskNote: value.taskNote, version: 1
+    })
+
+    const refreshing = store.refreshReport('report-1')
+    await store.updateTask('report-1', { title: '新名称', taskNote: '新备注' })
+    resolveRefresh({ id: 'report-1', title: '旧名称', taskNote: '', version: 1 })
+    await refreshing
+
+    assert.equal(store.reports[0].title, '新名称')
+    assert.equal(store.versions[0].taskNote, '新备注')
+    assert.equal(store.selectedReportId, 'report-1')
+    assert.equal(store.selectedReport.title, '新名称')
+  } finally {
+    window.ucli.getSummaryReport = originalGet
+    window.ucli.updateSummaryTask = originalUpdate
+    store.dispose()
+  }
+})
+
 test('deleting the selected report clears stale state and selects the promoted version', async () => {
   const originalDelete = window.ucli.deleteSummaryReport
   const originalList = window.ucli.listSummaryReports

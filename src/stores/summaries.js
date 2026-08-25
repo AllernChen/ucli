@@ -125,17 +125,21 @@ export const useSummariesStore = defineStore('summaries', {
     async refreshReport(reportId) {
       const meta = metadata(this)
       if (meta.deletedReports.has(reportId)) return null
+      const taskUpdateEpoch = meta.taskUpdateEpochs.get(reportId) || 0
       let report
       try {
         report = await ipc.getSummaryReport(reportId)
       } catch (error) {
         if (error?.code === 'SUMMARY_REPORT_NOT_FOUND') {
+          if (meta.deletedReports.has(reportId) ||
+            (meta.taskUpdateEpochs.get(reportId) || 0) !== taskUpdateEpoch) return null
           this.removeProjection(reportId)
           return null
         }
         throw error
       }
-      if (meta.deletedReports.has(reportId)) return null
+      if (meta.deletedReports.has(reportId) ||
+        (meta.taskUpdateEpochs.get(reportId) || 0) !== taskUpdateEpoch) return null
       this.upsertReport(report)
       const versionIndex = this.versions.findIndex(item => item.id === reportId)
       if (versionIndex >= 0) this.versions.splice(versionIndex, 1, withoutMarkdown(report))

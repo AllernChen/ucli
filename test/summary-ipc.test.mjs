@@ -344,12 +344,18 @@ test('summary task edit IPC accepts only report metadata and keeps rejected fiel
   assert.equal(updated.value.title, '新名称')
   assert.deepEqual(calls, [{ reportId: 'report-1', title: '新名称', taskNote: '备注' }])
 
-  const rejected = await handlers.get('summary:update-task')({}, {
-    reportId: 'report-1', title: 'bad\nname', taskNote: '', workspace: 'C:\\secret'
-  })
-  assert.equal(rejected.ok, false)
-  assert.equal(rejected.error.code, 'INVALID_SUMMARY_IPC')
-  assert.doesNotMatch(JSON.stringify(rejected), /secret|workspace/i)
+  for (const [field, value] of [
+    ['markdown', '# forged report'],
+    ['status', 'completed'],
+    ['workspace', 'C:\\secret']
+  ]) {
+    const rejected = await handlers.get('summary:update-task')({}, {
+      reportId: 'report-1', title: '合法名称', taskNote: '合法备注', [field]: value
+    })
+    assert.equal(rejected.ok, false, field)
+    assert.equal(rejected.error.code, 'INVALID_SUMMARY_IPC', field)
+    assert.doesNotMatch(JSON.stringify(rejected), /forged|completed|secret|workspace/i)
+  }
 })
 
 test('interactive summary IPC returns only report and session identifiers', async () => {

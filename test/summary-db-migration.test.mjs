@@ -407,6 +407,31 @@ test('summary task metadata updates the sole UCLI session projection atomically'
     assert.equal(shared.report.title, '只更新报告')
     assert.equal(shared.sessionUpdated, false)
     assert.equal(db.getSession('summary-session').name, '新的任务名称')
+
+    await db.createSummaryReport(summaryReport({
+      id: 'missing-session-report', version: 3, sessionId: 'missing-session', title: 'missing owner'
+    }))
+    const missing = await db.updateSummaryTask('missing-session-report', {
+      title: '仅更新缺失会话报告', taskNote: '没有会话投影', updatedAt: 4
+    })
+    assert.equal(missing.report.title, '仅更新缺失会话报告')
+    assert.equal(missing.sessionUpdated, false)
+
+    db.insertSession({
+      id: 'removed-session', project_path: 'C:\\summary', adapter_id: 'claude',
+      name: 'removed name', task_note: 'old note', tier: 'safety-rules', status: 'offline', created_at: 1
+    })
+    db.removeSession('removed-session')
+    await db.createSummaryReport(summaryReport({
+      id: 'removed-session-report', version: 4, sessionId: 'removed-session', title: 'removed owner'
+    }))
+    const removed = await db.updateSummaryTask('removed-session-report', {
+      title: '仅更新已移除会话报告', taskNote: '已移除会话', updatedAt: 5
+    })
+    assert.equal(removed.report.title, '仅更新已移除会话报告')
+    assert.equal(removed.sessionUpdated, false)
+    assert.equal(db.getSession('removed-session').name, 'removed name')
+    assert.equal(db.getSession('removed-session').taskNote, 'old note')
   } finally {
     db.close()
     await rm(root, { recursive: true, force: true })
