@@ -23,10 +23,12 @@ export function createInteractiveSummarySessionRuntime({
   createSession,
   startAdapter,
   stopSession,
+  removeSession,
   getEntry
 } = {}) {
   if (typeof createSession !== 'function' || typeof startAdapter !== 'function' ||
-    typeof stopSession !== 'function' || typeof getEntry !== 'function') {
+    typeof stopSession !== 'function' || typeof removeSession !== 'function' ||
+    typeof getEntry !== 'function') {
     throw new TypeError('Interactive summary session runtime dependencies are required')
   }
 
@@ -283,5 +285,15 @@ export function createInteractiveSummarySessionRuntime({
     return state.stopPromise
   }
 
-  return Object.freeze({ create, start, waitReady, deliver, subscribe, stop })
+  async function remove(sessionId) {
+    try {
+      const removed = await removeSession(sessionId)
+      if (removed !== true) throw typed('SUMMARY_RUN_FAILED')
+      return true
+    } catch {
+      throw typed('SUMMARY_RUN_FAILED')
+    }
+  }
+
+  return Object.freeze({ create, start, waitReady, deliver, subscribe, stop, remove })
 }

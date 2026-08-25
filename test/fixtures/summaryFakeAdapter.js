@@ -45,12 +45,15 @@ export function createSummaryFakeAdapterHarness({
   startError,
   stopGate,
   stopError,
+  removeGate,
+  removeError,
   onStop
 } = {}) {
   const entries = new Map()
   const configs = new Map()
   const stopped = []
   const stopRequests = []
+  const removeRequests = []
   const createRequests = []
   const startRequests = []
   let nextSession = 0
@@ -78,6 +81,17 @@ export function createSummaryFakeAdapterHarness({
       if (stopError) throw stopError
       return true
     },
+    async removeSession(sessionId) {
+      removeRequests.push(sessionId)
+      await removeGate?.promise
+      const error = typeof removeError === 'function'
+        ? removeError(sessionId)
+        : removeError
+      if (error) throw error
+      entries.delete(sessionId)
+      configs.delete(sessionId)
+      return true
+    },
     getEntry(sessionId) {
       return entries.get(sessionId)
     }
@@ -100,6 +114,7 @@ export function createSummaryFakeAdapterHarness({
     runtime,
     stopped,
     stopRequests,
+    removeRequests,
     createRequests,
     startRequests,
     config(sessionId) { return configs.get(sessionId) },

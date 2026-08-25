@@ -1052,6 +1052,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       createSession: createInteractiveSummarySession,
       startAdapter: startAdapterSession,
       stopSession,
+      removeSession: sessionId => removeSessionProjection(sessionId),
       getEntry: interactiveSummarySessionEntry
     })
     interactiveSummaryJobService = createInteractiveSummaryJobService({
@@ -3184,6 +3185,35 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     return true
   }
 
+  async function removeSessionProjection(sessionId, { persist = true } = {}) {
+    const e = sessions.get(sessionId)
+    if (e) {
+      clearInteractiveProfileCapability(e)
+      engine.removeSession(sessionId)
+      gatewaySignals.publish({
+        type: 'session_stopped',
+        sessionId,
+        occurredAt: Date.now()
+      })
+      let cleanupError = null
+      try {
+        await e.adapter?.dispose()
+      } catch (error) {
+        cleanupError = error
+      } finally {
+        clearInteractiveProfileCapability(e)
+        interactiveAdapterFacades.delete(sessionId)
+        sessions.delete(sessionId)
+        historyService.invalidate(sessionId)
+        const db = getDb()
+        if (persist && db) db.removeSession(sessionId)
+        scheduleFlush()
+      }
+      if (cleanupError) throw cleanupError
+    }
+    return true
+  }
+
   function registerIpc() {
     registerGatewayIpc({ ipcMain, manager: gatewayManager })
     registerAiCliProfileIpc({
@@ -3503,35 +3533,6 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       setSessionProfile(sessionId, profileId)
     )
     ipcMain.handle('session:stop', (_e, sessionId) => stopSession(sessionId))
-    async function removeSessionProjection(sessionId, { persist = true } = {}) {
-      const e = sessions.get(sessionId)
-      if (e) {
-        clearInteractiveProfileCapability(e)
-        engine.removeSession(sessionId)
-        gatewaySignals.publish({
-          type: 'session_stopped',
-          sessionId,
-          occurredAt: Date.now()
-        })
-        let cleanupError = null
-        try {
-          await e.adapter?.dispose()
-        } catch (error) {
-          cleanupError = error
-        } finally {
-          clearInteractiveProfileCapability(e)
-          interactiveAdapterFacades.delete(sessionId)
-          sessions.delete(sessionId)
-          historyService.invalidate(sessionId)
-          const db = getDb()
-          if (persist && db) db.removeSession(sessionId)
-          scheduleFlush()
-        }
-        if (cleanupError) throw cleanupError
-      }
-      return true
-    }
-
     ipcMain.handle('session:delete', async (_e, sessionId) => {
       return removeSessionProjection(sessionId)
     })

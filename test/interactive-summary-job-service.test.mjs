@@ -521,6 +521,77 @@ test('cancel aborts validation stops the CLI and settles cancelled', async t => 
   })
 })
 
+test('deletion cancellation retains construction ownership until its late session is removed', async t => {
+  const createGate = deferred()
+  const stopGate = deferred()
+  t.after(() => {
+    createGate.resolve()
+    stopGate.resolve()
+  })
+  const state = await fixture(t, {
+    fakeOptions: { createGate, stopGate },
+    timeouts: { cleanupMs: 100 }
+  })
+  const starting = state.service.start(request())
+  await waitUntil(() => state.fake.createRequests.length === 1)
+  const [queued] = state.repository.list()
+  let cancelled = false
+  const cancelling = state.service.cancelForDeletion(queued.id).then(value => {
+    cancelled = value
+    return value
+  })
+
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(cancelled, false)
+  assert.equal(state.repository.get(queued.id).status, 'running')
+  assert.equal((await manifest(state, queued.id)).status, 'running')
+  assert.equal(state.service.isActive(queued.id), true)
+
+  createGate.resolve()
+  await waitUntil(() => state.fake.stopRequests.length === 1)
+  assert.equal(cancelled, false)
+  stopGate.resolve()
+
+  assert.equal(await watchdog(cancelling), true)
+  await assert.rejects(starting, error => error?.code === 'SUMMARY_CANCELLED')
+  assert.deepEqual(state.fake.removeRequests, ['summary-session-1'])
+  assert.equal(state.service.isActive(queued.id), false)
+})
+
+test('failed late projection removal preserves the deletion target for a retry', async t => {
+  const createGate = deferred()
+  let removalAttempts = 0
+  t.after(() => createGate.resolve())
+  const state = await fixture(t, {
+    fakeOptions: {
+      createGate,
+      removeError: () => {
+        removalAttempts += 1
+        return removalAttempts === 1 ? new Error('private projection removal') : null
+      }
+    },
+    timeouts: { cleanupMs: 100 }
+  })
+  const starting = state.service.start(request())
+  await waitUntil(() => state.fake.createRequests.length === 1)
+  const [queued] = state.repository.list()
+  const cancelling = state.service.cancelForDeletion(queued.id)
+
+  createGate.resolve()
+  await assert.rejects(
+    watchdog(cancelling),
+    error => error?.code === 'SUMMARY_DELETE_DRAIN_FAILED'
+  )
+  assert.equal(state.repository.get(queued.id).status, 'running')
+  assert.equal((await manifest(state, queued.id)).status, 'running')
+  assert.equal(state.service.isActive(queued.id), true)
+
+  assert.equal(await watchdog(state.service.cancelForDeletion(queued.id)), true)
+  await assert.rejects(starting, error => error?.code === 'SUMMARY_CANCELLED')
+  assert.deepEqual(state.fake.removeRequests, ['summary-session-1', 'summary-session-1'])
+  assert.equal(state.service.isActive(queued.id), false)
+})
+
 for (const [label, fakeOptions] of [
   ['rejecting', { stopError: new Error('private stop rejection') }],
   ['timed-out', { stopGate: deferred() }]

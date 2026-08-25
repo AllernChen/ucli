@@ -66,6 +66,10 @@ function harness({
       if (entry) entry.stopped = true
       return true
     },
+    removeSession: async sessionId => {
+      entries.delete(sessionId)
+      return true
+    },
     getEntry: sessionId => entries.get(sessionId)
   })
   return { adapter, entries, runtime, stopped, get startCalls() { return startCalls } }

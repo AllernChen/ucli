@@ -110,7 +110,7 @@ export function createInteractiveSummaryJobService({
     requireMethod(workspaceService, method, 'workspaceService')
   }
   requireMethod(preparationService, 'prepare', 'preparationService')
-  for (const method of ['create', 'start', 'waitReady', 'deliver', 'subscribe', 'stop']) {
+  for (const method of ['create', 'start', 'waitReady', 'deliver', 'subscribe', 'stop', 'remove']) {
     requireMethod(sessionRuntime, method, 'sessionRuntime')
   }
   if (typeof buildPrompt !== 'function' || typeof waitForArtifact !== 'function' ||
@@ -219,6 +219,42 @@ export function createInteractiveSummaryJobService({
       job.stopPromise = Promise.resolve().then(() => sessionRuntime.stop(job.sessionId))
     }
     return bounded(job, job.stopPromise)
+  }
+
+  async function removeOwnedSession(job) {
+    if (!job.sessionId || job.projectionRemoved) return { ok: true, value: true }
+    if (!job.removePromise) {
+      job.removePromise = Promise.resolve().then(() => sessionRuntime.remove(job.sessionId))
+    }
+    const outcome = await bounded(job, job.removePromise)
+    if (outcome.ok && outcome.value === true) job.projectionRemoved = true
+    else job.removePromise = null
+    return outcome
+  }
+
+  async function drainDeletionSession(job, sessionId = job.sessionId) {
+    if (sessionId && !job.sessionId) job.sessionId = sessionId
+    if (!job.sessionId) return { ok: true, value: true }
+    const stopped = await stopOwnedSession(job)
+    if (!stopped.ok || stopped.value !== true) {
+      job.stopPromise = null
+      return stopped
+    }
+    return removeOwnedSession(job)
+  }
+
+  async function cleanLateCreatedSession(job, value) {
+    const sessionId = resultSessionId(value)
+    if (!job.sessionId) job.sessionId = sessionId
+    const stopped = await stopOwnedSession(job)
+    if (!stopped.ok || stopped.value !== true) {
+      job.stopPromise = null
+      throw typed('SUMMARY_RUN_FAILED')
+    }
+    if (!job.deletionRequired) return true
+    const removed = await removeOwnedSession(job)
+    if (!removed.ok || removed.value !== true) throw typed('SUMMARY_RUN_FAILED')
+    return true
   }
 
   async function ownedStep(job, operation, onLateValue) {
@@ -358,12 +394,20 @@ export function createInteractiveSummaryJobService({
     return job.canonicalCompletionPromise
   }
 
-  async function finishTerminal(job, phase, code) {
-    if (job.completionCommitted) return job.done.promise
-    if (job.finishPromise) return job.finishPromise
+  function claimTerminal(job, phase, code) {
+    if (job.terminal) return job.terminal
     job.terminal = { phase, code }
     job.terminalSignal.resolve(job.terminal)
     clearOwnedResources(job)
+    return job.terminal
+  }
+
+  async function finishTerminal(job, phase, code) {
+    if (job.completionCommitted) return job.done.promise
+    if (job.finishPromise) return job.finishPromise
+    const terminal = claimTerminal(job, phase, code)
+    phase = terminal.phase
+    code = terminal.code
     job.finishPromise = (async () => {
       const error = typed(code)
       let report = null
@@ -606,7 +650,12 @@ export function createInteractiveSummaryJobService({
       workspaceOperation: null,
       repositoryOperation: null,
       repositoryCompletionOperation: null,
+      sessionConstruction: null,
       stopPromise: null,
+      removePromise: null,
+      projectionRemoved: false,
+      deletionRequired: false,
+      deletionPromise: null,
       finishPromise: null,
       completionPromise: null,
       canonicalCompletionPromise: null,
@@ -656,20 +705,21 @@ export function createInteractiveSummaryJobService({
         )
       )
       await transition(job, INTERACTIVE_SUMMARY_PHASE.STARTING)
+      job.sessionConstruction = Promise.resolve().then(() => sessionRuntime.create({
+        adapterId: request.executorId,
+        profileId: request.profileId || null,
+        ...(request.profileId ? {} : { profileSelection: 'system' }),
+        ...(request.interactiveProfileSnapshot
+          ? { interactiveProfileSnapshot: request.interactiveProfileSnapshot }
+          : {}),
+        model: request.model || null,
+        name: `工作总结（${PERIOD_LABELS[queued.periodType]}）v${queued.version}`,
+        cwd: job.workspace.workDirectory
+      }))
       const created = await ownedStep(
         job,
-        () => sessionRuntime.create({
-          adapterId: request.executorId,
-          profileId: request.profileId || null,
-          ...(request.profileId ? {} : { profileSelection: 'system' }),
-          ...(request.interactiveProfileSnapshot
-            ? { interactiveProfileSnapshot: request.interactiveProfileSnapshot }
-            : {}),
-          model: request.model || null,
-          name: `工作总结（${PERIOD_LABELS[queued.periodType]}）v${queued.version}`,
-          cwd: job.workspace.workDirectory
-        }),
-        late => sessionRuntime.stop(resultSessionId(late))
+        () => job.sessionConstruction,
+        late => cleanLateCreatedSession(job, late)
       )
       job.sessionId = resultSessionId(created)
       job.report = await ownedStep(job, () => repository.update(queued.id, {
@@ -696,6 +746,7 @@ export function createInteractiveSummaryJobService({
   async function cancel(reportId) {
     const job = active.get(reportId)
     if (!job) return false
+    if (job.deletionPromise) return job.deletionPromise
     await finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.CANCELLED, 'SUMMARY_CANCELLED')
     return true
   }
@@ -703,13 +754,38 @@ export function createInteractiveSummaryJobService({
   async function cancelForDeletion(reportId) {
     const job = active.get(reportId)
     if (!job) return false
-    if (job.sessionId) {
-      const stopped = await stopOwnedSession(job)
-      if (!stopped.ok || stopped.value !== true) throw typed('SUMMARY_DELETE_DRAIN_FAILED')
+    if (job.deletionPromise) return job.deletionPromise
+    job.deletionRequired = true
+    const awaitingConstruction = Boolean(job.sessionConstruction && !job.sessionId)
+    if (awaitingConstruction) {
+      claimTerminal(job, INTERACTIVE_SUMMARY_PHASE.CANCELLED, 'SUMMARY_CANCELLED')
     }
-    await finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.CANCELLED, 'SUMMARY_CANCELLED')
-    if (active.has(reportId)) throw typed('SUMMARY_DELETE_DRAIN_FAILED')
-    return true
+    const deleting = (async () => {
+      try {
+        if (awaitingConstruction) {
+          const constructed = await bounded(job, job.sessionConstruction)
+          if (constructed.timeout) throw typed('SUMMARY_DELETE_DRAIN_FAILED')
+          if (constructed.ok) {
+            const drained = await drainDeletionSession(job, resultSessionId(constructed.value))
+            if (!drained.ok || drained.value !== true) {
+              throw typed('SUMMARY_DELETE_DRAIN_FAILED')
+            }
+          }
+        } else if (job.sessionId) {
+          const drained = await drainDeletionSession(job)
+          if (!drained.ok || drained.value !== true) throw typed('SUMMARY_DELETE_DRAIN_FAILED')
+        }
+        await finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.CANCELLED, 'SUMMARY_CANCELLED')
+        if (active.has(reportId)) throw typed('SUMMARY_DELETE_DRAIN_FAILED')
+        return true
+      } finally {
+        if (job.deletionPromise === deleting && active.has(reportId)) {
+          job.deletionPromise = null
+        }
+      }
+    })()
+    job.deletionPromise = deleting
+    return deleting
   }
 
   function isActive(reportId) {
@@ -725,7 +801,7 @@ export function createInteractiveSummaryJobService({
   async function interruptAll(code) {
     const safeCode = safeInteractiveSummaryError(typed(code), 'SUMMARY_RUN_FAILED').code
     const jobs = [...active.values()]
-    await Promise.all(jobs.map(job => finishTerminal(
+    await Promise.all(jobs.map(job => job.deletionPromise || finishTerminal(
       job,
       INTERACTIVE_SUMMARY_PHASE.INTERRUPTED,
       safeCode
