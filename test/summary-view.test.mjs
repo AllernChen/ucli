@@ -540,7 +540,7 @@ test('report detail stylesheet gives rendered wide Markdown tables a usable over
   )
   assert.match(reportView, /\.summary-markdown-shell\s*\{[^}]*min-width\s*:\s*0[^}]*overflow-x\s*:\s*auto/)
   assert.match(reportView, /\.markdown-body\s*:deep\(table\)\s*\{[^}]*display\s*:\s*block[^}]*width\s*:\s*max-content[^}]*min-width\s*:\s*100%[^}]*overflow-x\s*:\s*auto/)
-  assert.doesNotMatch(reportView, /\.markdown-body\s*:deep\(table\)\s*\{[^}]*max-width\s*:\s*100%/)
+  assert.match(reportView, /\.markdown-body\s*:deep\(table\)\s*\{[^}]*max-width\s*:\s*100%/)
 })
 
 test('summary store reconciles unknown cache-check progress without losing it', async () => {

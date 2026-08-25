@@ -146,6 +146,6 @@ function formatPeriod(value) {
 .summary-markdown-shell { min-width:0; overflow-x:auto; }
 .markdown-body { margin-top:18px; line-height:1.75; }
 .markdown-body :deep(pre) { overflow:auto; padding:12px; background:#f5f5f5; }
-.markdown-body :deep(table) { display:block; width:max-content; min-width:100%; overflow-x:auto; border-collapse:collapse; }
+.markdown-body :deep(table) { display:block; width:max-content; min-width:100%; max-width:100%; overflow-x:auto; border-collapse:collapse; }
 .markdown-body :deep(td),.markdown-body :deep(th) { border:1px solid #ddd; padding:6px; }
 </style>

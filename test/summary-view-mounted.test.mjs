@@ -808,7 +808,7 @@ test('mounted completed report keeps responsive metadata, grouped actions, and w
       props: {
         report: {
           id: 'wide-table', version: 1, status: 'completed', periodStart: 1, periodEndExclusive: 2,
-          markdown: '| 很宽的列 | 第二列 | 第三列 |\n| --- | --- | --- |\n| 内容 | 内容 | 内容 |'
+          markdown: '| 不可换行标识符 | 第二列 | 第三列 | 第四列 | 第五列 |\n| --- | --- | --- | --- | --- |\n| unbreakable-summary-table-content-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz | unbreakable-summary-table-content-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz | unbreakable-summary-table-content-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz | unbreakable-summary-table-content-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz | unbreakable-summary-table-content-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz |'
         },
         progress: null
       },
