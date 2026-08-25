@@ -1,7 +1,11 @@
 <template>
   <a-card v-if="report" class="summary-report" :title="`${periodLabel} · v${report.version}`">
     <template #extra><a-tag :color="status.color">{{ status.label }}</a-tag></template>
-    <a-descriptions size="small" :column="3" bordered>
+    <a-descriptions
+      size="small"
+      :column="{ xs: 1, sm: 1, md: 2, lg: 2, xl: 3, xxl: 3 }"
+      bordered
+    >
       <a-descriptions-item label="周期">{{ report.periodType }}{{ report.partial ? ' · partial' : '' }}</a-descriptions-item>
       <a-descriptions-item label="AI CLI">{{ report.executorId || '—' }}</a-descriptions-item>
       <a-descriptions-item label="模型">{{ report.model || '默认' }}</a-descriptions-item>
@@ -39,32 +43,39 @@
       <span>{{ visibleProgress.text }}</span>
     </div>
     <div v-if="active" class="cancel-row"><a-button danger size="small" @click="$emit('cancel', report.id)">取消生成</a-button></div>
-    <div class="actions">
-      <a-button aria-label="编辑总结任务" @click="$emit('edit', report)">编辑任务</a-button>
-      <a-button @click="$emit('open-conversation', report)">查看关联对话</a-button>
-      <a-button @click="copyMarkdown">复制 Markdown</a-button>
-      <a-button :disabled="!exportable" @click="exportMarkdown">导出 Markdown</a-button>
-      <a-button
-        :loading="htmlExporting"
-        :disabled="!exportable || htmlExporting"
-        @click="exportHtml"
-      >{{ htmlExporting ? '正在生成 HTML' : '导出 HTML' }}</a-button>
-      <a-popconfirm
-        :title="deleteTitle"
-        ok-text="确认删除"
-        cancel-text="取消"
-        :disabled="deleting"
-        @confirm="confirmDelete"
-      >
-        <a-button danger :loading="deleting" :disabled="deleting" :title="deleteTitle" :aria-label="deleteTitle">删除总结</a-button>
-      </a-popconfirm>
+    <div class="summary-detail-actions">
+      <div class="summary-detail-actions__group summary-detail-actions__primary">
+        <a-button aria-label="编辑总结任务" @click="$emit('edit', report)">编辑任务</a-button>
+        <a-button @click="$emit('open-conversation', report)">查看关联对话</a-button>
+        <a-button @click="copyMarkdown">复制 Markdown</a-button>
+      </div>
+      <div class="summary-detail-actions__group summary-detail-actions__export">
+        <a-button :disabled="!exportable" @click="exportMarkdown">导出 Markdown</a-button>
+        <a-button
+          :loading="htmlExporting"
+          :disabled="!exportable || htmlExporting"
+          @click="exportHtml"
+        >{{ htmlExporting ? '正在生成 HTML' : '导出 HTML' }}</a-button>
+      </div>
+      <div class="summary-detail-actions__group summary-detail-actions__danger">
+        <a-popconfirm
+          :title="deleteTitle"
+          ok-text="确认删除"
+          cancel-text="取消"
+          :disabled="deleting"
+          @confirm="confirmDelete"
+        >
+          <a-button danger :loading="deleting" :disabled="deleting" :title="deleteTitle" :aria-label="deleteTitle">删除总结</a-button>
+        </a-popconfirm>
+      </div>
     </div>
-    <article
-      v-if="report.markdown"
-      class="markdown-body"
-      v-html="safeHtml"
-      @click="handleReportLink"
-    />
+    <div v-if="report.markdown" class="summary-markdown-shell">
+      <article
+        class="markdown-body"
+        v-html="safeHtml"
+        @click="handleReportLink"
+      />
+    </div>
     <a-empty v-else description="报告内容尚未生成" />
   </a-card>
   <a-empty v-else description="请选择或生成一份工作总结" />
@@ -127,5 +138,14 @@ function formatPeriod(value) {
 </script>
 
 <style scoped>
-.progress-row,.actions { display:flex; align-items:center; gap:10px; margin-top:12px; }.cancel-row{margin-top:12px}.progress-row :deep(.ant-progress){flex:1}.markdown-body{margin-top:18px;line-height:1.75}.markdown-body :deep(pre){overflow:auto;padding:12px;background:#f5f5f5}.markdown-body :deep(table){border-collapse:collapse}.markdown-body :deep(td),.markdown-body :deep(th){border:1px solid #ddd;padding:6px}
+.progress-row { display:flex; align-items:center; gap:10px; margin-top:12px; }
+.cancel-row { margin-top:12px; }
+.progress-row :deep(.ant-progress) { flex:1; }
+.summary-detail-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; }
+.summary-detail-actions__group { display:flex; flex-wrap:wrap; gap:10px; }
+.summary-markdown-shell { min-width:0; overflow-x:auto; }
+.markdown-body { margin-top:18px; line-height:1.75; }
+.markdown-body :deep(pre) { overflow:auto; padding:12px; background:#f5f5f5; }
+.markdown-body :deep(table) { display:block; width:max-content; min-width:100%; overflow-x:auto; border-collapse:collapse; }
+.markdown-body :deep(td),.markdown-body :deep(th) { border:1px solid #ddd; padding:6px; }
 </style>

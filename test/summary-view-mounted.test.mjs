@@ -109,7 +109,7 @@ async function loadMountedDrawer(vite) {
   return attachClientRender(drawer, fileName, compiledScript.bindings)
 }
 
-async function loadMountedReport(vite) {
+async function loadMountedReport(vite, { renderMarkdown = false } = {}) {
   await vite.transformRequest('/src/components/summaries/SummaryReportView.vue')
   const fileName = '../src/components/summaries/SummaryReportView.vue'
   const source = readFileSync(new URL(fileName, import.meta.url), 'utf8')
@@ -120,10 +120,12 @@ async function loadMountedReport(vite) {
   code = `const { computed } = Vue\n${code}`
   code = code.replace(/\bsummaryTaskStatusMeta\b/g, 'statusMeta').replace(/\bsummaryTaskErrorMeta\b/g, 'errorMeta')
   const { summaryTaskStatusMeta, summaryTaskErrorMeta } = await import('../shared/summaryTaskContracts.js')
+  const DOMPurify = renderMarkdown ? (await import('dompurify')).default : { sanitize: value => value }
+  const MarkdownIt = renderMarkdown ? (await import('markdown-it')).default : class { render(value) { return value } }
   const report = new Function('Vue', 'DOMPurify', 'MarkdownIt', 'ipc', 'openSummaryReportLink', 'statusMeta', 'errorMeta', code)(
     Vue,
-    { sanitize: value => value },
-    class { render(value) { return value } },
+    DOMPurify,
+    MarkdownIt,
     { openExternal: () => {} },
     () => {},
     summaryTaskStatusMeta,
@@ -785,6 +787,46 @@ test('mounted persisted awaiting-confirmation report keeps cancellation availabl
     assert.doesNotMatch(wrapper.text(), /确认继续/)
     await wrapper.get('button').trigger('click')
     assert.deepEqual(wrapper.emitted('cancel'), [['legacy']])
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+  }
+})
+
+test('mounted completed report keeps responsive metadata, grouped actions, and wide Markdown tables contained', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ defineComponent } = Vue)
+  ;({ mount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    const DescriptionsStub = defineComponent({ name: 'ResponsiveDescriptions', props: ['column'], template: '<div><slot /></div>' })
+    wrapper = mount(await loadMountedReport(vite, { renderMarkdown: true }), {
+      props: {
+        report: {
+          id: 'wide-table', version: 1, status: 'completed', periodStart: 1, periodEndExclusive: 2,
+          markdown: '| 很宽的列 | 第二列 | 第三列 |\n| --- | --- | --- |\n| 内容 | 内容 | 内容 |'
+        },
+        progress: null
+      },
+      global: { stubs: {
+        'a-card': { template: '<section><slot /><slot name="extra" /></section>' }, 'a-tag': true,
+        'a-descriptions': DescriptionsStub, 'a-descriptions-item': { template: '<div><slot /></div>' },
+        'a-alert': true, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': { template: '<div><slot /></div>' }, 'a-empty': true
+      } }
+    })
+
+    assert.deepEqual(wrapper.findComponent(DescriptionsStub).props('column'), { xs: 1, sm: 1, md: 2, lg: 2, xl: 3, xxl: 3 })
+    const toolbar = wrapper.get('.summary-detail-actions')
+    assert.equal(toolbar.findAll(':scope > .summary-detail-actions__group').length, 3)
+    assert.equal(toolbar.get('.summary-detail-actions__primary').text().includes('编辑任务'), true)
+    assert.match(toolbar.get('.summary-detail-actions__export').text(), /导出 Markdown/)
+    assert.match(toolbar.get('.summary-detail-actions__danger').text(), /删除总结/)
+    const shell = wrapper.get('.summary-markdown-shell')
+    assert.equal(shell.find('table').exists(), true)
   } finally {
     wrapper?.unmount()
     await vite.close()
