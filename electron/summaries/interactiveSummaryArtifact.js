@@ -230,6 +230,7 @@ function validateMarkdown(buffer, unsafePaths) {
   assertSafeMarkdown(canonical.markdown, unsafePaths)
   assertHeadingOrder(canonical.markdown)
   const canonicalBuffer = Buffer.from(canonical.markdown, 'utf8')
+  if (canonicalBuffer.byteLength < 1 || canonicalBuffer.byteLength > MAX_MARKDOWN_BYTES) throw artifactError()
   return { buffer: canonicalBuffer, markdown: canonical.markdown, changed: canonical.changed }
 }
 

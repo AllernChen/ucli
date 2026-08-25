@@ -23,8 +23,25 @@ test('canonical headings are byte-for-byte unchanged', () => {
   assert.deepEqual(canonicalizeInteractiveSummaryMarkdown(CANONICAL), { markdown: CANONICAL, changed: false })
 })
 
-test('all-H2 required sections are rejected because the title level is wrong', () => {
-  assertInvalid(CANONICAL.replace('# 摘要', '## 摘要'))
+test('all-H2 required sections promote the title and preserve descendant hierarchy', () => {
+  const source = [
+    '## 摘要', '', '概览', '', '### 摘要详情', '', '#### 摘要条目', '',
+    '## 使用量分析', '', '数据', '', '### 使用量详情', '',
+    '## 项目进展', '', '进展', '', '### 项目详情', '',
+    '## 跨项目观察', '', '观察', '', '### 观察详情', '',
+    '## 下一步建议', '', '建议', '', '### 建议详情', '',
+    '## 数据覆盖', '', '完整', '', '### 覆盖详情', ''
+  ].join('\n')
+  const expected = [
+    '# 摘要', '', '概览', '', '## 摘要详情', '', '### 摘要条目', '',
+    '## 使用量分析', '', '数据', '', '### 使用量详情', '',
+    '## 项目进展', '', '进展', '', '### 项目详情', '',
+    '## 跨项目观察', '', '观察', '', '### 观察详情', '',
+    '## 下一步建议', '', '建议', '', '### 建议详情', '',
+    '## 数据覆盖', '', '完整', '', '### 覆盖详情', ''
+  ].join('\n')
+
+  assert.deepEqual(canonicalizeInteractiveSummaryMarkdown(source), { markdown: expected, changed: true })
 })
 
 test('mixed H1/H2 required sections are canonicalized', () => {

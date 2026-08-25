@@ -53,7 +53,7 @@ function matchRequiredHeadings(headings, targets) {
     const matches = headings.filter((heading) => heading.text === target.text)
     if (matches.length !== 1) throw invalidArtifact()
     const heading = matches[0]
-    if (heading.level < 1 || heading.level > 2 || (target.level === 1 && heading.level !== 1)) throw invalidArtifact()
+    if (heading.level < 1 || heading.level > 2) throw invalidArtifact()
     if (heading.lineIndex <= (required.at(-1)?.lineIndex ?? -1) || heading.lineIndex < cursor) throw invalidArtifact()
     required.push({ ...heading, target })
     cursor = heading.lineIndex

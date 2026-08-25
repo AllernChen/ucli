@@ -410,6 +410,28 @@ test('canonical markdown rejects invalid size encoding and heading order', async
   }
 })
 
+test('canonical markdown rejects source below the limit when canonicalization exceeds it', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-canonical-oversize')
+  const maximumBytes = 5 * 1024 * 1024
+  const sourceWithoutPadding = [
+    '# 摘要', '', '内容', '',
+    '# 使用量分析', '', '内容', '',
+    '# 项目进展', '', '内容', '',
+    '# 跨项目观察', '', '内容', '',
+    '# 下一步建议', '', '内容', '',
+    '# 数据覆盖', '', '内容', ''
+  ].join('\n')
+  const source = `${sourceWithoutPadding}${'x'.repeat(maximumBytes - Buffer.byteLength(sourceWithoutPadding) - 1)}`
+  assert.equal(Buffer.byteLength(source), maximumBytes - 1)
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), source, 'utf8')
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 3000 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
+})
+
 test('canonical markdown rejects credential material before returning report bytes', async t => {
   const { workspaceService } = await fixture(t)
   const workspace = await workspaceService.create('report-credential')
