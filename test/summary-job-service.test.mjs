@@ -878,6 +878,34 @@ test('cancellation wins if requested as the pipeline result is resolving', async
   assert.equal(report.isCurrent, false)
 })
 
+test('cancel waits for a running pipeline to drain before resolving', async () => {
+  let releasePipeline
+  let markPipelineStarted
+  const pipelineGate = new Promise(resolve => { releasePipeline = resolve })
+  const pipelineStarted = new Promise(resolve => { markPipelineStarted = resolve })
+  const { service, repository } = createHarness({
+    pipeline: { async run() { markPipelineStarted(); return pipelineGate } }
+  })
+  const job = await service.generate(request())
+  await waitFor(() => repository.get(job.reportId).status === 'running')
+  await pipelineStarted
+
+  let cancelled = false
+  const cancelling = service.cancel(job.reportId).then(value => {
+    cancelled = value
+    return value
+  })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(cancelled, false)
+  assert.equal(service.isActive(job.reportId), true)
+  releasePipeline(pipelineResult())
+
+  assert.equal(await cancelling, true)
+  assert.equal((await job.completion).status, 'cancelled')
+  assert.equal(service.isActive(job.reportId), false)
+})
+
 test('cancellation wins while usage snapshot is resolving on an empty report', async () => {
   let resolveUsage
   const pendingUsage = new Promise(resolve => { resolveUsage = resolve })
@@ -890,8 +918,9 @@ test('cancellation wins while usage snapshot is resolving on an empty report', a
   const job = await service.generate(request())
   await waitFor(() => repository.get(job.reportId).sourceHash !== null)
 
-  await service.cancel(job.reportId)
+  const cancelling = service.cancel(job.reportId)
   resolveUsage({ totals: { inputTokens: 0 } })
+  await cancelling
   const report = await job.completion
 
   assert.equal(report.status, 'cancelled')
@@ -1315,8 +1344,9 @@ test('cancel during real workspace finalization pairs a cancelled report with on
     const job = await service.generate(request())
     await finalized
 
-    assert.equal(await service.cancel(job.reportId), true)
+    const cancelling = service.cancel(job.reportId)
     releaseFinalize()
+    assert.equal(await cancelling, true)
     const report = await job.completion
     const manifest = JSON.parse(readFileSync(
       join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
@@ -1388,8 +1418,9 @@ test('cancel during empty workspace finalization cannot overwrite cancelled with
       job.completion.then(report => assert.fail(`finalization was not reached: ${report.errorText}`))
     ])
 
-    assert.equal(await service.cancel(job.reportId), true)
+    const cancelling = service.cancel(job.reportId)
     releaseFinalize()
+    assert.equal(await cancelling, true)
     const report = await job.completion
     const manifest = JSON.parse(readFileSync(
       join(root, 'workspaces', job.reportId, 'manifest.json'), 'utf8'
@@ -1434,8 +1465,9 @@ test('cancel during duplicate workspace finalization cannot overwrite cancelled 
       duplicate.completion.then(report => assert.fail(`finalization was not reached: ${report.errorText}`))
     ])
 
-    assert.equal(await service.cancel(duplicate.reportId), true)
+    const cancelling = service.cancel(duplicate.reportId)
     releaseFinalize()
+    assert.equal(await cancelling, true)
     const report = await duplicate.completion
     const manifest = JSON.parse(readFileSync(
       join(root, 'workspaces', duplicate.reportId, 'manifest.json'), 'utf8'

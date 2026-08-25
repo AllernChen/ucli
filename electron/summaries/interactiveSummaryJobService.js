@@ -700,6 +700,18 @@ export function createInteractiveSummaryJobService({
     return true
   }
 
+  async function cancelForDeletion(reportId) {
+    const job = active.get(reportId)
+    if (!job) return false
+    if (job.sessionId) {
+      const stopped = await stopOwnedSession(job)
+      if (!stopped.ok || stopped.value !== true) throw typed('SUMMARY_DELETE_DRAIN_FAILED')
+    }
+    await finishTerminal(job, INTERACTIVE_SUMMARY_PHASE.CANCELLED, 'SUMMARY_CANCELLED')
+    if (active.has(reportId)) throw typed('SUMMARY_DELETE_DRAIN_FAILED')
+    return true
+  }
+
   function isActive(reportId) {
     return active.has(reportId)
   }
@@ -721,5 +733,5 @@ export function createInteractiveSummaryJobService({
     return jobs.length
   }
 
-  return Object.freeze({ start, cancel, isActive, subscribe, interruptAll })
+  return Object.freeze({ start, cancel, cancelForDeletion, isActive, subscribe, interruptAll })
 }

@@ -867,6 +867,7 @@ test('maintenance reclaims a deleted report workspace after immediate cleanup fa
 
 test('active summary deletion cancels before canonical, session, and workspace removal', async () => {
   const calls = []
+  let active = true
   const result = await deleteSummaryReportAndWorkspace('report-active', {
     repository: {
       get: () => { calls.push('get-report'); return { id: 'report-active', sessionId: 'session-1' } },
@@ -876,8 +877,8 @@ test('active summary deletion cancels before canonical, session, and workspace r
       }
     },
     interactiveJobService: {
-      isActive: () => true,
-      async cancel() { calls.push('cancel'); return true }
+      isActive: () => active,
+      async cancelForDeletion() { calls.push('cancel'); active = false; return true }
     },
     headlessJobService: { isActive: () => false },
     removeSessionProjection: async id => calls.push(`remove-session:${id}`),
@@ -932,6 +933,24 @@ test('active summary deletion preserves resources when cancellation fails', asyn
     workspaceService: { remove: async () => { workspaceRemovals += 1 } }
   }), { code: 'SUMMARY_RUN_FAILED' })
   assert.deepEqual([deletes, sessionRemovals, workspaceRemovals], [0, 0, 0])
+})
+
+test('summary deletion requires the cancelled job to be drained before removing resources', async () => {
+  const calls = []
+  await assert.rejects(deleteSummaryReportAndWorkspace('report-active', {
+    repository: {
+      get: () => ({ id: 'report-active', sessionId: 'session-1' }),
+      delete: async () => { calls.push('delete-report') }
+    },
+    interactiveJobService: {
+      isActive: () => true,
+      async cancelForDeletion() { calls.push('cancel'); return true }
+    },
+    headlessJobService: { isActive: () => false },
+    removeSessionProjection: async () => { calls.push('remove-session') },
+    workspaceService: { remove: async () => { calls.push('remove-workspace') } }
+  }), { code: 'SUMMARY_DELETE_DRAIN_FAILED' })
+  assert.deepEqual(calls, ['cancel'])
 })
 
 test('successful report deletion removes its inactive derived workspace', async () => {

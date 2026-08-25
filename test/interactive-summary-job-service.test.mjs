@@ -521,6 +521,31 @@ test('cancel aborts validation stops the CLI and settles cancelled', async t => 
   })
 })
 
+for (const [label, fakeOptions] of [
+  ['rejecting', { stopError: new Error('private stop rejection') }],
+  ['timed-out', { stopGate: deferred() }]
+]) {
+  test(`deletion cancellation preserves an active interactive task when session stop is ${label}`, async t => {
+    const stopGate = fakeOptions.stopGate
+    t.after(() => stopGate?.resolve())
+    const state = await fixture(t, {
+      fakeOptions,
+      timeouts: { cleanupMs: 20 }
+    })
+    const run = await state.service.start(request())
+    await beginRunning(state, run)
+
+    await assert.rejects(
+      watchdog(state.service.cancelForDeletion(run.report.id), 1_000),
+      error => error?.code === 'SUMMARY_DELETE_DRAIN_FAILED'
+    )
+
+    assert.equal(state.repository.get(run.report.id).status, 'running')
+    assert.equal((await manifest(state, run.report.id)).status, 'running')
+    assert.equal(state.service.isActive(run.report.id), true)
+  })
+}
+
 test('app shutdown interrupts every active run with the exact safe code', async t => {
   const state = await fixture(t)
   const run = await state.service.start(request())

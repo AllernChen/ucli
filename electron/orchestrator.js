@@ -174,6 +174,7 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
   SUMMARY_PROFILE_UNAVAILABLE: 'Select an available default AI CLI profile',
   SUMMARY_DISCLOSURE_REQUIRED: 'Automatic summaries require disclosure acceptance',
   SUMMARY_JOB_NOT_ACTIVE: 'Summary job is not active',
+  SUMMARY_DELETE_DRAIN_FAILED: 'Summary task could not be stopped for deletion',
   SUMMARY_READY_TIMEOUT: 'AI CLI startup timed out',
   SUMMARY_TURN_NOT_CONFIRMED: 'Summary instruction delivery was not confirmed',
   SUMMARY_RUN_TIMEOUT: 'Interactive summary generation timed out',
@@ -576,10 +577,15 @@ export function summaryProgressPayload(report, confirmationCallLimit = null, pip
 
 export async function cancelActiveSummary(reportId, {
   interactiveJobService,
-  headlessJobService
+  headlessJobService,
+  requireDrained = false
 } = {}) {
-  if (interactiveJobService?.isActive(reportId) &&
-    await interactiveJobService.cancel(reportId) === true) return true
+  if (interactiveJobService?.isActive(reportId)) {
+    const cancel = requireDrained && typeof interactiveJobService.cancelForDeletion === 'function'
+      ? interactiveJobService.cancelForDeletion.bind(interactiveJobService)
+      : interactiveJobService.cancel.bind(interactiveJobService)
+    if (await cancel(reportId) === true) return true
+  }
   if (await headlessJobService?.cancel(reportId) === true) return true
   throw Object.assign(new Error('Summary job is not active'), {
     code: 'SUMMARY_JOB_NOT_ACTIVE'
@@ -627,8 +633,15 @@ export async function deleteSummaryReportAndWorkspace(reportId, deps = {}) {
   if (active) {
     await cancelActiveSummary(reportId, {
       interactiveJobService: deps.interactiveJobService,
-      headlessJobService: deps.headlessJobService
+      headlessJobService: deps.headlessJobService,
+      requireDrained: true
     })
+    if (deps.interactiveJobService?.isActive(reportId) ||
+      deps.headlessJobService?.isActive?.(reportId)) {
+      throw Object.assign(new Error('Summary task did not drain'), {
+        code: 'SUMMARY_DELETE_DRAIN_FAILED'
+      })
+    }
   }
   const result = await deps.repository.delete(reportId)
   if (result.removedSessionId) {

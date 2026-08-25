@@ -444,6 +444,7 @@ export function createSummaryJobService({
         errorText: 'SUMMARY_CANCELLED'
       })
       if (job && ['queued', 'awaiting_confirmation'].includes(report.status)) finish(job, cancelled)
+      if (job) await job.done.promise
       return true
     },
 
