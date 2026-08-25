@@ -58,17 +58,22 @@
         >{{ htmlExporting ? '正在生成 HTML' : '导出 HTML' }}</a-button>
       </div>
       <div class="summary-detail-actions__group summary-detail-actions__danger">
-        <a-popconfirm
-          :title="deleteTitle"
-          ok-text="确认删除"
-          cancel-text="取消"
-          :disabled="deleting"
-          @confirm="confirmDelete"
-        >
-          <a-button danger :loading="deleting" :disabled="deleting" :title="deleteTitle" :aria-label="deleteTitle">删除总结</a-button>
-        </a-popconfirm>
+        <a-button danger :loading="deleting" :disabled="deleting" :title="deleteTitle" :aria-label="deleteTitle" @click="openDeleteConfirm">删除总结</a-button>
       </div>
     </div>
+    <a-modal
+      :open="deleteConfirmOpen"
+      :title="deleteTitle"
+      ok-text="确认删除"
+      cancel-text="取消"
+      :confirm-loading="deleteConfirmLoading"
+      :mask-closable="!deleteConfirmLoading"
+      :keyboard="!deleteConfirmLoading"
+      :closable="!deleteConfirmLoading"
+      :cancel-button-props="{ disabled: deleteConfirmLoading }"
+      @ok="confirmDelete"
+      @cancel="cancelDeleteConfirm"
+    />
     <div v-if="report.markdown" class="summary-markdown-shell">
       <article
         class="markdown-body"
@@ -82,7 +87,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
 import ipc from '../../ipc.js'
@@ -91,6 +96,8 @@ import { summaryTaskErrorMeta, summaryTaskStatusMeta } from '../../../shared/sum
 
 const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean, deleting: Boolean, deleteReport: Function })
 const emit = defineEmits(['cancel', 'edit', 'export-markdown', 'export-html', 'delete-report', 'open-conversation'])
+const deleteConfirmOpen = ref(false)
+const deletePending = ref(false)
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const safeHtml = computed(() => DOMPurify.sanitize(markdown.render(props.report?.markdown || '')))
 const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].includes(props.report?.status))
@@ -107,6 +114,7 @@ const displayEnd = computed(() => {
 })
 const periodLabel = computed(() => props.report ? `${formatPeriod(props.report.periodStart)} — ${formatPeriod(displayEnd.value)}` : '')
 const deleteTitle = computed(() => active.value ? '取消并删除这个总结任务？' : '删除这个总结任务？')
+const deleteConfirmLoading = computed(() => deletePending.value || props.deleting)
 const generationPerformance = computed(() => {
   if (props.report?.status !== 'completed') return ''
   const metrics = props.report?.generationMetrics
@@ -127,10 +135,25 @@ async function copyMarkdown() { await navigator.clipboard.writeText(props.report
 function exportMarkdown() { if (exportable.value) emit('export-markdown', props.report.id) }
 function exportHtml() { if (exportable.value && !props.htmlExporting) emit('export-html', props.report.id) }
 function handleReportLink(event) { openSummaryReportLink(event, ipc.openExternal) }
-function confirmDelete() {
-  if (props.deleting) return Promise.resolve()
-  if (props.deleteReport) return props.deleteReport(props.report.id)
-  emit('delete-report', props.report.id)
+function openDeleteConfirm() {
+  if (!deleteConfirmLoading.value) deleteConfirmOpen.value = true
+}
+async function confirmDelete() {
+  if (deleteConfirmLoading.value) return
+  deletePending.value = true
+  try {
+    const outcome = props.deleteReport
+      ? await props.deleteReport(props.report.id)
+      : emit('delete-report', props.report.id)
+    if (outcome !== false) deleteConfirmOpen.value = false
+  } catch {
+    // The parent owns deletion errors; preserve the confirmation for a retry.
+  } finally {
+    deletePending.value = false
+  }
+}
+function cancelDeleteConfirm() {
+  if (!deleteConfirmLoading.value) deleteConfirmOpen.value = false
 }
 function formatPeriod(value) {
   return new Date(value).toLocaleDateString('zh-CN', { timeZone: props.report?.timezone || undefined })

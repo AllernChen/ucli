@@ -117,7 +117,7 @@ async function loadMountedReport(vite, { renderMarkdown = false } = {}) {
   assert.deepEqual(errors, [])
   const compiledScript = compileScript(descriptor, { id: 'summary-report-mounted' })
   let code = compiledScript.content.replace(/^import[^\n]*\n/gm, '').replace('export default', 'return')
-  code = `const { computed } = Vue\n${code}`
+  code = `const { computed, ref } = Vue\n${code}`
   code = code.replace(/\bsummaryTaskStatusMeta\b/g, 'statusMeta').replace(/\bsummaryTaskErrorMeta\b/g, 'errorMeta')
   const { summaryTaskStatusMeta, summaryTaskErrorMeta } = await import('../shared/summaryTaskContracts.js')
   const DOMPurify = renderMarkdown ? (await import('dompurify')).default : { sanitize: value => value }
@@ -362,7 +362,7 @@ test('mounted failed task presents mapped safe reason without persisted raw erro
         'a-card': { template: '<section><slot /><slot name="extra" /></section>' }, 'a-tag': true,
         'a-descriptions': { template: '<div><slot /></div>' }, 'a-descriptions-item': { template: '<div><slot /></div>' },
         'a-alert': { props: ['message', 'description'], template: '<div>{{ message }} {{ description }}</div>' },
-        'a-progress': true, 'a-button': true, 'a-popconfirm': true, 'a-empty': true
+        'a-progress': true, 'a-button': true, 'a-modal': true, 'a-empty': true
       } }
     })
     assert.match(listItem.text(), /报告已生成，但内容结构或安全校验未通过。/)
@@ -539,15 +539,25 @@ test('mounted panel keeps task-card and report-detail deletion confirmations ope
     wrapper.unmount()
     wrapper = null
 
+    const DetailDeleteModalStub = defineComponent({
+      name: 'DetailDeleteModalStub',
+      props: ['open', 'confirmLoading'],
+      emits: ['ok', 'cancel'],
+      template: '<section v-if="open" data-testid="detail-delete-confirm"><button @click="$emit(\'ok\')">确认删除</button><button @click="$emit(\'cancel\')">取消</button></section>'
+    })
     detail = mount(await loadMountedReport(vite), {
       props: { report, progress: null, deleting: false, deleteReport: remove },
       global: { stubs: {
         'a-card': { template: '<section><slot /><slot name="extra" /></section>' }, 'a-tag': true,
         'a-descriptions': { template: '<div><slot /></div>' }, 'a-descriptions-item': { template: '<div><slot /></div>' },
-        'a-alert': true, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': true, 'a-empty': true
+        'a-alert': true, 'a-progress': true, 'a-button': { template: '<button v-bind="$attrs"><slot /></button>' },
+        'a-modal': DetailDeleteModalStub, 'a-empty': true
       } }
     })
-    assert.equal(await detail.vm.confirmDelete(), false)
+    await detail.get('[aria-label="删除这个总结任务？"]').trigger('click')
+    await detail.get('[data-testid="detail-delete-confirm"] button').trigger('click')
+    await flushPromises()
+    assert.equal(detail.find('[data-testid="detail-delete-confirm"]').exists(), true)
   } finally {
     detail?.unmount()
     wrapper?.unmount()
@@ -779,7 +789,7 @@ test('mounted persisted awaiting-confirmation report keeps cancellation availabl
       },
       global: { stubs: {
         'a-card': { template: '<section><slot /><slot name="extra" /></section>' }, 'a-tag': true, 'a-descriptions': { template: '<div><slot /></div>' }, 'a-descriptions-item': { template: '<div><slot /></div>' },
-        'a-alert': { props: ['message', 'description'], template: '<div>{{ message }} {{ description }}</div>' }, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': { template: '<div><slot /></div>' }, 'a-empty': true
+        'a-alert': { props: ['message', 'description'], template: '<div>{{ message }} {{ description }}</div>' }, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-modal': true, 'a-empty': true
       } }
     })
     assert.match(wrapper.text(), /此报告无法在此继续。请取消后重试/)
@@ -815,7 +825,7 @@ test('mounted completed report keeps responsive metadata, grouped actions, and w
       global: { stubs: {
         'a-card': { template: '<section><slot /><slot name="extra" /></section>' }, 'a-tag': true,
         'a-descriptions': DescriptionsStub, 'a-descriptions-item': { template: '<div><slot /></div>' },
-        'a-alert': true, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': { template: '<div><slot /></div>' }, 'a-empty': true
+        'a-alert': true, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-modal': true, 'a-empty': true
       } }
     })
 
@@ -849,7 +859,7 @@ test('mounted completed report enables export while queued and failed reports ca
         props: { report: { ...report, status }, progress: null },
         global: { stubs: {
           'a-card': { template: '<section><slot /><slot name="extra" /></section>' }, 'a-tag': true, 'a-descriptions': { template: '<div><slot /></div>' }, 'a-descriptions-item': { template: '<div><slot /></div>' },
-          'a-alert': true, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': { template: '<div><slot /></div>' }, 'a-empty': true
+          'a-alert': true, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-modal': true, 'a-empty': true
         } }
       })
       const exportButtons = wrapper.findAll('button').filter(button => /导出 (?:Markdown|HTML)/.test(button.text()))
@@ -885,7 +895,7 @@ test('terminal reports ignore stale progress and awaiting-confirmation phases', 
       },
       global: { stubs: {
         'a-card': { template: '<section>{{ $attrs.title }}<slot /><slot name="extra" /></section>' }, 'a-tag': { template: '<span><slot /></span>' }, 'a-descriptions': { template: '<div><slot /></div>' }, 'a-descriptions-item': { template: '<div><slot /></div>' },
-        'a-alert': { props: ['message', 'description'], template: '<div>{{ message }} {{ description }}</div>' }, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': { template: '<div><slot /></div>' }, 'a-empty': true
+        'a-alert': { props: ['message', 'description'], template: '<div>{{ message }} {{ description }}</div>' }, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-modal': true, 'a-empty': true
       } }
     })
     assert.match(wrapper.text(), /已完成/)

@@ -72,7 +72,7 @@ Windows package artifacts:
 | 项目 | 证据 | 结果 |
 | --- | --- | --- |
 | 真实 Claude 周总结 | reportId `e94c1405-b5dc-4ea9-92aa-45d83206743d` | PASS；报告为 `completed` 且为 `current`，关联 session 为 offline。 |
-| canonical artifact 一致性 | DB Markdown 与 `output/report.md` 字节一致 | PASS；10,823 bytes，SHA-256 `bbc2a920a35b665950ebd496b483ed5a3bbdf3e93c76e3409f8701c0beaee3dc`，包含五个规范标题。 |
+| canonical artifact 一致性 | DB Markdown 与 `output/report.md` 字节一致 | PASS；10,823 bytes，SHA-256 `bbc2a920a35b665950ebd496b483ed5a3bbdf3e93c76e3409f8701c0beaee3dc`，包含六个必需标题（摘要加五个二级章节）。 |
 
 未在此记录提示词、转录、Provider 输出或本地路径。
 
