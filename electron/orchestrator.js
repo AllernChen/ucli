@@ -3746,7 +3746,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         clearTimeout(flushTimer)
         flushTimer = null
       }
-      codexConfigWatcher?.stop()
+      await codexConfigWatcher?.stop()
       codexConfigWatcher = null
       await summaryScheduler?.stop()
       summaryScheduler = null
