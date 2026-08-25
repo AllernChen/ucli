@@ -1,13 +1,19 @@
 <template>
-  <div class="work-summary-panel">
-    <div class="toolbar">
-      <a-button @click="refresh">刷新</a-button>
-      <a-button type="primary" @click="dialogOpen = true">生成总结</a-button>
-    </div>
+  <section class="work-summary-panel">
+    <header class="work-summary-header">
+      <div>
+        <h2>工作总结</h2>
+        <p>按周期生成、管理和导出规范工作总结。</p>
+      </div>
+      <div class="work-summary-header__actions">
+        <a-button @click="refresh">刷新</a-button>
+        <a-button type="primary" @click="dialogOpen = true">生成总结</a-button>
+      </div>
+    </header>
     <a-alert v-if="summaries.error" type="error" show-icon message="无法完成总结操作，请稍后重试。" />
     <a-spin :spinning="summaries.loading">
-      <a-row :gutter="14">
-        <a-col :span="7">
+      <div class="summary-workspace">
+        <aside class="summary-task-rail" aria-label="总结任务列表">
           <a-list :data-source="summaries.reports" row-key="id" :locale="{ emptyText: '还没有生成的工作总结' }">
             <template #renderItem="{ item }">
               <SummaryReportListItem
@@ -23,18 +29,18 @@
               />
             </template>
           </a-list>
-          <SummaryHistory :versions="summaries.versions" :progress="summaries.progress" :deleting-report-ids="deletingReportIds" :delete-report="remove" @select="select" @edit="openEdit" @retry="retry" @set-current="setCurrent" />
-        </a-col>
-        <a-col :span="17">
+        </aside>
+        <main class="summary-detail">
           <SummaryReportView :report="summaries.selectedReport" :progress="selectedProgress" :html-exporting="htmlExporting" :deleting="deletingReportIds.has(summaries.selectedReportId)" :delete-report="remove" @cancel="cancel" @edit="openEdit" @export-markdown="exportMarkdown" @export-html="openHtmlExport" @open-conversation="openConversation" />
-        </a-col>
-      </a-row>
+          <SummaryHistory class="summary-detail__history" :versions="summaries.versions" :progress="summaries.progress" @select="select" @retry="retry" @set-current="setCurrent" />
+        </main>
+      </div>
     </a-spin>
     <SummaryConversationDrawer v-model:open="drawerOpen" :report-id="conversationReport?.id" :session-id="conversationReport?.sessionId || null" />
     <SummaryGenerateDialog v-model:open="dialogOpen" @submit="generate" />
     <SummaryTaskEditDialog :open="editDialogOpen" :report="editReport" :confirm-loading="editSaving" @update:open="setEditDialogOpen" @submit="saveEdit" />
     <SummaryHtmlStyleDialog v-model:open="htmlStyleDialogOpen" :confirm-loading="htmlExporting" @submit="exportHtml" />
-  </div>
+  </section>
 </template>
 
 <script setup>
@@ -172,6 +178,18 @@ async function exportHtml(style) {
 </script>
 
 <style scoped>
-.toolbar { display:flex; justify-content:flex-end; gap:8px; margin-bottom:12px; }
+.work-summary-header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:12px; }
+.work-summary-header h2 { margin:0; }
+.work-summary-header p { margin:4px 0 0; color:rgba(0, 0, 0, 0.65); }
+.work-summary-header__actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
+.summary-workspace { display:grid; grid-template-columns:minmax(300px, 360px) minmax(0, 1fr); gap:16px; align-items:start; }
+.summary-task-rail { min-width:0; max-height:calc(100vh - 220px); overflow:auto; }
+.summary-detail { min-width:0; display:grid; gap:14px; }
 .selected { background:#e6f4ff; }
+@media (max-width:959px) {
+  .summary-workspace { grid-template-columns:minmax(0, 1fr); }
+  .summary-task-rail { max-height:360px; }
+  .work-summary-header { flex-wrap:wrap; }
+  .work-summary-header__actions { justify-content:flex-start; }
+}
 </style>

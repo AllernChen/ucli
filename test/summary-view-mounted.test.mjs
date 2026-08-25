@@ -375,6 +375,58 @@ test('mounted failed task presents mapped safe reason without persisted raw erro
   }
 })
 
+test('mounted panel places tasks and detail content in semantic master-detail regions', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ createPinia } = await import('pinia'))
+  ;({ defineComponent } = Vue)
+  ;({ flushPromises, shallowMount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const report = {
+    id: 'master-detail-report', title: '主从布局报告', taskNote: '', status: 'completed', version: 1,
+    periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai'
+  }
+  const api = window.ucli || {}
+  const originalApi = { ...api }
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    Object.assign(api, {
+      listSummaryReports: async () => [report], getSummaryReport: async () => report,
+      onSummaryProgress: () => () => {}
+    })
+    window.ucli = api
+    const stubs = createStubs()
+    stubs.ReportListItemStub = defineComponent({ name: 'SummaryReportListItem', template: '<article data-testid="summary-task-card-stub" />' })
+    stubs.ReportViewStub = defineComponent({ name: 'SummaryReportView', template: '<section data-testid="summary-report-view-stub" />' })
+    stubs.HistoryStub = defineComponent({ name: 'SummaryHistory', template: '<section data-testid="summary-history-stub" />' })
+    wrapper = shallowMount(await loadMountedPanel(vite, stubs), {
+      global: { plugins: [createPinia()], stubs: {
+        SummaryGenerateDialog: stubs.GenerateDialogStub, SummaryReportListItem: stubs.ReportListItemStub,
+        SummaryReportView: stubs.ReportViewStub, SummaryHistory: stubs.HistoryStub,
+        SummaryConversationDrawer: stubs.ConversationStub, SummaryHtmlStyleDialog: stubs.HtmlStyleDialogStub,
+        'a-button': { template: '<button><slot /></button>' }, 'a-alert': true,
+        'a-list': { props: ['dataSource'], template: '<div data-testid="summary-report-list"><slot v-for="item in dataSource" name="renderItem" :item="item" /></div>' },
+        'a-row': { template: '<div><slot /></div>' }, 'a-col': { template: '<div><slot /></div>' },
+        'a-spin': { template: '<div><slot /></div>' }
+      } }
+    })
+    await flushPromises()
+
+    assert.equal(wrapper.findAll('.summary-task-rail').length, 1)
+    assert.equal(wrapper.findAll('.summary-detail').length, 1)
+    assert.equal(wrapper.find('.summary-task-rail [data-testid="summary-report-list"]').exists(), true)
+    assert.equal(wrapper.find('.summary-detail [data-testid="summary-report-view-stub"]').exists(), true)
+    assert.equal(wrapper.find('.summary-detail [data-testid="summary-history-stub"]').exists(), true)
+    assert.equal(wrapper.find('.summary-task-rail [data-testid="summary-history-stub"]').exists(), false)
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+    Object.assign(api, originalApi)
+  }
+})
+
 test('mounted panel keeps a newer edit dialog open after an older save resolves and deduplicates deletion', async () => {
   Vue = await import('vue')
   ;({ createServer } = await import('vite'))
@@ -434,7 +486,7 @@ test('mounted panel keeps a newer edit dialog open after an older save resolves 
   }
 })
 
-test('mounted panel keeps the real task-card deletion confirmation open when deletion fails', async () => {
+test('mounted panel keeps task-card and report-detail deletion confirmations open when deletion fails', async () => {
   Vue = await import('vue')
   ;({ createServer } = await import('vite'))
   ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
@@ -447,7 +499,6 @@ test('mounted panel keeps the real task-card deletion confirmation open when del
   const originalApi = { ...api }
   const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
   let wrapper
-  let history
   let detail
   let remove
   try {
@@ -486,14 +537,6 @@ test('mounted panel keeps the real task-card deletion confirmation open when del
     wrapper.unmount()
     wrapper = null
 
-    history = mount(await loadMountedHistory(vite), {
-      props: { versions: [report], progress: {}, deletingReportIds: new Set(), deleteReport: remove },
-      global: { stubs: {
-        'a-card': { template: '<section><slot /></section>' }, 'a-list': { props: ['dataSource'], template: '<div><slot v-for="item in dataSource" name="renderItem" :item="item" /></div>' },
-        'a-list-item': { template: '<section><slot /><slot name="actions" /></section>' }, 'a-list-item-meta': true,
-        'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': true
-      } }
-    })
     detail = mount(await loadMountedReport(vite), {
       props: { report, progress: null, deleting: false, deleteReport: remove },
       global: { stubs: {
@@ -502,10 +545,8 @@ test('mounted panel keeps the real task-card deletion confirmation open when del
         'a-alert': true, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': true, 'a-empty': true
       } }
     })
-    assert.equal(await history.vm.confirmDelete(report), false)
     assert.equal(await detail.vm.confirmDelete(), false)
   } finally {
-    history?.unmount()
     detail?.unmount()
     wrapper?.unmount()
     await vite.close()
@@ -540,7 +581,7 @@ test('summary task edit dialog emits normalized title and note', async () => {
   }
 })
 
-test('history delete keeps its documented event fallback when no panel handler is provided', async () => {
+test('history keeps version selection, status, current-version and retry actions without repeated management controls', async () => {
   Vue = await import('vue')
   ;({ createServer } = await import('vite'))
   ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
@@ -550,15 +591,27 @@ test('history delete keeps its documented event fallback when no panel handler i
   let wrapper
   try {
     wrapper = mount(await loadMountedHistory(vite), {
-      props: { versions: [{ id: 'history-report', title: '历史', status: 'completed', version: 1 }], progress: {} },
+      props: { versions: [
+        { id: 'current-report', title: '当前历史', status: 'completed', isCurrent: true, version: 2 },
+        { id: 'previous-report', title: '旧历史', status: 'completed', version: 1 },
+        { id: 'failed-report', title: '失败历史', status: 'failed', version: 1 }
+      ], progress: {} },
       global: { stubs: {
         'a-card': { template: '<section><slot /></section>' }, 'a-list': { props: ['dataSource'], template: '<div><slot v-for="item in dataSource" name="renderItem" :item="item" /></div>' },
-        'a-list-item': { template: '<div><slot /><slot name="actions" /></div>' }, 'a-list-item-meta': true, 'a-button': { template: '<button><slot /></button>' },
-        'a-popconfirm': { emits: ['confirm'], template: '<button data-testid="history-confirm-delete" @click="$emit(\'confirm\')"><slot /></button>' }
+        'a-list-item': { template: '<div class="history-row"><slot /><slot name="actions" /></div>' },
+        'a-list-item-meta': { props: ['title', 'description'], template: '<p>{{ title }} {{ description }}</p>' },
+        'a-button': { template: '<button><slot /></button>' }, 'a-tag': { template: '<span><slot /></span>' }
       } }
     })
-    await wrapper.get('[data-testid="history-confirm-delete"]').trigger('click')
-    assert.deepEqual(wrapper.emitted('delete-report'), [['history-report']])
+    await wrapper.findAll('.history-row')[0].trigger('click')
+    await wrapper.get('button').trigger('click')
+    await wrapper.findAll('button')[1].trigger('click')
+    assert.deepEqual(wrapper.emitted('select'), [['current-report']])
+    assert.deepEqual(wrapper.emitted('set-current'), [['previous-report']])
+    assert.deepEqual(wrapper.emitted('retry'), [[{ id: 'failed-report', title: '失败历史', status: 'failed', version: 1 }]])
+    assert.match(wrapper.text(), /当前版本/)
+    assert.match(wrapper.text(), /失败/)
+    assert.doesNotMatch(wrapper.text(), /编辑|删除/)
   } finally {
     wrapper?.unmount()
     await vite.close()
