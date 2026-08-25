@@ -257,9 +257,111 @@ test('stable canonical markdown returns content metadata without a local path', 
   assert.deepEqual(result, {
     markdown: VALID_MARKDOWN,
     bytes: Buffer.byteLength(VALID_MARKDOWN),
-    sha256: `sha256:${createHash('sha256').update(VALID_MARKDOWN).digest('hex')}`
+    sha256: `sha256:${createHash('sha256').update(VALID_MARKDOWN).digest('hex')}`,
+    changed: false
   })
   assert.equal(JSON.stringify(result).includes(workspace.path), false)
+})
+
+test('stable all-H1 Claude markdown returns canonical bytes and changed metadata', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-claude-headings')
+  const source = [
+    '# 摘要',
+    '',
+    '总览',
+    '',
+    '# 使用量分析',
+    '',
+    '使用量',
+    '',
+    '# 项目进展',
+    '',
+    '## 项目甲',
+    '',
+    '完成事项',
+    '',
+    '## 项目乙',
+    '',
+    '计划事项',
+    '',
+    '# 跨项目观察',
+    '',
+    '观察',
+    '',
+    '# 下一步建议',
+    '',
+    '建议',
+    '',
+    '# 数据覆盖',
+    '',
+    '覆盖范围',
+    ''
+  ].join('\n')
+  const normalized = [
+    '# 摘要',
+    '',
+    '总览',
+    '',
+    '## 使用量分析',
+    '',
+    '使用量',
+    '',
+    '## 项目进展',
+    '',
+    '### 项目甲',
+    '',
+    '完成事项',
+    '',
+    '### 项目乙',
+    '',
+    '计划事项',
+    '',
+    '## 跨项目观察',
+    '',
+    '观察',
+    '',
+    '## 下一步建议',
+    '',
+    '建议',
+    '',
+    '## 数据覆盖',
+    '',
+    '覆盖范围',
+    ''
+  ].join('\n')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), source, 'utf8')
+
+  const result = await waitForCanonicalMarkdown({
+    workspacePath: workspace.path,
+    deadlineMs: Date.now() + 3000
+  })
+
+  assert.deepEqual(result, {
+    markdown: normalized,
+    bytes: Buffer.byteLength(normalized),
+    sha256: `sha256:${createHash('sha256').update(normalized).digest('hex')}`,
+    changed: true
+  })
+})
+
+test('all-H1 credential material is rejected before canonical bytes are returned', async t => {
+  const { workspaceService } = await fixture(t)
+  const workspace = await workspaceService.create('report-claude-credential')
+  const markdown = [
+    '# 摘要', '', '总览', '',
+    '# 使用量分析', '', 'token=super-secret-value', '',
+    '# 项目进展', '', '进展', '',
+    '# 跨项目观察', '', '观察', '',
+    '# 下一步建议', '', '建议', '',
+    '# 数据覆盖', '', '覆盖', ''
+  ].join('\n')
+  await writeFile(workspaceService.resolveArtifact(workspace.id, 'output/report.md'), markdown, 'utf8')
+
+  await assert.rejects(
+    waitForCanonicalMarkdown({ workspacePath: workspace.path, deadlineMs: Date.now() + 2500 }),
+    error => error?.code === 'SUMMARY_ARTIFACT_INVALID'
+  )
 })
 
 test('canonical markdown rejects required headings nested in a blockquote', async t => {

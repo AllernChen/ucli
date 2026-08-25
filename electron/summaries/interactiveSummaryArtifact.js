@@ -3,6 +3,7 @@ import { lstat, open, realpath } from 'node:fs/promises'
 import path from 'node:path'
 
 import { createSummaryMarkdownParser } from './summaryMarkdownParser.js'
+import { canonicalizeInteractiveSummaryMarkdown } from './summaryMarkdownCanonicalizer.js'
 import { assertSafeSummaryMarkdown } from './summaryMarkdownSafety.js'
 
 const MAX_MARKDOWN_BYTES = 5 * 1024 * 1024
@@ -223,10 +224,13 @@ async function readFromHandle(handle, size, signal, deadlineMs, onReadChunk) {
 
 function validateMarkdown(buffer, unsafePaths) {
   if (!buffer || buffer.byteLength < 1 || buffer.byteLength > MAX_MARKDOWN_BYTES) throw artifactError()
-  const markdown = decodeMarkdown(buffer)
-  assertHeadingOrder(markdown)
-  assertSafeMarkdown(markdown, unsafePaths)
-  return { buffer, markdown }
+  const sourceMarkdown = decodeMarkdown(buffer)
+  assertSafeMarkdown(sourceMarkdown, unsafePaths)
+  const canonical = canonicalizeInteractiveSummaryMarkdown(sourceMarkdown)
+  assertSafeMarkdown(canonical.markdown, unsafePaths)
+  assertHeadingOrder(canonical.markdown)
+  const canonicalBuffer = Buffer.from(canonical.markdown, 'utf8')
+  return { buffer: canonicalBuffer, markdown: canonical.markdown, changed: canonical.changed }
 }
 
 function delay(ms, signal) {
@@ -276,15 +280,16 @@ export async function waitForCanonicalMarkdown({ workspacePath, signal, deadline
         !await currentPathMatches(candidate, signal, deadlineMs)) continue
       checkActive(signal, deadlineMs)
       const realWorkspace = await resolvedPath(workspacePath, signal, deadlineMs)
-      const { markdown } = validateMarkdown(buffer, [workspacePath, realWorkspace])
+      const { buffer: canonicalBuffer, markdown, changed } = validateMarkdown(buffer, [workspacePath, realWorkspace])
       checkActive(signal, deadlineMs)
       await candidate.handle.close()
       candidate.handle = null
       checkActive(signal, deadlineMs)
       return {
         markdown,
-        bytes: buffer.byteLength,
-        sha256: `sha256:${createHash('sha256').update(buffer).digest('hex')}`
+        bytes: canonicalBuffer.byteLength,
+        sha256: `sha256:${createHash('sha256').update(canonicalBuffer).digest('hex')}`,
+        changed
       }
     } catch (error) {
       if (error?.code === 'SUMMARY_ARTIFACT_INVALID' || error?.code === 'ABORT_ERR') throw error
