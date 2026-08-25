@@ -74,7 +74,7 @@ test('existing 0.11.5 summary database gains interactive fields without losing r
       .map(row => row[1])
     for (const column of [
       'execution_mode', 'session_id', 'run_phase', 'artifact_metadata_json',
-      'legacy_import_key'
+      'legacy_import_key', 'title', 'task_note'
     ]) {
       assert.ok(columns.includes(column), `missing migrated column ${column}`)
     }
@@ -87,6 +87,8 @@ test('existing 0.11.5 summary database gains interactive fields without losing r
       partial: false,
       version: 1,
       status: 'completed',
+      title: null,
+      taskNote: '',
       markdown: '# 摘要',
       executorId: null,
       profileId: null,
@@ -119,6 +121,8 @@ test('existing 0.11.5 summary database gains interactive fields without losing r
     assert.deepEqual(legacyReport.coverage, { sessionsIncluded: 2 })
     assert.equal(legacyReport.errorText, 'SUMMARY_GENERATION_FAILED')
     assert.equal(legacyReport.markdown, '# 摘要')
+    assert.equal(legacyReport.title, '工作总结（每周）1970-01-01 08:00')
+    assert.equal(legacyReport.taskNote, '')
     db.close()
     db = await openDb(dbPath)
     const reopenedLegacyReport = createReportRepository({ db }).list()[0]
@@ -129,8 +133,9 @@ test('existing 0.11.5 summary database gains interactive fields without losing r
       db.sql.exec('PRAGMA table_info(summary_reports)')[0].values
         .map(row => row[1])
         .filter(column => ['execution_mode', 'session_id', 'run_phase',
-          'artifact_metadata_json', 'legacy_import_key'].includes(column)),
-      ['execution_mode', 'session_id', 'run_phase', 'artifact_metadata_json', 'legacy_import_key']
+          'artifact_metadata_json', 'legacy_import_key', 'title', 'task_note'].includes(column)),
+      ['execution_mode', 'session_id', 'run_phase', 'artifact_metadata_json', 'legacy_import_key',
+        'title', 'task_note']
     )
   } finally {
     db.close()
@@ -148,6 +153,8 @@ function summaryReport(overrides = {}) {
     partial: false,
     version: 1,
     status: 'queued',
+    title: '工作总结（每周）1970-01-01 08:00',
+    taskNote: '',
     markdown: null,
     executorId: 'codex',
     profileId: 'profile-1',
@@ -172,6 +179,27 @@ function summaryReport(overrides = {}) {
     ...overrides
   }
 }
+
+test('repository assigns canonical metadata when creating queued reports', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-task-title-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  try {
+    const repository = createReportRepository({
+      db,
+      now: () => Date.UTC(2026, 7, 25, 1, 50),
+      idFactory: () => 'task-title-report'
+    })
+    const report = await repository.createQueued({
+      periodType: 'week', periodStart: 1, periodEndExclusive: 2,
+      timezone: 'Asia/Shanghai', generatedBy: 'manual'
+    })
+    assert.equal(report.title, '工作总结（每周）2026-08-25 09:50')
+    assert.equal(report.taskNote, '')
+  } finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 async function seedCompletedSummary(db, overrides = {}) {
   const markdown = overrides.markdown ?? '# Previous'

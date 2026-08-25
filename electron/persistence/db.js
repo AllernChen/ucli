@@ -14,6 +14,7 @@ import {
   normalizeCompletedArtifactMetadata,
   normalizeSummaryJsonField
 } from '../summaries/summaryPersistenceValidation.js'
+import { normalizeSummaryTaskMetadata } from '../../shared/summaryTaskContracts.js'
 
 const USAGE_MODEL_KEY_PREFIX = 'model:'
 const USAGE_SESSION_TOTAL_KEY = '__ucli_internal__:session-total'
@@ -445,6 +446,8 @@ class Db {
           'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted',
           'awaiting_confirmation', 'skipped_empty'
         )),
+        title                 TEXT,
+        task_note             TEXT NOT NULL DEFAULT '',
         markdown              TEXT,
         executor_id           TEXT,
         profile_id            TEXT,
@@ -493,7 +496,9 @@ class Db {
         ))`],
       ['artifact_metadata_json', `ALTER TABLE summary_reports ADD COLUMN
         artifact_metadata_json TEXT NOT NULL DEFAULT '{}'`],
-      ['legacy_import_key', 'ALTER TABLE summary_reports ADD COLUMN legacy_import_key TEXT']
+      ['legacy_import_key', 'ALTER TABLE summary_reports ADD COLUMN legacy_import_key TEXT'],
+      ['title', 'ALTER TABLE summary_reports ADD COLUMN title TEXT'],
+      ['task_note', "ALTER TABLE summary_reports ADD COLUMN task_note TEXT NOT NULL DEFAULT ''"]
     ]) {
       if (!summaryReportColumns.some((candidate) => candidate.name === column)) {
         this.sql.run(ddl)
@@ -1004,21 +1009,26 @@ class Db {
   #insertSummaryReportSync(report) {
     assertSummaryReport(report)
     assertAutomaticDuplicateTarget(this, report, report.errorText)
+    const metadata = normalizeSummaryTaskMetadata({
+      title: report.title,
+      taskNote: report.taskNote
+    })
     const createdAt = Number.isFinite(report.createdAt) ? report.createdAt : Date.now()
     const updatedAt = Number.isFinite(report.updatedAt) ? report.updatedAt : createdAt
     this.sql.run(
       `INSERT INTO summary_reports (
          id, period_type, period_start, period_end_exclusive, timezone, partial,
-         version, status, markdown, executor_id, profile_id, model,
+         version, status, title, task_note, markdown, executor_id, profile_id, model,
          usage_snapshot_json, coverage_json, generation_usage_json, generation_metrics_json,
          generation_cost_usd, prompt_version, source_hash, is_current,
          generated_by, error_text, execution_mode, session_id, run_phase,
          artifact_metadata_json, legacy_import_key, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         report.id, report.periodType, report.periodStart, report.periodEndExclusive,
         report.timezone, report.partial ? 1 : 0, report.version, report.status,
-        report.markdown ?? null, report.executorId || null, report.profileId || null,
+        metadata.title, metadata.taskNote, report.markdown ?? null, report.executorId || null,
+        report.profileId || null,
         report.model || null, stringifyJsonObject(report.usageSnapshot),
         stringifyJsonObject(report.coverage), stringifyJsonObject(report.generationUsage),
         stringifyJsonObject(report.generationMetrics),
@@ -1056,7 +1066,7 @@ class Db {
       )
     }
     const columns = {
-      status: 'status', markdown: 'markdown', executorId: 'executor_id',
+      status: 'status', title: 'title', taskNote: 'task_note', markdown: 'markdown', executorId: 'executor_id',
       profileId: 'profile_id', model: 'model', generationCostUsd: 'generation_cost_usd',
       promptVersion: 'prompt_version', sourceHash: 'source_hash', generatedBy: 'generated_by',
       errorText: 'error_text', executionMode: 'execution_mode', sessionId: 'session_id',
@@ -1064,10 +1074,16 @@ class Db {
     }
     const sets = []
     const values = []
+    const metadata = fields.title !== undefined || fields.taskNote !== undefined
+      ? normalizeSummaryTaskMetadata({
+        title: fields.title ?? 'summary task',
+        taskNote: fields.taskNote ?? ''
+      })
+      : null
     for (const [field, column] of Object.entries(columns)) {
       if (fields[field] === undefined) continue
       sets.push(`${column} = ?`)
-      values.push(fields[field])
+      values.push(field === 'title' ? metadata.title : field === 'taskNote' ? metadata.taskNote : fields[field])
     }
     for (const [field, column] of [
       ['usageSnapshot', 'usage_snapshot_json'],
@@ -2327,6 +2343,7 @@ function assertSummaryReport(report) {
     throw summaryValidationError('SUMMARY_RUN_PHASE_INVALID', 'Invalid summary run phase')
   }
   assertSummaryErrorText(report.errorText)
+  normalizeSummaryTaskMetadata({ title: report.title, taskNote: report.taskNote })
   for (const field of [
     'usageSnapshot', 'coverage', 'generationUsage', 'generationMetrics', 'artifactMetadata'
   ]) assertSummaryJson(report[field], field)
@@ -2351,6 +2368,12 @@ function assertSummaryReportPatch(fields) {
     throw summaryValidationError('SUMMARY_RUN_PHASE_INVALID', 'Invalid summary run phase')
   }
   assertSummaryErrorText(fields.errorText)
+  if (fields.title !== undefined || fields.taskNote !== undefined) {
+    normalizeSummaryTaskMetadata({
+      title: fields.title ?? 'summary task',
+      taskNote: fields.taskNote ?? ''
+    })
+  }
   for (const field of [
     'usageSnapshot', 'coverage', 'generationUsage', 'generationMetrics', 'artifactMetadata'
   ]) assertSummaryJson(fields[field], field)
@@ -2388,6 +2411,8 @@ function rowToSummaryReport(row) {
     partial: row.partial === 1,
     version: row.version,
     status: row.status,
+    title: row.title ?? null,
+    taskNote: row.task_note ?? '',
     markdown: row.markdown ?? null,
     executorId: row.executor_id || null,
     profileId: row.profile_id || null,

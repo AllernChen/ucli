@@ -81,6 +81,8 @@ function summaryReport(overrides = {}) {
     partial: false,
     version: 1,
     status: 'queued',
+    title: '工作总结（每周）1970-01-01 08:00',
+    taskNote: '',
     markdown: null,
     executorId: 'codex',
     profileId: 'profile-1',

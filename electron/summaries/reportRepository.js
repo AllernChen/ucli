@@ -10,6 +10,10 @@ import {
   normalizeCompletedArtifactMetadata,
   normalizeSummaryJsonField
 } from './summaryPersistenceValidation.js'
+import {
+  buildSummaryTaskTitle,
+  normalizeSummaryTaskMetadata
+} from '../../shared/summaryTaskContracts.js'
 
 const JSON_FIELDS = [
   'usageSnapshot', 'coverage', 'generationUsage', 'generationMetrics', 'artifactMetadata'
@@ -23,7 +27,7 @@ const PERIOD_TYPES = new Set(['day', 'week', 'month', 'quarter', 'year'])
 const PATCH_FIELDS = new Set([
   'status', 'markdown', 'executorId', 'profileId', 'model', 'usageSnapshot', 'coverage',
   'generationUsage', 'generationMetrics', 'generationCostUsd', 'promptVersion', 'sourceHash', 'generatedBy',
-  'errorText', 'updatedAt', 'partial', 'sessionId', 'runPhase', 'artifactMetadata'
+  'errorText', 'updatedAt', 'partial', 'sessionId', 'runPhase', 'artifactMetadata', 'title', 'taskNote'
 ])
 const EXECUTION_MODES = new Set(Object.values(SUMMARY_EXECUTION_MODE))
 
@@ -205,6 +209,17 @@ function normalizeReport(report) {
     throw repositoryError('INVALID_SUMMARY_REPORT', 'Invalid summary report record')
   }
   const normalized = { ...report }
+  const fallbackTitle = buildSummaryTaskTitle({
+    periodType: report.periodType,
+    createdAt: report.createdAt,
+    timezone: report.timezone
+  })
+  const metadata = normalizeSummaryTaskMetadata({
+    title: report.title || fallbackTitle,
+    taskNote: report.taskNote || ''
+  })
+  normalized.title = metadata.title
+  normalized.taskNote = metadata.taskNote
   normalized.executionMode = report.executionMode || SUMMARY_EXECUTION_MODE.ISOLATED_RUNNER
   normalized.sessionId = report.sessionId || null
   normalized.runPhase = report.runPhase || null
@@ -295,6 +310,12 @@ export function createReportRepository({
         ...key,
         partial: input.partial === true,
         status: 'queued',
+        title: buildSummaryTaskTitle({
+          periodType: key.periodType,
+          createdAt: timestamp,
+          timezone: key.timezone
+        }),
+        taskNote: '',
         markdown: null,
         executorId: input.executorId || null,
         profileId: input.profileId || null,
@@ -368,6 +389,15 @@ export function createReportRepository({
             : jsonObject(safe[field], field)
       }
       const existing = db.getSummaryReport(reportId)
+      if (existing && (safe.title !== undefined || safe.taskNote !== undefined)) {
+        const current = normalizeReport(existing)
+        const metadata = normalizeSummaryTaskMetadata({
+          title: safe.title ?? current.title,
+          taskNote: safe.taskNote ?? current.taskNote
+        })
+        if (safe.title !== undefined) safe.title = metadata.title
+        if (safe.taskNote !== undefined) safe.taskNote = metadata.taskNote
+      }
       const candidate = existing ? { ...existing, ...safe } : existing
       assertAutomaticDuplicateTarget(candidate, candidate?.errorText)
       return normalizeReport(await db.updateSummaryReport(reportId, safe))
@@ -410,6 +440,12 @@ export function createReportRepository({
         ...key,
         partial: input.partial === true,
         status: 'completed',
+        title: buildSummaryTaskTitle({
+          periodType: key.periodType,
+          createdAt: timestamp,
+          timezone: key.timezone
+        }),
+        taskNote: '',
         markdown: requiredString(input.markdown, 'markdown'),
         executorId: input.executorId || null,
         profileId: input.profileId || null,
