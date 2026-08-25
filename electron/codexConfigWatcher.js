@@ -56,8 +56,21 @@ export function createCodexConfigWatcher({
       if (timer) clearTimeout(timer)
       timer = null
       pendingForce = false
-      try { handle?.close?.() } catch { /* watcher is already closed */ }
+      const closingHandle = handle
       handle = null
+      if (!closingHandle) return Promise.resolve()
+
+      let resolveClosed
+      const closed = new Promise((resolve) => { resolveClosed = resolve })
+      const emitsClose = typeof closingHandle.once === 'function'
+      if (emitsClose) closingHandle.once('close', resolveClosed)
+      try {
+        closingHandle.close?.()
+        if (!emitsClose) resolveClosed()
+      } catch {
+        resolveClosed()
+      }
+      return closed
     },
     getSnapshot: () => snapshot
   }

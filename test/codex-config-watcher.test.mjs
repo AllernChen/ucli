@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 
 import { createCodexConfigWatcher } from '../electron/codexConfigWatcher.js'
 
@@ -51,4 +52,30 @@ test('Codex config watcher emits a sanitised snapshot only when provider identit
 
   watcher.stop()
   assert.equal(closed, true)
+})
+
+test('Codex config watcher stop waits for the underlying watcher to close', async () => {
+  const handle = new EventEmitter()
+  handle.close = () => {}
+  const watcher = createCodexConfigWatcher({
+    readSnapshot: () => ({
+      codexHome: 'C:/codex',
+      configPath: 'C:/codex/config.toml',
+      currentProvider: 'openai',
+      availableProviders: ['openai'],
+      providerCatalog: [{ id: 'openai', displayName: 'OpenAI' }],
+      mtimeMs: 1
+    }),
+    watchDirectory: () => handle
+  })
+
+  watcher.start('C:/codex')
+  let stopped = false
+  const stopping = Promise.resolve(watcher.stop()).then(() => { stopped = true })
+  await Promise.resolve()
+  assert.equal(stopped, false)
+
+  handle.emit('close')
+  await stopping
+  assert.equal(stopped, true)
 })
