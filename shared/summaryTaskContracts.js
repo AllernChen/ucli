@@ -43,9 +43,12 @@ export function buildSummaryTaskTitle({ periodType, createdAt, timezone }) {
 }
 
 export function normalizeSummaryTaskMetadata({ title, taskNote } = {}) {
-  const safeTitle = typeof title === 'string' ? title.trim() : ''
+  if (typeof title !== 'string' || /[\u0000-\u001f\u007f]/.test(title)) {
+    throw invalidMetadata('Invalid summary task metadata')
+  }
+  const safeTitle = title.trim()
   const safeNote = typeof taskNote === 'string' ? taskNote.replace(/\r\n?/g, '\n') : ''
-  if (!safeTitle || safeTitle.length > 120 || /[\u0000-\u001f\u007f]/.test(safeTitle) ||
+  if (!safeTitle || safeTitle.length > 120 ||
     safeNote.length > 1000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(safeNote)) {
     throw invalidMetadata('Invalid summary task metadata')
   }

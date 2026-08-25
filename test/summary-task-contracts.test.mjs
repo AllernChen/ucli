@@ -23,6 +23,12 @@ test('summary task metadata validates title and note boundaries', () => {
     () => normalizeSummaryTaskMetadata({ title: 'bad\nname', taskNote: '' }),
     { code: 'INVALID_SUMMARY_TASK_METADATA' }
   )
+  for (const title of ['\n周报', '周报\n', '\r周报', '周报\r', '\t周报', '周报\t']) {
+    assert.throws(
+      () => normalizeSummaryTaskMetadata({ title, taskNote: '' }),
+      { code: 'INVALID_SUMMARY_TASK_METADATA' }
+    )
+  }
   assert.throws(
     () => normalizeSummaryTaskMetadata({ title: 'x', taskNote: 'a'.repeat(1001) }),
     { code: 'INVALID_SUMMARY_TASK_METADATA' }
