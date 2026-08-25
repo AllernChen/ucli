@@ -72,6 +72,7 @@ function deferred({ consumeRejection = false } = {}) {
 function phaseText(phase, error) {
   if (error) return safeInteractiveSummaryError(error, 'SUMMARY_RUN_FAILED').message
   return {
+    preparing: '正在准备工作总结',
     starting: '正在启动 AI CLI',
     'awaiting-delivery': '正在投递生成指令',
     running: '正在生成总结',
@@ -675,6 +676,7 @@ export function createInteractiveSummaryJobService({
         'SUMMARY_RUN_TIMEOUT'
       ).catch(() => {})
     })
+    publish(queued)
 
     try {
       job.prompt = await ownedStep(job, () => buildPrompt({
@@ -716,7 +718,7 @@ export function createInteractiveSummaryJobService({
           ? { interactiveProfileSnapshot: request.interactiveProfileSnapshot }
           : {}),
         model: request.model || null,
-        name: `工作总结（${PERIOD_LABELS[queued.periodType]}）v${queued.version}`,
+        name: queued.title,
         cwd: job.workspace.workDirectory
       }))
       const created = await ownedStep(

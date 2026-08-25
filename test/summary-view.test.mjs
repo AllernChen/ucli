@@ -134,6 +134,94 @@ test('terminal progress cannot be regressed by a late nonterminal progress event
   store.dispose()
 })
 
+test('unknown progress loads one report and applies the newest event', async () => {
+  const originalGet = window.ucli.getSummaryReport
+  let resolveReport
+  let gets = 0
+  const pending = new Promise(resolve => { resolveReport = resolve })
+  const store = freshStore()
+  try {
+    window.ucli.getSummaryReport = async () => { gets += 1; return pending }
+    store.applyProgress({
+      reportId: 'new-report', status: 'queued', phase: 'preparing',
+      completed: 0, total: 1, text: '正在准备工作总结'
+    })
+    store.applyProgress({
+      reportId: 'new-report', status: 'running', phase: 'starting',
+      completed: 0, total: 1, text: '正在启动 AI CLI'
+    })
+    assert.equal(gets, 1)
+    resolveReport({
+      id: 'new-report', title: '工作总结（每周）2026-08-25 09:50', taskNote: '',
+      status: 'running', runPhase: 'starting', version: 1
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(store.reports[0].id, 'new-report')
+    assert.equal(store.progress['new-report'].phase, 'starting')
+  } finally {
+    window.ucli.getSummaryReport = originalGet
+    store.dispose()
+  }
+})
+
+test('unknown terminal progress cannot be regressed after reconciliation', async () => {
+  const originalGet = window.ucli.getSummaryReport
+  let resolveReport
+  const pending = new Promise(resolve => { resolveReport = resolve })
+  const store = freshStore()
+  try {
+    window.ucli.getSummaryReport = () => pending
+    store.applyProgress({
+      reportId: 'terminal-report', status: 'completed', phase: 'completed',
+      completed: 1, total: 1, text: '总结已生成'
+    })
+    store.applyProgress({
+      reportId: 'terminal-report', status: 'running', phase: 'running',
+      completed: 0, total: 1, text: '迟到的运行中'
+    })
+    resolveReport({ id: 'terminal-report', status: 'completed', runPhase: 'completed', version: 1 })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    assert.equal(store.progress['terminal-report'].phase, 'completed')
+    assert.equal(store.reports[0].status, 'completed')
+  } finally {
+    window.ucli.getSummaryReport = originalGet
+    store.dispose()
+  }
+})
+
+test('unknown progress fetch cannot resurrect a deleted report', async () => {
+  const originalDelete = window.ucli.deleteSummaryReport
+  const originalGet = window.ucli.getSummaryReport
+  const originalList = window.ucli.listSummaryReports
+  let resolveReport
+  let gets = 0
+  const pending = new Promise(resolve => { resolveReport = resolve })
+  const store = freshStore()
+  try {
+    window.ucli.getSummaryReport = () => { gets += 1; return pending }
+    window.ucli.deleteSummaryReport = async id => ({
+      deletedReportId: id, currentReportId: null, removedSessionId: null
+    })
+    window.ucli.listSummaryReports = async () => []
+
+    store.applyProgress({
+      reportId: 'delete-race', status: 'queued', phase: 'preparing',
+      completed: 0, total: 1, text: '正在准备工作总结'
+    })
+    assert.equal(gets, 1)
+    await store.deleteReport('delete-race')
+    resolveReport({ id: 'delete-race', status: 'queued', version: 1 })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(store.reports.some(report => report.id === 'delete-race'), false)
+  } finally {
+    window.ucli.deleteSummaryReport = originalDelete
+    window.ucli.getSummaryReport = originalGet
+    window.ucli.listSummaryReports = originalList
+    store.dispose()
+  }
+})
+
 test('a slower earlier selection cannot replace the latest selected report or its versions', async () => {
   const originalGet = window.ucli.getSummaryReport
   const originalList = window.ucli.listSummaryReports
@@ -445,7 +533,7 @@ test('completed reports show bounded generation performance without renderer-sen
   assert.doesNotMatch(reportView, /cacheKey|providerOutput|rawPrompt|workspaceDirectory/)
 })
 
-test('summary store preserves cache-check progress until the existing terminal refresh', async () => {
+test('summary store reconciles unknown cache-check progress without losing it', async () => {
   getCalls = 0
   const store = freshStore()
   await store.init()
@@ -457,7 +545,10 @@ test('summary store preserves cache-check progress until the existing terminal r
     reportId: 'report-cache', status: 'running', phase: 'cache-check', completed: 0, total: 1,
     text: '正在检查缓存'
   })
-  assert.equal(getCalls, 0)
+  assert.equal(getCalls, 1)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(store.reports[0].id, 'report-cache')
+  assert.equal(store.reports[0].runPhase, 'cache-check')
   store.dispose()
 })
 

@@ -357,6 +357,23 @@ async function completeRun(
   })
 }
 
+test('queued report publishes preparing before slow preparation resolves', async t => {
+  const preparationGate = deferred()
+  const state = await fixture(t, { preparationGate })
+  const progress = []
+  state.service.subscribe(event => progress.push(event))
+
+  const starting = state.service.start(request())
+  await waitUntil(() => progress.length === 1)
+  assert.deepEqual(progress.map(item => [item.status, item.phase]), [
+    ['queued', 'preparing']
+  ])
+
+  preparationGate.resolve()
+  const run = await starting
+  assert.equal(run.report.title.startsWith('工作总结（每周）'), true)
+})
+
 test('interactive run owns report workspace session artifact and atomic completion', async t => {
   const state = await fixture(t, { realArtifact: true })
   const progress = []
@@ -373,11 +390,11 @@ test('interactive run owns report workspace session artifact and atomic completi
   assert.equal(completed.isCurrent, true)
   assert.equal(completed.markdown, VALID_MARKDOWN)
   assert.deepEqual(progress.map(item => item.phase), [
-    'starting', 'awaiting-delivery', 'running', 'validating', 'completed'
+    'preparing', 'starting', 'awaiting-delivery', 'running', 'validating', 'completed'
   ])
   assert.deepEqual(state.fake.config(run.sessionId), {
     adapterId: 'claude', profileId: 'p1', model: 'm1',
-    name: '工作总结（每周）v1',
+    name: run.report.title,
     cwd: join(state.root, 'summaries', 'workspaces', run.report.id, 'work')
   })
 })
@@ -400,7 +417,7 @@ test('a resolved system selection cannot be replaced by profile bindings during 
     profileId: null,
     profileSelection: 'system',
     model: 'system-model',
-    name: '工作总结（每周）v1',
+    name: run.report.title,
     cwd: join(state.root, 'summaries', 'workspaces', run.report.id, 'work')
   })
 })

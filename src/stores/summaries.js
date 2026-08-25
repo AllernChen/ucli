@@ -24,7 +24,17 @@ function metadata(store) {
   const state = store.$state
   let value = storeMetadata.get(state)
   if (!value) {
-    value = { unsubscribe: null, initPromise: null, owners: new Set(), selectionEpoch: 0, taskUpdateEpochs: new Map(), terminalReports: new Set(), deletedReports: new Set() }
+    value = {
+      unsubscribe: null,
+      initPromise: null,
+      owners: new Set(),
+      selectionEpoch: 0,
+      taskUpdateEpochs: new Map(),
+      terminalReports: new Set(),
+      deletedReports: new Set(),
+      pendingProgress: new Map(),
+      reportRefreshes: new Map()
+    }
     storeMetadata.set(state, value)
   }
   return value
@@ -90,19 +100,53 @@ export const useSummariesStore = defineStore('summaries', {
         total: payload.total,
         text: payload.text
       }
+      if (isTerminal(progress.phase)) meta.terminalReports.add(progress.reportId)
       this.progress = { ...this.progress, [progress.reportId]: progress }
       const report = this.reports.find(item => item.id === progress.reportId)
-      if (report) Object.assign(report, {
+      if (!report) {
+        meta.pendingProgress.set(progress.reportId, progress)
+        void this.ensureReportProjection(progress.reportId).catch(error => {
+          if (error?.code !== 'SUMMARY_REPORT_NOT_FOUND') this.error = new Error('无法刷新总结报告')
+        })
+        return
+      }
+      this.applyProgressToKnown(progress)
+    },
+
+    applyProgressToKnown(progress, { refreshTerminal = true } = {}) {
+      const meta = metadata(this)
+      const report = this.reports.find(item => item.id === progress.reportId)
+      if (!report) return
+      Object.assign(report, {
         status: progress.status,
         runPhase: progress.phase,
         progressText: progress.text
       })
       if (isTerminal(progress.phase)) {
         meta.terminalReports.add(progress.reportId)
+        if (!refreshTerminal) return
         void this.refreshReport(progress.reportId).catch(error => {
           if (error?.code !== 'SUMMARY_REPORT_NOT_FOUND') this.error = new Error('无法刷新总结报告')
         })
       }
+    },
+
+    async ensureReportProjection(reportId) {
+      const meta = metadata(this)
+      if (meta.deletedReports.has(reportId)) return null
+      if (meta.reportRefreshes.has(reportId)) return meta.reportRefreshes.get(reportId)
+      const pending = this.refreshReport(reportId).then(report => {
+        const latest = meta.pendingProgress.get(reportId)
+        if (report && latest && !meta.deletedReports.has(reportId)) {
+          this.applyProgressToKnown(latest, { refreshTerminal: false })
+        }
+        return report
+      }).finally(() => {
+        meta.pendingProgress.delete(reportId)
+        meta.reportRefreshes.delete(reportId)
+      })
+      meta.reportRefreshes.set(reportId, pending)
+      return pending
     },
 
     upsertReport(report) {
