@@ -22,8 +22,9 @@ const STATS_FALLBACK_INTERVAL_MS = 30000
 // 完成前写入（cmd shim + hook settings 加载会让首次启动慢于 spawn-ready），输入
 // 会被整个丢弃，CLI 会永远停在输入框。为确认 prompt 真的被 TUI 接收，我们轮询
 // 会话产物目录的 transcript，找一条晚于本轮起点的 user 记录且其内容包含 prompt
-// 指纹；窗口内未确认则回车清行后重打一次（此时 TUI 必然已就绪）。
+// 指纹；窗口内未确认则先提交一次、双 Escape 清除陈旧提示，再重打一次。
 const TURN_DELIVERY_WINDOW_MS = 8000
+const TURN_RETYPE_SETTLE_MS = 500
 const TURN_DELIVERY_POLL_MS = 400
 const TURN_FINGERPRINT_LENGTH = 40
 
@@ -594,23 +595,30 @@ export class ClaudeAdapter extends BaseAdapter {
   }
 
   /** Poll transcripts until the typed prompt is recorded (delivery confirmed). */
-  _waitTurnDelivered(fingerprint, sinceMs) {
+  _waitTurnDelivered(fingerprint, sinceMs, timeoutMs = TURN_DELIVERY_WINDOW_MS) {
     return new Promise((resolve) => {
       const started = Date.now()
       const step = () => {
         if (this._disposed || !this.ptyProc) return resolve(false)
         if (this._scanProjectTranscripts(fingerprint, sinceMs)) return resolve(true)
-        if (Date.now() - started >= TURN_DELIVERY_WINDOW_MS) return resolve(false)
-        setTimeout(step, TURN_DELIVERY_POLL_MS)
+        const elapsed = Date.now() - started
+        if (elapsed >= timeoutMs) return resolve(false)
+        setTimeout(step, Math.min(TURN_DELIVERY_POLL_MS, timeoutMs - elapsed))
       }
       step()
     })
   }
 
+  async _confirmTurnDelivery(fingerprint, sinceMs, timeoutMs) {
+    const delivered = await this._waitTurnDelivered(fingerprint, sinceMs, timeoutMs)
+    if (delivered) this._extractStats()
+    return delivered
+  }
+
   /**
    * 注入一轮用户输入（PTY 打字模式）。为规避 TUI 未就绪时输入被整体丢弃的竞态，
    * 先按普通方式打入，随后确认 transcript 里出现了该 prompt 的 user 记录；未确认
-   * 则回车清行后重打一次（首次打入要么全部被读走、要么整体被丢，不会部分残留）。
+   * 则先提交一次，再清除陈旧提示后重打一次，最后再提交一次。
    * 返回投递是否已确认。
    */
   async sendTurn(text) {
@@ -618,10 +626,14 @@ export class ClaudeAdapter extends BaseAdapter {
     const fingerprint = makeTurnFingerprint(text)
     const sinceMs = Date.now()
     this.writeInput(text + '\r')
-    if (await this._waitTurnDelivered(fingerprint, sinceMs)) return true
+    if (await this._confirmTurnDelivery(fingerprint, sinceMs, TURN_DELIVERY_WINDOW_MS)) return true
     this.writeInput('\r')
+    if (await this._confirmTurnDelivery(fingerprint, sinceMs, TURN_DELIVERY_WINDOW_MS)) return true
+    this.writeInput('\x1b\x1b')
     this.writeInput(text + '\r')
-    return this._waitTurnDelivered(fingerprint, sinceMs)
+    if (await this._confirmTurnDelivery(fingerprint, sinceMs, TURN_RETYPE_SETTLE_MS)) return true
+    this.writeInput('\r')
+    return this._confirmTurnDelivery(fingerprint, sinceMs, TURN_DELIVERY_WINDOW_MS)
   }
 
   async interrupt() {

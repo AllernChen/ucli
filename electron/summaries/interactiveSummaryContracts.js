@@ -7,7 +7,7 @@ export const SUMMARY_EXECUTION_MODE = Object.freeze({
 // Claude may need two bounded 8-second transcript-confirmation attempts on a
 // cold TUI start. Keep the outer fail-closed deadline longer than that adapter
 // acceptance cycle, and share it between the job service and session runtime.
-export const INTERACTIVE_SUMMARY_DELIVERY_TIMEOUT_MS = 20_000
+export const INTERACTIVE_SUMMARY_DELIVERY_TIMEOUT_MS = 30_000
 
 export const INTERACTIVE_SUMMARY_PHASE = Object.freeze({
   PREPARING: 'preparing',

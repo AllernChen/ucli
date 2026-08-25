@@ -212,18 +212,51 @@ test('Claude adapter verifies the current decision before writing native input',
   await adapter.dispose()
 })
 
-test('Claude sendTurn reports whether transcript delivery was accepted', async () => {
+test('Claude sendTurn confirms once without duplicate input', async () => {
   const adapter = new ClaudeAdapter({
     session: { id: 'session-1', cwd: 'F:\\projects\\ucli' },
     engine: null,
     settings: {}
   })
   const writes = []
+  let scans = 0
   adapter.ptyProc = { write: value => writes.push(value), kill() {} }
   adapter._waitTurnDelivered = async () => true
+  adapter._extractStats = () => { scans += 1 }
 
   assert.equal(await adapter.sendTurn('summary prompt'), true)
   assert.deepEqual(writes, ['summary prompt\r'])
+  assert.equal(scans, 1)
+  await adapter.dispose()
+})
+
+test('Claude sendTurn pulses submit before one bounded retype', async () => {
+  const adapter = new ClaudeAdapter({
+    session: { id: 'session-1', cwd: 'F:\\projects\\ucli' },
+    engine: null,
+    settings: {}
+  })
+  const writes = []
+  const windows = []
+  const outcomes = [false, false, false, true]
+  let scans = 0
+  adapter.ptyProc = { write: value => writes.push(value), kill() {} }
+  adapter._waitTurnDelivered = async (_fingerprint, _sinceMs, timeoutMs) => {
+    windows.push(timeoutMs)
+    return outcomes.shift()
+  }
+  adapter._extractStats = () => { scans += 1 }
+
+  assert.equal(await adapter.sendTurn('summary prompt'), true)
+  assert.deepEqual(writes, [
+    'summary prompt\r',
+    '\r',
+    '\x1b\x1b',
+    'summary prompt\r',
+    '\r'
+  ])
+  assert.deepEqual(windows, [8_000, 8_000, 500, 8_000])
+  assert.equal(scans, 1)
   await adapter.dispose()
 })
 
