@@ -126,6 +126,8 @@ async function fixture(t, {
   workspaceRemoveTree = undefined,
   workspaceCreateError = null,
   workspaceCompleteError = null,
+  workspaceWriteGate = null,
+  workspaceWriteError = null,
   workspaceFailGate = null,
   repositoryCompleteGate = null,
   repositoryCompleteMode = 'real',
@@ -220,8 +222,15 @@ async function fixture(t, {
       return value
     },
     async writeArtifact(...args) {
-      order.push(`workspace.write:${args[1]}`)
-      return workspaceService.writeArtifact(...args)
+      const relativePath = args[1]
+      order.push(`workspace.write:${relativePath}:start`)
+      if (relativePath === 'output/report.md') {
+        await workspaceWriteGate?.promise
+        if (workspaceWriteError) throw workspaceWriteError
+      }
+      const value = await workspaceService.writeArtifact(...args)
+      order.push(`workspace.write:${relativePath}:end`)
+      return value
     },
     async fail(...args) {
       order.push(`workspace.fail:${args[2]?.status || 'failed'}:start`)
@@ -406,19 +415,45 @@ test('interactive run owns report workspace session artifact and atomic completi
 })
 
 test('safe normalized artifact is written to the workspace before repository completion', async t => {
-  const state = await fixture(t, { realArtifact: true })
+  const workspaceWriteGate = deferred()
+  t.after(() => workspaceWriteGate.resolve())
+  const state = await fixture(t, { realArtifact: true, workspaceWriteGate })
   const run = await state.service.start(request())
   await beginRunning(state, run)
   await state.fake.writeCanonicalMarkdown(run.report.id, ALL_H1_MARKDOWN)
+  await waitUntil(() => state.order.includes('workspace.write:output/report.md:start'), 2_000)
+
+  assert.equal(state.order.includes('workspace.write:output/report.md:end'), false)
+  assert.equal(state.order.includes('repository.complete'), false)
+
+  workspaceWriteGate.resolve()
   const completed = await assertSettled(state, run, { status: 'completed', phase: 'completed' })
   const outputPath = join(state.root, 'summaries', 'workspaces', run.report.id, 'output', 'report.md')
 
   assert.equal(completed.status, 'completed')
   assert.equal(completed.markdown, VALID_MARKDOWN)
   assert.equal(await readFile(outputPath, 'utf8'), VALID_MARKDOWN)
-  assert.ok(state.order.indexOf('workspace.write:output/report.md') < state.order.indexOf('repository.complete'))
-  assert.equal(state.order.filter(value => value === 'workspace.write:output/report.md').length, 1)
+  assert.ok(state.order.indexOf('workspace.write:output/report.md:end') < state.order.indexOf('repository.complete'))
+  assert.equal(state.order.filter(value => value === 'workspace.write:output/report.md:end').length, 1)
   assert.equal(state.fake.deliveries.length, 1)
+})
+
+test('normalized artifact writeback failure terminalizes safely before repository completion', async t => {
+  const state = await fixture(t, {
+    realArtifact: true,
+    workspaceWriteError: new Error('C:\\private\\writeback')
+  })
+  const run = await state.service.start(request())
+  await beginRunning(state, run)
+  await state.fake.writeCanonicalMarkdown(run.report.id, ALL_H1_MARKDOWN)
+  const failed = await assertSettled(state, run, {
+    status: 'failed', phase: 'failed', code: 'SUMMARY_RUN_FAILED'
+  })
+  const persisted = state.repository.get(run.report.id)
+  const workspace = await manifest(state, run.report.id)
+
+  assert.equal(state.order.includes('repository.complete'), false)
+  assert.equal(JSON.stringify({ failed, persisted, workspace }).includes('private'), false)
 })
 
 test('canonical artifact completes without a job-owned workspace writeback', async t => {
@@ -428,7 +463,7 @@ test('canonical artifact completes without a job-owned workspace writeback', asy
   await state.fake.writeCanonicalMarkdown(run.report.id, VALID_MARKDOWN)
   await assertSettled(state, run, { status: 'completed', phase: 'completed' })
 
-  assert.equal(state.order.includes('workspace.write:output/report.md'), false)
+  assert.equal(state.order.includes('workspace.write:output/report.md:start'), false)
 })
 
 test('ready timeout settles failed and releases workspace session resources', async t => {
