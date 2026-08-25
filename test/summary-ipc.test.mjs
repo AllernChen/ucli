@@ -807,12 +807,16 @@ test('summary cancellation prefers interactive jobs, falls back to headless, and
 test('report deletion keeps database success when best-effort workspace cleanup fails', async () => {
   const events = []
   const result = await deleteSummaryReportAndWorkspace('report-1', {
-    repository: { delete: async () => ({ deletedReportId: 'report-1', currentReportId: null }) },
-    jobService: { isActive: () => false },
+    repository: {
+      get: () => ({ id: 'report-1', sessionId: null }),
+      delete: async () => ({ deletedReportId: 'report-1', currentReportId: null, removedSessionId: null })
+    },
+    interactiveJobService: { isActive: () => false },
+    headlessJobService: { isActive: () => false },
     workspaceService: { remove: async () => { throw new Error('C:\\private\\prompt') } },
     onEvent: event => events.push(event)
   })
-  assert.deepEqual(result, { deletedReportId: 'report-1', currentReportId: null })
+  assert.deepEqual(result, { deletedReportId: 'report-1', currentReportId: null, removedSessionId: null })
   assert.deepEqual(events, [{ phase: 'workspace-delete', code: 'SUMMARY_WORKSPACE_DELETE_FAILED' }])
   assert.doesNotMatch(JSON.stringify(events), /private|prompt/i)
 })
@@ -835,8 +839,12 @@ test('maintenance reclaims a deleted report workspace after immediate cleanup fa
   }
 
   await deleteSummaryReportAndWorkspace(workspace.id, {
-    repository: { delete: async () => ({ deletedReportId: workspace.id, currentReportId: null }) },
-    jobService: { isActive: () => false },
+    repository: {
+      get: () => ({ id: workspace.id, sessionId: null }),
+      delete: async () => ({ deletedReportId: workspace.id, currentReportId: null, removedSessionId: null })
+    },
+    interactiveJobService: { isActive: () => false },
+    headlessJobService: { isActive: () => false },
     workspaceService: cleanupFacade
   })
   assert.equal(existsSync(workspace.path), true)
@@ -857,25 +865,87 @@ test('maintenance reclaims a deleted report workspace after immediate cleanup fa
   assert.equal(existsSync(workspace.path), false)
 })
 
-test('report deletion never removes a workspace while its job is active', async () => {
-  let removals = 0
+test('active summary deletion cancels before canonical, session, and workspace removal', async () => {
+  const calls = []
   const result = await deleteSummaryReportAndWorkspace('report-active', {
-    repository: { delete: async () => ({ deletedReportId: 'report-active', currentReportId: null }) },
-    jobService: { isActive: () => true },
-    workspaceService: { remove: async () => { removals += 1 } }
+    repository: {
+      get: () => { calls.push('get-report'); return { id: 'report-active', sessionId: 'session-1' } },
+      delete: async () => {
+        calls.push('delete-report')
+        return { deletedReportId: 'report-active', currentReportId: null, removedSessionId: 'session-1' }
+      }
+    },
+    interactiveJobService: {
+      isActive: () => true,
+      async cancel() { calls.push('cancel'); return true }
+    },
+    headlessJobService: { isActive: () => false },
+    removeSessionProjection: async id => calls.push(`remove-session:${id}`),
+    workspaceService: { remove: async id => calls.push(`remove-workspace:${id}`) }
   })
   assert.equal(result.deletedReportId, 'report-active')
-  assert.equal(removals, 0)
+  assert.deepEqual(calls, [
+    'get-report', 'cancel', 'delete-report', 'remove-session:session-1', 'remove-workspace:report-active'
+  ])
+})
+
+test('summary deletion preserves database success when session projection cleanup fails', async () => {
+  const calls = []
+  const events = []
+  const result = await deleteSummaryReportAndWorkspace('report-session-cleanup', {
+    repository: {
+      get: () => { calls.push('get-report'); return { id: 'report-session-cleanup', sessionId: 'session-1' } },
+      delete: async () => {
+        calls.push('delete-report')
+        return { deletedReportId: 'report-session-cleanup', currentReportId: null, removedSessionId: 'session-1' }
+      }
+    },
+    interactiveJobService: { isActive: () => false },
+    headlessJobService: { isActive: () => false },
+    removeSessionProjection: async () => { calls.push('remove-session'); throw new Error('private adapter failure') },
+    workspaceService: { remove: async () => { calls.push('remove-workspace') } },
+    onEvent: event => events.push(event)
+  })
+  assert.deepEqual(result, {
+    deletedReportId: 'report-session-cleanup', currentReportId: null, removedSessionId: 'session-1'
+  })
+  assert.deepEqual(calls, ['get-report', 'delete-report', 'remove-session', 'remove-workspace'])
+  assert.deepEqual(events, [{ phase: 'session-delete', code: 'SUMMARY_SESSION_DELETE_FAILED' }])
+  assert.doesNotMatch(JSON.stringify(events), /private|adapter/i)
+})
+
+test('active summary deletion preserves resources when cancellation fails', async () => {
+  let deletes = 0
+  let sessionRemovals = 0
+  let workspaceRemovals = 0
+  await assert.rejects(deleteSummaryReportAndWorkspace('report-active', {
+    repository: {
+      get: () => ({ id: 'report-active', sessionId: 'session-1' }),
+      delete: async () => { deletes += 1 }
+    },
+    interactiveJobService: {
+      isActive: () => true,
+      async cancel() { throw Object.assign(new Error('stop failed'), { code: 'SUMMARY_RUN_FAILED' }) }
+    },
+    headlessJobService: { isActive: () => false },
+    removeSessionProjection: async () => { sessionRemovals += 1 },
+    workspaceService: { remove: async () => { workspaceRemovals += 1 } }
+  }), { code: 'SUMMARY_RUN_FAILED' })
+  assert.deepEqual([deletes, sessionRemovals, workspaceRemovals], [0, 0, 0])
 })
 
 test('successful report deletion removes its inactive derived workspace', async () => {
   const removals = []
   const result = await deleteSummaryReportAndWorkspace('report-completed', {
-    repository: { delete: async () => ({ deletedReportId: 'report-completed', currentReportId: 'report-old' }) },
-    jobService: { isActive: () => false },
+    repository: {
+      get: () => ({ id: 'report-completed', sessionId: null }),
+      delete: async () => ({ deletedReportId: 'report-completed', currentReportId: 'report-old', removedSessionId: null })
+    },
+    interactiveJobService: { isActive: () => false },
+    headlessJobService: { isActive: () => false },
     workspaceService: { remove: async reportId => { removals.push(reportId) } }
   })
-  assert.deepEqual(result, { deletedReportId: 'report-completed', currentReportId: 'report-old' })
+  assert.deepEqual(result, { deletedReportId: 'report-completed', currentReportId: 'report-old', removedSessionId: null })
   assert.deepEqual(removals, ['report-completed'])
 })
 

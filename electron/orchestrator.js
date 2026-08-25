@@ -619,19 +619,29 @@ export function registerSummaryIpc({ ipcMain, service }) {
     service.clearCache(validateSummaryCacheClear(value))))
 }
 
-export async function deleteSummaryReportAndWorkspace(reportId, {
-  repository, jobService, workspaceService, onEvent = () => {}
-}) {
-  const result = await repository.delete(reportId)
-  if (!jobService?.isActive(reportId)) {
+export async function deleteSummaryReportAndWorkspace(reportId, deps = {}) {
+  deps.repository.get(reportId)
+  const onEvent = typeof deps.onEvent === 'function' ? deps.onEvent : () => {}
+  const active = deps.interactiveJobService?.isActive(reportId) ||
+    deps.headlessJobService?.isActive?.(reportId)
+  if (active) {
+    await cancelActiveSummary(reportId, {
+      interactiveJobService: deps.interactiveJobService,
+      headlessJobService: deps.headlessJobService
+    })
+  }
+  const result = await deps.repository.delete(reportId)
+  if (result.removedSessionId) {
     try {
-      await workspaceService?.remove(reportId)
-    } catch (error) {
-      const typed = error?.code
-        ? safeStartupFailure('workspace-delete', error)
-        : { phase: 'workspace-delete', code: 'SUMMARY_WORKSPACE_DELETE_FAILED' }
-      try { onEvent(typed) } catch { /* logging isolation */ }
+      await deps.removeSessionProjection?.(result.removedSessionId)
+    } catch {
+      try { onEvent({ phase: 'session-delete', code: 'SUMMARY_SESSION_DELETE_FAILED' }) } catch { /* logging isolation */ }
     }
+  }
+  try {
+    await deps.workspaceService?.remove(reportId)
+  } catch {
+    try { onEvent({ phase: 'workspace-delete', code: 'SUMMARY_WORKSPACE_DELETE_FAILED' }) } catch { /* logging isolation */ }
   }
   return result
 }
@@ -3252,8 +3262,10 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           if (!summaryRepository) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
           const result = await deleteSummaryReportAndWorkspace(reportId, {
             repository: summaryRepository,
-            jobService: summaryJobService,
+            interactiveJobService: interactiveSummaryJobService,
+            headlessJobService: summaryJobService,
             workspaceService: summaryWorkspaceService,
+            removeSessionProjection: id => removeSessionProjection(id, { persist: false }),
             onEvent: event => log('summary-maintenance', event)
           })
           scheduleFlush()
@@ -3478,7 +3490,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       setSessionProfile(sessionId, profileId)
     )
     ipcMain.handle('session:stop', (_e, sessionId) => stopSession(sessionId))
-    ipcMain.handle('session:delete', async (_e, sessionId) => {
+    async function removeSessionProjection(sessionId, { persist = true } = {}) {
       const e = sessions.get(sessionId)
       if (e) {
         clearInteractiveProfileCapability(e)
@@ -3499,11 +3511,16 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           sessions.delete(sessionId)
           historyService.invalidate(sessionId)
           const db = getDb()
-          if (db) { db.removeSession(sessionId); scheduleFlush() }
+          if (persist && db) db.removeSession(sessionId)
+          scheduleFlush()
         }
         if (cleanupError) throw cleanupError
       }
       return true
+    }
+
+    ipcMain.handle('session:delete', async (_e, sessionId) => {
+      return removeSessionProjection(sessionId)
     })
     ipcMain.handle('session:list', () => listSessions())
     ipcMain.handle('session:update-note', (_e, sessionId, note) => {

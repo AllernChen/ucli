@@ -1277,6 +1277,24 @@ class Db {
         })
       }
 
+      let removedSessionId = null
+      if (target.sessionId) {
+        const otherOwner = rows(this.sql.exec(
+          'SELECT id FROM summary_reports WHERE session_id = ? AND id <> ? LIMIT 1',
+          [target.sessionId, reportId]
+        ))[0]
+        if (!otherOwner) {
+          const timestamp = Date.now()
+          this.sql.run(
+            `UPDATE sessions SET status = 'removed', removed_at = ?, updated_at = ? WHERE id = ?`,
+            [timestamp, timestamp, target.sessionId]
+          )
+          if (this.sql.getRowsModified() > 0) {
+            this.deactivateGatewayRoutesForSession(target.sessionId)
+            removedSessionId = target.sessionId
+          }
+        }
+      }
       this.sql.run('DELETE FROM summary_reports WHERE id = ?', [reportId])
       let currentReportId = null
       if (target.isCurrent) {
@@ -1302,7 +1320,7 @@ class Db {
         ))[0]
         currentReportId = current?.id || null
       }
-      return { deletedReportId: reportId, currentReportId }
+      return { deletedReportId: reportId, currentReportId, removedSessionId }
     })
   }
 

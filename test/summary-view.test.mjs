@@ -245,7 +245,7 @@ test('deleting the selected report clears stale state and selects the promoted v
     store.progress = { 'report-v2': { phase: 'completed' } }
 
     window.ucli.deleteSummaryReport = async reportId => ({
-      deletedReportId: reportId, currentReportId: 'report-v1'
+      deletedReportId: reportId, currentReportId: 'report-v1', removedSessionId: 'summary-session-v2'
     })
     window.ucli.listSummaryReports = async filters => filters?.periodType
       ? [{ id: 'report-v1', status: 'completed', version: 1, isCurrent: true }]
@@ -257,11 +257,12 @@ test('deleting the selected report clears stale state and selects the promoted v
     })
 
     assert.deepEqual(await store.deleteReport('report-v2'), {
-      deletedReportId: 'report-v2', currentReportId: 'report-v1'
+      deletedReportId: 'report-v2', currentReportId: 'report-v1', removedSessionId: 'summary-session-v2'
     })
     assert.equal(store.selectedReport.id, 'report-v1')
     assert.equal(store.progress['report-v2'], undefined)
     assert.deepEqual(store.reports.map(report => report.id), ['report-v1'])
+    assert.equal(store.reports.some(report => 'removedSessionId' in report), false)
   } finally {
     window.ucli.deleteSummaryReport = originalDelete
     window.ucli.listSummaryReports = originalList

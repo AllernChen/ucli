@@ -933,10 +933,16 @@ test('a current completed report cannot transition to a non-completed status', a
   })
 })
 
-test('deleting reports rejects active work and atomically promotes the previous completed version', async () => {
+test('deleting reports rejects active work, promotes the previous completed version, and soft-removes an exclusive UCLI session', async () => {
   await withDb('ucli-summary-report-delete-', async (db) => {
+    db.insertSession({
+      id: 'summary-session-v2', project_path: 'C:\\summary', adapter_id: 'claude',
+      name: 'summary session', task_note: '', tier: 'safety-rules', status: 'offline', created_at: 1
+    })
     await seedCompletedSummary(db, { id: 'week-v1' })
-    await seedCompletedSummary(db, { id: 'week-v2', isCurrent: true })
+    await seedCompletedSummary(db, {
+      id: 'week-v2', isCurrent: true, sessionId: 'summary-session-v2'
+    })
     await db.createSummaryReport(summaryReport({
       id: 'week-running', status: 'running', version: 3
     }))
@@ -956,11 +962,32 @@ test('deleting reports rejects active work and atomically promotes the previous 
     assert.ok(db.getSummaryReport('week-running'))
 
     assert.deepEqual(await db.deleteSummaryReport('week-v2'), {
-      deletedReportId: 'week-v2', currentReportId: 'week-v1'
+      deletedReportId: 'week-v2', currentReportId: 'week-v1', removedSessionId: 'summary-session-v2'
     })
     assert.equal(db.getSummaryReport('week-v2'), null)
     assert.equal(db.getSummaryReport('week-v1').isCurrent, true)
     assert.equal(db.getSummaryReport('day-current').isCurrent, true)
+    assert.equal(db.getSession('summary-session-v2').removedAt > 0, true)
+  })
+})
+
+test('deleting a report preserves its UCLI session when another report shares it', async () => {
+  await withDb('ucli-summary-report-delete-shared-session-', async (db) => {
+    db.insertSession({
+      id: 'summary-session-shared', project_path: 'C:\\summary', adapter_id: 'claude',
+      name: 'shared summary session', task_note: '', tier: 'safety-rules', status: 'offline', created_at: 1
+    })
+    await seedCompletedSummary(db, {
+      id: 'shared-session-v1', sessionId: 'summary-session-shared', isCurrent: true
+    })
+    await seedCompletedSummary(db, {
+      id: 'shared-session-v2', version: 2, sessionId: 'summary-session-shared'
+    })
+
+    const result = await db.deleteSummaryReport('shared-session-v1')
+
+    assert.equal(result.removedSessionId, null)
+    assert.equal(db.getSession('summary-session-shared').removedAt, null)
   })
 })
 
