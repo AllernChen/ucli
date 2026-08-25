@@ -1,6 +1,6 @@
 <template>
   <a-card v-if="report" class="summary-report" :title="`${periodLabel} · v${report.version}`">
-    <template #extra><a-tag :color="statusColor">{{ report.status }}</a-tag></template>
+    <template #extra><a-tag :color="status.color">{{ status.label }}</a-tag></template>
     <a-descriptions size="small" :column="3" bordered>
       <a-descriptions-item label="周期">{{ report.periodType }}{{ report.partial ? ' · partial' : '' }}</a-descriptions-item>
       <a-descriptions-item label="AI CLI">{{ report.executorId || '—' }}</a-descriptions-item>
@@ -33,6 +33,7 @@
     </div>
     <div v-if="active" class="cancel-row"><a-button danger size="small" @click="$emit('cancel', report.id)">取消生成</a-button></div>
     <div class="actions">
+      <a-button aria-label="编辑总结任务" @click="$emit('edit', report)">编辑任务</a-button>
       <a-button @click="$emit('open-conversation', report)">查看关联对话</a-button>
       <a-button @click="copyMarkdown">复制 Markdown</a-button>
       <a-button :disabled="!exportable" @click="exportMarkdown">导出 Markdown</a-button>
@@ -42,13 +43,12 @@
         @click="exportHtml"
       >{{ htmlExporting ? '正在生成 HTML' : '导出 HTML' }}</a-button>
       <a-popconfirm
-        v-if="!active"
-        title="确认删除这份总结？此操作不可恢复。"
+        :title="deleteTitle"
         ok-text="确认删除"
         cancel-text="取消"
         @confirm="$emit('delete-report', report.id)"
       >
-        <a-button danger>删除总结</a-button>
+        <a-button danger :title="deleteTitle" :aria-label="deleteTitle">删除总结</a-button>
       </a-popconfirm>
     </div>
     <article
@@ -68,16 +68,22 @@ import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
 import ipc from '../../ipc.js'
 import { openSummaryReportLink } from '../../summaryLinks.js'
+import { summaryTaskStatusMeta } from '../../../shared/summaryTaskContracts.js'
 
 const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean })
-const emit = defineEmits(['cancel', 'export-markdown', 'export-html', 'delete-report', 'open-conversation'])
+const emit = defineEmits(['cancel', 'edit', 'export-markdown', 'export-html', 'delete-report', 'open-conversation'])
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const safeHtml = computed(() => DOMPurify.sanitize(markdown.render(props.report?.markdown || '')))
 const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].includes(props.report?.status))
 const exportable = computed(() => props.report?.status === 'completed')
 const awaitingConfirmation = computed(() => props.report?.status === 'awaiting_confirmation' || props.progress?.phase === 'awaiting_confirmation')
-const statusColor = computed(() => props.report?.status === 'completed' ? 'green' : props.report?.status === 'failed' ? 'red' : 'blue')
-const periodLabel = computed(() => props.report ? `${new Date(props.report.periodStart).toLocaleDateString()} — ${new Date(props.report.periodEndExclusive).toLocaleDateString()}` : '')
+const status = computed(() => summaryTaskStatusMeta(props.report, props.progress))
+const displayEnd = computed(() => {
+  if (!props.report) return null
+  return props.report.partial ? props.report.periodEndExclusive : props.report.periodEndExclusive - 1
+})
+const periodLabel = computed(() => props.report ? `${formatPeriod(props.report.periodStart)} — ${formatPeriod(displayEnd.value)}` : '')
+const deleteTitle = computed(() => active.value ? '取消并删除这个总结任务？' : '删除这个总结任务？')
 const generationPerformance = computed(() => {
   if (props.report?.status !== 'completed') return ''
   const metrics = props.report?.generationMetrics
@@ -98,6 +104,9 @@ async function copyMarkdown() { await navigator.clipboard.writeText(props.report
 function exportMarkdown() { if (exportable.value) emit('export-markdown', props.report.id) }
 function exportHtml() { if (exportable.value && !props.htmlExporting) emit('export-html', props.report.id) }
 function handleReportLink(event) { openSummaryReportLink(event, ipc.openExternal) }
+function formatPeriod(value) {
+  return new Date(value).toLocaleDateString('zh-CN', { timeZone: props.report?.timezone || undefined })
+}
 </script>
 
 <style scoped>

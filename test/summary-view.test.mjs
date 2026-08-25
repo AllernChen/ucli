@@ -509,7 +509,7 @@ test('summary renderer and focused tests contain no legacy task workflow identif
     '../test/summary-view.test.mjs', '../test/summary-view-mounted.test.mjs'
   ]
   const legacy = new RegExp([
-    'useSummary' + 'TasksStore', 'summaryTask' + 'Note', 'summaryTask' + 'Status',
+    'useSummary' + 'TasksStore', 'summaryTask' + 'Note', 'summaryTask' + 'Status\\b',
     'listSummary' + 'WorkLogs', 'readSummary' + 'WorkLog', 'suggestedFile' + 'Name',
     'reportProduced' + 'ByRun', '\\bm' + 'time\\b'
   ].join('|'))

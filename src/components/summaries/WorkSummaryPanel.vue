@@ -10,20 +10,28 @@
         <a-col :span="7">
           <a-list :data-source="summaries.reports" row-key="id" :locale="{ emptyText: '还没有生成的工作总结' }">
             <template #renderItem="{ item }">
-              <a-list-item :class="{ selected: item.id === summaries.selectedReportId }" @click="select(item.id)">
-                <a-list-item-meta :title="`v${item.version} · ${item.status}`" :description="item.progressText || item.runPhase || '等待生成'" />
-              </a-list-item>
+              <SummaryReportListItem
+                :report="item"
+                :progress="summaries.progress[item.id] || null"
+                :selected="item.id === summaries.selectedReportId"
+                @select="select"
+                @edit="openEdit"
+                @delete-report="remove"
+                @retry="retry"
+                @open-conversation="openConversation"
+              />
             </template>
           </a-list>
-          <SummaryHistory :versions="summaries.versions" @select="select" @retry="retry" @set-current="setCurrent" @delete-report="remove" />
+          <SummaryHistory :versions="summaries.versions" :progress="summaries.progress" @select="select" @edit="openEdit" @retry="retry" @set-current="setCurrent" @delete-report="remove" />
         </a-col>
         <a-col :span="17">
-          <SummaryReportView :report="summaries.selectedReport" :progress="selectedProgress" :html-exporting="htmlExporting" @cancel="cancel" @export-markdown="exportMarkdown" @export-html="openHtmlExport" @delete-report="remove" @open-conversation="openConversation" />
+          <SummaryReportView :report="summaries.selectedReport" :progress="selectedProgress" :html-exporting="htmlExporting" @cancel="cancel" @edit="openEdit" @export-markdown="exportMarkdown" @export-html="openHtmlExport" @delete-report="remove" @open-conversation="openConversation" />
         </a-col>
       </a-row>
     </a-spin>
     <SummaryConversationDrawer v-model:open="drawerOpen" :report-id="conversationReport?.id" :session-id="conversationReport?.sessionId || null" />
     <SummaryGenerateDialog v-model:open="dialogOpen" @submit="generate" />
+    <SummaryTaskEditDialog v-model:open="editDialogOpen" :report="editReport" :confirm-loading="editSaving" @submit="saveEdit" />
     <SummaryHtmlStyleDialog v-model:open="htmlStyleDialogOpen" :confirm-loading="htmlExporting" @submit="exportHtml" />
   </div>
 </template>
@@ -36,6 +44,8 @@ import SummaryConversationDrawer from './SummaryConversationDrawer.vue'
 import SummaryHistory from './SummaryHistory.vue'
 import SummaryReportView from './SummaryReportView.vue'
 import SummaryHtmlStyleDialog from './SummaryHtmlStyleDialog.vue'
+import SummaryReportListItem from './SummaryReportListItem.vue'
+import SummaryTaskEditDialog from './SummaryTaskEditDialog.vue'
 
 const summaries = useSummariesStore()
 const dialogOpen = ref(false)
@@ -44,6 +54,9 @@ const conversationReport = ref(null)
 const htmlStyleDialogOpen = ref(false)
 const htmlExportReportId = ref(null)
 const htmlExporting = ref(false)
+const editDialogOpen = ref(false)
+const editReport = ref(null)
+const editSaving = ref(false)
 const selectedProgress = computed(() => summaries.progress[summaries.selectedReportId] || null)
 const owner = Symbol('work-summary-panel')
 let alive = true
@@ -76,7 +89,25 @@ async function retry(report) {
 }
 async function cancel(reportId) { await summaries.cancel(reportId) }
 async function setCurrent(reportId) { await summaries.setCurrent(reportId) }
-async function remove(reportId) { await summaries.deleteReport(reportId) }
+async function remove(reportId) {
+  try { await summaries.deleteReport(reportId) } catch { summaries.error = new Error('无法删除总结任务') }
+}
+function openEdit(report) {
+  editReport.value = report
+  editDialogOpen.value = true
+}
+async function saveEdit(patch) {
+  if (!editReport.value || editSaving.value) return
+  editSaving.value = true
+  try {
+    await summaries.updateTask(editReport.value.id, patch)
+    editDialogOpen.value = false
+  } catch {
+    summaries.error = new Error('无法更新总结任务')
+  } finally {
+    editSaving.value = false
+  }
+}
 function openConversation(report) { conversationReport.value = report; drawerOpen.value = true }
 async function exportMarkdown(reportId) {
   const report = summaries.reports.find(item => item.id === reportId)

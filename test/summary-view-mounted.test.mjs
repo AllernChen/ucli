@@ -49,6 +49,14 @@ function createStubs() {
     HtmlStyleDialogStub: defineComponent({
       name: 'SummaryHtmlStyleDialog', props: { open: Boolean }, emits: ['update:open', 'submit'],
       template: '<button v-if="open" data-testid="summary-export-print" @click="$emit(\'submit\', { mode: \'theme\', themeId: \'print\' })">导出打印版</button>'
+    }),
+    ReportListItemStub: defineComponent({
+      name: 'SummaryReportListItem', props: { report: Object, progress: Object }, emits: ['select', 'edit', 'delete-report', 'retry', 'open-conversation'],
+      template: '<button @click="$emit(\'select\', report.id)">{{ progress?.text || report?.title }}</button>'
+    }),
+    TaskEditDialogStub: defineComponent({
+      name: 'SummaryTaskEditDialog', props: { open: Boolean, report: Object }, emits: ['update:open', 'submit'],
+      template: '<div />'
     })
   }
 }
@@ -79,9 +87,10 @@ async function loadMountedPanel(vite, stubs) {
   code = code.replace(/^import[^\n]*\n/gm, '').replace('export default', 'return')
   code = `const { computed, onBeforeUnmount, onMounted, ref } = Vue\n${code}`
   const { useSummariesStore } = await import('../src/stores/summaries.js')
+  const fallback = defineComponent({ template: '<div />' })
   const panel = new Function(
-    'Vue', 'useSummariesStore', 'SummaryGenerateDialog', 'SummaryConversationDrawer', 'SummaryHistory', 'SummaryReportView', 'SummaryHtmlStyleDialog', code
-  )(Vue, useSummariesStore, stubs.GenerateDialogStub, stubs.ConversationStub, stubs.HistoryStub, stubs.ReportViewStub, stubs.HtmlStyleDialogStub)
+    'Vue', 'useSummariesStore', 'SummaryGenerateDialog', 'SummaryConversationDrawer', 'SummaryHistory', 'SummaryReportView', 'SummaryHtmlStyleDialog', 'SummaryReportListItem', 'SummaryTaskEditDialog', code
+  )(Vue, useSummariesStore, stubs.GenerateDialogStub, stubs.ConversationStub, stubs.HistoryStub, stubs.ReportViewStub, stubs.HtmlStyleDialogStub, stubs.ReportListItemStub || fallback, stubs.TaskEditDialogStub || fallback)
   return attachClientRender(panel, fileName, compiledScript.bindings)
 }
 
@@ -109,15 +118,117 @@ async function loadMountedReport(vite) {
   const compiledScript = compileScript(descriptor, { id: 'summary-report-mounted' })
   let code = compiledScript.content.replace(/^import[^\n]*\n/gm, '').replace('export default', 'return')
   code = `const { computed } = Vue\n${code}`
-  const report = new Function('Vue', 'DOMPurify', 'MarkdownIt', 'ipc', 'openSummaryReportLink', code)(
+  code = code.replace(/\bsummaryTaskStatusMeta\b/g, 'statusMeta')
+  const { summaryTaskStatusMeta } = await import('../shared/summaryTaskContracts.js')
+  const report = new Function('Vue', 'DOMPurify', 'MarkdownIt', 'ipc', 'openSummaryReportLink', 'statusMeta', code)(
     Vue,
     { sanitize: value => value },
     class { render(value) { return value } },
     { openExternal: () => {} },
-    () => {}
+    () => {},
+    summaryTaskStatusMeta
   )
   return attachClientRender(report, fileName, compiledScript.bindings)
 }
+
+async function loadMountedListItem(vite) {
+  await vite.transformRequest('/src/components/summaries/SummaryReportListItem.vue')
+  const fileName = '../src/components/summaries/SummaryReportListItem.vue'
+  const source = readFileSync(new URL(fileName, import.meta.url), 'utf8')
+  const { descriptor, errors } = parseSfc(source, { filename: fileName })
+  assert.deepEqual(errors, [])
+  const compiledScript = compileScript(descriptor, { id: 'summary-list-item-mounted' })
+  let code = compiledScript.content.replace(/^import[^\n]*\n/gm, '').replace('export default', 'return')
+  code = `const { computed } = Vue\n${code}`
+  code = code.replace(/\bsummaryTaskStatusMeta\b/g, 'statusMeta')
+  const { summaryTaskStatusMeta } = await import('../shared/summaryTaskContracts.js')
+  const item = new Function('Vue', 'statusMeta', code)(Vue, summaryTaskStatusMeta)
+  return attachClientRender(item, fileName, compiledScript.bindings)
+}
+
+async function loadMountedTaskEditDialog(vite) {
+  await vite.transformRequest('/src/components/summaries/SummaryTaskEditDialog.vue')
+  const fileName = '../src/components/summaries/SummaryTaskEditDialog.vue'
+  const source = readFileSync(new URL(fileName, import.meta.url), 'utf8')
+  const { descriptor, errors } = parseSfc(source, { filename: fileName })
+  assert.deepEqual(errors, [])
+  const compiledScript = compileScript(descriptor, { id: 'summary-task-edit-mounted' })
+  let code = compiledScript.content.replace(/^import[^\n]*\n/gm, '').replace('export default', 'return')
+  code = `const { reactive, watch } = Vue\n${code}`
+  const dialog = new Function('Vue', code)(Vue)
+  return attachClientRender(dialog, fileName, compiledScript.bindings)
+}
+
+test('summary task card presents terminal status and exposes edit/delete controls', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ mount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    const report = {
+      id: 'legacy-completed', title: '工作总结（每日）2026-08-19 11:28', taskNote: '',
+      version: 1, status: 'completed', runPhase: null, markdown: '# 摘要',
+      periodType: 'day', periodStart: Date.UTC(2026, 7, 19),
+      periodEndExclusive: Date.UTC(2026, 7, 19, 3, 28), timezone: 'Asia/Shanghai'
+    }
+    wrapper = mount(await loadMountedListItem(vite), {
+      props: { report, progress: null, selected: false },
+      global: { stubs: {
+        'a-list-item': { template: '<section><slot /><slot name="actions" /></section>' },
+        'a-list-item-meta': { template: '<div><slot /><slot name="title" /><slot name="description" /></div>' },
+        'a-tag': { template: '<span><slot /></span>' },
+        'a-button': { template: '<button :title="$attrs.title"><slot /></button>' },
+        'a-popconfirm': { template: '<div><slot /></div>' }
+      } }
+    })
+    assert.match(wrapper.text(), /已完成/)
+    assert.doesNotMatch(wrapper.text(), /等待生成/)
+    await wrapper.get('[data-testid="summary-task-edit-legacy-completed"]').trigger('click')
+    assert.deepEqual(wrapper.emitted('edit'), [[report]])
+    await wrapper.get('[data-testid="summary-task-delete-legacy-completed"]').trigger('click')
+    assert.equal(wrapper.get('[data-testid="summary-task-delete-legacy-completed"]').attributes('title'), '删除这个总结任务？')
+
+    await wrapper.setProps({
+      report: { ...report, id: 'active-report', status: 'running', runPhase: 'starting' },
+      progress: { reportId: 'active-report', status: 'running', phase: 'starting', completed: 0, total: 1, text: '正在启动 AI CLI' }
+    })
+    assert.match(wrapper.text(), /正在启动 AI CLI/)
+    assert.equal(wrapper.get('[data-testid="summary-task-delete-active-report"]').attributes('title'), '取消并删除这个总结任务？')
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+  }
+})
+
+test('summary task edit dialog emits normalized title and note', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ mount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    wrapper = mount(await loadMountedTaskEditDialog(vite), {
+      props: { open: true, report: { id: 'legacy-completed', title: '旧标题', taskNote: '' }, confirmLoading: false },
+      global: { stubs: {
+        'a-modal': { template: '<section><slot /></section>' }, 'a-form': { template: '<form><slot /></form>' },
+        'a-form-item': { template: '<label><slot /></label>' }, 'a-input': { props: ['value'], emits: ['update:value'], template: '<input :value="value" @input="$emit(\'update:value\', $event.target.value)" />' },
+        'a-textarea': { props: ['value'], emits: ['update:value'], template: '<textarea :value="value" @input="$emit(\'update:value\', $event.target.value)" />' }
+      } }
+    })
+    await wrapper.get('[data-testid="summary-task-title"]').setValue('  8 月 19 日总结  ')
+    await wrapper.get('[data-testid="summary-task-note"]').setValue('已复核\r\n第二行')
+    await wrapper.get('[data-testid="summary-task-edit-submit"]').trigger('click')
+    assert.deepEqual(wrapper.emitted('submit'), [[{ title: '8 月 19 日总结', taskNote: '已复核\n第二行' }]])
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+  }
+})
 
 test('mounted work summary panel uses canonical reports for generation, progress, versions, retry, cancel, and conversations', async () => {
   Vue = await import('vue')
