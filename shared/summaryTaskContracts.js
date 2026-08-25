@@ -22,6 +22,11 @@ const PHASE_DETAIL = Object.freeze({
 })
 
 const ERROR_META = Object.freeze({
+  SUMMARY_READY_TIMEOUT: Object.freeze({
+    code: 'SUMMARY_READY_TIMEOUT',
+    message: 'AI CLI 启动超时。',
+    action: '请检查 AI CLI 后重试。'
+  }),
   SUMMARY_ARTIFACT_INVALID: Object.freeze({
     code: 'SUMMARY_ARTIFACT_INVALID',
     message: '报告已生成，但内容结构或安全校验未通过。',
@@ -41,6 +46,16 @@ const ERROR_META = Object.freeze({
     code: 'SUMMARY_RUN_TIMEOUT',
     message: '生成超过允许时间。',
     action: '请重试生成总结。'
+  }),
+  SUMMARY_PROFILE_UNAVAILABLE: Object.freeze({
+    code: 'SUMMARY_PROFILE_UNAVAILABLE',
+    message: '所选 AI CLI 配置不可用。',
+    action: '请检查配置后重试。'
+  }),
+  SUMMARY_APP_SHUTDOWN: Object.freeze({
+    code: 'SUMMARY_APP_SHUTDOWN',
+    message: '应用关闭，工作总结已中断。',
+    action: '请重新打开应用后重试。'
   }),
   SUMMARY_RUN_FAILED: Object.freeze({
     code: 'SUMMARY_RUN_FAILED',

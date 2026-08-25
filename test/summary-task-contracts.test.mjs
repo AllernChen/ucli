@@ -45,6 +45,11 @@ test('completed database status wins when runPhase is absent', () => {
 
 test('summary task error metadata exposes only actionable allowlisted failures', () => {
   const cases = [
+    ['SUMMARY_READY_TIMEOUT', {
+      code: 'SUMMARY_READY_TIMEOUT',
+      message: 'AI CLI 启动超时。',
+      action: '请检查 AI CLI 后重试。'
+    }],
     ['SUMMARY_ARTIFACT_INVALID', {
       code: 'SUMMARY_ARTIFACT_INVALID',
       message: '报告已生成，但内容结构或安全校验未通过。',
@@ -64,6 +69,16 @@ test('summary task error metadata exposes only actionable allowlisted failures',
       code: 'SUMMARY_RUN_TIMEOUT',
       message: '生成超过允许时间。',
       action: '请重试生成总结。'
+    }],
+    ['SUMMARY_PROFILE_UNAVAILABLE', {
+      code: 'SUMMARY_PROFILE_UNAVAILABLE',
+      message: '所选 AI CLI 配置不可用。',
+      action: '请检查配置后重试。'
+    }],
+    ['SUMMARY_APP_SHUTDOWN', {
+      code: 'SUMMARY_APP_SHUTDOWN',
+      message: '应用关闭，工作总结已中断。',
+      action: '请重新打开应用后重试。'
     }]
   ]
   for (const [errorText, expected] of cases) {
