@@ -2,9 +2,11 @@
   <a-list-item
     class="summary-task-card"
     :class="{ 'is-selected': selected }"
+    role="option"
+    :aria-selected="selected"
     tabindex="0"
-    @click="emit('select', report.id)"
-    @keydown.enter.prevent="emit('select', report.id)"
+    @click="selectCard"
+    @keydown="handleCardKeydown"
   >
     <div class="summary-task-card__body">
       <div class="summary-task-card__title-row">
@@ -16,7 +18,9 @@
         <a-tag :color="status.color">{{ status.label }}</a-tag>
         <span>{{ report.executorId || '—' }} · {{ createdAt }}</span>
       </div>
+      <div class="summary-task-card__detail">{{ status.detail }}</div>
       <div v-if="failed" class="summary-task-card__failure">{{ error.message }}</div>
+      <div v-if="failed" class="summary-task-card__failure-action">{{ error.action }}</div>
       <div v-if="report.taskNote" class="summary-task-card__note">{{ report.taskNote }}</div>
       <div class="summary-task-card__actions">
         <a-button
@@ -44,9 +48,13 @@
     :title="deleteTitle"
     ok-text="确认删除"
     cancel-text="取消"
-    :confirm-loading="deleting"
+    :confirm-loading="deleteConfirmLoading"
+    :mask-closable="!deleteConfirmLoading"
+    :keyboard="!deleteConfirmLoading"
+    :closable="!deleteConfirmLoading"
+    :cancel-button-props="{ disabled: deleteConfirmLoading }"
     @ok="confirmDelete"
-    @cancel="deleteConfirmOpen = false"
+    @cancel="cancelDeleteConfirm"
   />
 </template>
 
@@ -63,6 +71,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['select', 'edit', 'delete-report', 'retry', 'open-conversation'])
 const deleteConfirmOpen = ref(false)
+const deletePending = ref(false)
 const status = computed(() => summaryTaskStatusMeta(props.report, props.progress))
 const failed = computed(() => props.report.status === 'failed')
 const error = computed(() => summaryTaskErrorMeta(props.report.errorText))
@@ -70,6 +79,17 @@ const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].inc
 const retryable = computed(() => ['failed', 'interrupted', 'cancelled'].includes(props.report.status))
 const deleteTitle = computed(() => active.value ? '取消并删除这个总结任务？' : '删除这个总结任务？')
 const createdAt = computed(() => props.report.createdAt ? new Date(props.report.createdAt).toLocaleString() : '—')
+const deleteConfirmLoading = computed(() => deletePending.value || props.deleting)
+
+function selectCard() {
+  emit('select', props.report.id)
+}
+
+function handleCardKeydown(event) {
+  if (event.target !== event.currentTarget || !['Enter', ' '].includes(event.key)) return
+  event.preventDefault()
+  selectCard()
+}
 
 function handleMenuClick({ key }) {
   if (key === 'edit') emit('edit', props.report)
@@ -78,14 +98,21 @@ function handleMenuClick({ key }) {
 }
 
 async function confirmDelete() {
-  if (props.deleting) return
+  if (deleteConfirmLoading.value) return
+  deletePending.value = true
   try {
     if (props.deleteReport) await props.deleteReport(props.report.id)
     else emit('delete-report', props.report.id)
     deleteConfirmOpen.value = false
   } catch {
     // The parent owns deletion errors; preserve the confirmation for a retry.
+  } finally {
+    deletePending.value = false
   }
+}
+
+function cancelDeleteConfirm() {
+  if (!deleteConfirmLoading.value) deleteConfirmOpen.value = false
 }
 </script>
 
@@ -138,11 +165,23 @@ async function confirmDelete() {
 }
 
 .summary-task-card__meta,
+.summary-task-card__detail,
 .summary-task-card__failure,
+.summary-task-card__failure-action,
 .summary-task-card__note {
   margin-top: 4px;
   color: rgba(0, 0, 0, .65);
   font-size: 12px;
+}
+
+.summary-task-card__detail,
+.summary-task-card__failure,
+.summary-task-card__failure-action {
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .summary-task-card__failure {

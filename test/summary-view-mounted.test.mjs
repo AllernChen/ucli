@@ -211,12 +211,18 @@ test('summary task card keeps secondary actions behind the compact menu and pres
     assert.match(wrapper.text(), /生成失败/)
     assert.match(wrapper.text(), /v3/)
     assert.match(wrapper.get('.summary-task-card__meta').text(), /2026/)
+    assert.equal(wrapper.get('.summary-task-card').attributes('aria-selected'), 'false')
+    assert.match(wrapper.get('.summary-task-card__failure-action').text(), /请检查生成内容后重试/)
     assert.equal(wrapper.findComponent(MenuStub).exists(), false)
 
     await wrapper.get('.summary-task-card').trigger('click')
     assert.deepEqual(wrapper.emitted('select'), [['failed-report']])
+    await wrapper.get('[aria-label="重试生成总结"]').trigger('keydown', { key: 'Enter' })
+    assert.equal(wrapper.emitted('select').length, 1)
     await wrapper.get('[aria-label="重试生成总结"]').trigger('click')
     assert.deepEqual(wrapper.emitted('retry'), [[report]])
+    await wrapper.get('[aria-label="更多操作"]').trigger('keydown', { key: 'Enter' })
+    assert.equal(wrapper.emitted('select').length, 1)
     await wrapper.get('[aria-label="更多操作"]').trigger('click')
     assert.equal(wrapper.emitted('select').length, 1)
     assert.equal(wrapper.findComponent(MenuStub).exists(), true)
@@ -232,6 +238,16 @@ test('summary task card keeps secondary actions behind the compact menu and pres
     await flushPromises()
     assert.deepEqual(wrapper.emitted('delete-report'), [['failed-report']])
     assert.equal(wrapper.find('[data-testid="delete-confirm"]').exists(), false)
+
+    await wrapper.setProps({
+      report: { ...report, status: 'running', runPhase: 'starting' },
+      progress: { reportId: report.id, status: 'running', phase: 'starting', completed: 0, total: 1, text: '正在启动 AI CLI' },
+      selected: true
+    })
+    assert.equal(wrapper.get('.summary-task-card').attributes('aria-selected'), 'true')
+    assert.match(wrapper.get('.summary-task-card__detail').text(), /正在启动 AI CLI/)
+    await wrapper.get('.summary-task-card').trigger('keydown', { key: ' ' })
+    assert.deepEqual(wrapper.emitted('select'), [['failed-report'], ['failed-report']])
   } finally {
     wrapper?.unmount()
     await vite.close()
@@ -253,6 +269,12 @@ test('summary task card keeps deletion confirmation open while deletion is pendi
     let rejectDelete
     const deleteCalls = []
     const MenuStub = defineComponent({ name: 'PendingDeleteMenuStub', emits: ['click'], template: '<div><slot /></div>' })
+    const ModalStub = defineComponent({
+      name: 'PendingDeleteModalStub',
+      props: ['open', 'confirmLoading', 'maskClosable', 'keyboard', 'closable', 'cancelButtonProps'],
+      emits: ['ok', 'cancel'],
+      template: '<section v-if="open" data-testid="delete-confirm"><button @click="$emit(\'ok\')">确认删除</button></section>'
+    })
     wrapper = mount(await loadMountedListItem(vite), {
       props: { report, progress: null, selected: false, deleteReport: reportId => {
         deleteCalls.push(reportId)
@@ -263,7 +285,7 @@ test('summary task card keeps deletion confirmation open while deletion is pendi
         'a-button': { template: '<button v-bind="$attrs"><slot /></button>' },
         'a-dropdown': defineComponent({ setup: () => ({ open: Vue.ref(false) }), template: '<div @click.capture="open = true"><slot /><div v-if="open"><slot name="overlay" /></div></div>' }),
         'a-menu': MenuStub, 'a-menu-item': { template: '<button><slot /></button>' }, 'a-menu-divider': { template: '<hr />' },
-        'a-modal': { props: ['open'], emits: ['ok'], template: '<section v-if="open" data-testid="delete-confirm"><button @click="$emit(\'ok\')">确认删除</button></section>' }
+        'a-modal': ModalStub
       } }
     })
     await wrapper.get('[aria-label="更多操作"]').trigger('click')
@@ -272,10 +294,24 @@ test('summary task card keeps deletion confirmation open while deletion is pendi
     await flushPromises()
     assert.deepEqual(deleteCalls, ['deleting-report'])
     assert.equal(wrapper.find('[data-testid="delete-confirm"]').exists(), true)
+    const modal = wrapper.findComponent(ModalStub)
+    assert.equal(modal.props('confirmLoading'), true)
+    assert.equal(modal.props('maskClosable'), false)
+    assert.equal(modal.props('keyboard'), false)
+    assert.equal(modal.props('closable'), false)
+    assert.deepEqual(modal.props('cancelButtonProps'), { disabled: true })
+    await modal.vm.$emit('cancel')
+    assert.equal(wrapper.find('[data-testid="delete-confirm"]').exists(), true)
 
     rejectDelete(new Error('delete failed'))
     await flushPromises()
     assert.equal(wrapper.find('[data-testid="delete-confirm"]').exists(), true)
+
+    await wrapper.setProps({ deleting: true })
+    assert.equal(modal.props('confirmLoading'), true)
+    await modal.vm.$emit('cancel')
+    assert.equal(wrapper.find('[data-testid="delete-confirm"]').exists(), true)
+    await wrapper.setProps({ deleting: false })
 
     await wrapper.get('[data-testid="delete-confirm"] button').trigger('click')
     await flushPromises()
@@ -385,6 +421,60 @@ test('mounted panel keeps a newer edit dialog open after an older save resolves 
     assert.deepEqual(deleteCalls, ['first'])
     resolveDelete({ deletedReportId: 'first', currentReportId: null })
     await Promise.all([deleting, duplicate])
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+    Object.assign(api, originalApi)
+  }
+})
+
+test('mounted panel keeps the real task-card deletion confirmation open when deletion fails', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ createPinia } = await import('pinia'))
+  ;({ defineComponent } = Vue)
+  ;({ flushPromises, mount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const report = { id: 'undeletable-report', title: '无法删除的任务', taskNote: '', status: 'completed', version: 1, periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai' }
+  const api = window.ucli || {}
+  const originalApi = { ...api }
+  let rejectDelete
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    Object.assign(api, {
+      listSummaryReports: async () => [report], getSummaryReport: async () => report,
+      deleteSummaryReport: () => new Promise((resolve, reject) => { rejectDelete = reject }),
+      onSummaryProgress: () => () => {}
+    })
+    window.ucli = api
+    const stubs = createStubs()
+    stubs.ReportListItemStub = await loadMountedListItem(vite)
+    const MenuStub = defineComponent({ name: 'PanelDeleteMenuStub', emits: ['click'], template: '<div><slot /></div>' })
+    wrapper = mount(await loadMountedPanel(vite, stubs), {
+      global: { plugins: [createPinia()], stubs: {
+        SummaryGenerateDialog: stubs.GenerateDialogStub, SummaryReportView: stubs.ReportViewStub, SummaryHistory: stubs.HistoryStub,
+        SummaryConversationDrawer: stubs.ConversationStub, SummaryHtmlStyleDialog: stubs.HtmlStyleDialogStub,
+        'a-button': { template: '<button v-bind="$attrs"><slot /></button>' }, 'a-alert': true,
+        'a-list': { props: ['dataSource'], template: '<div><slot v-for="item in dataSource" name="renderItem" :item="item" /></div>' },
+        'a-list-item': { template: '<section><slot /></section>' }, 'a-tag': { template: '<span><slot /></span>' },
+        'a-dropdown': defineComponent({ setup: () => ({ open: Vue.ref(false) }), template: '<div @click.capture="open = true"><slot /><div v-if="open"><slot name="overlay" /></div></div>' }),
+        'a-menu': MenuStub, 'a-menu-item': { template: '<button><slot /></button>' }, 'a-menu-divider': { template: '<hr />' },
+        'a-modal': { props: ['open'], emits: ['ok'], template: '<section v-if="open" data-testid="delete-confirm"><button @click="$emit(\'ok\')">确认删除</button></section>' },
+        'a-row': { template: '<div><slot /></div>' }, 'a-col': { template: '<div><slot /></div>' }, 'a-spin': { template: '<div><slot /></div>' }
+      } }
+    })
+    await flushPromises()
+    const card = wrapper.findComponent(stubs.ReportListItemStub)
+    await card.get('[aria-label="更多操作"]').trigger('click')
+    await card.findComponent(MenuStub).vm.$emit('click', { key: 'delete' })
+    await card.get('[data-testid="delete-confirm"] button').trigger('click')
+    await flushPromises()
+    rejectDelete(new Error('delete failed'))
+    await flushPromises()
+    assert.equal(card.find('[data-testid="delete-confirm"]').exists(), true)
+    assert.equal(wrapper.vm.summaries.error.message, '无法删除总结任务')
   } finally {
     wrapper?.unmount()
     await vite.close()
