@@ -16,6 +16,7 @@ test('Codex config watcher emits a sanitised snapshot only when provider identit
   const changes = []
   const watcher = createCodexConfigWatcher({
     readSnapshot: () => snapshots[Math.min(readCount++, snapshots.length - 1)],
+    resolveWatchDirectory: (directory) => directory,
     watchDirectory: (_directory, onChange) => {
       callback = onChange
       return { close: () => { closed = true } }
@@ -66,6 +67,7 @@ test('Codex config watcher stop waits for the underlying watcher to close', asyn
       providerCatalog: [{ id: 'openai', displayName: 'OpenAI' }],
       mtimeMs: 1
     }),
+    resolveWatchDirectory: (directory) => directory,
     watchDirectory: () => handle
   })
 
@@ -78,4 +80,27 @@ test('Codex config watcher stop waits for the underlying watcher to close', asyn
   handle.emit('close')
   await stopping
   assert.equal(stopped, true)
+})
+
+test('Codex config watcher watches the canonical directory path', async () => {
+  let watchedDirectory = null
+  const watcher = createCodexConfigWatcher({
+    readSnapshot: () => ({
+      codexHome: 'C:/Users/RUNNER~1/.codex',
+      configPath: 'C:/Users/RUNNER~1/.codex/config.toml',
+      currentProvider: 'openai',
+      availableProviders: ['openai'],
+      providerCatalog: [{ id: 'openai', displayName: 'OpenAI' }],
+      mtimeMs: 1
+    }),
+    resolveWatchDirectory: () => 'C:/Users/runneradmin/.codex',
+    watchDirectory: (directory) => {
+      watchedDirectory = directory
+      return { close() {} }
+    }
+  })
+
+  watcher.start('C:/Users/RUNNER~1/.codex')
+  assert.equal(watchedDirectory, 'C:/Users/runneradmin/.codex')
+  await watcher.stop()
 })
