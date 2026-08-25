@@ -218,7 +218,7 @@ function makeBoundProfileUnavailable({ profile, executorId, codexHome }) {
 const CHANNELS = [
   'summary:get-settings', 'summary:set-settings', 'summary:list-reports',
   'summary:get-report', 'summary:generate', 'summary:start-interactive',
-  'summary:cancel',
+  'summary:cancel', 'summary:update-task',
   'summary:set-current', 'summary:delete', 'summary:export-markdown', 'summary:export-html',
   'summary:cache-stats', 'summary:cache-clear'
 ]
@@ -322,6 +322,34 @@ test('summary IPC preserves the safe concurrent-confirmation error', async () =>
     }
   })
   assert.doesNotMatch(JSON.stringify(response), /private|detail/i)
+})
+
+test('summary task edit IPC accepts only report metadata and keeps rejected fields out of safe errors', async () => {
+  const handlers = new Map()
+  const calls = []
+  registerSummaryIpc({
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    service: {
+      updateTask(value) {
+        calls.push(value)
+        return { id: value.reportId, title: value.title, taskNote: value.taskNote }
+      }
+    }
+  })
+
+  const updated = await handlers.get('summary:update-task')({}, {
+    reportId: 'report-1', title: '新名称', taskNote: '备注'
+  })
+  assert.equal(updated.ok, true)
+  assert.equal(updated.value.title, '新名称')
+  assert.deepEqual(calls, [{ reportId: 'report-1', title: '新名称', taskNote: '备注' }])
+
+  const rejected = await handlers.get('summary:update-task')({}, {
+    reportId: 'report-1', title: 'bad\nname', taskNote: '', workspace: 'C:\\secret'
+  })
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.error.code, 'INVALID_SUMMARY_IPC')
+  assert.doesNotMatch(JSON.stringify(rejected), /secret|workspace/i)
 })
 
 test('interactive summary IPC returns only report and session identifiers', async () => {
@@ -972,6 +1000,7 @@ test('preload exposes named summary calls and one removable progress listener', 
   await api.startInteractiveSummary({ periodType: 'week' })
   await api.confirmSummary('r1', 24)
   await api.cancelSummary('r1')
+  await api.updateSummaryTask({ reportId: 'r1', title: '新名称', taskNote: '备注' })
   await api.setCurrentSummary('r1')
   await api.deleteSummaryReport('r1')
   await api.exportSummaryMarkdown({ reportId: 'r1' })
@@ -998,6 +1027,7 @@ test('preload exposes named summary calls and one removable progress listener', 
 
   const rendererIpc = readFileSync(new URL('../src/ipc.js', import.meta.url), 'utf8')
   assert.match(rendererIpc, /startInteractiveSummary:\s*\(value\)\s*=>\s*u\.startInteractiveSummary\(value\)/)
+  assert.match(rendererIpc, /updateSummaryTask:\s*\(value\)\s*=>\s*u\.updateSummaryTask\(value\)/)
 })
 
 test('cache IPC accepts no stats payload and only the failed-workspace boolean for clear', async () => {

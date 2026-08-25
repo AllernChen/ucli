@@ -24,7 +24,7 @@ function metadata(store) {
   const state = store.$state
   let value = storeMetadata.get(state)
   if (!value) {
-    value = { unsubscribe: null, initPromise: null, owners: new Set(), selectionEpoch: 0, terminalReports: new Set(), deletedReports: new Set() }
+    value = { unsubscribe: null, initPromise: null, owners: new Set(), selectionEpoch: 0, taskUpdateEpochs: new Map(), terminalReports: new Set(), deletedReports: new Set() }
     storeMetadata.set(state, value)
   }
   return value
@@ -169,6 +169,17 @@ export const useSummariesStore = defineStore('summaries', {
         ? listed
         : [withoutMarkdown(created), ...listed]
       return created
+    },
+
+    async updateTask(reportId, patch) {
+      const meta = metadata(this)
+      const epoch = (meta.taskUpdateEpochs.get(reportId) || 0) + 1
+      meta.taskUpdateEpochs.set(reportId, epoch)
+      const report = await ipc.updateSummaryTask({ reportId, ...patch })
+      if (meta.taskUpdateEpochs.get(reportId) === epoch && !meta.deletedReports.has(reportId)) {
+        this.upsertReport(report)
+      }
+      return report
     },
 
     retry(report) {

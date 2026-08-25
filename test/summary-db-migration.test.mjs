@@ -377,6 +377,42 @@ test('a failed completion transaction cannot roll back an unrelated synchronous 
   }
 })
 
+test('summary task metadata updates the sole UCLI session projection atomically', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-task-update-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  try {
+    db.insertSession({
+      id: 'summary-session', project_path: 'C:\\summary', adapter_id: 'claude',
+      name: 'old name', task_note: '', tier: 'safety-rules', status: 'offline', created_at: 1
+    })
+    await db.createSummaryReport(summaryReport({
+      id: 'editable-report', sessionId: 'summary-session', title: 'old name', taskNote: ''
+    }))
+
+    const result = await db.updateSummaryTask('editable-report', {
+      title: '新的任务名称', taskNote: '复盘说明', updatedAt: 2
+    })
+    assert.equal(result.report.title, '新的任务名称')
+    assert.equal(result.report.taskNote, '复盘说明')
+    assert.equal(result.sessionUpdated, true)
+    assert.equal(db.getSession('summary-session').name, '新的任务名称')
+    assert.equal(db.getSession('summary-session').taskNote, '复盘说明')
+
+    await db.createSummaryReport(summaryReport({
+      id: 'shared-owner', version: 2, sessionId: 'summary-session', title: 'second owner'
+    }))
+    const shared = await db.updateSummaryTask('editable-report', {
+      title: '只更新报告', taskNote: '共享异常', updatedAt: 3
+    })
+    assert.equal(shared.report.title, '只更新报告')
+    assert.equal(shared.sessionUpdated, false)
+    assert.equal(db.getSession('summary-session').name, '新的任务名称')
+  } finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('real database imports are concurrent-idempotent and allocate same-period versions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ucli-summary-real-import-'))
   const db = await openDb(join(root, 'ucli.db'))

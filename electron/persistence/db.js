@@ -1006,6 +1006,36 @@ class Db {
     })
   }
 
+  async updateSummaryTask(reportId, fields) {
+    const metadata = normalizeSummaryTaskMetadata(fields)
+    return this.transactionSync(() => {
+      const target = this.getSummaryReport(reportId)
+      if (!target) throw Object.assign(new Error('Summary report not found'), {
+        code: 'SUMMARY_REPORT_NOT_FOUND'
+      })
+      const report = this.#updateSummaryReportSync(reportId, {
+        ...metadata,
+        updatedAt: fields.updatedAt
+      })
+      let sessionUpdated = false
+      if (target.sessionId) {
+        const other = rows(this.sql.exec(
+          'SELECT id FROM summary_reports WHERE session_id = ? AND id <> ? LIMIT 1',
+          [target.sessionId, reportId]
+        ))[0]
+        if (!other) {
+          this.sql.run(
+            `UPDATE sessions SET name = ?, task_note = ?, updated_at = ?
+             WHERE id = ? AND removed_at IS NULL`,
+            [metadata.title, metadata.taskNote, fields.updatedAt, target.sessionId]
+          )
+          sessionUpdated = this.sql.getRowsModified() > 0
+        }
+      }
+      return { report, sessionId: target.sessionId || null, sessionUpdated }
+    })
+  }
+
   #insertSummaryReportSync(report) {
     assertSummaryReport(report)
     assertAutomaticDuplicateTarget(this, report, report.errorText)

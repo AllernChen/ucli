@@ -174,6 +174,30 @@ test('new interactive reports are immediately included in the selected period hi
   }
 })
 
+test('task editing updates report and version projections without changing selection', async () => {
+  const originalUpdate = window.ucli.updateSummaryTask
+  const store = freshStore()
+  try {
+    store.reports = [{ id: 'report-1', title: '旧名称', taskNote: '', version: 1 }]
+    store.versions = [{ id: 'report-1', title: '旧名称', taskNote: '', version: 1 }]
+    store.selectedReportId = 'report-1'
+    window.ucli.updateSummaryTask = async value => ({
+      id: value.reportId, title: value.title, taskNote: value.taskNote, version: 1
+    })
+
+    const report = await store.updateTask('report-1', {
+      title: '新名称', taskNote: '备注'
+    })
+    assert.equal(report.title, '新名称')
+    assert.equal(store.reports[0].taskNote, '备注')
+    assert.equal(store.versions[0].title, '新名称')
+    assert.equal(store.selectedReportId, 'report-1')
+  } finally {
+    window.ucli.updateSummaryTask = originalUpdate
+    store.dispose()
+  }
+})
+
 test('deleting the selected report clears stale state and selects the promoted version', async () => {
   const originalDelete = window.ucli.deleteSummaryReport
   const originalList = window.ucli.listSummaryReports

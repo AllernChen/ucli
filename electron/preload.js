@@ -169,6 +169,7 @@ const api = {
   setSummarySettings: (value) => invokeSummary('summary:set-settings', value),
   listSummaryReports: (filters) => invokeSummary('summary:list-reports', filters || {}),
   getSummaryReport: (reportId) => invokeSummary('summary:get-report', reportId),
+  updateSummaryTask: (value) => invokeSummary('summary:update-task', value),
   generateSummary: (value) => invokeSummary('summary:generate', value),
   startInteractiveSummary: (value) => invokeSummary('summary:start-interactive', value),
   confirmSummary: (reportId, confirmationCallLimit) => invokeSummary('summary:generate', {

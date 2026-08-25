@@ -73,6 +73,7 @@ import { completedPeriod, manualPeriod } from './usage/periods.js'
 import { createEvidenceCollector } from './summaries/evidenceCollector.js'
 import { createSummaryPipeline } from './summaries/chunkPlanner.js'
 import { createReportRepository } from './summaries/reportRepository.js'
+import { normalizeSummaryTaskMetadata } from '../shared/summaryTaskContracts.js'
 import { createReportExportService } from './summaries/reportExportService.js'
 import { createSummaryJobService } from './summaries/summaryJobService.js'
 import { createSummaryRunner } from './summaries/summaryRunner.js'
@@ -590,6 +591,16 @@ export function registerSummaryIpc({ ipcMain, service }) {
   ipcMain.handle('summary:set-settings', safeSummaryEnvelope((_event, value) => service.setSettings(validateSummarySettings(value))))
   ipcMain.handle('summary:list-reports', safeSummaryEnvelope((_event, value = {}) => service.listReports(validateSummaryFilters(value))))
   ipcMain.handle('summary:get-report', safeSummaryEnvelope((_event, value) => service.getReport(validateSummaryId(value))))
+  ipcMain.handle('summary:update-task', safeSummaryEnvelope((_event, value) => {
+    const keys = Object.keys(value || {})
+    if (keys.length !== 3 || !keys.every(key => ['reportId', 'title', 'taskNote'].includes(key))) {
+      throw invalidSummaryIpc()
+    }
+    const reportId = validateSummaryId(value.reportId)
+    let metadata
+    try { metadata = normalizeSummaryTaskMetadata(value) } catch { throw invalidSummaryIpc() }
+    return service.updateTask({ reportId, ...metadata })
+  }))
   ipcMain.handle('summary:generate', safeSummaryEnvelope((_event, value) => service.generate(validateSummaryGenerate(value))))
   ipcMain.handle('summary:start-interactive', safeSummaryEnvelope(async (_event, value) => {
     const run = await service.startInteractive(validateInteractiveSummaryRequest(value))
@@ -3175,6 +3186,20 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           const report = summaryRepository.get(reportId)
           if (!report) throw Object.assign(new Error(), { code: 'SUMMARY_REPORT_NOT_FOUND' })
           return report
+        },
+        async updateTask({ reportId, title, taskNote }) {
+          if (!summaryRepository) throw Object.assign(new Error(), { code: 'SUMMARY_SERVICE_UNAVAILABLE' })
+          const result = await summaryRepository.updateTask(reportId, { title, taskNote })
+          if (result.sessionUpdated && result.sessionId) {
+            const entry = sessions.get(result.sessionId)
+            if (entry) {
+              entry.session.name = result.report.title
+              entry.session.taskNote = result.report.taskNote
+              entry.updatedAt = result.report.updatedAt
+            }
+          }
+          scheduleFlush()
+          return result.report
         },
         generate: async input => {
           if (!summaryJobService || !summaryAutomationReady) {

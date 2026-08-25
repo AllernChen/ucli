@@ -352,6 +352,12 @@ export function createReportRepository({
 
     listForKey,
 
+    async updateTask(reportId, patch) {
+      const metadata = normalizeSummaryTaskMetadata(patch)
+      const result = await db.updateSummaryTask(reportId, { ...metadata, updatedAt: now() })
+      return { ...result, report: normalizeReport(result.report) }
+    },
+
     async update(reportId, patch = {}) {
       const forbidden = Object.keys(patch).find(field => !PATCH_FIELDS.has(field))
       if (forbidden) {
