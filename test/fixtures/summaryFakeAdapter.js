@@ -51,6 +51,7 @@ export function createSummaryFakeAdapterHarness({
 } = {}) {
   const entries = new Map()
   const configs = new Map()
+  const deliveries = []
   const stopped = []
   const stopRequests = []
   const removeRequests = []
@@ -64,7 +65,13 @@ export function createSummaryFakeAdapterHarness({
       await createGate?.promise
       if (createError) throw createError
       const sessionId = `summary-session-${++nextSession}`
-      entries.set(sessionId, { adapter: new SummaryFakeAdapter(sessionId) })
+      const adapter = new SummaryFakeAdapter(sessionId)
+      const sendTurn = adapter.sendTurn.bind(adapter)
+      adapter.sendTurn = async text => {
+        deliveries.push({ sessionId, text })
+        return sendTurn(text)
+      }
+      entries.set(sessionId, { adapter })
       configs.set(sessionId, structuredClone(config))
       return { sessionId }
     },
@@ -117,6 +124,7 @@ export function createSummaryFakeAdapterHarness({
     removeRequests,
     createRequests,
     startRequests,
+    deliveries,
     config(sessionId) { return configs.get(sessionId) },
     adapter,
     emitReady(sessionId) { adapter(sessionId).emitEvent('ready') },

@@ -107,7 +107,7 @@ export function createInteractiveSummaryJobService({
   for (const method of ['createQueued', 'update', 'complete', 'get']) {
     requireMethod(repository, method, 'repository')
   }
-  for (const method of ['create', 'markStage', 'complete', 'fail']) {
+  for (const method of ['create', 'markStage', 'writeArtifact', 'complete', 'fail']) {
     requireMethod(workspaceService, method, 'workspaceService')
   }
   requireMethod(preparationService, 'prepare', 'preparationService')
@@ -491,6 +491,13 @@ export function createInteractiveSummaryJobService({
         await transition(job, INTERACTIVE_SUMMARY_PHASE.VALIDATING)
         if (job.terminal) return job.done.promise
         job.completionArtifact = artifact
+        if (artifact.changed) {
+          await ownedStep(job, () => workspaceService.writeArtifact(
+            job.reportId,
+            'output/report.md',
+            artifact.markdown
+          ))
+        }
         const completionOperation = Promise.resolve().then(() => repository.complete(job.reportId, {
           markdown: artifact.markdown,
           sourceHash: artifact.sha256,

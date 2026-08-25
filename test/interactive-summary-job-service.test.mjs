@@ -15,6 +15,7 @@ import { createSummaryFakeAdapterHarness } from './fixtures/summaryFakeAdapter.j
 const START = Date.UTC(2026, 7, 10)
 const WEEK = 7 * 24 * 60 * 60 * 1000
 const VALID_MARKDOWN = `${REQUIRED_HEADINGS.map(heading => `${heading}\n\n内容`).join('\n\n')}\n`
+const ALL_H1_MARKDOWN = `${REQUIRED_HEADINGS.map(heading => `# ${heading.replace(/^#+ /, '')}\n\n内容`).join('\n\n')}\n`
 
 function request(overrides = {}) {
   return {
@@ -106,7 +107,8 @@ async function quickArtifact({ workspacePath, signal, deadlineMs }) {
       return {
         markdown,
         bytes: buffer.byteLength,
-        sha256: `sha256:${createHash('sha256').update(buffer).digest('hex')}`
+        sha256: `sha256:${createHash('sha256').update(buffer).digest('hex')}`,
+        changed: false
       }
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
@@ -216,6 +218,10 @@ async function fixture(t, {
       workspaceObservations.push({ requested: args[1], status: value.status, stage: value.stage })
       order.push(`workspace.mark:${args[1]}:end`)
       return value
+    },
+    async writeArtifact(...args) {
+      order.push(`workspace.write:${args[1]}`)
+      return workspaceService.writeArtifact(...args)
     },
     async fail(...args) {
       order.push(`workspace.fail:${args[2]?.status || 'failed'}:start`)
@@ -397,6 +403,32 @@ test('interactive run owns report workspace session artifact and atomic completi
     name: run.report.title,
     cwd: join(state.root, 'summaries', 'workspaces', run.report.id, 'work')
   })
+})
+
+test('safe normalized artifact is written to the workspace before repository completion', async t => {
+  const state = await fixture(t, { realArtifact: true })
+  const run = await state.service.start(request())
+  await beginRunning(state, run)
+  await state.fake.writeCanonicalMarkdown(run.report.id, ALL_H1_MARKDOWN)
+  const completed = await assertSettled(state, run, { status: 'completed', phase: 'completed' })
+  const outputPath = join(state.root, 'summaries', 'workspaces', run.report.id, 'output', 'report.md')
+
+  assert.equal(completed.status, 'completed')
+  assert.equal(completed.markdown, VALID_MARKDOWN)
+  assert.equal(await readFile(outputPath, 'utf8'), VALID_MARKDOWN)
+  assert.ok(state.order.indexOf('workspace.write:output/report.md') < state.order.indexOf('repository.complete'))
+  assert.equal(state.order.filter(value => value === 'workspace.write:output/report.md').length, 1)
+  assert.equal(state.fake.deliveries.length, 1)
+})
+
+test('canonical artifact completes without a job-owned workspace writeback', async t => {
+  const state = await fixture(t, { realArtifact: true })
+  const run = await state.service.start(request())
+  await beginRunning(state, run)
+  await state.fake.writeCanonicalMarkdown(run.report.id, VALID_MARKDOWN)
+  await assertSettled(state, run, { status: 'completed', phase: 'completed' })
+
+  assert.equal(state.order.includes('workspace.write:output/report.md'), false)
 })
 
 test('ready timeout settles failed and releases workspace session resources', async t => {
