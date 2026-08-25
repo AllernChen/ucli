@@ -353,38 +353,18 @@ const lastCliOutput = computed(() => {
 })
 const diagnosticCliSummary = computed(() => formatCliDiagnosticSummary(diagnostics.value?.cliTools || []))
 const diagnosticProfileSummary = computed(() => profileDiagnosticSummary(diagnostics.value?.aiCliProfiles || {}))
-const managedSummaryProfile = (profile, executorId) =>
-  executorId === 'claude' &&
-  profile?.adapterId === executorId &&
-  profile?.kind === 'managed' &&
-  profile?.status === 'ready' &&
-  ['api_key', 'bearer'].includes(profile?.connectionMode || profile?.config?.connectionMode)
-const summaryProfileUsable = (profile, tool) =>
-  managedSummaryProfile(profile, tool?.id) || (
-    tool?.summaryExecutorAvailable === true &&
-    tool?.id === 'claude' &&
-    profile?.adapterId === tool.id &&
-    profile?.kind === 'reference' &&
-    profile?.status === 'ready' &&
-    (profile?.connectionMode || profile?.config?.connectionMode) === 'subscription'
-  )
-const summaryExecutorUsable = (tool, profileId = null, allowAnyManaged = false) => {
-  if (!tool?.installed || tool.safeForSummary !== true) return false
-  if (tool.summaryExecutorAvailable === true) return !profileId || summaryProfiles.value.some(profile =>
-    profile.id === profileId && summaryProfileUsable(profile, tool))
-  return summaryProfiles.value.some(profile =>
-    managedSummaryProfile(profile, tool.id) &&
-    (allowAnyManaged || profile.id === profileId))
-}
+// Summary generation opens an interactive AI CLI in the workLogs directory, so
+// the headless capability matrix no longer applies: any installed CLI can be
+// the default, and profiles are plain ready profiles bound to that CLI.
+const SUMMARY_CLI_IDS = ['claude', 'codex', 'opencode', 'ucode']
 const summaryExecutorOptions = computed(() => cliTools.value.filter(tool =>
-  summaryExecutorUsable(tool, null, true)
-))
-const summaryProfileOptions = computed(() => summaryProfiles.value.filter(profile =>
-  summaryProfileUsable(
-    profile,
-    cliTools.value.find(tool => tool.id === local.value.defaultExecutorId)
-  )
-))
+  SUMMARY_CLI_IDS.includes(tool.id) && tool.installed))
+const summaryProfileOptions = computed(() => {
+  const executor = cliTools.value.find(tool => tool.id === local.value.defaultExecutorId)
+  if (!executor) return []
+  return summaryProfiles.value.filter(profile =>
+    profile.adapterId === executor.id && profile.status === 'ready')
+})
 const summaryModelOptions = computed(() => {
   const adapter = adapters.value.find(item => item.id === local.value.defaultExecutorId)
   return Array.isArray(adapter?.models) ? adapter.models.map(item => typeof item === 'string' ? item : item.id).filter(Boolean) : []
@@ -616,12 +596,8 @@ function onSummaryAutoChange(enabled) {
     local.value.autoEnabled = false
     return
   }
-  const executor = cliTools.value.find(tool => tool.id === local.value.defaultExecutorId)
-  if (!summaryExecutorUsable(executor, local.value.defaultProfileId)) {
-    local.value.autoEnabled = false
-    message.warning('请先选择一个已安装的默认 AI CLI')
-    return
-  }
+  // Reminders only notify that a period is due; no executor is required, so
+  // enablement only needs disclosure acceptance.
   if (local.value.firstEnableDisclosureAcceptedAt) {
     local.value.autoEnabled = true
     return
@@ -644,10 +620,6 @@ function onSummaryAutoChange(enabled) {
 function onSummaryExecutorChange() {
   local.value.defaultProfileId = null
   local.value.defaultModel = null
-  const executor = cliTools.value.find(tool => tool.id === local.value.defaultExecutorId)
-  if (local.value.autoEnabled && !summaryExecutorUsable(executor, local.value.defaultProfileId)) {
-    local.value.autoEnabled = false
-  }
 }
 
 // --- Keybinding config ---

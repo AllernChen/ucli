@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
+import { openDb } from '../electron/persistence/db.js'
+import { SUMMARY_EXECUTION_MODE } from '../electron/summaries/interactiveSummaryContracts.js'
+import { createReportRepository } from '../electron/summaries/reportRepository.js'
 import { createSummaryScheduler } from '../electron/summaries/summaryScheduler.js'
 
 const NOW = Date.parse('2026-08-12T08:30:00.000Z')
@@ -18,12 +25,12 @@ function enabledSettings(overrides = {}) {
   }
 }
 
-test('startup enqueues the latest missing completed period in cadence order', async () => {
-  const enqueued = []
+test('startup reminds the latest missing completed period in cadence order', async () => {
+  const reminded = []
   const scheduler = createSummaryScheduler({
     getSettings: () => enabledSettings(),
     listReports: () => [],
-    generate: (request) => { enqueued.push(request); return { reportId: `r${enqueued.length}` } },
+    onReminder: (reminder) => { reminded.push(reminder) },
     now: () => NOW,
     timeZone: 'UTC',
     setIntervalFn: () => 1,
@@ -32,22 +39,27 @@ test('startup enqueues the latest missing completed period in cadence order', as
 
   await scheduler.start()
 
-  assert.deepEqual(enqueued.map(item => item.periodType), ['day', 'week', 'month', 'quarter', 'year'])
-  assert.equal(enqueued.filter(item => item.periodType === 'day').length, 1)
-  assert.ok(enqueued.every(item => item.generatedBy === 'automatic'))
-  assert.ok(enqueued.every(item => item.executorId === 'claude'))
+  assert.deepEqual(reminded.map(item => item.periodType), ['day', 'week', 'month', 'quarter', 'year'])
+  assert.equal(reminded.filter(item => item.periodType === 'day').length, 1)
+  assert.ok(reminded.every(item =>
+    item.timezone === 'UTC' &&
+    Number.isFinite(item.start) &&
+    Number.isFinite(item.endExclusive) &&
+    item.endExclusive > item.start
+  ))
+  assert.equal(reminded.find(item => item.periodType === 'day').start, Date.parse('2026-08-11T00:00:00.000Z'))
   scheduler.stop()
 })
 
-test('duplicate ticks are single-flight while a crossed boundary enqueues one new period', async () => {
+test('duplicate ticks are single-flight while a crossed boundary reminds one new period', async () => {
   let current = NOW
-  const enqueued = []
+  const reminded = []
   const scheduler = createSummaryScheduler({
     getSettings: () => enabledSettings({
       autoPeriods: { day: true, week: false, month: false, quarter: false, year: false }
     }),
     listReports: async () => [],
-    generate: async request => { enqueued.push(request); return { reportId: `r${enqueued.length}` } },
+    onReminder: async reminder => { reminded.push(reminder) },
     now: () => current,
     timeZone: 'UTC',
     setIntervalFn: () => 1,
@@ -55,21 +67,21 @@ test('duplicate ticks are single-flight while a crossed boundary enqueues one ne
   })
 
   await Promise.all([scheduler.start(), scheduler.tick(), scheduler.tick()])
-  assert.equal(enqueued.length, 1)
+  assert.equal(reminded.length, 1)
 
   current = Date.parse('2026-08-13T00:01:00.000Z')
   await Promise.all([scheduler.tick(), scheduler.tick()])
-  assert.equal(enqueued.length, 2)
-  assert.equal(enqueued[1].start, Date.parse('2026-08-12T00:00:00.000Z'))
+  assert.equal(reminded.length, 2)
+  assert.equal(reminded[1].start, Date.parse('2026-08-12T00:00:00.000Z'))
 })
 
-test('master and per-period switches suppress automatic work', async () => {
+test('master and per-period switches suppress reminders', async () => {
   let settings = enabledSettings({ autoEnabled: false })
-  const enqueued = []
+  const reminded = []
   const scheduler = createSummaryScheduler({
     getSettings: () => settings,
     listReports: () => [],
-    generate: request => { enqueued.push(request); return {} },
+    onReminder: reminder => { reminded.push(reminder) },
     now: () => NOW,
     timeZone: 'UTC',
     setIntervalFn: () => 1,
@@ -77,21 +89,21 @@ test('master and per-period switches suppress automatic work', async () => {
   })
 
   await scheduler.start()
-  assert.deepEqual(enqueued, [])
+  assert.deepEqual(reminded, [])
 
   settings = enabledSettings({
     autoPeriods: { day: false, week: true, month: false, quarter: false, year: false }
   })
   await scheduler.tick()
-  assert.deepEqual(enqueued.map(item => item.periodType), ['week'])
+  assert.deepEqual(reminded.map(item => item.periodType), ['week'])
 })
 
-test('persisted unsafe executors never enqueue automatic work', async () => {
-  const enqueued = []
+test('persisted unsafe executors no longer suppress reminders', async () => {
+  const reminded = []
   const scheduler = createSummaryScheduler({
     getSettings: () => enabledSettings({ defaultExecutorId: 'codex' }),
     listReports: () => [],
-    generate: request => { enqueued.push(request); return {} },
+    onReminder: reminder => { reminded.push(reminder) },
     now: () => NOW,
     timeZone: 'UTC',
     setIntervalFn: () => 1,
@@ -99,11 +111,11 @@ test('persisted unsafe executors never enqueue automatic work', async () => {
   })
 
   await scheduler.start()
-  assert.deepEqual(enqueued, [])
+  assert.equal(reminded.length, 5)
 })
 
-test('completed, current, and skipped empty periods are not enqueued again', async () => {
-  const enqueued = []
+test('only canonical completed reports suppress reminders', async () => {
+  const reminded = []
   const statusByPeriod = {
     day: [{ status: 'completed', isCurrent: false }],
     week: [{ status: 'skipped_empty', isCurrent: false }],
@@ -114,8 +126,12 @@ test('completed, current, and skipped empty periods are not enqueued again', asy
     getSettings: () => enabledSettings({
       autoPeriods: { day: true, week: true, month: true, quarter: true, year: false }
     }),
-    listReports: filters => statusByPeriod[filters.periodType] || [],
-    generate: request => { enqueued.push(request); return {} },
+    listReports: filters => {
+      assert.equal(filters.status, 'completed')
+      return (statusByPeriod[filters.periodType] || [])
+        .filter(report => report.status === filters.status)
+    },
+    onReminder: reminder => { reminded.push(reminder) },
     now: () => NOW,
     timeZone: 'UTC',
     setIntervalFn: () => 1,
@@ -123,7 +139,49 @@ test('completed, current, and skipped empty periods are not enqueued again', asy
   })
 
   await scheduler.start()
-  assert.deepEqual(enqueued.map(item => item.periodType), ['quarter'])
+  assert.deepEqual(reminded.map(item => item.periodType), ['week', 'quarter'])
+})
+
+test('completed interactive repository report suppresses its logical period reminder', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-scheduler-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const repository = createReportRepository({ db: await openDb(join(root, 'ucli.db')) })
+  const request = {
+    periodType: 'day',
+    start: Date.parse('2026-08-11T00:00:00.000Z'),
+    endExclusive: Date.parse('2026-08-12T00:00:00.000Z'),
+    timezone: 'UTC', partial: false, generatedBy: 'manual', executorId: 'claude',
+    profileId: null, model: null, executionMode: SUMMARY_EXECUTION_MODE.INTERACTIVE_CLI
+  }
+  const report = await repository.createQueued(request)
+  await repository.update(report.id, { status: 'running', runPhase: 'running' })
+  const markdown = '# 工作总结\n'
+  const sha256 = `sha256:${createHash('sha256').update(markdown).digest('hex')}`
+  await repository.complete(report.id, {
+    markdown,
+    sourceHash: sha256,
+    artifactMetadata: {
+      canonical: 'markdown',
+      bytes: Buffer.byteLength(markdown),
+      sha256
+    }
+  })
+  const reminded = []
+  const scheduler = createSummaryScheduler({
+    getSettings: () => enabledSettings({
+      autoPeriods: { day: true, week: false, month: false, quarter: false, year: false }
+    }),
+    listReports: filters => repository.list(filters),
+    onReminder: reminder => { reminded.push(reminder) },
+    now: () => NOW,
+    timeZone: 'UTC',
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {}
+  })
+
+  await scheduler.start()
+
+  assert.deepEqual(reminded, [])
 })
 
 test('the in-app timer ticks every 15 minutes and stop clears it', async () => {
@@ -131,13 +189,13 @@ test('the in-app timer ticks every 15 minutes and stop clears it', async () => {
   let callback = null
   let delay = null
   let cleared = null
-  const enqueued = []
+  const reminded = []
   const scheduler = createSummaryScheduler({
     getSettings: () => enabledSettings({
       autoPeriods: { day: true, week: false, month: false, quarter: false, year: false }
     }),
     listReports: () => [],
-    generate: request => { enqueued.push(request); return {} },
+    onReminder: reminder => { reminded.push(reminder) },
     now: () => current,
     timeZone: 'UTC',
     setIntervalFn: (fn, ms) => { callback = fn; delay = ms; return 42 },
@@ -149,14 +207,14 @@ test('the in-app timer ticks every 15 minutes and stop clears it', async () => {
   current = Date.parse('2026-08-13T00:01:00.000Z')
   callback()
   await scheduler.tick()
-  assert.equal(enqueued.length, 2)
+  assert.equal(reminded.length, 2)
 
   scheduler.stop()
   assert.equal(cleared, 42)
 })
 
-test('several missed periods enqueue only the latest completed day', async () => {
-  const enqueued = []
+test('several missed periods remind only the latest completed day', async () => {
+  const reminded = []
   const scheduler = createSummaryScheduler({
     getSettings: () => enabledSettings({
       autoPeriods: { day: true, week: false, month: false, quarter: false, year: false }
@@ -169,7 +227,7 @@ test('several missed periods enqueue only the latest completed day', async () =>
         status: 'completed'
       }
     ],
-    generate: request => { enqueued.push(request); return {} },
+    onReminder: reminder => { reminded.push(reminder) },
     now: () => NOW,
     timeZone: 'UTC',
     setIntervalFn: () => 1,
@@ -177,22 +235,21 @@ test('several missed periods enqueue only the latest completed day', async () =>
   })
 
   await scheduler.start()
-  assert.equal(enqueued.length, 1)
-  assert.equal(enqueued[0].start, Date.parse('2026-08-11T00:00:00.000Z'))
+  assert.equal(reminded.length, 1)
+  assert.equal(reminded[0].start, Date.parse('2026-08-11T00:00:00.000Z'))
 })
 
-test('a failed automatic job is not retried every tick but can retry after restart', async () => {
-  const enqueued = []
-  let resolveFirst
-  const firstCompletion = new Promise(resolve => { resolveFirst = resolve })
+test('a failed reminder delivery is not retried every tick but refires after restart', async () => {
+  const attempts = []
+  let failed = true
   const scheduler = createSummaryScheduler({
     getSettings: () => enabledSettings({
       autoPeriods: { day: true, week: false, month: false, quarter: false, year: false }
     }),
     listReports: () => [],
-    generate: request => {
-      enqueued.push(request)
-      return enqueued.length === 1 ? { completion: firstCompletion } : {}
+    onReminder: () => {
+      attempts.push(1)
+      if (failed) throw new Error('notification delivery failed')
     },
     now: () => NOW,
     timeZone: 'UTC',
@@ -201,18 +258,16 @@ test('a failed automatic job is not retried every tick but can retry after resta
   })
 
   await scheduler.start()
-  resolveFirst({ status: 'failed' })
-  await firstCompletion
   await scheduler.tick()
+  assert.equal(attempts.length, 1)
 
-  assert.equal(enqueued.length, 1)
-
+  // A fresh scheduler forgets the in-memory dedup and reminds again.
   const restarted = createSummaryScheduler({
     getSettings: () => enabledSettings({
       autoPeriods: { day: true, week: false, month: false, quarter: false, year: false }
     }),
-    listReports: () => [{ status: 'failed', isCurrent: false }],
-    generate: request => { enqueued.push(request); return {} },
+    listReports: () => [],
+    onReminder: () => { attempts.push(1) },
     now: () => NOW,
     timeZone: 'UTC',
     setIntervalFn: () => 1,
@@ -220,36 +275,40 @@ test('a failed automatic job is not retried every tick but can retry after resta
   })
   await restarted.start()
 
-  assert.equal(enqueued.length, 2)
+  assert.equal(attempts.length, 2)
 })
 
-test('stop cancels and waits for automatic jobs before shutdown can flush', async () => {
-  let resolveCompletion
-  const completion = new Promise(resolve => { resolveCompletion = resolve })
-  const cancelled = []
+test('stop clears the timer and awaits the in-flight tick', async () => {
+  let cleared = null
+  let releaseReminder
+  let signalReminderStarted
+  const reminderStarted = new Promise(resolve => { signalReminderStarted = resolve })
+  const reminderGate = new Promise(resolve => { releaseReminder = resolve })
   const scheduler = createSummaryScheduler({
     getSettings: () => enabledSettings({
       autoPeriods: { day: true, week: false, month: false, quarter: false, year: false }
     }),
     listReports: () => [],
-    generate: () => ({ reportId: 'report-1', completion }),
-    cancel: reportId => { cancelled.push(reportId) },
+    onReminder: () => { signalReminderStarted(); return reminderGate },
     now: () => NOW,
     timeZone: 'UTC',
-    setIntervalFn: () => 1,
-    clearIntervalFn: () => {}
+    setIntervalFn: () => 42,
+    clearIntervalFn: id => { cleared = id }
   })
-  await scheduler.start()
+
+  const starting = scheduler.start()
+  await reminderStarted
 
   let stopped = false
   const stopping = scheduler.stop().then(() => { stopped = true })
   await Promise.resolve()
-  assert.deepEqual(cancelled, ['report-1'])
   assert.equal(stopped, false)
 
-  resolveCompletion({ status: 'cancelled' })
+  releaseReminder()
   await stopping
+  await starting
   assert.equal(stopped, true)
+  assert.equal(cleared, 42)
 })
 
 test('daily maintenance removes expired workspaces before cache LRU and does not hang timers', async () => {
@@ -258,7 +317,7 @@ test('daily maintenance removes expired workspaces before cache LRU and does not
   const scheduler = createSummaryScheduler({
     getSettings: () => enabledSettings({ autoEnabled: false }),
     listReports: () => [],
-    generate: () => ({}),
+    onReminder: () => ({}),
     maintain: async () => {
       events.push('workspace-expired')
       events.push('cache-lru')
@@ -277,7 +336,7 @@ test('daily maintenance removes expired workspaces before cache LRU and does not
   await scheduler.stop()
 })
 
-test('maintenance runs before automatic generation and failures do not block catch-up', async () => {
+test('maintenance runs before reminders and failures do not block catch-up', async () => {
   const events = []
   const failures = []
   const scheduler = createSummaryScheduler({
@@ -285,7 +344,7 @@ test('maintenance runs before automatic generation and failures do not block cat
       autoPeriods: { day: true, week: false, month: false, quarter: false, year: false }
     }),
     listReports: () => [],
-    generate: () => { events.push('generate'); return {} },
+    onReminder: () => { events.push('remind') },
     maintain: async () => {
       events.push('maintain')
       throw Object.assign(new Error('prompt C:\\private'), { code: 'SUMMARY_CACHE_PRUNE_FAILED' })
@@ -297,7 +356,7 @@ test('maintenance runs before automatic generation and failures do not block cat
     clearIntervalFn: () => {}
   })
   await scheduler.start()
-  assert.deepEqual(events, ['maintain', 'generate'])
+  assert.deepEqual(events, ['maintain', 'remind'])
   assert.deepEqual(failures, [{ phase: 'daily-maintenance', code: 'SUMMARY_CACHE_PRUNE_FAILED' }])
   assert.doesNotMatch(JSON.stringify(failures), /prompt|private/i)
 })

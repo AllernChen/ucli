@@ -38,18 +38,41 @@ test('summary startup failure is typed and never blocks the main window', async 
   assert.doesNotMatch(JSON.stringify(errors), /prompt|transcript|credential/)
 })
 
-test('summary lifecycle orders recovery, cache maintenance, stale interruption, and catch-up', async () => {
+test('summary lifecycle interrupts stale jobs before recovery, legacy import, maintenance, and catch-up', async () => {
   const events = []
   const errors = []
   await runSummaryStartupLifecycle({
     recoverWorkspaces: async () => { events.push('workspace-recover'); return { interrupted: 1, removed: 2 } },
+    importLegacyWorkLogs: async () => { events.push('legacy-import'); return { scanned: 1, imported: 1, existing: 0, rejected: 0 } },
     maintainCache: async () => { events.push('cache-prune'); return { removed: 3, bytes: 64 } },
     interruptStaleJobs: async () => { events.push('job-interrupt'); return { interrupted: 1 } },
     startScheduler: async () => { events.push('scheduler') },
     onEvent: event => errors.push(event)
   })
-  assert.deepEqual(events, ['workspace-recover', 'cache-prune', 'job-interrupt', 'scheduler'])
+  assert.deepEqual(events, ['job-interrupt', 'workspace-recover', 'legacy-import', 'cache-prune', 'scheduler'])
   assert.deepEqual(errors, [])
+})
+
+test('legacy work log import failure is safe and does not bypass critical recovery or scheduler', async () => {
+  const events = []
+  const logs = []
+  const result = await runSummaryStartupLifecycle({
+    interruptStaleJobs: async () => { events.push('interrupt') },
+    recoverWorkspaces: async () => { events.push('workspace') },
+    importLegacyWorkLogs: async () => {
+      events.push('legacy-import')
+      throw Object.assign(new Error('C:\\private\\workLogs\\report.md'), {
+        code: 'SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED'
+      })
+    },
+    maintainCache: async () => { events.push('cache') },
+    startScheduler: async () => { events.push('scheduler') },
+    onEvent: event => logs.push(event)
+  })
+  assert.deepEqual(result, { ready: true })
+  assert.deepEqual(events, ['interrupt', 'workspace', 'legacy-import', 'cache', 'scheduler'])
+  assert.deepEqual(logs, [{ phase: 'legacy-worklog-import', code: 'SUMMARY_LEGACY_WORKLOG_IMPORT_FAILED' }])
+  assert.doesNotMatch(JSON.stringify(logs), /private|workLogs|report\.md/i)
 })
 
 test('summary startup maintenance failures are typed and never block scheduler or expose details', async () => {
@@ -67,9 +90,35 @@ test('summary startup maintenance failures are typed and never block scheduler o
     startScheduler: async () => { events.push('scheduler') },
     onEvent: event => logs.push(event)
   })
-  assert.deepEqual(events, ['workspace', 'cache', 'interrupt', 'scheduler'])
+  assert.deepEqual(events, ['interrupt', 'workspace', 'cache', 'scheduler'])
   assert.deepEqual(logs, [{ phase: 'cache-maintenance', code: 'SUMMARY_CACHE_ENTRY_INVALID' }])
   assert.doesNotMatch(JSON.stringify(logs), /private|cache key|prompt|secret/i)
+})
+
+test('critical summary recovery failures skip maintenance and scheduler and report not-ready', async () => {
+  for (const failedPhase of ['interrupt', 'workspace']) {
+    const calls = []
+    const errors = []
+    const result = await runSummaryStartupLifecycle({
+      interruptStaleJobs: async () => {
+        calls.push('interrupt')
+        if (failedPhase === 'interrupt') throw new Error('private database path')
+      },
+      recoverWorkspaces: async () => {
+        calls.push('workspace')
+        if (failedPhase === 'workspace') throw new Error('private workspace path')
+      },
+      maintainCache: async () => { calls.push('maintenance') },
+      startScheduler: async () => { calls.push('scheduler') },
+      onEvent: event => errors.push(event)
+    })
+    assert.deepEqual(result, { ready: false })
+    assert.deepEqual(calls, failedPhase === 'interrupt'
+      ? ['interrupt']
+      : ['interrupt', 'workspace'])
+    assert.equal(errors.length, 1)
+    assert.doesNotMatch(JSON.stringify(errors), /private|path/i)
+  }
 })
 
 test('daily maintenance isolates workspace and cache phases and exposes only safe counters', async () => {
@@ -109,7 +158,7 @@ test('shared quota maintenance prunes expired workspaces, cache, then completed 
   assert.deepEqual(result.total, { bytes: 90, quotaBytes: 100, overQuotaBytes: 0 })
 })
 
-test('summary recovery happens after persistence and before scheduler catch-up', () => {
+test('summary stale interruption and recovery happen before scheduler catch-up accepts work', () => {
   const orchestrator = readFileSync(
     new URL('../electron/orchestrator.js', import.meta.url),
     'utf8'
@@ -117,19 +166,20 @@ test('summary recovery happens after persistence and before scheduler catch-up',
   const persistence = orchestrator.indexOf('const db = await openDb(dbPath')
   const initializeAutomation = orchestrator.indexOf('await initSummaryAutomation(db)', persistence)
   const automationFactory = orchestrator.indexOf('async function initSummaryAutomation(db)')
-  const jobService = orchestrator.indexOf('summaryJobService = createSummaryJobService')
+  const jobService = orchestrator.indexOf('interactiveSummaryJobService = createInteractiveSummaryJobService')
   const scheduler = orchestrator.indexOf('summaryScheduler = createSummaryScheduler')
   const lifecycle = orchestrator.indexOf('await runSummaryStartupLifecycle({', scheduler)
-  const workspaceRecovery = orchestrator.indexOf('recoverWorkspaces:', lifecycle)
+  const interrupt = orchestrator.indexOf('interruptStaleJobs:', lifecycle)
+  const workspaceRecovery = orchestrator.indexOf('recoverWorkspaces:', interrupt)
   const cacheMaintenance = orchestrator.indexOf('maintainCache:', workspaceRecovery)
-  const interrupt = orchestrator.indexOf('interruptStaleJobs:', cacheMaintenance)
-  const catchUp = orchestrator.indexOf('startScheduler:', interrupt)
+  const legacyImport = orchestrator.indexOf('importLegacyWorkLogs:', workspaceRecovery)
+  const catchUp = orchestrator.indexOf('startScheduler:', cacheMaintenance)
 
   assert.ok(persistence >= 0 && initializeAutomation > persistence)
   assert.ok(automationFactory >= 0 && jobService > automationFactory)
   assert.ok(scheduler > jobService && lifecycle > scheduler)
-  assert.ok(workspaceRecovery > lifecycle && cacheMaintenance > workspaceRecovery)
-  assert.ok(interrupt > cacheMaintenance && catchUp > interrupt)
+  assert.ok(interrupt > lifecycle && workspaceRecovery > interrupt)
+  assert.ok(legacyImport > workspaceRecovery && cacheMaintenance > legacyImport && catchUp > cacheMaintenance)
 })
 
 test('orchestrator stops summary catch-up before gateway and database shutdown', () => {
@@ -139,13 +189,15 @@ test('orchestrator stops summary catch-up before gateway and database shutdown',
   )
   const shutdown = source.indexOf('function shutdown()')
   const schedulerStop = source.indexOf('await summaryScheduler?.stop()', shutdown)
-  const jobsStop = source.indexOf('await summaryJobService?.shutdown()', schedulerStop)
+  const interactiveStop = source.indexOf("await interactiveSummaryJobService?.interruptAll('SUMMARY_APP_SHUTDOWN')", schedulerStop)
+  const jobsStop = source.indexOf('await summaryJobService?.shutdown()', interactiveStop)
   const compactWorkspaces = source.indexOf('await summaryWorkspaceService?.recover()', jobsStop)
   const gatewayStop = source.indexOf('await gatewayManager?.shutdown()', compactWorkspaces)
   const databaseFlush = source.indexOf('db.flush()', gatewayStop)
 
   assert.ok(shutdown >= 0 && schedulerStop > shutdown)
-  assert.ok(jobsStop > schedulerStop && compactWorkspaces > jobsStop)
+  assert.ok(interactiveStop > schedulerStop && jobsStop > interactiveStop)
+  assert.ok(compactWorkspaces > jobsStop)
   assert.ok(gatewayStop > compactWorkspaces && databaseFlush > gatewayStop)
 })
 

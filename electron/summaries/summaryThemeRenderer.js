@@ -1,14 +1,11 @@
-import MarkdownIt from 'markdown-it'
-
 import { getSummaryTheme } from './summaryThemeCatalog.js'
+import { createSummaryMarkdownParser } from './summaryMarkdownParser.js'
 
-const markdownRenderer = new MarkdownIt({
-  html: false,
-  linkify: false,
-  typographer: false
-})
+const markdownRenderer = createSummaryMarkdownParser()
 
-const BASE_CSS = `
+// Shared base stylesheet. Exported so the workLogs template can hand the same
+// CSS to an interactive AI CLI for generating a structurally identical HTML.
+export const SUMMARY_BASE_CSS = `
 *{box-sizing:border-box}
 html{font-family:Arial,"Microsoft YaHei",sans-serif;font-size:16px;line-height:1.6}
 body{margin:0;min-height:100vh}
@@ -128,5 +125,5 @@ export function renderSummaryTheme({ themeId, markdown, report = {}, usageSnapsh
     `<li data-level="${heading.level}"><a href="#${escapeHtml(heading.id)}">${escapeHtml(heading.label)}</a></li>`
   ).join('')
   const article = themeArticle(theme.id, theme.marker, content, usageSnapshot)
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>工作总结</title><style>${BASE_CSS}${theme.css}</style></head><body data-summary-theme="${theme.id}"><nav aria-label="报告目录"><h2>目录</h2><ol>${navigation}</ol></nav><main>${article}</main></body></html>`
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>工作总结</title><style>${SUMMARY_BASE_CSS}${theme.css}</style></head><body data-summary-theme="${theme.id}"><nav aria-label="报告目录"><h2>目录</h2><ol>${navigation}</ol></nav><main>${article}</main></body></html>`
 }

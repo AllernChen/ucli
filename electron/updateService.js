@@ -51,8 +51,12 @@ export function createUpdateService({
   let initialTimer = null
   let periodicTimer = null
   let installTimer = null
+  let retryTimer = null
+  let retryScheduled = false
+  let firstCheckPending = false
   let started = false
   let intervalMs = 21600000
+  let retryDelayMs = 60000
 
   function snapshot() { return { ...state } }
 
@@ -88,11 +92,27 @@ export function createUpdateService({
   }
 
   function clearTimer(name) {
-    const id = name === 'initial' ? initialTimer : name === 'periodic' ? periodicTimer : installTimer
+    const id = name === 'initial' ? initialTimer
+      : name === 'periodic' ? periodicTimer
+      : name === 'retry' ? retryTimer
+      : installTimer
     if (id != null) cancelSchedule(id)
     if (name === 'initial') initialTimer = null
     else if (name === 'periodic') periodicTimer = null
+    else if (name === 'retry') retryTimer = null
     else installTimer = null
+  }
+
+  // A transient failure on the very first startup check should not leave the
+  // footer stuck for six hours. Re-check once shortly after, then fall back to
+  // the long periodic interval. Only the first failure of the session re-arms.
+  function scheduleSoonRetry() {
+    if (!started || retryTimer != null || retryScheduled || !firstCheckPending) return
+    retryScheduled = true
+    retryTimer = schedule(async () => {
+      retryTimer = null
+      if (PERIODIC_STATUSES.has(state.status)) await check()
+    }, retryDelayMs)
   }
 
   function schedulePeriodic() {
@@ -155,7 +175,11 @@ export function createUpdateService({
       error: ''
     })
   })
-  updater.on('error', () => fail('更新检查失败'))
+  updater.on('error', (error) => {
+    console.error('[update] update check failed:', error?.message || error)
+    fail('更新检查失败')
+    scheduleSoonRetry()
+  })
 
   function check() {
     if (!supported) return Promise.resolve(snapshot())
@@ -177,13 +201,19 @@ export function createUpdateService({
     checkPromise = (async () => {
       try {
         await updater.checkForUpdates()
-      } catch {
+      } catch (error) {
+        console.error('[update] update check failed:', error?.message || error)
         fail('更新检查失败')
+        scheduleSoonRetry()
       }
       emit({ checkedAt: safeInteger(now()) })
       return snapshot()
     })().finally(() => {
       checkPromise = null
+      if (state.status !== 'error') {
+        firstCheckPending = false
+        retryScheduled = false
+      }
       if (started) {
         if (PERIODIC_STATUSES.has(state.status)) schedulePeriodic()
         else clearTimer('periodic')
@@ -198,7 +228,10 @@ export function createUpdateService({
       status: 'downloading', progressPercent: 0,
       transferred: null, total: null, bytesPerSecond: null, error: ''
     })
-    try { await updater.downloadUpdate() } catch { fail('更新下载失败') }
+    try { await updater.downloadUpdate() } catch (error) {
+      console.error('[update] update download failed:', error?.message || error)
+      fail('更新下载失败')
+    }
     return snapshot()
   }
 
@@ -207,7 +240,10 @@ export function createUpdateService({
     emit({ status: 'installing', error: '' })
     installTimer = schedule(() => {
       installTimer = null
-      try { updater.quitAndInstall(false, true) } catch { fail('更新安装失败') }
+      try { updater.quitAndInstall(false, true) } catch (error) {
+        console.error('[update] update install failed:', error?.message || error)
+        fail('更新安装失败')
+      }
     }, 200)
     return true
   }
@@ -217,9 +253,13 @@ export function createUpdateService({
     const config = typeof options === 'number' ? { initialDelayMs: options } : options
     const initialDelayMs = safeInteger(config.initialDelayMs, 3000)
     intervalMs = safeInteger(config.intervalMs, 21600000)
+    retryDelayMs = safeInteger(config.retryDelayMs, 60000)
     started = true
+    firstCheckPending = true
+    retryScheduled = false
     clearTimer('initial')
     clearTimer('periodic')
+    clearTimer('retry')
     initialTimer = schedule(async () => {
       initialTimer = null
       if (PERIODIC_STATUSES.has(state.status)) await check()
@@ -232,6 +272,7 @@ export function createUpdateService({
     started = false
     clearTimer('initial')
     clearTimer('periodic')
+    clearTimer('retry')
     clearTimer('install')
   }
 

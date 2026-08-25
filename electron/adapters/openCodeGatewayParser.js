@@ -142,6 +142,18 @@ export function parseOpenCodeGatewayState(source = {}, previousCursor = [], iden
       })
     }
 
+    if (info.error && typeof info.error === 'object' &&
+      typeof info.error.name === 'string' && info.error.name) {
+      const interrupted = info.error.name === 'MessageAbortedError'
+      pushNew(eventKey(interrupted ? 'interrupted' : 'failed', info.id, info.time?.completed), {
+        type: interrupted ? 'turn_interrupted' : 'turn_failed',
+        sessionId: '',
+        turnId: currentTurnId,
+        occurredAt: occurredAt(message, true),
+        ...(interrupted ? {} : { errorCode: 'opencode_turn_failed' })
+      })
+      continue
+    }
     if (info.finish !== 'stop') continue
     if (info.agent === 'plan') {
       const markdown = messageText(message)

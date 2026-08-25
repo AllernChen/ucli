@@ -2,7 +2,10 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
-import { createGatewayPort } from '../electron/gateway/orchestratorPort.js'
+import {
+  createGatewayPort,
+  sendAdapterTurn
+} from '../electron/gateway/orchestratorPort.js'
 
 test('the Gateway port exposes only the approved UCLI operations', async () => {
   const calls = []
@@ -63,4 +66,25 @@ test('orchestrator wires permission and adapter lifecycle into the Gateway bound
   )
   assert.match(source, /turnActive:\s*entry\._gatewayTurnActive === true/)
   assert.doesNotMatch(source, /gatewayRuntime\.sessions/)
+  assert.match(source, /session:send-turn[\s\S]*sendAdapterTurn\(e, text\)/)
+})
+
+test('ordinary session turn delivery advances running state only after true acceptance', async () => {
+  const rejected = {
+    status: 'idle',
+    _gatewayTurnActive: false,
+    adapter: { sendTurn: async () => false }
+  }
+  assert.equal(await sendAdapterTurn(rejected, 'prompt'), false)
+  assert.equal(rejected.status, 'idle')
+  assert.equal(rejected._gatewayTurnActive, false)
+
+  const accepted = {
+    status: 'idle',
+    _gatewayTurnActive: false,
+    adapter: { sendTurn: async () => true }
+  }
+  assert.equal(await sendAdapterTurn(accepted, 'prompt'), true)
+  assert.equal(accepted.status, 'running')
+  assert.equal(accepted._gatewayTurnActive, true)
 })

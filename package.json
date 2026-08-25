@@ -1,6 +1,6 @@
 {
   "name": "ucli",
-  "version": "0.11.5",
+  "version": "0.11.6",
   "description": "UCLI — 多 CLI 编排工作台 GUI（Claude Code / Codex 等的卡片式编排与权限管控）",
   "author": "ucli",
   "license": "MIT",
@@ -65,9 +65,11 @@
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/compiler-dom": "^3.5.40",
     "@vue/compiler-sfc": "^3.5.40",
+    "@vue/test-utils": "2.4.6",
     "electron": "^43.4.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "jsdom": "26.1.0",
     "vite": "^7.3.6"
   },
   "engines": {

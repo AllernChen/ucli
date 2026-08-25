@@ -171,6 +171,28 @@ test('Codex adapter verifies current decisions and owns provider input', async (
   await adapter.dispose()
 })
 
+test('Codex explicit task failure emits a failed lifecycle event', async () => {
+  const { parseCodexGatewayState } = await parser()
+  const lines = fixtureLines('codex-result')
+  const failed = parseCodexGatewayState([
+    ...lines.slice(0, 2),
+    JSON.stringify({
+      type: 'event_msg',
+      timestamp: '2026-07-30T05:00:02.000Z',
+      payload: {
+        type: 'task_failed',
+        turn_id: 'codex-turn-result',
+        error_code: 'provider_failed'
+      }
+    })
+  ])
+
+  assert.deepEqual(failed.events.map(event => event.type), [
+    'turn_started',
+    'turn_failed'
+  ])
+})
+
 test('Codex Gateway identifies a resumed rollout by its current ID, not its ancestor session_id', async () => {
   const { parseCodexGatewayState } = await parser()
   const state = parseCodexGatewayState([
@@ -206,5 +228,18 @@ test('Codex adapter writes the second approval choice back to the TUI', async ()
     { accepted: true }
   )
   assert.deepEqual(writes, ['\x1b[B', '\r'])
+  await adapter.dispose()
+})
+
+test('Codex sendTurn returns the PTY write acceptance result', async () => {
+  const adapter = new CodexAdapter({
+    session: { id: 'session-1', cwd: 'F:\\projects\\ucli' },
+    engine: null,
+    settings: {}
+  })
+  adapter.writeInput = value => value === 'accepted\r'
+
+  assert.equal(await adapter.sendTurn('accepted'), true)
+  assert.equal(await adapter.sendTurn('rejected'), false)
   await adapter.dispose()
 })

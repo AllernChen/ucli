@@ -29,3 +29,25 @@ test('main gates cleanup, session setup, and application startup behind the prim
   assert.ok(cleanup > bootstrap && sessionMkdir > cleanup && ready > sessionMkdir)
   assert.equal(source.match(/requestSingleInstanceLock\(\)/g)?.length, 1)
 })
+
+test('second-instance registration can reference a module-scoped window focus function', () => {
+  const source = readFileSync(new URL('../electron/main.js', import.meta.url), 'utf8')
+  const gate = source.indexOf('runPrimaryInstanceGate({')
+  const secondInstance = source.indexOf("onSecondInstance: () => app.on('second-instance', () => showMainWindow())", gate)
+  const showMainWindow = source.indexOf('function showMainWindow()')
+
+  assert.ok(secondInstance > gate)
+  assert.ok(showMainWindow >= 0 && showMainWindow < gate,
+    'showMainWindow must be declared before the second-instance gate')
+  assert.equal(braceDepthAt(source, showMainWindow), 0,
+    'showMainWindow must be declared at module scope')
+})
+
+function braceDepthAt(source, end) {
+  let depth = 0
+  for (let index = 0; index < end; index += 1) {
+    if (source[index] === '{') depth += 1
+    if (source[index] === '}') depth -= 1
+  }
+  return depth
+}

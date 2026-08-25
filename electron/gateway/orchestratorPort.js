@@ -24,6 +24,14 @@ export function describeGatewaySessionEligibility(session) {
   return { eligible: false, reason: 'DSH_TUI_UNAVAILABLE' }
 }
 
+export async function sendAdapterTurn(entry, text) {
+  const accepted = await entry.adapter.sendTurn(text)
+  if (accepted !== true) return false
+  entry.status = 'running'
+  entry._gatewayTurnActive = true
+  return true
+}
+
 export function createGatewaySessionOperations({ getEntry, getSession }) {
   const eligibleEntry = (sessionId) => {
     const entry = getEntry(sessionId)
@@ -37,9 +45,9 @@ export function createGatewaySessionOperations({ getEntry, getSession }) {
     async sendTurn(sessionId, text) {
       const { entry, reason } = eligibleEntry(sessionId)
       if (!entry) return { accepted: false, reason }
-      await entry.adapter.sendTurn(text)
-      entry.status = 'running'
-      entry._gatewayTurnActive = true
+      if (!await sendAdapterTurn(entry, text)) {
+        return { accepted: false, reason: 'turn_not_accepted' }
+      }
       return { accepted: true }
     },
     async interrupt(sessionId) {

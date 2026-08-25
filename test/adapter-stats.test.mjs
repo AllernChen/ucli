@@ -59,6 +59,17 @@ test('parses Claude transcript stats from assistant usage and result modelUsage'
   ])
 })
 
+test('counts current Claude TUI string user content as a turn', () => {
+  const stats = parseClaudeTranscriptStats([
+    JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: 'Generate the bounded summary.' }
+    })
+  ])
+
+  assert.equal(stats.turnsCount, 1)
+})
+
 test('parses Codex token_count events and session metadata', () => {
   const stats = parseCodexTranscriptStats([
     JSON.stringify({

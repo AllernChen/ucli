@@ -1,7 +1,11 @@
 <template>
   <a-card v-if="report" class="summary-report" :title="`${periodLabel} · v${report.version}`">
-    <template #extra><a-tag :color="statusColor">{{ report.status }}</a-tag></template>
-    <a-descriptions size="small" :column="3" bordered>
+    <template #extra><a-tag :color="status.color">{{ status.label }}</a-tag></template>
+    <a-descriptions
+      size="small"
+      :column="{ xs: 1, sm: 1, md: 2, lg: 2, xl: 3, xxl: 3 }"
+      bordered
+    >
       <a-descriptions-item label="周期">{{ report.periodType }}{{ report.partial ? ' · partial' : '' }}</a-descriptions-item>
       <a-descriptions-item label="AI CLI">{{ report.executorId || '—' }}</a-descriptions-item>
       <a-descriptions-item label="模型">{{ report.model || '默认' }}</a-descriptions-item>
@@ -19,66 +23,98 @@
     />
     <a-alert v-if="coverageWarning" style="margin-top:12px" type="warning" show-icon :message="coverageWarning" />
     <a-alert
+      v-if="failed"
+      style="margin-top:12px"
+      type="error"
+      show-icon
+      :message="error.message"
+      :description="`${error.action}（错误代码：${error.code}）`"
+    />
+    <a-alert
       v-if="awaitingConfirmation"
       style="margin-top:12px"
       type="warning"
       show-icon
-      message="确认继续"
-      :description="`预计调用 ${progress.total} 次，继续可能产生费用。确认后将在同一报告版本中继续。`"
-    >
-      <template #action>
-        <a-button type="primary" size="small" @click="$emit('confirm', report.id)">确认继续</a-button>
-      </template>
-    </a-alert>
-    <div v-if="progress" class="progress-row">
-      <a-progress :percent="progress.total ? Math.round(progress.completed / progress.total * 100) : 0" />
-      <span>{{ progress.text }}</span>
-      <a-button v-if="active" danger size="small" @click="$emit('cancel', report.id)">取消生成</a-button>
-    </div>
-    <div class="actions">
-      <a-button @click="copyMarkdown">复制 Markdown</a-button>
-      <a-button @click="$emit('export-markdown', report.id)">导出 Markdown</a-button>
-      <a-button
-        :loading="htmlExporting"
-        :disabled="htmlExporting"
-        @click="$emit('export-html', report.id)"
-      >{{ htmlExporting ? '正在生成 HTML' : '导出 HTML' }}</a-button>
-      <a-popconfirm
-        v-if="!active"
-        title="确认删除这份总结？此操作不可恢复。"
-        ok-text="确认删除"
-        cancel-text="取消"
-        @confirm="$emit('delete-report', report.id)"
-      >
-        <a-button danger>删除总结</a-button>
-      </a-popconfirm>
-    </div>
-    <article
-      v-if="report.markdown"
-      class="markdown-body"
-      v-html="safeHtml"
-      @click="handleReportLink"
+      message="旧版报告等待确认"
+      description="此报告无法在此继续。请取消后重试，以创建新的总结版本。"
     />
+    <div v-if="visibleProgress" class="progress-row">
+      <a-progress :percent="visibleProgress.total ? Math.round(visibleProgress.completed / visibleProgress.total * 100) : 0" />
+      <span>{{ visibleProgress.text }}</span>
+    </div>
+    <div v-if="active" class="cancel-row"><a-button danger size="small" @click="$emit('cancel', report.id)">取消生成</a-button></div>
+    <div class="summary-detail-actions">
+      <div class="summary-detail-actions__group summary-detail-actions__primary">
+        <a-button aria-label="编辑总结任务" @click="$emit('edit', report)">编辑任务</a-button>
+        <a-button @click="$emit('open-conversation', report)">查看关联对话</a-button>
+        <a-button @click="copyMarkdown">复制 Markdown</a-button>
+      </div>
+      <div class="summary-detail-actions__group summary-detail-actions__export">
+        <a-button :disabled="!exportable" @click="exportMarkdown">导出 Markdown</a-button>
+        <a-button
+          :loading="htmlExporting"
+          :disabled="!exportable || htmlExporting"
+          @click="exportHtml"
+        >{{ htmlExporting ? '正在生成 HTML' : '导出 HTML' }}</a-button>
+      </div>
+      <div class="summary-detail-actions__group summary-detail-actions__danger">
+        <a-button danger :loading="deleting" :disabled="deleting" :title="deleteTitle" :aria-label="deleteTitle" @click="openDeleteConfirm">删除总结</a-button>
+      </div>
+    </div>
+    <a-modal
+      :open="deleteConfirmOpen"
+      :title="deleteTitle"
+      ok-text="确认删除"
+      cancel-text="取消"
+      :confirm-loading="deleteConfirmLoading"
+      :mask-closable="!deleteConfirmLoading"
+      :keyboard="!deleteConfirmLoading"
+      :closable="!deleteConfirmLoading"
+      :cancel-button-props="{ disabled: deleteConfirmLoading }"
+      @ok="confirmDelete"
+      @cancel="cancelDeleteConfirm"
+    />
+    <div v-if="report.markdown" class="summary-markdown-shell">
+      <article
+        class="markdown-body"
+        v-html="safeHtml"
+        @click="handleReportLink"
+      />
+    </div>
     <a-empty v-else description="报告内容尚未生成" />
   </a-card>
   <a-empty v-else description="请选择或生成一份工作总结" />
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
 import ipc from '../../ipc.js'
 import { openSummaryReportLink } from '../../summaryLinks.js'
+import { summaryTaskErrorMeta, summaryTaskStatusMeta } from '../../../shared/summaryTaskContracts.js'
 
-const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean })
-defineEmits(['cancel', 'confirm', 'export-markdown', 'export-html', 'delete-report'])
+const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean, deleting: Boolean, deleteReport: Function })
+const emit = defineEmits(['cancel', 'edit', 'export-markdown', 'export-html', 'delete-report', 'open-conversation'])
+const deleteConfirmOpen = ref(false)
+const deletePending = ref(false)
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const safeHtml = computed(() => DOMPurify.sanitize(markdown.render(props.report?.markdown || '')))
 const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].includes(props.report?.status))
-const awaitingConfirmation = computed(() => props.progress?.phase === 'awaiting_confirmation')
-const statusColor = computed(() => props.report?.status === 'completed' ? 'green' : props.report?.status === 'failed' ? 'red' : 'blue')
-const periodLabel = computed(() => props.report ? `${new Date(props.report.periodStart).toLocaleDateString()} — ${new Date(props.report.periodEndExclusive).toLocaleDateString()}` : '')
+const terminal = computed(() => ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(props.report?.status))
+const exportable = computed(() => props.report?.status === 'completed')
+const awaitingConfirmation = computed(() => !terminal.value && props.report?.status === 'awaiting_confirmation')
+const visibleProgress = computed(() => terminal.value ? null : props.progress)
+const status = computed(() => summaryTaskStatusMeta(props.report, props.progress))
+const failed = computed(() => props.report?.status === 'failed')
+const error = computed(() => summaryTaskErrorMeta(props.report?.errorText))
+const displayEnd = computed(() => {
+  if (!props.report) return null
+  return props.report.partial ? props.report.periodEndExclusive : props.report.periodEndExclusive - 1
+})
+const periodLabel = computed(() => props.report ? `${formatPeriod(props.report.periodStart)} — ${formatPeriod(displayEnd.value)}` : '')
+const deleteTitle = computed(() => active.value ? '取消并删除这个总结任务？' : '删除这个总结任务？')
+const deleteConfirmLoading = computed(() => deletePending.value || props.deleting)
 const generationPerformance = computed(() => {
   if (props.report?.status !== 'completed') return ''
   const metrics = props.report?.generationMetrics
@@ -96,9 +132,43 @@ const coverageWarning = computed(() => {
   return props.report?.partial ? '当前周期尚未结束，报告为部分覆盖。' : ''
 })
 async function copyMarkdown() { await navigator.clipboard.writeText(props.report?.markdown || '') }
+function exportMarkdown() { if (exportable.value) emit('export-markdown', props.report.id) }
+function exportHtml() { if (exportable.value && !props.htmlExporting) emit('export-html', props.report.id) }
 function handleReportLink(event) { openSummaryReportLink(event, ipc.openExternal) }
+function openDeleteConfirm() {
+  if (!deleteConfirmLoading.value) deleteConfirmOpen.value = true
+}
+async function confirmDelete() {
+  if (deleteConfirmLoading.value) return
+  deletePending.value = true
+  try {
+    const outcome = props.deleteReport
+      ? await props.deleteReport(props.report.id)
+      : emit('delete-report', props.report.id)
+    if (outcome !== false) deleteConfirmOpen.value = false
+  } catch {
+    // The parent owns deletion errors; preserve the confirmation for a retry.
+  } finally {
+    deletePending.value = false
+  }
+}
+function cancelDeleteConfirm() {
+  if (!deleteConfirmLoading.value) deleteConfirmOpen.value = false
+}
+function formatPeriod(value) {
+  return new Date(value).toLocaleDateString('zh-CN', { timeZone: props.report?.timezone || undefined })
+}
 </script>
 
 <style scoped>
-.progress-row,.actions { display:flex; align-items:center; gap:10px; margin-top:12px; }.progress-row :deep(.ant-progress){flex:1}.markdown-body{margin-top:18px;line-height:1.75}.markdown-body :deep(pre){overflow:auto;padding:12px;background:#f5f5f5}.markdown-body :deep(table){border-collapse:collapse}.markdown-body :deep(td),.markdown-body :deep(th){border:1px solid #ddd;padding:6px}
+.progress-row { display:flex; align-items:center; gap:10px; margin-top:12px; }
+.cancel-row { margin-top:12px; }
+.progress-row :deep(.ant-progress) { flex:1; }
+.summary-detail-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; }
+.summary-detail-actions__group { display:flex; flex-wrap:wrap; gap:10px; }
+.summary-markdown-shell { min-width:0; overflow-x:auto; }
+.markdown-body { margin-top:18px; line-height:1.75; }
+.markdown-body :deep(pre) { overflow:auto; padding:12px; background:#f5f5f5; }
+.markdown-body :deep(table) { display:block; width:max-content; min-width:100%; max-width:100%; overflow-x:auto; border-collapse:collapse; }
+.markdown-body :deep(td),.markdown-body :deep(th) { border:1px solid #ddd; padding:6px; }
 </style>

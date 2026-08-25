@@ -212,6 +212,73 @@ test('Claude adapter verifies the current decision before writing native input',
   await adapter.dispose()
 })
 
+test('Claude parser emits turn_started for current TUI string user content', async () => {
+  const { parseClaudeGatewayState } = await parser()
+  const state = parseClaudeGatewayState([
+    JSON.stringify({
+      type: 'user',
+      uuid: 'turn-string-content',
+      timestamp: '2026-08-25T06:49:12.639Z',
+      message: { role: 'user', content: 'Generate the bounded summary.' }
+    })
+  ])
+
+  assert.deepEqual(state.events, [{
+    type: 'turn_started',
+    sessionId: '',
+    turnId: 'turn-string-content',
+    occurredAt: Date.parse('2026-08-25T06:49:12.639Z')
+  }])
+})
+
+test('Claude sendTurn confirms once without duplicate input', async () => {
+  const adapter = new ClaudeAdapter({
+    session: { id: 'session-1', cwd: 'F:\\projects\\ucli' },
+    engine: null,
+    settings: {}
+  })
+  const writes = []
+  let scans = 0
+  adapter.ptyProc = { write: value => writes.push(value), kill() {} }
+  adapter._waitTurnDelivered = async () => true
+  adapter._extractStats = () => { scans += 1 }
+
+  assert.equal(await adapter.sendTurn('summary prompt'), true)
+  assert.deepEqual(writes, ['summary prompt\r'])
+  assert.equal(scans, 1)
+  await adapter.dispose()
+})
+
+test('Claude sendTurn pulses submit before one bounded retype', async () => {
+  const adapter = new ClaudeAdapter({
+    session: { id: 'session-1', cwd: 'F:\\projects\\ucli' },
+    engine: null,
+    settings: {}
+  })
+  const writes = []
+  const windows = []
+  const outcomes = [false, false, false, true]
+  let scans = 0
+  adapter.ptyProc = { write: value => writes.push(value), kill() {} }
+  adapter._waitTurnDelivered = async (_fingerprint, _sinceMs, timeoutMs) => {
+    windows.push(timeoutMs)
+    return outcomes.shift()
+  }
+  adapter._extractStats = () => { scans += 1 }
+
+  assert.equal(await adapter.sendTurn('summary prompt'), true)
+  assert.deepEqual(writes, [
+    'summary prompt\r',
+    '\r',
+    '\x1b\x1b',
+    'summary prompt\r',
+    '\r'
+  ])
+  assert.deepEqual(windows, [8_000, 8_000, 500, 8_000])
+  assert.equal(scans, 1)
+  await adapter.dispose()
+})
+
 test('Claude hook passes user-decision tools through to the native prompt', () => {
   const runner = fileURLToPath(new URL('../resources/claudeHook.runner.mjs', import.meta.url))
   for (const toolName of ['AskUserQuestion', 'ExitPlanMode']) {

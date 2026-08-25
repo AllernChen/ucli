@@ -4,7 +4,9 @@ import test from 'node:test'
 import {
   assertSafeSummaryChild,
   resolveSummaryChild,
-  resolveSummaryStorageRoot
+  resolveSummaryStorageRoot,
+  resolveSummaryWorkLogsRoot,
+  resolveWorkLogsFile
 } from '../electron/summaries/summaryStoragePaths.js'
 
 const isUnsafe = error => error?.code === 'SUMMARY_STORAGE_PATH_UNSAFE'
@@ -92,6 +94,66 @@ test('rejects sibling-prefix paths and the storage root itself', () => {
   )
   assert.throws(
     () => assertSafeSummaryChild('/safe/summary', '/safe/summary'),
+    isUnsafe
+  )
+})
+
+test('resolves the workLogs root below the trusted summary storage root', () => {
+  assert.equal(resolveSummaryWorkLogsRoot({
+    platform: 'win32',
+    env: { LOCALAPPDATA: 'C:\\Users\\demo\\AppData\\Local' },
+    homeDirectory: 'C:\\Users\\demo'
+  }), 'C:\\Users\\demo\\AppData\\Local\\UCLI\\summary\\workLogs')
+  assert.equal(resolveSummaryWorkLogsRoot({
+    platform: 'darwin',
+    env: {},
+    homeDirectory: '/Users/demo'
+  }), '/Users/demo/Library/Caches/UCLI/summary/workLogs')
+  assert.equal(resolveSummaryWorkLogsRoot({
+    platform: 'linux',
+    env: { XDG_CACHE_HOME: '/var/cache/demo' },
+    homeDirectory: '/home/demo'
+  }), '/var/cache/demo/ucli/summary/workLogs')
+})
+
+test('resolves an opaque file inside workLogs with its platform path semantics', () => {
+  assert.equal(
+    resolveWorkLogsFile('C:\\safe\\summary\\workLogs', 'week-2026-33.md'),
+    'C:\\safe\\summary\\workLogs\\week-2026-33.md'
+  )
+  assert.equal(
+    resolveWorkLogsFile('/safe/summary/workLogs', 'week-2026-33.html'),
+    '/safe/summary/workLogs/week-2026-33.html'
+  )
+})
+
+test('rejects traversal, separators, dotfiles, and non-opaque names inside workLogs', () => {
+  for (const fileName of [
+    '../escape.md',
+    '..\\escape.md',
+    '/absolute.md',
+    'C:\\absolute.md',
+    'nested/value.md',
+    'nested\\value.md',
+    '.hidden',
+    '.week-2026-33.md',
+    'a'.repeat(129),
+    ''
+  ]) {
+    assert.throws(
+      () => resolveWorkLogsFile('/safe/summary/workLogs', fileName),
+      isUnsafe,
+      fileName
+    )
+  }
+})
+
+test('rejects a workLogs candidate that escapes below the storage root', () => {
+  assert.throws(
+    () => assertSafeSummaryChild(
+      'C:\\safe\\summary\\workLogs',
+      'C:\\safe\\summary\\other\\week-2026-33.md'
+    ),
     isUnsafe
   )
 })

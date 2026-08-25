@@ -22,14 +22,24 @@ async function continueAfterFailure(phase, operation, onError) {
 
 export async function runSummaryStartupLifecycle({
   recoverWorkspaces = () => {}, maintainCache = () => {},
-  interruptStaleJobs = () => {}, startScheduler = () => {}, onEvent = () => {}
+  interruptStaleJobs = () => {}, importLegacyWorkLogs = () => {},
+  startScheduler = () => {}, onEvent = () => {}
 } = {}) {
   for (const [phase, operation] of [
-    ['workspace-recovery', recoverWorkspaces],
-    ['cache-maintenance', maintainCache],
     ['stale-job-interruption', interruptStaleJobs],
-    ['scheduler-catch-up', startScheduler]
-  ]) await continueAfterFailure(phase, operation, onEvent)
+    ['workspace-recovery', recoverWorkspaces]
+  ]) {
+    try {
+      await operation()
+    } catch (error) {
+      try { onEvent(safeStartupFailure(phase, error)) } catch { /* logging cannot block startup */ }
+      return { ready: false }
+    }
+  }
+  await continueAfterFailure('legacy-worklog-import', importLegacyWorkLogs, onEvent)
+  await continueAfterFailure('cache-maintenance', maintainCache, onEvent)
+  await continueAfterFailure('scheduler-catch-up', startScheduler, onEvent)
+  return { ready: true }
 }
 
 function safeMaintenanceResult(value) {

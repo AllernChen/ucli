@@ -12,6 +12,18 @@ UCLI 是一个支持 macOS 与 Windows 的桌面工作台与本地代理。它�
 - **移除会话**：停止进程、关闭窗格并从 UCLI 会话列表隐藏；源会话以及已经产生的审计与用量统计保留。
 - **安全规则模式**：可信操作自动放行，高风险操作要求用户确认，硬黑名单始终拒绝。
 
+## 工作总结报告所有权与生命周期
+
+- **总结报告（summary report）**：数据库 `summary_reports` 中的版本化业务记录，是周期、状态、执行器、档案、模型、会话关联和规范 Markdown 的唯一真相源。相同周期重跑创建新版本，不覆盖历史版本。
+- **生成 run**：一次报告版本的主进程生命周期，按 `queued → running → completed/failed/interrupted/cancelled` 收口；`turn_started` 是提示词投递确认门槛，终态与恢复均以数据库记录为准。
+- **总结工作区（workspace）**：仅属于该 run 的受控派生目录，用于准备输入和临时输出；它不是报告真相源，完成后 Markdown 已原子保存到数据库，工作区清理不得删除报告内容。
+- **总结会话（session）**：该 run 唯一绑定的原生 CLI/UCLI 会话。报告版本、工作区和会话一一对应，重跑或并发运行不得复用彼此会话。
+- **总结任务元数据**：任务名称和备注属于 `summary_reports`；关联 UCLI session 只同步显示，不成为恢复真相源。
+- **删除总结任务**：先收口活动 run，再删除报告、受控 workspace 和独占 UCLI session 投影；CLI 原生 transcript 永远不在该删除范围内。
+- **数据库真相（DB truth）**：报告、当前版本、状态恢复和调度去重只读取 `summary_reports`；renderer 只投影该记录，不能以文件存在、计时器或会话显示状态判定完成。
+- **渲染器投影（renderer projection）**：预览、Markdown/HTML 导出从选定 `reportId` 的数据库 Markdown 派生；本地主题可确定性渲染，自定义 HTML 必须经过既有安全校验。
+- **旧记录导入（legacy import）**：旧 `workLogs` 仅被只读、幂等地导入为非当前的完成报告；原文件不被覆盖、删除或作为运行状态依据。
+
 ## 当前边界
 
 - 桌面端负责工作台、目录选择、会话管理、规则、设置和统计。

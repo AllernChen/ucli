@@ -84,6 +84,7 @@ export const ipc = {
   deleteSession: (sessionId) => u.deleteSession(sessionId),
   listSessions: () => u.listSessions(),
   updateSessionNote: (sessionId, note) => u.updateSessionNote(sessionId, note),
+  resetNativeSession: (sessionId) => u.resetNativeSession(sessionId),
   updateSessionName: (sessionId, name) => u.updateSessionName(sessionId, name),
   updateCodexProviderPolicy: (sessionId, policy) => u.updateCodexProviderPolicy(sessionId, policy),
   // rules
@@ -105,7 +106,9 @@ export const ipc = {
   setSummarySettings: (value) => u.setSummarySettings(value),
   listSummaryReports: (filters) => u.listSummaryReports(filters),
   getSummaryReport: (reportId) => u.getSummaryReport(reportId),
+  updateSummaryTask: (value) => u.updateSummaryTask(value),
   generateSummary: (value) => u.generateSummary(value),
+  startInteractiveSummary: (value) => u.startInteractiveSummary(value),
   confirmSummary: (reportId, confirmationCallLimit) => u.confirmSummary(reportId, confirmationCallLimit),
   cancelSummary: (reportId) => u.cancelSummary(reportId),
   setCurrentSummary: (reportId) => u.setCurrentSummary(reportId),
@@ -136,6 +139,7 @@ export const ipc = {
   // shell
   openExternal: (url) => u.openExternal(url),
   openPath: (path) => u.openPath(path),
+  showItemInFolder: (path) => u.showItemInFolder(path),
   // events
   on: (channel, handler) => u.on(channel, handler)
 }

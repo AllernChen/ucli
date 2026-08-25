@@ -1,4 +1,6 @@
-import { writeFile } from 'node:fs/promises'
+import { rename, rm, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 
 import { sanitizeSummaryHtml } from './htmlSafety.js'
 import { SUMMARY_THEME_IDS } from './summaryThemeCatalog.js'
@@ -114,12 +116,22 @@ function htmlFromResult(result) {
   return html
 }
 
-function runnerSelection(report, input) {
-  const own = (key, fallback) => Object.prototype.hasOwnProperty.call(input, key) ? input[key] : fallback
+function runnerSelection(report) {
   return {
-    executorId: own('executorId', report.executorId),
-    profileId: own('profileId', report.profileId),
-    model: own('model', report.model)
+    executorId: report.executorId,
+    profileId: report.profileId,
+    model: report.model
+  }
+}
+
+async function writeUtf8Atomically(filePath, content) {
+  const temporaryPath = join(dirname(filePath), `.${basename(filePath)}.${randomUUID()}.tmp`)
+  try {
+    await writeFile(temporaryPath, content, 'utf8')
+    await rename(temporaryPath, filePath)
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch(() => {})
+    throw error
   }
 }
 
@@ -127,13 +139,19 @@ export function createReportExportService({
   repository,
   runner,
   showSaveDialog,
-  writeUtf8 = (path, content) => writeFile(path, content, 'utf8')
+  writeUtf8 = writeUtf8Atomically
 } = {}) {
   if (!repository?.get) throw new TypeError('repository.get is required')
   if (!runner?.run) throw new TypeError('runner.run is required')
   if (typeof showSaveDialog !== 'function') throw new TypeError('showSaveDialog is required')
 
-  async function chooseDestination(report, extension) {
+  async function chooseDestination(report, extension, destination) {
+    if (destination !== undefined) {
+      if (typeof destination !== 'string' || !destination || destination.includes('\0')) {
+        throw exportError('INVALID_SUMMARY_EXPORT_DESTINATION', 'Invalid summary export destination')
+      }
+      return destination
+    }
     const result = await showSaveDialog({
       defaultPath: defaultFilename(report, extension),
       filters: [{ name: extension === 'md' ? 'Markdown' : 'HTML', extensions: [extension] }]
@@ -141,11 +159,11 @@ export function createReportExportService({
     return result?.canceled || !result?.filePath ? null : result.filePath
   }
 
-  async function chooseAndWrite(report, extension, content) {
-    const filePath = await chooseDestination(report, extension)
+  async function chooseAndWrite(report, extension, content, destination) {
+    const filePath = await chooseDestination(report, extension, destination)
     if (!filePath) return { canceled: true }
     await writeUtf8(filePath, content)
-    return { canceled: false, filePath }
+    return { canceled: false, filePath, reportId: report.id, bytes: Buffer.byteLength(content) }
   }
 
   return {
@@ -153,16 +171,16 @@ export function createReportExportService({
       return requireReport(repository, reportId).markdown
     },
 
-    async exportMarkdown({ reportId }) {
+    async exportMarkdown({ reportId, destination } = {}) {
       const report = requireReport(repository, reportId)
-      return chooseAndWrite(report, 'md', report.markdown)
+      return chooseAndWrite(report, 'md', report.markdown, destination)
     },
 
     async exportHtml(input = {}) {
       const report = requireReport(repository, input.reportId)
       const style = validateStyle(input.style)
-      const selection = runnerSelection(report, input)
-      const filePath = await chooseDestination(report, 'html')
+      const selection = runnerSelection(report)
+      const filePath = await chooseDestination(report, 'html', input.destination)
       const generation = style.mode === 'theme' ? 'local' : 'ai'
       if (!filePath) return { canceled: true, generation }
       if (style.mode === 'theme') {
@@ -173,7 +191,10 @@ export function createReportExportService({
           usageSnapshot: report.usageSnapshot || {}
         })
         await writeUtf8(filePath, html)
-        return { canceled: false, filePath, generation }
+        return {
+          canceled: false, filePath, reportId: report.id,
+          bytes: Buffer.byteLength(html), generation
+        }
       }
       const run = prompt => runner.run({
         ...selection,
@@ -207,7 +228,10 @@ export function createReportExportService({
         })
       }
       await writeUtf8(filePath, cleaned.html)
-      return { canceled: false, filePath, generation }
+      return {
+        canceled: false, filePath, reportId: report.id,
+        bytes: Buffer.byteLength(cleaned.html), generation
+      }
     }
   }
 }

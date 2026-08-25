@@ -1,9 +1,9 @@
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, statSync } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { tmpdir } from 'os'
 import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
-import { findClaudeProjectDirectory } from '../sessionDiscovery.js'
+import { findClaudeProjectDirectory, isSafeNativeSessionId } from '../sessionDiscovery.js'
 import { buildClaudeProfileArgs } from '../aiCliProfiles/claudeProfileAdapter.js'
 import {
   encodeClaudeDecisionResponse,
@@ -17,6 +17,59 @@ const ICON = '🟣'
 const STATS_IDLE_DELAY_MS = 2000
 const STATS_MAX_WAIT_MS = 30000
 const STATS_FALLBACK_INTERVAL_MS = 30000
+
+// sendTurn 投递确认：PTY 模式下 prompt 是"像人一样打字"注入的，若在 TUI 初始化
+// 完成前写入（cmd shim + hook settings 加载会让首次启动慢于 spawn-ready），输入
+// 会被整个丢弃，CLI 会永远停在输入框。为确认 prompt 真的被 TUI 接收，我们轮询
+// 会话产物目录的 transcript，找一条晚于本轮起点的 user 记录且其内容包含 prompt
+// 指纹；窗口内未确认则先提交一次、双 Escape 清除陈旧提示，再重打一次。
+const TURN_DELIVERY_WINDOW_MS = 8000
+const TURN_RETYPE_SETTLE_MS = 500
+const TURN_DELIVERY_POLL_MS = 400
+const TURN_FINGERPRINT_LENGTH = 40
+
+// 生成 prompt 的投递指纹：折叠空白后取前 N 字符。transcript 中 user 记录的内容
+// 是逐字打进去的文本，折叠空白后应包含该指纹。
+export function makeTurnFingerprint(text) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, TURN_FINGERPRINT_LENGTH)
+}
+
+// 从 user 记录中提取其内容文本（兼容内容块数组与纯字符串两种形态）。
+export function userEntryText(obj) {
+  const content = obj?.message?.content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => (block && typeof block.text === 'string' ? block.text : ''))
+      .join(' ')
+  }
+  if (typeof obj?.content === 'string') return obj.content
+  return ''
+}
+
+// 判定 transcript 中是否存在一条晚于 sinceMs 的 user 记录，其内容（折叠空白后）
+// 包含给定指纹。path 为 transcript jsonl 的绝对路径。
+export function transcriptHasUserTurn(path, fingerprint, sinceMs) {
+  if (!path || !fingerprint || typeof sinceMs !== 'number') return false
+  try {
+    const lines = readFileSync(path, 'utf8').split('\n')
+    for (const line of lines) {
+      if (!line.trim()) continue
+      let obj
+      try { obj = JSON.parse(line) } catch { continue }
+      if (obj?.type !== 'user') continue
+      if (obj?.timestamp) {
+        const ts = Date.parse(obj.timestamp)
+        if (Number.isFinite(ts) && ts < sinceMs) continue
+      }
+      if (userEntryText(obj).replace(/\s+/g, ' ').trim().includes(fingerprint)) return true
+    }
+  } catch { /* transcript read failed, treat as not-delivered */ }
+  return false
+}
 
 // node-pty is a CJS native module — use createRequire in ESM context
 const require = createRequire(import.meta.url)
@@ -53,10 +106,8 @@ export function parseClaudeTranscriptStats(lines) {
     if (obj.type === 'assistant' && obj.message?.stop_reason === 'end_turn') {
       completedTurnsCount += 1
     }
-    if (obj.type === 'user' && obj.message?.content) {
-      for (const b of obj.message.content) {
-        if (b.type === 'text') { turnsCount += 1; break }
-      }
+    if (obj.type === 'user' && userEntryText(obj).trim()) {
+      turnsCount += 1
     }
     if (obj.type === 'result') {
       if (obj.total_cost_usd) costUsd = Math.max(costUsd, obj.total_cost_usd)
@@ -523,8 +574,73 @@ export class ClaudeAdapter extends BaseAdapter {
     }
   }
 
+  /** Scan project transcripts for a user turn containing fingerprint, written after sinceMs. */
+  _scanProjectTranscripts(fingerprint, sinceMs) {
+    const dir = this._projectDir()
+    if (!dir) return false
+    try {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith('.jsonl')) continue
+        const full = join(dir, f)
+        try {
+          // 跳过自本轮起未变过的文件（全新 transcript 或追加都会更新 mtime）。
+          if (statSync(full).mtimeMs < sinceMs) continue
+        } catch { continue }
+        if (transcriptHasUserTurn(full, fingerprint, sinceMs)) {
+          if (!this.session.cliSessionId) {
+            const nativeSessionId = basename(full, '.jsonl')
+            if (isSafeNativeSessionId(nativeSessionId)) {
+              this.session.cliSessionId = nativeSessionId
+              this.emitEvent({ type: 'init', cliSessionId: nativeSessionId })
+            }
+          }
+          return true
+        }
+      }
+    } catch { /* scan failed, treat as not-delivered */ }
+    return false
+  }
+
+  /** Poll transcripts until the typed prompt is recorded (delivery confirmed). */
+  _waitTurnDelivered(fingerprint, sinceMs, timeoutMs = TURN_DELIVERY_WINDOW_MS) {
+    return new Promise((resolve) => {
+      const started = Date.now()
+      const step = () => {
+        if (this._disposed || !this.ptyProc) return resolve(false)
+        if (this._scanProjectTranscripts(fingerprint, sinceMs)) return resolve(true)
+        const elapsed = Date.now() - started
+        if (elapsed >= timeoutMs) return resolve(false)
+        setTimeout(step, Math.min(TURN_DELIVERY_POLL_MS, timeoutMs - elapsed))
+      }
+      step()
+    })
+  }
+
+  async _confirmTurnDelivery(fingerprint, sinceMs, timeoutMs) {
+    const delivered = await this._waitTurnDelivered(fingerprint, sinceMs, timeoutMs)
+    if (delivered) this._extractStats()
+    return delivered
+  }
+
+  /**
+   * 注入一轮用户输入（PTY 打字模式）。为规避 TUI 未就绪时输入被整体丢弃的竞态，
+   * 先按普通方式打入，随后确认 transcript 里出现了该 prompt 的 user 记录；未确认
+   * 则先提交一次，再清除陈旧提示后重打一次，最后再提交一次。
+   * 返回投递是否已确认。
+   */
   async sendTurn(text) {
+    if (!this.ptyProc) return false
+    const fingerprint = makeTurnFingerprint(text)
+    const sinceMs = Date.now()
     this.writeInput(text + '\r')
+    if (await this._confirmTurnDelivery(fingerprint, sinceMs, TURN_DELIVERY_WINDOW_MS)) return true
+    this.writeInput('\r')
+    if (await this._confirmTurnDelivery(fingerprint, sinceMs, TURN_DELIVERY_WINDOW_MS)) return true
+    this.writeInput('\x1b\x1b')
+    this.writeInput(text + '\r')
+    if (await this._confirmTurnDelivery(fingerprint, sinceMs, TURN_RETYPE_SETTLE_MS)) return true
+    this.writeInput('\r')
+    return this._confirmTurnDelivery(fingerprint, sinceMs, TURN_DELIVERY_WINDOW_MS)
   }
 
   async interrupt() {

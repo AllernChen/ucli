@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { gunzipSync } from 'node:zlib'
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -9,7 +9,6 @@ import test from 'node:test'
 import { replaceBridgeArtifact } from '../scripts/package-dsh-bridge.mjs'
 
 const root = path.resolve(import.meta.dirname, '..')
-const artifact = path.join(root, 'resources', 'deepseek-harness', 'ucli-dsh-bridge-0.11.0.tgz')
 
 /**
  * Run a pnpm command. CI installs pnpm globally (npm install -g pnpm), so it is
@@ -126,29 +125,22 @@ test('quarantined bridge artifact remains installable only for explicit legacy r
   }
 })
 
-test('packaging creates the deterministic four-file tgz without runtime copies or secrets', async (t) => {
-  let previousArtifact = null
-  try {
-    previousArtifact = await readFile(artifact)
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error
+test('packaging writes the deterministic bridge artifact only to an isolated output root', async (t) => {
+  const outputRoot = await mkdtemp(path.join(tmpdir(), 'ucli-dsh-bridge-output-'))
+  const outputArtifact = path.join(outputRoot, 'ucli-dsh-bridge-0.11.0.tgz')
+  t.after(() => rm(outputRoot, { recursive: true, force: true }))
+  const env = {
+    ...process.env,
+    UCLI_DSH_BRIDGE_OUTPUT_ROOT: outputRoot,
+    UCLI_DSH_BRIDGE_TOKEN: 'supersecret-runtime-token'
   }
-  await rm(artifact, { force: true })
-  t.after(async () => {
-    if (previousArtifact) {
-      await writeFile(artifact, previousArtifact)
-    } else {
-      await rm(artifact, { force: true })
-    }
-  })
-  const env = { ...process.env, UCLI_DSH_BRIDGE_TOKEN: 'supersecret-runtime-token' }
   const first = spawnSync(process.execPath, ['scripts/package-dsh-bridge.mjs'], {
     cwd: root,
     env,
     encoding: 'utf8'
   })
   assert.equal(first.status, 0, first.stderr)
-  const firstBytes = await readFile(artifact)
+  const firstBytes = await readFile(outputArtifact)
   const entries = readTar(gunzipSync(firstBytes))
   assert.deepEqual([...entries.keys()], [
     'package/package.json',
@@ -171,7 +163,8 @@ test('packaging creates the deterministic four-file tgz without runtime copies o
     encoding: 'utf8'
   })
   assert.equal(second.status, 0, second.stderr)
-  assert.deepEqual(await readFile(artifact), firstBytes)
+  assert.deepEqual(await readFile(outputArtifact), firstBytes)
+  assert.deepEqual(await readdir(outputRoot), ['ucli-dsh-bridge-0.11.0.tgz'])
 })
 
 test('root lifecycle scripts package the bridge through exactly one builder resource mapping', async () => {

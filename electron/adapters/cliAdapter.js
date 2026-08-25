@@ -43,6 +43,11 @@ export class BaseAdapter extends EventEmitter {
   async start() {
     throw new Error(`${this.id}: start() not implemented`)
   }
+  /**
+   * Submit one user turn to the native CLI.
+   * @param {string} _text
+   * @returns {Promise<boolean>} whether the native input channel accepted the write
+   */
   async sendTurn(_text) {
     throw new Error(`${this.id}: sendTurn() not implemented`)
   }

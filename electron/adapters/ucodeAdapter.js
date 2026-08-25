@@ -169,6 +169,10 @@ export class UCodeAdapter extends OpenCodeAdapter {
   constructor(options) {
     super(options, UCODE_RUNTIME)
   }
+
+  async sendTurn(text) {
+    return super.sendTurn(text)
+  }
 }
 
 export const ucodeDescriptor = {

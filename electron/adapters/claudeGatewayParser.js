@@ -21,6 +21,8 @@ function contentOf(record) {
 }
 
 function hasUserText(record) {
+  const content = record?.message?.content
+  if (typeof content === 'string') return Boolean(content.trim())
   return contentOf(record).some((part) => part?.type === 'text' && part.text?.trim())
 }
 

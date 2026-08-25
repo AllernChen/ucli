@@ -46,6 +46,13 @@ let quitReady = false
 let shutdownPromise = null
 let updateService = null
 
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
 runPrimaryInstanceGate({
   acquireLock: () => app.requestSingleInstanceLock(),
   quit: () => app.quit(),
@@ -82,13 +89,6 @@ if (process.platform === 'win32') app.setAppUserModelId('com.ucli.app')
 function iconPath(filename) {
   const root = app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources')
   return join(root, 'icons', filename)
-}
-
-function showMainWindow() {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  if (mainWindow.isMinimized()) mainWindow.restore()
-  mainWindow.show()
-  mainWindow.focus()
 }
 
 function createTray() {

@@ -127,6 +127,7 @@ const api = {
   deleteSession: (sessionId) => ipcRenderer.invoke('session:delete', sessionId),
   listSessions: () => ipcRenderer.invoke('session:list'),
   updateSessionNote: (sessionId, note) => ipcRenderer.invoke('session:update-note', sessionId, note),
+  resetNativeSession: (sessionId) => ipcRenderer.invoke('session:reset-native', sessionId),
   updateSessionName: (sessionId, name) => ipcRenderer.invoke('session:update-name', sessionId, name),
   updateCodexProviderPolicy: (sessionId, policy) =>
     ipcRenderer.invoke('session:update-codex-provider-policy', sessionId, policy),
@@ -168,7 +169,9 @@ const api = {
   setSummarySettings: (value) => invokeSummary('summary:set-settings', value),
   listSummaryReports: (filters) => invokeSummary('summary:list-reports', filters || {}),
   getSummaryReport: (reportId) => invokeSummary('summary:get-report', reportId),
+  updateSummaryTask: (value) => invokeSummary('summary:update-task', value),
   generateSummary: (value) => invokeSummary('summary:generate', value),
+  startInteractiveSummary: (value) => invokeSummary('summary:start-interactive', value),
   confirmSummary: (reportId, confirmationCallLimit) => invokeSummary('summary:generate', {
     reportId, confirm: true, confirmationCallLimit
   }),
@@ -222,6 +225,7 @@ const api = {
   // ---- shell ----
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   openPath: (path) => ipcRenderer.invoke('shell:open-path', path),
+  showItemInFolder: (path) => ipcRenderer.invoke('shell:show-item-in-folder', path),
 
   // ---- events ----
   on: (channel, handler) => {

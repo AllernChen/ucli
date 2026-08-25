@@ -58,6 +58,18 @@ test('creates a compact running manifest without leaking local paths', async t =
   assert.equal(serialized.includes(temporaryPathFragment(root)), false)
 })
 
+test('create removes a partial workspace when its initial manifest write fails', async t => {
+  const { root, service } = await withWorkspace(t, {
+    writeAtomicFile: async () => {
+      throw new Error('initial manifest unavailable')
+    }
+  })
+
+  await assert.rejects(service.create('report-partial-create'))
+
+  assert.equal(existsSync(join(root, 'workspaces', 'report-partial-create')), false)
+})
+
 test('atomically replaces artifacts without leaving temporary files', async t => {
   const { service } = await withWorkspace(t)
   const workspace = await service.create('report-atomic')
@@ -71,6 +83,30 @@ test('atomically replaces artifacts without leaving temporary files', async t =>
   )
   assert.deepEqual(await findTemporaryFiles(workspace.path), [])
   assert.equal((await readManifest(workspace.path)).bytes, 11)
+})
+
+test('resolveArtifact only resolves a canonical child inside one report workspace', async t => {
+  const { root, service } = await withWorkspace(t)
+  await service.create('report-resolve')
+
+  assert.equal(
+    service.resolveArtifact('report-resolve', 'output/report.md'),
+    join(root, 'workspaces', 'report-resolve', 'output', 'report.md')
+  )
+  for (const candidate of [
+    'report.md',
+    'output/other.md',
+    'input/data.json',
+    '../output/report.md',
+    'output/../report.md',
+    'output/other.md/..'
+  ]) {
+    assert.throws(
+      () => service.resolveArtifact('report-resolve', candidate),
+      error => error?.code === 'SUMMARY_STORAGE_PATH_UNSAFE',
+      candidate
+    )
+  }
 })
 
 test('rejects an artifact before it crosses the injected workspace limit', async t => {
@@ -105,6 +141,24 @@ test('completion compacts inputs and work while retaining output and manifest', 
   assert.deepEqual(manifest.progress, { completed: 1, total: 2 })
   assert.equal(manifest.bytes, 8)
   assert.deepEqual(manifest.artifacts, [{ path: 'output/summary.md', bytes: 8 }])
+})
+
+test('completion persists a terminal manifest before best-effort cleanup of locked directories', async t => {
+  const { service } = await withWorkspace(t, {
+    removeTree: async () => { throw Object.assign(new Error('locked cwd'), { code: 'EPERM' }) }
+  })
+  const workspace = await service.create('report-complete-locked')
+  await service.writeArtifact('report-complete-locked', 'input/project.md', 'evidence')
+  await service.writeArtifact('report-complete-locked', 'work/prompt.md', 'prompt')
+
+  const outcome = await service.complete('report-complete-locked', { markdown: '# Completed' })
+
+  const completed = await readManifest(workspace.path)
+  assert.equal(completed.status, 'completed')
+  assert.equal(completed.stage, 'completed')
+  assert.equal(existsSync(join(workspace.path, 'input')), true)
+  assert.equal(existsSync(join(workspace.path, 'work')), true)
+  assert.deepEqual(outcome.cleanup, { ok: false, code: 'SUMMARY_RUN_FAILED' })
 })
 
 test('failure retains bounded inputs for seven days without persisting secrets', async t => {

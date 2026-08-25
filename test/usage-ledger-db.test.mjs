@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -80,11 +81,13 @@ function summaryReport(overrides = {}) {
     partial: false,
     version: 1,
     status: 'queued',
+    title: '工作总结（每周）1970-01-01 08:00',
+    taskNote: '',
     markdown: null,
     executorId: 'codex',
     profileId: 'profile-1',
     model: 'gpt-5',
-    usageSnapshot: { inputTokens: 30, outputTokens: 10 },
+    usageSnapshot: { totals: { inputTokens: 30, outputTokens: 10 } },
     coverage: { sessionsIncluded: 2 },
     generationUsage: { inputTokens: 0, outputTokens: 0 },
     generationMetrics: {},
@@ -94,10 +97,41 @@ function summaryReport(overrides = {}) {
     isCurrent: false,
     generatedBy: 'manual',
     errorText: null,
+    executionMode: 'isolated-runner',
+    sessionId: null,
+    runPhase: null,
+    artifactMetadata: {},
+    legacyImportKey: null,
     createdAt: 1000,
     updatedAt: 1000,
     ...overrides
   }
+}
+
+function summaryArtifact(markdown) {
+  return {
+    canonical: 'markdown',
+    bytes: Buffer.byteLength(markdown),
+    sha256: `sha256:${createHash('sha256').update(markdown).digest('hex')}`
+  }
+}
+
+async function seedCompletedSummary(db, overrides = {}) {
+  const markdown = overrides.markdown ?? '# Completed'
+  const report = summaryReport({
+    ...overrides,
+    status: 'completed',
+    markdown,
+    sourceHash: `sha256:${'a'.repeat(64)}`,
+    isCurrent: false,
+    executionMode: 'legacy-worklog-import',
+    runPhase: 'completed',
+    artifactMetadata: summaryArtifact(markdown),
+    legacyImportKey: `legacy:${overrides.id ?? 'report-1'}`
+  })
+  const result = await db.importCompletedSummaryReport(report)
+  if (overrides.isCurrent) return db.setCurrentSummaryReport(result.report.id)
+  return result.report
 }
 
 test('migration preserves cumulative statistics and adds usage and summary tables', async () => {
@@ -668,18 +702,26 @@ test('model-filtered queries include matching approvals without double-counting 
 
 test('summary report CRUD maps fields and validates JSON at the database boundary', async () => {
   await withDb('ucli-summary-report-crud-', async (db) => {
-    assert.deepEqual(db.createSummaryReport(summaryReport()), summaryReport())
+    assert.deepEqual(await db.createSummaryReport(summaryReport()), summaryReport())
     assert.deepEqual(db.getSummaryReport('report-1'), summaryReport())
     assert.deepEqual(db.listSummaryReports({ periodType: 'week', status: 'queued' }), [summaryReport()])
     assert.deepEqual(db.listSummaryReports({ periodType: 'day' }), [])
 
-    const completed = db.updateSummaryReport('report-1', {
+    await db.updateSummaryReport('report-1', { status: 'running' })
+    const completed = await db.completeSummaryReport('report-1', {
       status: 'completed',
+      runPhase: 'completed',
       markdown: '# 周报',
       coverage: { sessionsIncluded: 3 },
       generationUsage: { inputTokens: 200, outputTokens: 50 },
-      generationMetrics: { strategy: 'map-reduce', aiCalls: 3, cacheHits: 2 },
+      generationMetrics: {
+        strategy: 'map-reduce', plannedCalls: 3, aiCalls: 3, cacheHits: 2,
+        durationMs: 25, mapConcurrency: 2
+      },
       generationCostUsd: 0.25,
+      sourceHash: `sha256:${'a'.repeat(64)}`,
+      artifactMetadata: summaryArtifact('# 周报'),
+      errorText: null,
       updatedAt: 2000
     })
     assert.deepEqual(completed, summaryReport({
@@ -687,8 +729,15 @@ test('summary report CRUD maps fields and validates JSON at the database boundar
       markdown: '# 周报',
       coverage: { sessionsIncluded: 3 },
       generationUsage: { inputTokens: 200, outputTokens: 50 },
-      generationMetrics: { strategy: 'map-reduce', aiCalls: 3, cacheHits: 2 },
+      generationMetrics: {
+        strategy: 'map-reduce', plannedCalls: 3, aiCalls: 3, cacheHits: 2,
+        durationMs: 25, mapConcurrency: 2
+      },
       generationCostUsd: 0.25,
+      sourceHash: `sha256:${'a'.repeat(64)}`,
+      isCurrent: true,
+      runPhase: 'completed',
+      artifactMetadata: summaryArtifact('# 周报'),
       updatedAt: 2000
     }))
 
@@ -797,19 +846,19 @@ test('summary reports reject invalid periods, states, origins, versions, ranges,
       [{ periodStart: 200, periodEndExclusive: 200 }, 'INVALID_SUMMARY_RANGE'],
       [{ timezone: '  ' }, 'INVALID_SUMMARY_TIMEZONE']
     ]) {
-      assert.throws(
-        () => db.createSummaryReport(summaryReport(overrides)),
+      await assert.rejects(
+        db.createSummaryReport(summaryReport(overrides)),
         (error) => error.code === code
       )
     }
 
-    db.createSummaryReport(summaryReport())
-    assert.throws(
-      () => db.updateSummaryReport('report-1', { status: 'done' }),
+    await db.createSummaryReport(summaryReport())
+    await assert.rejects(
+      db.updateSummaryReport('report-1', { status: 'done' }),
       (error) => error.code === 'INVALID_SUMMARY_STATUS'
     )
-    assert.throws(
-      () => db.updateSummaryReport('report-1', { generatedBy: 'scheduler' }),
+    await assert.rejects(
+      db.updateSummaryReport('report-1', { generatedBy: 'scheduler' }),
       (error) => error.code === 'INVALID_SUMMARY_GENERATED_BY'
     )
 
@@ -823,12 +872,12 @@ test('summary reports reject invalid periods, states, origins, versions, ranges,
 
 test('setting a current report atomically switches only its logical period', async () => {
   await withDb('ucli-summary-report-current-', async (db) => {
-    db.createSummaryReport(summaryReport({ id: 'week-v1', status: 'completed', isCurrent: true }))
-    db.createSummaryReport(summaryReport({ id: 'week-v2', status: 'completed', version: 2 }))
-    db.createSummaryReport(summaryReport({
+    await seedCompletedSummary(db, { id: 'week-v1', isCurrent: true })
+    await seedCompletedSummary(db, { id: 'week-v2' })
+    await seedCompletedSummary(db, {
       id: 'day-v1', periodType: 'day', periodStart: 300, periodEndExclusive: 400,
-      status: 'completed', isCurrent: true
-    }))
+      isCurrent: true
+    })
 
     const current = await db.setCurrentSummaryReport('week-v2')
     assert.equal(current.id, 'week-v2')
@@ -844,8 +893,8 @@ test('setting a current report atomically switches only its logical period', asy
 
 test('a failed current switch rolls back the previous current marker', async () => {
   await withDb('ucli-summary-report-current-atomic-', async (db) => {
-    db.createSummaryReport(summaryReport({ id: 'week-v1', status: 'completed', isCurrent: true }))
-    db.createSummaryReport(summaryReport({ id: 'week-v2', status: 'completed', version: 2 }))
+    await seedCompletedSummary(db, { id: 'week-v1', isCurrent: true })
+    await seedCompletedSummary(db, { id: 'week-v2' })
     db.sql.run(`
       CREATE TRIGGER reject_report_current
       BEFORE UPDATE OF is_current ON summary_reports
@@ -863,7 +912,7 @@ test('a failed current switch rolls back the previous current marker', async () 
 
 test('only completed reports can become current', async () => {
   await withDb('ucli-summary-report-current-status-', async (db) => {
-    db.createSummaryReport(summaryReport({ status: 'running' }))
+    await db.createSummaryReport(summaryReport({ status: 'running' }))
     await assert.rejects(
       db.setCurrentSummaryReport('report-1'),
       (error) => error.code === 'SUMMARY_REPORT_NOT_COMPLETED'
@@ -874,9 +923,9 @@ test('only completed reports can become current', async () => {
 
 test('a current completed report cannot transition to a non-completed status', async () => {
   await withDb('ucli-summary-report-current-update-', async (db) => {
-    db.createSummaryReport(summaryReport({ status: 'completed', isCurrent: true }))
-    assert.throws(
-      () => db.updateSummaryReport('report-1', { status: 'failed' }),
+    await seedCompletedSummary(db, { isCurrent: true })
+    await assert.rejects(
+      db.updateSummaryReport('report-1', { status: 'failed' }),
       (error) => error.code === 'SUMMARY_REPORT_NOT_COMPLETED'
     )
     assert.equal(db.getSummaryReport('report-1').status, 'completed')
@@ -884,19 +933,23 @@ test('a current completed report cannot transition to a non-completed status', a
   })
 })
 
-test('deleting reports rejects active work and atomically promotes the previous completed version', async () => {
+test('deleting reports rejects active work, promotes the previous completed version, and soft-removes an exclusive UCLI session', async () => {
   await withDb('ucli-summary-report-delete-', async (db) => {
-    db.createSummaryReport(summaryReport({ id: 'week-v1', status: 'completed' }))
-    db.createSummaryReport(summaryReport({
-      id: 'week-v2', status: 'completed', version: 2, isCurrent: true
-    }))
-    db.createSummaryReport(summaryReport({
+    db.insertSession({
+      id: 'summary-session-v2', project_path: 'C:\\summary', adapter_id: 'claude',
+      name: 'summary session', task_note: '', tier: 'safety-rules', status: 'offline', created_at: 1
+    })
+    await seedCompletedSummary(db, { id: 'week-v1' })
+    await seedCompletedSummary(db, {
+      id: 'week-v2', isCurrent: true, sessionId: 'summary-session-v2'
+    })
+    await db.createSummaryReport(summaryReport({
       id: 'week-running', status: 'running', version: 3
     }))
-    db.createSummaryReport(summaryReport({
+    await seedCompletedSummary(db, {
       id: 'day-current', periodType: 'day', periodStart: 300, periodEndExclusive: 400,
-      status: 'completed', isCurrent: true
-    }))
+      isCurrent: true
+    })
 
     await assert.rejects(
       db.deleteSummaryReport('missing'),
@@ -909,11 +962,32 @@ test('deleting reports rejects active work and atomically promotes the previous 
     assert.ok(db.getSummaryReport('week-running'))
 
     assert.deepEqual(await db.deleteSummaryReport('week-v2'), {
-      deletedReportId: 'week-v2', currentReportId: 'week-v1'
+      deletedReportId: 'week-v2', currentReportId: 'week-v1', removedSessionId: 'summary-session-v2'
     })
     assert.equal(db.getSummaryReport('week-v2'), null)
     assert.equal(db.getSummaryReport('week-v1').isCurrent, true)
     assert.equal(db.getSummaryReport('day-current').isCurrent, true)
+    assert.equal(db.getSession('summary-session-v2').removedAt > 0, true)
+  })
+})
+
+test('deleting a report preserves its UCLI session when another report shares it', async () => {
+  await withDb('ucli-summary-report-delete-shared-session-', async (db) => {
+    db.insertSession({
+      id: 'summary-session-shared', project_path: 'C:\\summary', adapter_id: 'claude',
+      name: 'shared summary session', task_note: '', tier: 'safety-rules', status: 'offline', created_at: 1
+    })
+    await seedCompletedSummary(db, {
+      id: 'shared-session-v1', sessionId: 'summary-session-shared', isCurrent: true
+    })
+    await seedCompletedSummary(db, {
+      id: 'shared-session-v2', version: 2, sessionId: 'summary-session-shared'
+    })
+
+    const result = await db.deleteSummaryReport('shared-session-v1')
+
+    assert.equal(result.removedSessionId, null)
+    assert.equal(db.getSession('summary-session-shared').removedAt, null)
   })
 })
 

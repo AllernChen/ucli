@@ -11,6 +11,7 @@ let unsubscriptions = 0
 let listCalls = 0
 let getCalls = 0
 let generatedPayloads = []
+const progressListeners = new Set()
 
 globalThis.window = {
   ucli: {
@@ -20,10 +21,9 @@ globalThis.window = {
       getCalls += 1
       return { id: reportId, status: 'completed', markdown: '# 摘要', version: 1 }
     },
-    generateSummary: async payload => { generatedPayloads.push(payload); return { reportId: 'report-1' } },
-    confirmSummary: async (reportId, confirmationCallLimit) => {
-      generatedPayloads.push({ reportId, confirm: true, confirmationCallLimit })
-      return { reportId }
+    startInteractiveSummary: async payload => {
+      generatedPayloads.push(payload)
+      return { report: { id: 'report-1', status: 'queued', version: 1 }, sessionId: 'session-1' }
     },
     cancelSummary: async () => true,
     setCurrentSummary: async reportId => ({ id: reportId, status: 'completed', isCurrent: true }),
@@ -33,8 +33,10 @@ globalThis.window = {
     onSummaryProgress: handler => {
       subscriptions += 1
       progressHandler = handler
-      return () => { unsubscriptions += 1; progressHandler = null }
-    }
+      progressListeners.add(handler)
+      return () => { unsubscriptions += 1; progressListeners.delete(handler); if (progressHandler === handler) progressHandler = null }
+    },
+    log: () => {}
   }
 }
 
@@ -43,6 +45,10 @@ const { useSummariesStore } = await import('../src/stores/summaries.js')
 function freshStore() {
   setActivePinia(createPinia())
   return useSummariesStore()
+}
+
+function emitProgress(payload) {
+  for (const listener of progressListeners) listener(payload)
 }
 
 test('summary store subscribes once and completion refreshes only the affected report', async () => {
@@ -66,24 +72,249 @@ test('summary store subscribes once and completion refreshes only the affected r
   assert.equal(unsubscriptions, 1)
 })
 
-test('awaiting confirmation retains the actual call estimate and resumes the same report', async () => {
+test('terminal progress refreshes the matching report in version history', async () => {
+  const store = freshStore()
+  await store.init()
+  store.reports = [{ id: 'report-1', status: 'running', version: 2 }]
+  store.versions = [{ id: 'report-1', status: 'running', version: 2 }]
+  progressHandler({ reportId: 'report-1', status: 'completed', phase: 'completed', completed: 1, total: 1, text: '总结已生成' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(store.versions[0].status, 'completed')
+  assert.equal(store.versions[0].markdown, undefined)
+  store.dispose()
+})
+
+test('interactive generation creates and selects the canonical queued report', async () => {
   generatedPayloads = []
   const store = freshStore()
   await store.init()
-  store.activeJobs = { 'report-1': true }
-
-  progressHandler({
-    reportId: 'report-1', phase: 'awaiting_confirmation', completed: 0,
-    total: 5, text: '预计调用 5 次，等待确认'
-  })
-  assert.equal(store.progress['report-1'].total, 5)
-  await store.confirm('report-1')
-
-  assert.deepEqual(generatedPayloads, [{
-    reportId: 'report-1', confirm: true, confirmationCallLimit: 5
-  }])
-  assert.equal(store.activeJobs['report-1'], true)
+  const request = { periodType: 'week', start: 1, endExclusive: 2, timezone: 'Asia/Shanghai', partial: false, executorId: 'claude', profileId: 'p1', model: 'sonnet' }
+  const report = await store.generateInteractive(request)
+  assert.deepEqual(generatedPayloads, [request])
+  assert.equal(report.sessionId, 'session-1')
+  assert.equal(store.selectedReportId, 'report-1')
   store.dispose()
+})
+
+test('init preserves the list failure for callers while keeping a safe error message', async () => {
+  const originalList = window.ucli.listSummaryReports
+  const store = freshStore()
+  try {
+    window.ucli.listSummaryReports = async () => { throw new Error('database unavailable') }
+    await assert.rejects(store.init(), /database unavailable/)
+    assert.equal(store.error.message, '无法读取总结报告')
+  } finally {
+    window.ucli.listSummaryReports = originalList
+    store.dispose()
+  }
+})
+
+test('each Pinia store owns its progress listener and disposing one leaves the other live', async () => {
+  const piniaA = createPinia()
+  const piniaB = createPinia()
+  setActivePinia(piniaA)
+  const storeA = useSummariesStore()
+  setActivePinia(piniaB)
+  const storeB = useSummariesStore()
+  await Promise.all([storeA.init(), storeB.init()])
+  storeA.dispose()
+  emitProgress({ reportId: 'still-live', status: 'running', phase: 'running', completed: 0, total: 1, text: '仍在生成' })
+  assert.equal(storeA.progress['still-live'], undefined)
+  assert.equal(storeB.progress['still-live'].text, '仍在生成')
+  storeB.dispose()
+})
+
+test('terminal progress cannot be regressed by a late nonterminal progress event', () => {
+  const store = freshStore()
+  store.reports = [{ id: 'r1', status: 'running', version: 1 }]
+  store.applyProgress({ reportId: 'r1', status: 'completed', phase: 'completed', completed: 1, total: 1, text: '完成' })
+  store.applyProgress({ reportId: 'r1', status: 'running', phase: 'running', completed: 0, total: 1, text: '迟到的运行中' })
+  assert.equal(store.progress.r1.phase, 'completed')
+  assert.equal(store.reports[0].status, 'completed')
+  store.dispose()
+})
+
+test('unknown progress loads one report and applies the newest event', async () => {
+  const originalGet = window.ucli.getSummaryReport
+  let resolveReport
+  let gets = 0
+  const pending = new Promise(resolve => { resolveReport = resolve })
+  const store = freshStore()
+  try {
+    window.ucli.getSummaryReport = async () => { gets += 1; return pending }
+    store.applyProgress({
+      reportId: 'new-report', status: 'queued', phase: 'preparing',
+      completed: 0, total: 1, text: '正在准备工作总结'
+    })
+    store.applyProgress({
+      reportId: 'new-report', status: 'running', phase: 'starting',
+      completed: 0, total: 1, text: '正在启动 AI CLI'
+    })
+    assert.equal(gets, 1)
+    resolveReport({
+      id: 'new-report', title: '工作总结（每周）2026-08-25 09:50', taskNote: '',
+      status: 'running', runPhase: 'starting', version: 1
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(store.reports[0].id, 'new-report')
+    assert.equal(store.progress['new-report'].phase, 'starting')
+  } finally {
+    window.ucli.getSummaryReport = originalGet
+    store.dispose()
+  }
+})
+
+test('unknown terminal progress cannot be regressed after reconciliation', async () => {
+  const originalGet = window.ucli.getSummaryReport
+  let resolveReport
+  const pending = new Promise(resolve => { resolveReport = resolve })
+  const store = freshStore()
+  try {
+    window.ucli.getSummaryReport = () => pending
+    store.applyProgress({
+      reportId: 'terminal-report', status: 'completed', phase: 'completed',
+      completed: 1, total: 1, text: '总结已生成'
+    })
+    store.applyProgress({
+      reportId: 'terminal-report', status: 'running', phase: 'running',
+      completed: 0, total: 1, text: '迟到的运行中'
+    })
+    resolveReport({ id: 'terminal-report', status: 'completed', runPhase: 'completed', version: 1 })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    assert.equal(store.progress['terminal-report'].phase, 'completed')
+    assert.equal(store.reports[0].status, 'completed')
+  } finally {
+    window.ucli.getSummaryReport = originalGet
+    store.dispose()
+  }
+})
+
+test('unknown progress fetch cannot resurrect a deleted report', async () => {
+  const originalDelete = window.ucli.deleteSummaryReport
+  const originalGet = window.ucli.getSummaryReport
+  const originalList = window.ucli.listSummaryReports
+  let resolveReport
+  let gets = 0
+  const pending = new Promise(resolve => { resolveReport = resolve })
+  const store = freshStore()
+  try {
+    window.ucli.getSummaryReport = () => { gets += 1; return pending }
+    window.ucli.deleteSummaryReport = async id => ({
+      deletedReportId: id, currentReportId: null, removedSessionId: null
+    })
+    window.ucli.listSummaryReports = async () => []
+
+    store.applyProgress({
+      reportId: 'delete-race', status: 'queued', phase: 'preparing',
+      completed: 0, total: 1, text: '正在准备工作总结'
+    })
+    assert.equal(gets, 1)
+    await store.deleteReport('delete-race')
+    resolveReport({ id: 'delete-race', status: 'queued', version: 1 })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(store.reports.some(report => report.id === 'delete-race'), false)
+  } finally {
+    window.ucli.deleteSummaryReport = originalDelete
+    window.ucli.getSummaryReport = originalGet
+    window.ucli.listSummaryReports = originalList
+    store.dispose()
+  }
+})
+
+test('a slower earlier selection cannot replace the latest selected report or its versions', async () => {
+  const originalGet = window.ucli.getSummaryReport
+  const originalList = window.ucli.listSummaryReports
+  let resolveA
+  const reportA = new Promise(resolve => { resolveA = resolve })
+  const store = freshStore()
+  try {
+    window.ucli.getSummaryReport = id => id === 'a' ? reportA : Promise.resolve({ id: 'b', periodType: 'week', periodStart: 3, periodEndExclusive: 4, timezone: 'Asia/Shanghai', version: 2 })
+    window.ucli.listSummaryReports = async filters => [{ id: filters.periodStart === 3 ? 'b' : 'a', version: filters.periodStart === 3 ? 2 : 1 }]
+    const selectingA = store.selectReport('a')
+    await store.selectReport('b')
+    resolveA({ id: 'a', periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai', version: 1 })
+    await selectingA
+    assert.equal(store.selectedReportId, 'b')
+    assert.deepEqual(store.versions.map(report => report.id), ['b'])
+  } finally {
+    window.ucli.getSummaryReport = originalGet
+    window.ucli.listSummaryReports = originalList
+    store.dispose()
+  }
+})
+
+test('new interactive reports are immediately included in the selected period history', async () => {
+  const originalStart = window.ucli.startInteractiveSummary
+  const originalList = window.ucli.listSummaryReports
+  const store = freshStore()
+  try {
+    const report = { id: 'r3', version: 3, periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai', status: 'queued' }
+    window.ucli.startInteractiveSummary = async () => ({ report, sessionId: 'session-3' })
+    window.ucli.listSummaryReports = async () => [report, { id: 'r2', version: 2 }]
+    await store.generateInteractive({ periodType: 'week', start: 1, endExclusive: 2, timezone: 'Asia/Shanghai', partial: false, executorId: 'claude', profileId: null, model: null })
+    assert.equal(store.selectedReportId, 'r3')
+    assert.deepEqual(store.versions.map(item => item.id), ['r3', 'r2'])
+  } finally {
+    window.ucli.startInteractiveSummary = originalStart
+    window.ucli.listSummaryReports = originalList
+    store.dispose()
+  }
+})
+
+test('task editing updates report and version projections without changing selection', async () => {
+  const originalUpdate = window.ucli.updateSummaryTask
+  const store = freshStore()
+  try {
+    store.reports = [{ id: 'report-1', title: '旧名称', taskNote: '', version: 1 }]
+    store.versions = [{ id: 'report-1', title: '旧名称', taskNote: '', version: 1 }]
+    store.selectedReportId = 'report-1'
+    window.ucli.updateSummaryTask = async value => ({
+      id: value.reportId, title: value.title, taskNote: value.taskNote, version: 1
+    })
+
+    const report = await store.updateTask('report-1', {
+      title: '新名称', taskNote: '备注'
+    })
+    assert.equal(report.title, '新名称')
+    assert.equal(store.reports[0].taskNote, '备注')
+    assert.equal(store.versions[0].title, '新名称')
+    assert.equal(store.selectedReportId, 'report-1')
+  } finally {
+    window.ucli.updateSummaryTask = originalUpdate
+    store.dispose()
+  }
+})
+
+test('a stale refresh response cannot overwrite a newer task edit', async () => {
+  const originalGet = window.ucli.getSummaryReport
+  const originalUpdate = window.ucli.updateSummaryTask
+  let resolveRefresh
+  const staleReport = new Promise(resolve => { resolveRefresh = resolve })
+  const store = freshStore()
+  try {
+    store.reports = [{ id: 'report-1', title: '旧名称', taskNote: '', version: 1 }]
+    store.versions = [{ id: 'report-1', title: '旧名称', taskNote: '', version: 1 }]
+    store.selectedReportId = 'report-1'
+    window.ucli.getSummaryReport = () => staleReport
+    window.ucli.updateSummaryTask = async value => ({
+      id: value.reportId, title: value.title, taskNote: value.taskNote, version: 1
+    })
+
+    const refreshing = store.refreshReport('report-1')
+    await store.updateTask('report-1', { title: '新名称', taskNote: '新备注' })
+    resolveRefresh({ id: 'report-1', title: '旧名称', taskNote: '', version: 1 })
+    await refreshing
+
+    assert.equal(store.reports[0].title, '新名称')
+    assert.equal(store.versions[0].taskNote, '新备注')
+    assert.equal(store.selectedReportId, 'report-1')
+    assert.equal(store.selectedReport.title, '新名称')
+  } finally {
+    window.ucli.getSummaryReport = originalGet
+    window.ucli.updateSummaryTask = originalUpdate
+    store.dispose()
+  }
 })
 
 test('deleting the selected report clears stale state and selects the promoted version', async () => {
@@ -94,16 +325,15 @@ test('deleting the selected report clears stale state and selects the promoted v
   try {
     store.initialized = true
     store.reports = [
-      { id: 'report-v2', status: 'completed', version: 2 },
+      { id: 'report-v2', status: 'completed', version: 2, markdown: '# v2' },
       { id: 'report-v1', status: 'completed', version: 1 }
     ]
-    store.selectedReport = { id: 'report-v2', status: 'completed', version: 2, markdown: '# v2' }
+    store.selectedReportId = 'report-v2'
     store.versions = [...store.reports]
-    store.activeJobs = { 'report-v2': true }
     store.progress = { 'report-v2': { phase: 'completed' } }
 
     window.ucli.deleteSummaryReport = async reportId => ({
-      deletedReportId: reportId, currentReportId: 'report-v1'
+      deletedReportId: reportId, currentReportId: 'report-v1', removedSessionId: 'summary-session-v2'
     })
     window.ucli.listSummaryReports = async filters => filters?.periodType
       ? [{ id: 'report-v1', status: 'completed', version: 1, isCurrent: true }]
@@ -115,12 +345,12 @@ test('deleting the selected report clears stale state and selects the promoted v
     })
 
     assert.deepEqual(await store.deleteReport('report-v2'), {
-      deletedReportId: 'report-v2', currentReportId: 'report-v1'
+      deletedReportId: 'report-v2', currentReportId: 'report-v1', removedSessionId: 'summary-session-v2'
     })
     assert.equal(store.selectedReport.id, 'report-v1')
-    assert.equal(store.activeJobs['report-v2'], undefined)
     assert.equal(store.progress['report-v2'], undefined)
     assert.deepEqual(store.reports.map(report => report.id), ['report-v1'])
+    assert.equal(store.reports.some(report => 'removedSessionId' in report), false)
   } finally {
     window.ucli.deleteSummaryReport = originalDelete
     window.ucli.listSummaryReports = originalList
@@ -140,7 +370,7 @@ test('a stale terminal refresh cannot resurrect a report after deletion', async 
   try {
     await store.init()
     store.reports = [{ id: 'deleted-report', status: 'completed', version: 1 }]
-    store.selectedReport = { id: 'deleted-report', status: 'completed', version: 1, markdown: '# old' }
+    store.selectedReportId = 'deleted-report'
     window.ucli.getSummaryReport = async reportId => {
       if (reportId === 'deleted-report' && getCallsForDeleted++ === 0) return stale
       return { id: reportId, status: 'completed', version: 1, markdown: '# next' }
@@ -177,7 +407,7 @@ test('a terminal event arriving after deletion does not surface a not-found erro
   try {
     await store.init()
     store.reports = [{ id: 'late-report', status: 'completed', version: 1 }]
-    store.selectedReport = { id: 'late-report', status: 'completed', version: 1, markdown: '# old' }
+    store.selectedReportId = 'late-report'
     window.ucli.deleteSummaryReport = async reportId => ({
       deletedReportId: reportId, currentReportId: null
     })
@@ -202,13 +432,37 @@ test('a terminal event arriving after deletion does not surface a not-found erro
   }
 })
 
+test('an externally deleted terminal report is removed without surfacing a refresh error', async () => {
+  const originalGet = window.ucli.getSummaryReport
+  const store = freshStore()
+  try {
+    store.reports = [{ id: 'externally-deleted', status: 'running', version: 1 }]
+    store.versions = [{ id: 'externally-deleted', status: 'running', version: 1 }]
+    store.selectedReportId = 'externally-deleted'
+    window.ucli.getSummaryReport = async () => { throw Object.assign(new Error('not found'), { code: 'SUMMARY_REPORT_NOT_FOUND' }) }
+    store.applyProgress({ reportId: 'externally-deleted', status: 'completed', phase: 'completed', completed: 1, total: 1, text: '完成' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.deepEqual(store.reports, [])
+    assert.deepEqual(store.versions, [])
+    assert.equal(store.error, null)
+  } finally {
+    window.ucli.getSummaryReport = originalGet
+    store.dispose()
+  }
+})
+
 test('summary workspace components cover generation, safe reading, history, retry, and export', () => {
   const files = [
+    '../src/components/SessionTerminal.vue',
     '../src/components/summaries/SummaryGenerateDialog.vue',
     '../src/components/summaries/SummaryReportView.vue',
     '../src/components/summaries/SummaryHistory.vue',
     '../src/components/summaries/WorkSummaryPanel.vue',
-    '../src/components/summaries/SummaryHtmlStyleDialog.vue'
+    '../src/components/summaries/SummaryHtmlStyleDialog.vue',
+    '../src/components/summaries/SummaryConversationDrawer.vue',
+    // The conversation drawer reuses the existing history pane for its
+    // 「历史记录」tab; its getSessionHistory contract is covered here.
+    '../src/components/PaneHistory.vue'
   ]
   const sources = files.map(file => readFileSync(new URL(file, import.meta.url), 'utf8'))
   for (const [index, source] of sources.entries()) {
@@ -217,14 +471,11 @@ test('summary workspace components cover generation, safe reading, history, retr
   const all = sources.join('\n')
   for (const text of [
     'periodType', 'partial', 'executorId', 'profileId', 'model',
-    'estimatedCalls', 'coverage', '可能产生费用', '设为当前版本',
-    '取消生成', '确认继续', '预计调用', '可能产生费用',
-    '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试'
+    '可能产生费用', '设为当前版本', '取消生成',
+    '复制 Markdown', '导出 Markdown', '导出 HTML', '删除总结', '确认删除', '重试（新版本）',
+    'SummaryConversationDrawer', 'attachTerminal', 'refit', 'getSessionHistory',
+    '此报告没有关联的交互会话', 'SessionTerminal'
   ]) assert.match(all, new RegExp(text))
-  assert.match(all, /:loading="htmlExporting"/)
-  assert.match(all, /exportingHtml\.value\s*=\s*true/)
-  assert.match(all, /exportingHtml\.value\s*=\s*false/)
-  assert.match(all, /HTML\s*已导出/)
   for (const themeId of ['executive', 'engineering', 'timeline', 'dashboard', 'print']) {
     assert.match(all, new RegExp(themeId))
   }
@@ -234,15 +485,40 @@ test('summary workspace components cover generation, safe reading, history, retr
   for (const text of ['AI 自定义', '较慢', '产生 AI 用量', '即时生成']) {
     assert.match(all, new RegExp(text))
   }
-  assert.match(all, /:confirm-loading="exportingHtml"/)
-  assert.match(all, /if\s*\(exportingHtml\.value\)\s*return/)
   assert.match(all, /themeId:\s*['"]executive['"]/)
-  assert.match(all, /@confirm="\$emit\('delete-report', report\.id\)"/)
-  assert.match(all, /summaries\.deleteReport/)
+  assert.match(all, /:open="deleteConfirmOpen"/)
+  assert.match(all, /@ok="confirmDelete"/)
   assert.match(all, /MarkdownIt\(\{\s*html:\s*false/)
   assert.match(all, /DOMPurify\.sanitize/)
   assert.match(all, /failed|interrupted/)
+  // The generate dialog hands the session off instead of navigating away.
+  assert.doesNotMatch(all, /pendingAssign|router\.push/)
+  // The embedded terminal forwards input and output over the session IPC surface.
+  assert.match(all, /ipc\.sendTerminalInput\s*\(props\.sessionId,\s*data\)/)
+  assert.match(all, /evt\.sessionId\s*===\s*props\.sessionId/)
+  assert.match(all, /ipc\.terminalResize\s*\(props\.sessionId/)
+  assert.doesNotMatch(
+    readFileSync(new URL('../src/components/summaries/WorkSummaryPanel.vue', import.meta.url), 'utf8'),
+    new RegExp(['prepare' + 'Summary', 'summaryTasks\\.addTask', 'reportProduced' + 'ByRun', 'setInterval'].join('|'))
+  )
 })
+
+test('summary renderer and focused tests contain no legacy task workflow identifiers', () => {
+  const files = [
+    '../src/ipc.js', '../electron/preload.js', '../electron/orchestrator.js',
+    '../test/summary-export.test.mjs', '../test/summary-ipc.test.mjs',
+    '../test/summary-view.test.mjs', '../test/summary-view-mounted.test.mjs'
+  ]
+  const legacy = new RegExp([
+    'useSummary' + 'TasksStore', 'summaryTask' + 'Note', 'summaryTask' + 'Status\\b',
+    'listSummary' + 'WorkLogs', 'readSummary' + 'WorkLog', 'suggestedFile' + 'Name',
+    'reportProduced' + 'ByRun', '\\bm' + 'time\\b'
+  ].join('|'))
+  for (const file of files) {
+    assert.doesNotMatch(readFileSync(new URL(file, import.meta.url), 'utf8'), legacy, file)
+  }
+})
+
 
 test('completed reports show bounded generation performance without renderer-sensitive fields', () => {
   const reportView = readFileSync(
@@ -258,19 +534,40 @@ test('completed reports show bounded generation performance without renderer-sen
   assert.doesNotMatch(reportView, /cacheKey|providerOutput|rawPrompt|workspaceDirectory/)
 })
 
-test('summary store preserves cache-check progress until the existing terminal refresh', async () => {
+test('report detail stylesheet gives rendered wide Markdown tables a usable overflow boundary', () => {
+  const reportView = readFileSync(
+    new URL('../src/components/summaries/SummaryReportView.vue', import.meta.url),
+    'utf8'
+  )
+  assert.match(reportView, /\.summary-markdown-shell\s*\{[^}]*min-width\s*:\s*0[^}]*overflow-x\s*:\s*auto/)
+  assert.match(reportView, /\.markdown-body\s*:deep\(table\)\s*\{[^}]*display\s*:\s*block[^}]*width\s*:\s*max-content[^}]*min-width\s*:\s*100%[^}]*overflow-x\s*:\s*auto/)
+  assert.match(reportView, /\.markdown-body\s*:deep\(table\)\s*\{[^}]*max-width\s*:\s*100%/)
+})
+
+test('summary panel detail grid declares a bounded track for wide report content', () => {
+  const panel = readFileSync(
+    new URL('../src/components/summaries/WorkSummaryPanel.vue', import.meta.url),
+    'utf8'
+  )
+  assert.match(panel, /\.summary-detail\s*\{[^}]*display\s*:\s*grid[^}]*grid-template-columns\s*:\s*minmax\(0,\s*1fr\)/)
+})
+
+test('summary store reconciles unknown cache-check progress without losing it', async () => {
   getCalls = 0
   const store = freshStore()
   await store.init()
   progressHandler({
-    reportId: 'report-cache', phase: 'cache-check', completed: 0, total: 1,
+    reportId: 'report-cache', status: 'running', phase: 'cache-check', completed: 0, total: 1,
     text: '正在检查缓存'
   })
   assert.deepEqual(store.progress['report-cache'], {
-    reportId: 'report-cache', phase: 'cache-check', completed: 0, total: 1,
+    reportId: 'report-cache', status: 'running', phase: 'cache-check', completed: 0, total: 1,
     text: '正在检查缓存'
   })
-  assert.equal(getCalls, 0)
+  assert.equal(getCalls, 1)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(store.reports[0].id, 'report-cache')
+  assert.equal(store.reports[0].runPhase, 'cache-check')
   store.dispose()
 })
 
@@ -292,9 +589,12 @@ test('AI-authored report links cannot navigate the renderer and use only narrow 
     'utf8'
   )
   const preload = readFileSync(new URL('../electron/preload.js', import.meta.url), 'utf8')
-  assert.match(reportView, /@click="handleReportLink"/)
-  assert.match(reportView, /openSummaryReportLink\(event, ipc\.openExternal\)/)
+  for (const source of [reportView]) {
+    assert.match(source, /@click="handleReportLink"/)
+    assert.match(source, /openSummaryReportLink\(event, ipc\.openExternal\)/)
+  }
   assert.match(preload, /openExternal:\s*\(url\)\s*=>\s*ipcRenderer\.invoke\('shell:open-external', url\)/)
+  assert.match(preload, /showItemInFolder/)
   assert.doesNotMatch(preload, /(?:navigate|loadURL)\s*:/)
 })
 

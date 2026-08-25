@@ -2,7 +2,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import * as openCodeAdapter from '../electron/adapters/openCodeAdapter.js'
-import { extractOpenCodeResultSnapshot } from '../electron/adapters/openCodeGatewayParser.js'
+import {
+  extractOpenCodeResultSnapshot,
+  parseOpenCodeGatewayState
+} from '../electron/adapters/openCodeGatewayParser.js'
 
 let ucodeAdapter = {}
 try {
@@ -214,4 +217,43 @@ test('OpenCode-compatible Gateway snapshots retain the U-Code provider identity'
     turnId: 'turn-1',
     capturedAt: 2
   })
+})
+
+test('U-Code inherits accepted sendTurn and real AssistantMessage lifecycle terminals', async () => {
+  const adapter = new ucodeAdapter.UCodeAdapter({
+    session: { id: 'session-1', cwd: 'F:\\projects\\ucli' },
+    engine: null,
+    settings: {}
+  })
+  adapter.writeInput = value => value === 'accepted\r'
+  assert.equal(await adapter.sendTurn('accepted'), true)
+  assert.equal(await adapter.sendTurn('rejected'), false)
+
+  const parseTerminal = ({ finish = 'stop', error } = {}) => parseOpenCodeGatewayState({
+    info: { id: 'ses_ucode' },
+    messages: [
+      { info: { id: 'turn-1', role: 'user', time: { created: 1 } }, parts: [] },
+      {
+        info: {
+          id: 'assistant-1', role: 'assistant', finish, error, time: { completed: 2 }
+        },
+        parts: [{ type: 'text', text: 'U-Code result' }]
+      }
+    ]
+  }, [], { provider: 'ucode', displayName: 'U-Code' })
+
+  assert.deepEqual(parseTerminal().events.map(event => event.type), [
+    'turn_started', 'turn_completed'
+  ])
+  assert.deepEqual(parseTerminal({ error: {
+    name: 'UnknownError', data: { message: 'private failure' }
+  } }).events.map(event => event.type), [
+    'turn_started', 'turn_failed'
+  ])
+  assert.deepEqual(parseTerminal({ error: {
+    name: 'MessageAbortedError', data: { message: 'cancelled' }
+  } }).events.map(event => event.type), [
+    'turn_started', 'turn_interrupted'
+  ])
+  await adapter.dispose()
 })

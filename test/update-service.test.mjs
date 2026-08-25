@@ -211,6 +211,60 @@ test('an eligible error transition schedules a new periodic retry', async () => 
   assert.deepEqual([...timers.timers.values()].map(timer => timer.delay), [20])
 })
 
+test('an initial check failure schedules a short retry before falling back to the long periodic', async () => {
+  const updater = new FakeUpdater()
+  let calls = 0
+  updater.checkForUpdates = async () => {
+    calls += 1
+    if (calls === 1) throw new Error('transient network failure')
+    updater.emit('update-not-available')
+  }
+  const timers = createTimers()
+  const { service } = createInstalledService(updater, timers)
+
+  service.start({ initialDelayMs: 0, intervalMs: 21600000 })
+  await timers.take(0)()
+
+  assert.equal(calls, 1)
+  assert.equal(service.getState().status, 'error')
+  assert.deepEqual(
+    [...timers.timers.values()].map(timer => timer.delay).sort((a, b) => a - b),
+    [60000, 21600000]
+  )
+
+  await timers.take(60000)()
+  assert.equal(calls, 2)
+  assert.equal(service.getState().status, 'not-available')
+  assert.deepEqual([...timers.timers.values()].map(timer => timer.delay), [21600000])
+})
+
+test('a later periodic failure does not re-arm the short retry', async () => {
+  const updater = new FakeUpdater()
+  let calls = 0
+  updater.checkForUpdates = async () => {
+    calls += 1
+    if (calls === 1) throw new Error('initial hiccup')
+    updater.emit('update-not-available')
+  }
+  const timers = createTimers()
+  const { service } = createInstalledService(updater, timers)
+  service.start({ initialDelayMs: 0, intervalMs: 20 })
+  await timers.take(0)()
+  await timers.take(60000)()
+  assert.equal(calls, 2)
+  assert.deepEqual([...timers.timers.values()].map(timer => timer.delay), [20])
+
+  updater.checkForUpdates = async () => {
+    calls += 1
+    throw new Error('later hiccup')
+  }
+  await timers.take(20)()
+
+  assert.equal(calls, 3)
+  assert.equal(service.getState().status, 'error')
+  assert.deepEqual([...timers.timers.values()].map(timer => timer.delay), [20])
+})
+
 test('a manual eligible check restores the periodic timer after the request settles', async () => {
   const updater = new FakeUpdater()
   updater.checkForUpdates = async () => {

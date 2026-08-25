@@ -5,6 +5,17 @@ import {
 import { createHash } from 'node:crypto'
 import { join } from 'path'
 
+import {
+  isPersistedSummaryErrorText,
+  summaryAutomaticDuplicateReportId
+} from '../summaries/interactiveSummaryContracts.js'
+import {
+  assertSafeSummaryHash,
+  normalizeCompletedArtifactMetadata,
+  normalizeSummaryJsonField
+} from '../summaries/summaryPersistenceValidation.js'
+import { normalizeSummaryTaskMetadata } from '../../shared/summaryTaskContracts.js'
+
 const USAGE_MODEL_KEY_PREFIX = 'model:'
 const USAGE_SESSION_TOTAL_KEY = '__ucli_internal__:session-total'
 
@@ -435,6 +446,8 @@ class Db {
           'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted',
           'awaiting_confirmation', 'skipped_empty'
         )),
+        title                 TEXT,
+        task_note             TEXT NOT NULL DEFAULT '',
         markdown              TEXT,
         executor_id           TEXT,
         profile_id            TEXT,
@@ -449,6 +462,16 @@ class Db {
         is_current            INTEGER NOT NULL DEFAULT 0,
         generated_by          TEXT NOT NULL CHECK (generated_by IN ('manual', 'automatic')),
         error_text            TEXT,
+        execution_mode        TEXT NOT NULL DEFAULT 'isolated-runner' CHECK (execution_mode IN (
+          'isolated-runner', 'interactive-cli', 'legacy-worklog-import'
+        )),
+        session_id            TEXT,
+        run_phase             TEXT CHECK (run_phase IS NULL OR run_phase IN (
+          'preparing', 'starting', 'awaiting-delivery', 'running', 'validating',
+          'completed', 'failed', 'interrupted', 'cancelled'
+        )),
+        artifact_metadata_json TEXT NOT NULL DEFAULT '{}',
+        legacy_import_key     TEXT,
         created_at            INTEGER NOT NULL,
         updated_at            INTEGER NOT NULL,
         UNIQUE (period_type, period_start, period_end_exclusive, timezone, version),
@@ -460,10 +483,36 @@ class Db {
     if (!summaryReportColumns.some((column) => column.name === 'generation_metrics_json')) {
       this.sql.run("ALTER TABLE summary_reports ADD COLUMN generation_metrics_json TEXT NOT NULL DEFAULT '{}'")
     }
+    for (const [column, ddl] of [
+      ['execution_mode', `ALTER TABLE summary_reports ADD COLUMN execution_mode TEXT NOT NULL
+        DEFAULT 'isolated-runner' CHECK (execution_mode IN (
+          'isolated-runner', 'interactive-cli', 'legacy-worklog-import'
+        ))`],
+      ['session_id', 'ALTER TABLE summary_reports ADD COLUMN session_id TEXT'],
+      ['run_phase', `ALTER TABLE summary_reports ADD COLUMN run_phase TEXT CHECK (
+        run_phase IS NULL OR run_phase IN (
+          'preparing', 'starting', 'awaiting-delivery', 'running', 'validating',
+          'completed', 'failed', 'interrupted', 'cancelled'
+        ))`],
+      ['artifact_metadata_json', `ALTER TABLE summary_reports ADD COLUMN
+        artifact_metadata_json TEXT NOT NULL DEFAULT '{}'`],
+      ['legacy_import_key', 'ALTER TABLE summary_reports ADD COLUMN legacy_import_key TEXT'],
+      ['title', 'ALTER TABLE summary_reports ADD COLUMN title TEXT'],
+      ['task_note', "ALTER TABLE summary_reports ADD COLUMN task_note TEXT NOT NULL DEFAULT ''"]
+    ]) {
+      if (!summaryReportColumns.some((candidate) => candidate.name === column)) {
+        this.sql.run(ddl)
+      }
+    }
     this.sql.run(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_summary_reports_current
       ON summary_reports(period_type, period_start, period_end_exclusive, timezone)
       WHERE is_current = 1
+    `)
+    this.sql.run(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_summary_reports_legacy_import
+      ON summary_reports(legacy_import_key)
+      WHERE legacy_import_key IS NOT NULL
     `)
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS summary_settings (
@@ -717,7 +766,7 @@ class Db {
   // ---- exact post-upgrade usage ledger ----
   async observeUsage(snapshot) {
     assertUsageObservationScope(snapshot)
-    return this.transaction(async () => {
+    return this.transactionSync(() => {
       const modelKey = snapshot.scope === 'session'
         ? USAGE_SESSION_TOTAL_KEY
         : `${USAGE_MODEL_KEY_PREFIX}${snapshot.model}`
@@ -922,60 +971,156 @@ class Db {
   }
 
   // ---- summary reports ----
-  createSummaryReport(report) {
+  async createSummaryReport(report) {
     assertSummaryReport(report)
+    if (report.status === 'completed' || report.isCurrent === true) {
+      throw summaryValidationError(
+        'INVALID_SUMMARY_STATUS',
+        'Completed summary reports require the dedicated completion or import path'
+      )
+    }
+    return this.transactionSync(() => this.#insertSummaryReportSync(report))
+  }
+
+  async createQueuedSummaryReport(report) {
+    if (report?.version !== undefined) {
+      throw summaryValidationError('INVALID_SUMMARY_VERSION', 'Invalid summary report version')
+    }
+    const candidate = { ...report, version: 1 }
+    assertSummaryReport(candidate)
+    if (candidate.status !== 'queued' || candidate.isCurrent === true) {
+      throw summaryValidationError('INVALID_SUMMARY_STATUS', 'Invalid queued summary report')
+    }
+    return this.transactionSync(() => {
+      const latest = rows(this.sql.exec(
+        `SELECT COALESCE(MAX(version), 0) AS version FROM summary_reports
+         WHERE period_type = ? AND period_start = ?
+           AND period_end_exclusive = ? AND timezone = ?`,
+        [candidate.periodType, candidate.periodStart,
+          candidate.periodEndExclusive, candidate.timezone]
+      ))[0]
+      return this.#insertSummaryReportSync({
+        ...candidate,
+        version: Number(latest?.version || 0) + 1
+      })
+    })
+  }
+
+  async updateSummaryTask(reportId, fields) {
+    const metadata = normalizeSummaryTaskMetadata(fields)
+    return this.transactionSync(() => {
+      const target = this.getSummaryReport(reportId)
+      if (!target) throw Object.assign(new Error('Summary report not found'), {
+        code: 'SUMMARY_REPORT_NOT_FOUND'
+      })
+      const report = this.#updateSummaryReportSync(reportId, {
+        ...metadata,
+        updatedAt: fields.updatedAt
+      })
+      let sessionUpdated = false
+      if (target.sessionId) {
+        const other = rows(this.sql.exec(
+          'SELECT id FROM summary_reports WHERE session_id = ? AND id <> ? LIMIT 1',
+          [target.sessionId, reportId]
+        ))[0]
+        if (!other) {
+          this.sql.run(
+            `UPDATE sessions SET name = ?, task_note = ?, updated_at = ?
+             WHERE id = ? AND removed_at IS NULL`,
+            [metadata.title, metadata.taskNote, fields.updatedAt, target.sessionId]
+          )
+          sessionUpdated = this.sql.getRowsModified() > 0
+        }
+      }
+      return { report, sessionId: target.sessionId || null, sessionUpdated }
+    })
+  }
+
+  #insertSummaryReportSync(report) {
+    assertSummaryReport(report)
+    assertAutomaticDuplicateTarget(this, report, report.errorText)
+    const metadata = normalizeSummaryTaskMetadata({
+      title: report.title,
+      taskNote: report.taskNote
+    })
     const createdAt = Number.isFinite(report.createdAt) ? report.createdAt : Date.now()
     const updatedAt = Number.isFinite(report.updatedAt) ? report.updatedAt : createdAt
     this.sql.run(
       `INSERT INTO summary_reports (
          id, period_type, period_start, period_end_exclusive, timezone, partial,
-         version, status, markdown, executor_id, profile_id, model,
+         version, status, title, task_note, markdown, executor_id, profile_id, model,
          usage_snapshot_json, coverage_json, generation_usage_json, generation_metrics_json,
          generation_cost_usd, prompt_version, source_hash, is_current,
-         generated_by, error_text, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         generated_by, error_text, execution_mode, session_id, run_phase,
+         artifact_metadata_json, legacy_import_key, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         report.id, report.periodType, report.periodStart, report.periodEndExclusive,
         report.timezone, report.partial ? 1 : 0, report.version, report.status,
-        report.markdown ?? null, report.executorId || null, report.profileId || null,
+        metadata.title, metadata.taskNote, report.markdown ?? null, report.executorId || null,
+        report.profileId || null,
         report.model || null, stringifyJsonObject(report.usageSnapshot),
         stringifyJsonObject(report.coverage), stringifyJsonObject(report.generationUsage),
         stringifyJsonObject(report.generationMetrics),
         report.generationCostUsd ?? null, report.promptVersion || null,
         report.sourceHash || null, report.isCurrent ? 1 : 0, report.generatedBy,
-        report.errorText ?? null, createdAt, updatedAt
+        report.errorText ?? null, report.executionMode || 'isolated-runner',
+        report.sessionId || null, report.runPhase ?? null,
+        stringifyJsonObject(report.artifactMetadata), report.legacyImportKey || null,
+        createdAt, updatedAt
       ]
     )
     return this.getSummaryReport(report.id)
   }
 
-  updateSummaryReport(reportId, fields = {}) {
+  async updateSummaryReport(reportId, fields = {}) {
     assertSummaryReportPatch(fields)
-    if (fields.status !== undefined && fields.status !== 'completed' &&
-      this.getSummaryReport(reportId)?.isCurrent) {
+    if (fields.status === 'completed' || fields.runPhase === 'completed') {
+      throw summaryValidationError(
+        'INVALID_SUMMARY_STATUS',
+        'Completed summary reports require the dedicated completion path'
+      )
+    }
+    return this.transactionSync(() => this.#updateSummaryReportSync(reportId, fields))
+  }
+
+  #updateSummaryReportSync(reportId, fields = {}) {
+    assertSummaryReportPatch(fields)
+    const existing = this.getSummaryReport(reportId)
+    const candidate = existing ? { ...existing, ...fields } : existing
+    assertAutomaticDuplicateTarget(this, candidate, candidate?.errorText)
+    if (fields.status !== undefined && fields.status !== 'completed' && existing?.isCurrent) {
       throw summaryValidationError(
         'SUMMARY_REPORT_NOT_COMPLETED',
         'A current summary report must remain completed'
       )
     }
     const columns = {
-      status: 'status', markdown: 'markdown', executorId: 'executor_id',
+      status: 'status', title: 'title', taskNote: 'task_note', markdown: 'markdown', executorId: 'executor_id',
       profileId: 'profile_id', model: 'model', generationCostUsd: 'generation_cost_usd',
       promptVersion: 'prompt_version', sourceHash: 'source_hash', generatedBy: 'generated_by',
-      errorText: 'error_text', updatedAt: 'updated_at'
+      errorText: 'error_text', executionMode: 'execution_mode', sessionId: 'session_id',
+      runPhase: 'run_phase', legacyImportKey: 'legacy_import_key', updatedAt: 'updated_at'
     }
     const sets = []
     const values = []
+    const metadata = fields.title !== undefined || fields.taskNote !== undefined
+      ? normalizeSummaryTaskMetadata({
+        title: fields.title ?? 'summary task',
+        taskNote: fields.taskNote ?? ''
+      })
+      : null
     for (const [field, column] of Object.entries(columns)) {
       if (fields[field] === undefined) continue
       sets.push(`${column} = ?`)
-      values.push(fields[field])
+      values.push(field === 'title' ? metadata.title : field === 'taskNote' ? metadata.taskNote : fields[field])
     }
     for (const [field, column] of [
       ['usageSnapshot', 'usage_snapshot_json'],
       ['coverage', 'coverage_json'],
       ['generationUsage', 'generation_usage_json'],
-      ['generationMetrics', 'generation_metrics_json']
+      ['generationMetrics', 'generation_metrics_json'],
+      ['artifactMetadata', 'artifact_metadata_json']
     ]) {
       if (fields[field] === undefined) continue
       sets.push(`${column} = ?`)
@@ -1000,12 +1145,72 @@ class Db {
       .map(rowToSummaryReport)[0] || null
   }
 
+  async completeSummaryReport(reportId, fields = {}) {
+    assertSummaryReportPatch(fields)
+    if (fields.status !== 'completed' || fields.runPhase !== 'completed') {
+      throw summaryValidationError('INVALID_SUMMARY_STATUS', 'Invalid completed summary report')
+    }
+    assertSummaryCompletion(fields)
+    return this.transactionSync(() => {
+      const target = this.getSummaryReport(reportId)
+      if (!target) {
+        throw Object.assign(new Error(`Summary report not found: ${reportId}`), {
+          code: 'SUMMARY_REPORT_NOT_FOUND'
+        })
+      }
+      if (target.status !== 'running') {
+        throw Object.assign(new Error('Only running summary reports can complete'), {
+          code: 'SUMMARY_REPORT_NOT_RUNNING'
+        })
+      }
+      this.#updateSummaryReportSync(reportId, fields)
+      this.sql.run(
+        `UPDATE summary_reports SET is_current = 0
+         WHERE period_type = ? AND period_start = ?
+           AND period_end_exclusive = ? AND timezone = ? AND id <> ?`,
+        [target.periodType, target.periodStart, target.periodEndExclusive, target.timezone, reportId]
+      )
+      this.sql.run('UPDATE summary_reports SET is_current = 1 WHERE id = ?', [reportId])
+      return this.getSummaryReport(reportId)
+    })
+  }
+
+  async importCompletedSummaryReport(report) {
+    if (typeof report?.legacyImportKey !== 'string' || !report.legacyImportKey.trim()) {
+      throw summaryValidationError('INVALID_SUMMARY_LEGACY_IMPORT_KEY', 'Invalid legacy import key')
+    }
+    assertSummaryCompletion(report)
+    return this.transactionSync(() => {
+      const existing = rows(this.sql.exec(
+        'SELECT * FROM summary_reports WHERE legacy_import_key = ? LIMIT 1',
+        [report.legacyImportKey]
+      )).map(rowToSummaryReport)[0]
+      if (existing) return { report: existing, imported: false }
+
+      const latest = rows(this.sql.exec(
+        `SELECT COALESCE(MAX(version), 0) AS version FROM summary_reports
+         WHERE period_type = ? AND period_start = ?
+           AND period_end_exclusive = ? AND timezone = ?`,
+        [report.periodType, report.periodStart, report.periodEndExclusive, report.timezone]
+      ))[0]
+      const created = this.#insertSummaryReportSync({
+        ...report,
+        version: Number(latest?.version || 0) + 1,
+        status: 'completed',
+        isCurrent: false
+      })
+      return { report: created, imported: true }
+    })
+  }
+
   listSummaryReports(filters = {}) {
     const conditions = []
     const values = []
     for (const [field, column] of [
       ['periodType', 'period_type'], ['status', 'status'], ['generatedBy', 'generated_by'],
-      ['timezone', 'timezone']
+      ['timezone', 'timezone'], ['executionMode', 'execution_mode'],
+      ['sessionId', 'session_id'], ['runPhase', 'run_phase'],
+      ['legacyImportKey', 'legacy_import_key']
     ]) {
       if (filters[field] === undefined) continue
       conditions.push(`${column} = ?`)
@@ -1032,7 +1237,7 @@ class Db {
   }
 
   async setCurrentSummaryReport(reportId) {
-    return this.transaction(async () => {
+    return this.transactionSync(() => {
       const target = this.getSummaryReport(reportId)
       if (!target) {
         throw Object.assign(new Error(`Summary report not found: ${reportId}`), {
@@ -1059,7 +1264,7 @@ class Db {
   }
 
   async deleteSummaryReport(reportId) {
-    return this.transaction(async () => {
+    return this.transactionSync(() => {
       const target = this.getSummaryReport(reportId)
       if (!target) {
         throw Object.assign(new Error(`Summary report not found: ${reportId}`), {
@@ -1072,6 +1277,24 @@ class Db {
         })
       }
 
+      let removedSessionId = null
+      if (target.sessionId) {
+        const otherOwner = rows(this.sql.exec(
+          'SELECT id FROM summary_reports WHERE session_id = ? AND id <> ? LIMIT 1',
+          [target.sessionId, reportId]
+        ))[0]
+        if (!otherOwner) {
+          const timestamp = Date.now()
+          this.sql.run(
+            `UPDATE sessions SET status = 'removed', removed_at = ?, updated_at = ? WHERE id = ?`,
+            [timestamp, timestamp, target.sessionId]
+          )
+          if (this.sql.getRowsModified() > 0) {
+            this.deactivateGatewayRoutesForSession(target.sessionId)
+            removedSessionId = target.sessionId
+          }
+        }
+      }
       this.sql.run('DELETE FROM summary_reports WHERE id = ?', [reportId])
       let currentReportId = null
       if (target.isCurrent) {
@@ -1097,7 +1320,7 @@ class Db {
         ))[0]
         currentReportId = current?.id || null
       }
-      return { deletedReportId: reportId, currentReportId }
+      return { deletedReportId: reportId, currentReportId, removedSessionId }
     })
   }
 
@@ -1805,6 +2028,28 @@ class Db {
     return result
   }
 
+  transactionSync(work) {
+    const run = () => {
+      this.sql.run('BEGIN IMMEDIATE')
+      try {
+        const result = work()
+        if (result && typeof result.then === 'function') {
+          throw Object.assign(new TypeError('Database transactions must be synchronous'), {
+            code: 'ASYNC_DATABASE_TRANSACTION_FORBIDDEN'
+          })
+        }
+        this.sql.run('COMMIT')
+        return result
+      } catch (error) {
+        try { this.sql.run('ROLLBACK') } catch { /* preserve original error */ }
+        throw error
+      }
+    }
+    const result = this._transactionTail.then(run, run)
+    this._transactionTail = result.catch(() => {})
+    return result
+  }
+
   // ---- migration ----
   migrateFromJson(rulesets, settings, sessionsObj) {
     if (rulesets) {
@@ -2056,6 +2301,60 @@ const SUMMARY_STATUSES = new Set([
   'awaiting_confirmation', 'skipped_empty'
 ])
 const SUMMARY_GENERATORS = new Set(['manual', 'automatic'])
+const SUMMARY_EXECUTION_MODES = new Set([
+  'isolated-runner', 'interactive-cli', 'legacy-worklog-import'
+])
+const SUMMARY_RUN_PHASES = new Set([
+  'preparing', 'starting', 'awaiting-delivery', 'running', 'validating',
+  'completed', 'failed', 'interrupted', 'cancelled'
+])
+function assertSummaryJson(value, field) {
+  if (value === undefined) return
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw summaryValidationError('INVALID_SUMMARY_JSON_SHAPE', 'Invalid summary JSON shape')
+  }
+  try {
+    normalizeSummaryJsonField(value, field)
+  } catch (error) {
+    if (field !== 'artifactMetadata' || error?.code === 'SUMMARY_SENSITIVE_JSON_FORBIDDEN') {
+      throw error
+    }
+    throw summaryValidationError(
+      'INVALID_SUMMARY_ARTIFACT_METADATA',
+      'Invalid summary artifact metadata'
+    )
+  }
+}
+
+function assertSummaryErrorText(value) {
+  if (value !== undefined && !isPersistedSummaryErrorText(value)) {
+    throw summaryValidationError('INVALID_SUMMARY_ERROR_CODE', 'Invalid summary error code')
+  }
+}
+
+function assertAutomaticDuplicateTarget(db, report, errorText) {
+  const targetId = summaryAutomaticDuplicateReportId(errorText)
+  if (!targetId) return
+  const target = db.getSummaryReport(targetId)
+  if (!report || !target || report.generatedBy !== 'automatic' ||
+    !report.sourceHash || target.sourceHash !== report.sourceHash ||
+    target.status !== 'completed' ||
+    target.periodType !== report.periodType || target.periodStart !== report.periodStart ||
+    target.periodEndExclusive !== report.periodEndExclusive || target.timezone !== report.timezone) {
+    throw summaryValidationError('INVALID_SUMMARY_ERROR_CODE', 'Invalid summary error code')
+  }
+}
+
+function assertSummaryCompletion(fields) {
+  if (typeof fields.markdown !== 'string' || !fields.markdown.trim()) {
+    throw summaryValidationError(
+      'INVALID_SUMMARY_CANONICAL_REPORT',
+      'Invalid canonical summary report'
+    )
+  }
+  assertSafeSummaryHash(fields.sourceHash)
+  normalizeCompletedArtifactMetadata(fields.markdown, fields.artifactMetadata)
+}
 
 function assertSummaryReport(report) {
   if (!SUMMARY_PERIOD_TYPES.has(report?.periodType)) {
@@ -2080,6 +2379,22 @@ function assertSummaryReport(report) {
   if (report.isCurrent && report.status !== 'completed') {
     throw summaryValidationError('SUMMARY_REPORT_NOT_COMPLETED', 'Only completed reports can be current')
   }
+  if (report.executionMode !== undefined && !SUMMARY_EXECUTION_MODES.has(report.executionMode)) {
+    throw summaryValidationError('INVALID_SUMMARY_EXECUTION_MODE', 'Invalid summary execution mode')
+  }
+  if (report.sessionId !== undefined && report.sessionId !== null &&
+    (typeof report.sessionId !== 'string' || !report.sessionId.trim())) {
+    throw summaryValidationError('INVALID_SUMMARY_SESSION_ID', 'Invalid summary session id')
+  }
+  if (report.runPhase !== undefined && report.runPhase !== null &&
+    !SUMMARY_RUN_PHASES.has(report.runPhase)) {
+    throw summaryValidationError('SUMMARY_RUN_PHASE_INVALID', 'Invalid summary run phase')
+  }
+  assertSummaryErrorText(report.errorText)
+  normalizeSummaryTaskMetadata({ title: report.title, taskNote: report.taskNote })
+  for (const field of [
+    'usageSnapshot', 'coverage', 'generationUsage', 'generationMetrics', 'artifactMetadata'
+  ]) assertSummaryJson(report[field], field)
 }
 
 function assertSummaryReportPatch(fields) {
@@ -2089,6 +2404,27 @@ function assertSummaryReportPatch(fields) {
   if (fields.generatedBy !== undefined && !SUMMARY_GENERATORS.has(fields.generatedBy)) {
     throw summaryValidationError('INVALID_SUMMARY_GENERATED_BY', 'Invalid summary report origin')
   }
+  if (fields.executionMode !== undefined && !SUMMARY_EXECUTION_MODES.has(fields.executionMode)) {
+    throw summaryValidationError('INVALID_SUMMARY_EXECUTION_MODE', 'Invalid summary execution mode')
+  }
+  if (fields.sessionId !== undefined && fields.sessionId !== null &&
+    (typeof fields.sessionId !== 'string' || !fields.sessionId.trim())) {
+    throw summaryValidationError('INVALID_SUMMARY_SESSION_ID', 'Invalid summary session id')
+  }
+  if (fields.runPhase !== undefined && fields.runPhase !== null &&
+    !SUMMARY_RUN_PHASES.has(fields.runPhase)) {
+    throw summaryValidationError('SUMMARY_RUN_PHASE_INVALID', 'Invalid summary run phase')
+  }
+  assertSummaryErrorText(fields.errorText)
+  if (fields.title !== undefined || fields.taskNote !== undefined) {
+    normalizeSummaryTaskMetadata({
+      title: fields.title ?? 'summary task',
+      taskNote: fields.taskNote ?? ''
+    })
+  }
+  for (const field of [
+    'usageSnapshot', 'coverage', 'generationUsage', 'generationMetrics', 'artifactMetadata'
+  ]) assertSummaryJson(fields[field], field)
 }
 
 function summaryValidationError(code, message) {
@@ -2123,6 +2459,8 @@ function rowToSummaryReport(row) {
     partial: row.partial === 1,
     version: row.version,
     status: row.status,
+    title: row.title ?? null,
+    taskNote: row.task_note ?? '',
     markdown: row.markdown ?? null,
     executorId: row.executor_id || null,
     profileId: row.profile_id || null,
@@ -2137,6 +2475,11 @@ function rowToSummaryReport(row) {
     isCurrent: row.is_current === 1,
     generatedBy: row.generated_by,
     errorText: row.error_text ?? null,
+    executionMode: row.execution_mode || 'isolated-runner',
+    sessionId: row.session_id || null,
+    runPhase: row.run_phase || null,
+    artifactMetadata: parseJsonObject(row.artifact_metadata_json),
+    legacyImportKey: row.legacy_import_key || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   }

@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const sourceRoot = path.join(root, 'integrations', 'deepseek-harness-bridge')
-const outputRoot = path.join(root, 'resources', 'deepseek-harness')
+const outputRoot = process.env.UCLI_DSH_BRIDGE_OUTPUT_ROOT
+  ? path.resolve(process.env.UCLI_DSH_BRIDGE_OUTPUT_ROOT)
+  : path.join(root, 'resources', 'deepseek-harness')
 const output = path.join(outputRoot, 'ucli-dsh-bridge-0.11.0.tgz')
 const entries = [
   ['package/package.json', 'package.json'],
