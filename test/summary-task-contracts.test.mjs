@@ -69,9 +69,13 @@ test('summary task error metadata exposes only actionable allowlisted failures',
   for (const [errorText, expected] of cases) {
     assert.deepEqual(summaryTaskErrorMeta(errorText), expected)
   }
-  assert.deepEqual(summaryTaskErrorMeta('C:\\private\\secret provider output'), {
+  const fallback = {
     code: 'SUMMARY_RUN_FAILED',
     message: '工作总结生成失败。',
     action: '请重试生成总结。'
-  })
+  }
+  assert.deepEqual(summaryTaskErrorMeta('C:\\private\\secret provider output'), fallback)
+  for (const inheritedProperty of ['toString', 'constructor', '__proto__']) {
+    assert.deepEqual(summaryTaskErrorMeta(inheritedProperty), fallback)
+  }
 })

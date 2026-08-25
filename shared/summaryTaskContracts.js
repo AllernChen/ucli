@@ -94,5 +94,7 @@ export function summaryTaskStatusMeta(report = {}, progress = null) {
 }
 
 export function summaryTaskErrorMeta(errorText) {
-  return ERROR_META[errorText] || ERROR_META.SUMMARY_RUN_FAILED
+  return Object.hasOwn(ERROR_META, errorText)
+    ? ERROR_META[errorText]
+    : ERROR_META.SUMMARY_RUN_FAILED
 }
