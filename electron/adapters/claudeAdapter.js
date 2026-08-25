@@ -1,9 +1,9 @@
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, statSync } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { tmpdir } from 'os'
 import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
-import { findClaudeProjectDirectory } from '../sessionDiscovery.js'
+import { findClaudeProjectDirectory, isSafeNativeSessionId } from '../sessionDiscovery.js'
 import { buildClaudeProfileArgs } from '../aiCliProfiles/claudeProfileAdapter.js'
 import {
   encodeClaudeDecisionResponse,
@@ -106,10 +106,8 @@ export function parseClaudeTranscriptStats(lines) {
     if (obj.type === 'assistant' && obj.message?.stop_reason === 'end_turn') {
       completedTurnsCount += 1
     }
-    if (obj.type === 'user' && obj.message?.content) {
-      for (const b of obj.message.content) {
-        if (b.type === 'text') { turnsCount += 1; break }
-      }
+    if (obj.type === 'user' && userEntryText(obj).trim()) {
+      turnsCount += 1
     }
     if (obj.type === 'result') {
       if (obj.total_cost_usd) costUsd = Math.max(costUsd, obj.total_cost_usd)
@@ -588,7 +586,16 @@ export class ClaudeAdapter extends BaseAdapter {
           // 跳过自本轮起未变过的文件（全新 transcript 或追加都会更新 mtime）。
           if (statSync(full).mtimeMs < sinceMs) continue
         } catch { continue }
-        if (transcriptHasUserTurn(full, fingerprint, sinceMs)) return true
+        if (transcriptHasUserTurn(full, fingerprint, sinceMs)) {
+          if (!this.session.cliSessionId) {
+            const nativeSessionId = basename(full, '.jsonl')
+            if (isSafeNativeSessionId(nativeSessionId)) {
+              this.session.cliSessionId = nativeSessionId
+              this.emitEvent({ type: 'init', cliSessionId: nativeSessionId })
+            }
+          }
+          return true
+        }
       }
     } catch { /* scan failed, treat as not-delivered */ }
     return false

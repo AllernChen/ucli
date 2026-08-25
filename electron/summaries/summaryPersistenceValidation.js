@@ -16,6 +16,10 @@ const COVERAGE_KEYS = new Set([
   'sessionsDiscovered', 'sessionsIncluded', 'sessionsMissing', 'messagesIncluded',
   'truncatedSessions', 'sources', 'warnings', 'redactions', 'legacyFormat'
 ])
+const COVERAGE_COUNT_KEYS = new Set([
+  'sessionsDiscovered', 'sessionsIncluded', 'sessionsMissing', 'messagesIncluded',
+  'truncatedSessions'
+])
 const SOURCE_KEYS = new Set(['transcript', 'note', 'nativeDigest'])
 const REDACTION_KEYS = new Set([
   'authorization', 'commonKey', 'privateKey', 'credentialUrl', 'namedValue'
@@ -45,6 +49,7 @@ function sensitiveKey(key, child, path) {
   const normalized = String(key).replace(/[^a-z0-9]/gi, '').toLowerCase()
   const numericTokenCounter = normalized.endsWith('tokens') && nonNegativeNumber(child)
   const allowedCoverageCount = path[0] === 'coverage' && (
+    (path.length === 1 && COVERAGE_COUNT_KEYS.has(key)) ||
     (path[1] === 'sources' && key === 'transcript') || path[1] === 'redactions'
   ) && Number.isSafeInteger(child) && child >= 0
   return !numericTokenCounter && !allowedCoverageCount && (

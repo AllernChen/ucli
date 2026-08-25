@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  ClaudeAdapter,
   makeTurnFingerprint,
   userEntryText,
   transcriptHasUserTurn
@@ -20,6 +21,34 @@ function makeFixture(entries) {
   writeFileSync(path, entries.map((line) => JSON.stringify(line)).join('\n'))
   return { dir, path }
 }
+
+test('Claude delivery binds the native session from a matching current TUI transcript filename', async () => {
+  const nativeSessionId = '75b2eb81-2a47-4dc3-9803-6cf3f6a3993d'
+  const dir = mkdtempSync(join(tmpdir(), 'ucli-turn-native-binding-'))
+  const path = join(dir, `${nativeSessionId}.jsonl`)
+  const prompt = 'Generate the bounded summary.'
+  writeFileSync(path, JSON.stringify({
+    type: 'user',
+    timestamp: T1,
+    message: { role: 'user', content: prompt }
+  }))
+  const session = { id: 'ucli-session', cwd: dir, cliSessionId: null }
+  const adapter = new ClaudeAdapter({ session, engine: null, settings: {} })
+  adapter._projectDir = () => dir
+  const initEvents = []
+  adapter.on('event', event => {
+    if (event.type === 'init') initEvents.push(event.cliSessionId)
+  })
+
+  try {
+    assert.equal(adapter._scanProjectTranscripts(makeTurnFingerprint(prompt), SINCE), true)
+    assert.equal(session.cliSessionId, nativeSessionId)
+    assert.deepEqual(initEvents, [nativeSessionId])
+  } finally {
+    await adapter.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('makeTurnFingerprint collapses whitespace and truncates to 40 chars', () => {
   assert.equal(

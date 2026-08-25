@@ -212,6 +212,25 @@ test('Claude adapter verifies the current decision before writing native input',
   await adapter.dispose()
 })
 
+test('Claude parser emits turn_started for current TUI string user content', async () => {
+  const { parseClaudeGatewayState } = await parser()
+  const state = parseClaudeGatewayState([
+    JSON.stringify({
+      type: 'user',
+      uuid: 'turn-string-content',
+      timestamp: '2026-08-25T06:49:12.639Z',
+      message: { role: 'user', content: 'Generate the bounded summary.' }
+    })
+  ])
+
+  assert.deepEqual(state.events, [{
+    type: 'turn_started',
+    sessionId: '',
+    turnId: 'turn-string-content',
+    occurredAt: Date.parse('2026-08-25T06:49:12.639Z')
+  }])
+})
+
 test('Claude sendTurn confirms once without duplicate input', async () => {
   const adapter = new ClaudeAdapter({
     session: { id: 'session-1', cwd: 'F:\\projects\\ucli' },

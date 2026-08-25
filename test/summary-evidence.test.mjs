@@ -5,6 +5,7 @@ import test from 'node:test'
 import { createSessionHistoryService } from '../electron/sessionHistoryService.js'
 import { collectSummaryEvidence } from '../electron/summaries/evidenceCollector.js'
 import { redactEvidenceText } from '../electron/summaries/redaction.js'
+import { normalizeSummaryJsonField } from '../electron/summaries/summaryPersistenceValidation.js'
 
 const start = Date.parse('2026-08-10T00:00:00.000Z')
 const endExclusive = Date.parse('2026-08-11T00:00:00.000Z')
@@ -148,6 +149,7 @@ test('collector groups mixed provider evidence and reports exact coverage', asyn
       namedValue: 3
     }
   })
+  assert.deepEqual(normalizeSummaryJsonField(result.coverage, 'coverage'), result.coverage)
   assert.equal(result.projects.length, 2)
   assert.deepEqual(result.projects.map(project => project.projectPath), ['/work/a', 'C:/Repo/B'])
   assert.deepEqual(result.projects[0].sessions.map(session => session.sessionId), [
