@@ -521,6 +521,30 @@ test('cancel aborts validation stops the CLI and settles cancelled', async t => 
   })
 })
 
+test('deletion cancellation leaves a report-bound shared session for database ownership', async t => {
+  const state = await fixture(t)
+  const run = await state.service.start(request())
+  await beginRunning(state, run)
+  state.db.insertSession({
+    id: run.sessionId, project_path: 'F:\\summary', adapter_id: 'claude',
+    name: 'interactive summary', task_note: '', tier: 'safety-rules',
+    status: 'running', created_at: Date.now()
+  })
+  const shared = await state.repository.createQueued({
+    ...request({ start: START + WEEK, endExclusive: START + (2 * WEEK) }),
+    generatedBy: 'manual', executionMode: 'interactive-cli'
+  })
+  await state.repository.update(shared.id, { sessionId: run.sessionId })
+
+  assert.equal(await state.service.cancelForDeletion(run.report.id), true)
+  const deleted = await state.repository.delete(run.report.id)
+
+  assert.equal(deleted.removedSessionId, null)
+  assert.equal(state.db.getSession(run.sessionId).removedAt, null)
+  assert.ok(state.fake.config(run.sessionId))
+  assert.deepEqual(state.fake.removeRequests, [])
+})
+
 test('deletion cancellation retains construction ownership until its late session is removed', async t => {
   const createGate = deferred()
   const stopGate = deferred()

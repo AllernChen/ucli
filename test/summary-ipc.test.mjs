@@ -935,6 +935,28 @@ test('active summary deletion preserves resources when cancellation fails', asyn
   assert.deepEqual([deletes, sessionRemovals, workspaceRemovals], [0, 0, 0])
 })
 
+test('failed active summary deletion leaves session projection and workspace for retry', async () => {
+  const calls = []
+  let active = true
+  await assert.rejects(deleteSummaryReportAndWorkspace('report-active', {
+    repository: {
+      get: () => ({ id: 'report-active', sessionId: 'session-1' }),
+      delete: async () => {
+        calls.push('delete-report')
+        throw Object.assign(new Error('transaction rolled back'), { code: 'SUMMARY_DELETE_FAILED' })
+      }
+    },
+    interactiveJobService: {
+      isActive: () => active,
+      async cancelForDeletion() { calls.push('cancel'); active = false; return true }
+    },
+    headlessJobService: { isActive: () => false },
+    removeSessionProjection: async () => { calls.push('remove-session') },
+    workspaceService: { remove: async () => { calls.push('remove-workspace') } }
+  }), { code: 'SUMMARY_DELETE_FAILED' })
+  assert.deepEqual(calls, ['cancel', 'delete-report'])
+})
+
 test('summary deletion requires the cancelled job to be drained before removing resources', async () => {
   const calls = []
   await assert.rejects(deleteSummaryReportAndWorkspace('report-active', {

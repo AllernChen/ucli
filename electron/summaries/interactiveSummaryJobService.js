@@ -232,7 +232,9 @@ export function createInteractiveSummaryJobService({
     return outcome
   }
 
-  async function drainDeletionSession(job, sessionId = job.sessionId) {
+  async function drainDeletionSession(job, sessionId = job.sessionId, {
+    removeProjection = !job.sessionBoundToReport
+  } = {}) {
     if (sessionId && !job.sessionId) job.sessionId = sessionId
     if (!job.sessionId) return { ok: true, value: true }
     const stopped = await stopOwnedSession(job)
@@ -240,7 +242,7 @@ export function createInteractiveSummaryJobService({
       job.stopPromise = null
       return stopped
     }
-    return removeOwnedSession(job)
+    return removeProjection ? removeOwnedSession(job) : { ok: true, value: true }
   }
 
   async function cleanLateCreatedSession(job, value) {
@@ -651,6 +653,7 @@ export function createInteractiveSummaryJobService({
       repositoryOperation: null,
       repositoryCompletionOperation: null,
       sessionConstruction: null,
+      sessionBoundToReport: false,
       stopPromise: null,
       removePromise: null,
       projectionRemoved: false,
@@ -726,6 +729,7 @@ export function createInteractiveSummaryJobService({
         sessionId: job.sessionId,
         updatedAt: now()
       }))
+      job.sessionBoundToReport = job.report.sessionId === job.sessionId
       execute(job).catch(() => {})
       return {
         report: job.report,
