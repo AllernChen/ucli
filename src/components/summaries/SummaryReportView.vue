@@ -27,9 +27,9 @@
       message="旧版报告等待确认"
       description="此报告无法在此继续。请取消后重试，以创建新的总结版本。"
     />
-    <div v-if="progress" class="progress-row">
-      <a-progress :percent="progress.total ? Math.round(progress.completed / progress.total * 100) : 0" />
-      <span>{{ progress.text }}</span>
+    <div v-if="visibleProgress" class="progress-row">
+      <a-progress :percent="visibleProgress.total ? Math.round(visibleProgress.completed / visibleProgress.total * 100) : 0" />
+      <span>{{ visibleProgress.text }}</span>
     </div>
     <div v-if="active" class="cancel-row"><a-button danger size="small" @click="$emit('cancel', report.id)">取消生成</a-button></div>
     <div class="actions">
@@ -46,9 +46,10 @@
         :title="deleteTitle"
         ok-text="确认删除"
         cancel-text="取消"
-        @confirm="$emit('delete-report', report.id)"
+        :disabled="deleting"
+        @confirm="confirmDelete"
       >
-        <a-button danger :title="deleteTitle" :aria-label="deleteTitle">删除总结</a-button>
+        <a-button danger :loading="deleting" :disabled="deleting" :title="deleteTitle" :aria-label="deleteTitle">删除总结</a-button>
       </a-popconfirm>
     </div>
     <article
@@ -70,13 +71,15 @@ import ipc from '../../ipc.js'
 import { openSummaryReportLink } from '../../summaryLinks.js'
 import { summaryTaskStatusMeta } from '../../../shared/summaryTaskContracts.js'
 
-const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean })
+const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean, deleting: Boolean, deleteReport: Function })
 const emit = defineEmits(['cancel', 'edit', 'export-markdown', 'export-html', 'delete-report', 'open-conversation'])
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const safeHtml = computed(() => DOMPurify.sanitize(markdown.render(props.report?.markdown || '')))
 const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].includes(props.report?.status))
+const terminal = computed(() => ['completed', 'failed', 'cancelled', 'interrupted', 'skipped_empty'].includes(props.report?.status))
 const exportable = computed(() => props.report?.status === 'completed')
-const awaitingConfirmation = computed(() => props.report?.status === 'awaiting_confirmation' || props.progress?.phase === 'awaiting_confirmation')
+const awaitingConfirmation = computed(() => !terminal.value && props.report?.status === 'awaiting_confirmation')
+const visibleProgress = computed(() => terminal.value ? null : props.progress)
 const status = computed(() => summaryTaskStatusMeta(props.report, props.progress))
 const displayEnd = computed(() => {
   if (!props.report) return null
@@ -104,6 +107,11 @@ async function copyMarkdown() { await navigator.clipboard.writeText(props.report
 function exportMarkdown() { if (exportable.value) emit('export-markdown', props.report.id) }
 function exportHtml() { if (exportable.value && !props.htmlExporting) emit('export-html', props.report.id) }
 function handleReportLink(event) { openSummaryReportLink(event, ipc.openExternal) }
+function confirmDelete() {
+  if (props.deleting) return Promise.resolve()
+  if (props.deleteReport) return props.deleteReport(props.report.id)
+  emit('delete-report', props.report.id)
+}
 function formatPeriod(value) {
   return new Date(value).toLocaleDateString('zh-CN', { timeZone: props.report?.timezone || undefined })
 }

@@ -14,24 +14,25 @@
                 :report="item"
                 :progress="summaries.progress[item.id] || null"
                 :selected="item.id === summaries.selectedReportId"
+                :deleting="deletingReportIds.has(item.id)"
+                :delete-report="remove"
                 @select="select"
                 @edit="openEdit"
-                @delete-report="remove"
                 @retry="retry"
                 @open-conversation="openConversation"
               />
             </template>
           </a-list>
-          <SummaryHistory :versions="summaries.versions" :progress="summaries.progress" @select="select" @edit="openEdit" @retry="retry" @set-current="setCurrent" @delete-report="remove" />
+          <SummaryHistory :versions="summaries.versions" :progress="summaries.progress" :deleting-report-ids="deletingReportIds" :delete-report="remove" @select="select" @edit="openEdit" @retry="retry" @set-current="setCurrent" />
         </a-col>
         <a-col :span="17">
-          <SummaryReportView :report="summaries.selectedReport" :progress="selectedProgress" :html-exporting="htmlExporting" @cancel="cancel" @edit="openEdit" @export-markdown="exportMarkdown" @export-html="openHtmlExport" @delete-report="remove" @open-conversation="openConversation" />
+          <SummaryReportView :report="summaries.selectedReport" :progress="selectedProgress" :html-exporting="htmlExporting" :deleting="deletingReportIds.has(summaries.selectedReportId)" :delete-report="remove" @cancel="cancel" @edit="openEdit" @export-markdown="exportMarkdown" @export-html="openHtmlExport" @open-conversation="openConversation" />
         </a-col>
       </a-row>
     </a-spin>
     <SummaryConversationDrawer v-model:open="drawerOpen" :report-id="conversationReport?.id" :session-id="conversationReport?.sessionId || null" />
     <SummaryGenerateDialog v-model:open="dialogOpen" @submit="generate" />
-    <SummaryTaskEditDialog v-model:open="editDialogOpen" :report="editReport" :confirm-loading="editSaving" @submit="saveEdit" />
+    <SummaryTaskEditDialog :open="editDialogOpen" :report="editReport" :confirm-loading="editSaving" @update:open="setEditDialogOpen" @submit="saveEdit" />
     <SummaryHtmlStyleDialog v-model:open="htmlStyleDialogOpen" :confirm-loading="htmlExporting" @submit="exportHtml" />
   </div>
 </template>
@@ -57,9 +58,12 @@ const htmlExporting = ref(false)
 const editDialogOpen = ref(false)
 const editReport = ref(null)
 const editSaving = ref(false)
+const deletingReportIds = ref(new Set())
 const selectedProgress = computed(() => summaries.progress[summaries.selectedReportId] || null)
 const owner = Symbol('work-summary-panel')
 let alive = true
+let editDialogEpoch = 0
+let editRequestEpoch = 0
 
 onMounted(async () => {
   try {
@@ -90,22 +94,47 @@ async function retry(report) {
 async function cancel(reportId) { await summaries.cancel(reportId) }
 async function setCurrent(reportId) { await summaries.setCurrent(reportId) }
 async function remove(reportId) {
-  try { await summaries.deleteReport(reportId) } catch { summaries.error = new Error('无法删除总结任务') }
+  if (deletingReportIds.value.has(reportId)) return
+  deletingReportIds.value = new Set(deletingReportIds.value).add(reportId)
+  try {
+    return await summaries.deleteReport(reportId)
+  } catch {
+    summaries.error = new Error('无法删除总结任务')
+  } finally {
+    const next = new Set(deletingReportIds.value)
+    next.delete(reportId)
+    deletingReportIds.value = next
+  }
 }
 function openEdit(report) {
+  editDialogEpoch += 1
   editReport.value = report
   editDialogOpen.value = true
 }
+function setEditDialogOpen(open) {
+  if (open || editSaving.value) return
+  editDialogEpoch += 1
+  editDialogOpen.value = false
+  editReport.value = null
+}
 async function saveEdit(patch) {
   if (!editReport.value || editSaving.value) return
+  const reportId = editReport.value.id
+  const dialogEpoch = editDialogEpoch
+  const requestEpoch = ++editRequestEpoch
   editSaving.value = true
   try {
-    await summaries.updateTask(editReport.value.id, patch)
-    editDialogOpen.value = false
+    await summaries.updateTask(reportId, patch)
+    if (editDialogEpoch === dialogEpoch && editReport.value?.id === reportId) {
+      editDialogOpen.value = false
+      editReport.value = null
+    }
   } catch {
-    summaries.error = new Error('无法更新总结任务')
+    if (editDialogEpoch === dialogEpoch && editReport.value?.id === reportId) {
+      summaries.error = new Error('无法更新总结任务')
+    }
   } finally {
-    editSaving.value = false
+    if (editRequestEpoch === requestEpoch) editSaving.value = false
   }
 }
 function openConversation(report) { conversationReport.value = report; drawerOpen.value = true }

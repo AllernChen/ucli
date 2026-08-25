@@ -159,6 +159,19 @@ async function loadMountedTaskEditDialog(vite) {
   return attachClientRender(dialog, fileName, compiledScript.bindings)
 }
 
+async function loadMountedHistory(vite) {
+  await vite.transformRequest('/src/components/summaries/SummaryHistory.vue')
+  const fileName = '../src/components/summaries/SummaryHistory.vue'
+  const source = readFileSync(new URL(fileName, import.meta.url), 'utf8')
+  const { descriptor, errors } = parseSfc(source, { filename: fileName })
+  assert.deepEqual(errors, [])
+  const compiledScript = compileScript(descriptor, { id: 'summary-history-mounted' })
+  let code = compiledScript.content.replace(/^import[^\n]*\n/gm, '').replace('export default', 'return')
+  const { summaryTaskStatusMeta } = await import('../shared/summaryTaskContracts.js')
+  const history = new Function('summaryTaskStatusMeta', code)(summaryTaskStatusMeta)
+  return attachClientRender(history, fileName, compiledScript.bindings)
+}
+
 test('summary task card presents terminal status and exposes edit/delete controls', async () => {
   Vue = await import('vue')
   ;({ createServer } = await import('vite'))
@@ -174,14 +187,15 @@ test('summary task card presents terminal status and exposes edit/delete control
       periodType: 'day', periodStart: Date.UTC(2026, 7, 19),
       periodEndExclusive: Date.UTC(2026, 7, 19, 3, 28), timezone: 'Asia/Shanghai'
     }
+    const deleteCalls = []
     wrapper = mount(await loadMountedListItem(vite), {
-      props: { report, progress: null, selected: false },
+      props: { report, progress: null, selected: false, deleteReport: async reportId => { deleteCalls.push(reportId) } },
       global: { stubs: {
         'a-list-item': { template: '<section><slot /><slot name="actions" /></section>' },
         'a-list-item-meta': { template: '<div><slot /><slot name="title" /><slot name="description" /></div>' },
         'a-tag': { template: '<span><slot /></span>' },
         'a-button': { template: '<button :title="$attrs.title"><slot /></button>' },
-        'a-popconfirm': { template: '<div><slot /></div>' }
+        'a-popconfirm': { emits: ['confirm'], template: '<div><button data-testid="confirm-delete" @click="$emit(\'confirm\')">确认</button><slot /></div>' }
       } }
     })
     assert.match(wrapper.text(), /已完成/)
@@ -190,6 +204,8 @@ test('summary task card presents terminal status and exposes edit/delete control
     assert.deepEqual(wrapper.emitted('edit'), [[report]])
     await wrapper.get('[data-testid="summary-task-delete-legacy-completed"]').trigger('click')
     assert.equal(wrapper.get('[data-testid="summary-task-delete-legacy-completed"]').attributes('title'), '删除这个总结任务？')
+    await wrapper.get('[data-testid="confirm-delete"]').trigger('click')
+    assert.deepEqual(deleteCalls, ['legacy-completed'])
 
     await wrapper.setProps({
       report: { ...report, id: 'active-report', status: 'running', runPhase: 'starting' },
@@ -200,6 +216,65 @@ test('summary task card presents terminal status and exposes edit/delete control
   } finally {
     wrapper?.unmount()
     await vite.close()
+  }
+})
+
+test('mounted panel keeps a newer edit dialog open after an older save resolves and deduplicates deletion', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ createPinia } = await import('pinia'))
+  ;({ defineComponent } = Vue)
+  ;({ flushPromises, shallowMount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const first = { id: 'first', title: '第一份', taskNote: '', status: 'completed', version: 1, periodType: 'day', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai' }
+  const second = { ...first, id: 'second', title: '第二份' }
+  let resolveUpdate
+  let resolveDelete
+  const updateCalls = []
+  const deleteCalls = []
+  const stubs = createStubs()
+  const api = window.ucli || {}
+  window.ucli = api
+  const originalApi = { ...api }
+  Object.assign(api, {
+    listSummaryReports: async () => [first, second], getSummaryReport: async reportId => reportId === first.id ? first : second,
+    updateSummaryTask: value => { updateCalls.push(value); return new Promise(resolve => { resolveUpdate = resolve }) },
+    deleteSummaryReport: reportId => { deleteCalls.push(reportId); return new Promise(resolve => { resolveDelete = resolve }) },
+    onSummaryProgress: () => () => {}
+  })
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    wrapper = shallowMount(await loadMountedPanel(vite, stubs), {
+      global: { plugins: [createPinia()], stubs: {
+        SummaryGenerateDialog: stubs.GenerateDialogStub, SummaryReportView: stubs.ReportViewStub, SummaryHistory: stubs.HistoryStub,
+        SummaryConversationDrawer: stubs.ConversationStub, SummaryHtmlStyleDialog: stubs.HtmlStyleDialogStub,
+        'a-button': { template: '<button><slot /></button>' }, 'a-alert': true, 'a-list': { template: '<div><slot /></div>' },
+        'a-row': { template: '<div><slot /></div>' }, 'a-col': { template: '<div><slot /></div>' }, 'a-spin': { template: '<div><slot /></div>' }
+      } }
+    })
+    await flushPromises()
+
+    wrapper.vm.openEdit(first)
+    const saving = wrapper.vm.saveEdit({ title: '第一份已编辑', taskNote: '备注' })
+    await flushPromises()
+    assert.deepEqual(updateCalls, [{ reportId: 'first', title: '第一份已编辑', taskNote: '备注' }])
+    wrapper.vm.openEdit(second)
+    resolveUpdate({ ...first, title: '第一份已编辑', taskNote: '备注' })
+    await saving
+    assert.equal(wrapper.vm.editDialogOpen, true)
+    assert.equal(wrapper.vm.editReport.id, 'second')
+
+    const deleting = wrapper.vm.remove('first')
+    const duplicate = wrapper.vm.remove('first')
+    assert.deepEqual(deleteCalls, ['first'])
+    resolveDelete({ deletedReportId: 'first', currentReportId: null })
+    await Promise.all([deleting, duplicate])
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+    Object.assign(api, originalApi)
   }
 })
 
@@ -224,6 +299,31 @@ test('summary task edit dialog emits normalized title and note', async () => {
     await wrapper.get('[data-testid="summary-task-note"]').setValue('已复核\r\n第二行')
     await wrapper.get('[data-testid="summary-task-edit-submit"]').trigger('click')
     assert.deepEqual(wrapper.emitted('submit'), [[{ title: '8 月 19 日总结', taskNote: '已复核\n第二行' }]])
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+  }
+})
+
+test('history delete keeps its documented event fallback when no panel handler is provided', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ mount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    wrapper = mount(await loadMountedHistory(vite), {
+      props: { versions: [{ id: 'history-report', title: '历史', status: 'completed', version: 1 }], progress: {} },
+      global: { stubs: {
+        'a-card': { template: '<section><slot /></section>' }, 'a-list': { props: ['dataSource'], template: '<div><slot v-for="item in dataSource" name="renderItem" :item="item" /></div>' },
+        'a-list-item': { template: '<div><slot /><slot name="actions" /></div>' }, 'a-list-item-meta': true, 'a-button': { template: '<button><slot /></button>' },
+        'a-popconfirm': { emits: ['confirm'], template: '<button data-testid="history-confirm-delete" @click="$emit(\'confirm\')"><slot /></button>' }
+      } }
+    })
+    await wrapper.get('[data-testid="history-confirm-delete"]').trigger('click')
+    assert.deepEqual(wrapper.emitted('delete-report'), [['history-report']])
   } finally {
     wrapper?.unmount()
     await vite.close()
@@ -262,7 +362,7 @@ test('mounted work summary panel uses canonical reports for generation, progress
       periodEndExclusive: 4, timezone: 'Asia/Shanghai', executorId: null, profileId: null, model: null
     }
   }
-  window.ucli = {
+  Object.assign(window.ucli, {
     listSummaryReports: async filters => {
       if (filters?.periodType === 'week') return [reports.r2, reports.r1]
       return [reports.r2, reports.r1, reports.imported]
@@ -288,7 +388,7 @@ test('mounted work summary panel uses canonical reports for generation, progress
       progressListeners.add(listener)
       return () => { unsubscribeCalls += 1; progressListeners.delete(listener); if (progressListener === listener) progressListener = () => {} }
     }
-  }
+  })
 
   const vite = await createServer({
     plugins: [vuePlugin()],
@@ -433,6 +533,36 @@ test('mounted completed report enables export while queued and failed reports ca
       wrapper.unmount()
       wrapper = null
     }
+  } finally {
+    wrapper?.unmount()
+    await vite.close()
+  }
+})
+
+test('terminal reports ignore stale progress and awaiting-confirmation phases', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ mount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  let wrapper
+  try {
+    wrapper = mount(await loadMountedReport(vite), {
+      props: {
+        report: { id: 'completed', version: 1, status: 'completed', periodStart: Date.UTC(2026, 7, 19), periodEndExclusive: Date.UTC(2026, 7, 19, 3, 28), timezone: 'Asia/Shanghai', markdown: '# 已完成' },
+        progress: { phase: 'awaiting_confirmation', completed: 0, total: 1, text: '陈旧进度' }
+      },
+      global: { stubs: {
+        'a-card': { template: '<section>{{ $attrs.title }}<slot /><slot name="extra" /></section>' }, 'a-tag': { template: '<span><slot /></span>' }, 'a-descriptions': { template: '<div><slot /></div>' }, 'a-descriptions-item': { template: '<div><slot /></div>' },
+        'a-alert': { props: ['message', 'description'], template: '<div>{{ message }} {{ description }}</div>' }, 'a-progress': true, 'a-button': { template: '<button><slot /></button>' }, 'a-popconfirm': { template: '<div><slot /></div>' }, 'a-empty': true
+      } }
+    })
+    assert.match(wrapper.text(), /已完成/)
+    assert.doesNotMatch(wrapper.text(), /陈旧进度|旧版报告等待确认/)
+    assert.match(wrapper.text(), /2026\/8\/19 — 2026\/8\/19/)
+    await wrapper.setProps({ report: { ...wrapper.props('report'), partial: true, periodEndExclusive: Date.UTC(2026, 7, 20) } })
+    assert.match(wrapper.text(), /2026\/8\/19 — 2026\/8\/20/)
   } finally {
     wrapper?.unmount()
     await vite.close()

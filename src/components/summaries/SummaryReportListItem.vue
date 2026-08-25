@@ -21,10 +21,13 @@
         :title="deleteTitle"
         ok-text="确认删除"
         cancel-text="取消"
-        @confirm="emit('delete-report', report.id)"
+        :disabled="deleting"
+        @confirm="confirmDelete"
       >
         <a-button
           danger
+          :loading="deleting"
+          :disabled="deleting"
           :data-testid="`summary-task-delete-${report.id}`"
           :title="deleteTitle"
           :aria-label="deleteTitle"
@@ -42,7 +45,9 @@ import { summaryTaskStatusMeta } from '../../../shared/summaryTaskContracts.js'
 const props = defineProps({
   report: { type: Object, required: true },
   progress: { type: Object, default: null },
-  selected: Boolean
+  selected: Boolean,
+  deleting: Boolean,
+  deleteReport: Function
 })
 const emit = defineEmits(['select', 'edit', 'delete-report', 'retry', 'open-conversation'])
 const status = computed(() => summaryTaskStatusMeta(props.report, props.progress))
@@ -50,6 +55,11 @@ const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].inc
 const retryable = computed(() => ['failed', 'interrupted', 'cancelled'].includes(props.report.status))
 const deleteTitle = computed(() => active.value ? '取消并删除这个总结任务？' : '删除这个总结任务？')
 const createdAt = computed(() => props.report.createdAt ? new Date(props.report.createdAt).toLocaleString() : '—')
+function confirmDelete() {
+  if (props.deleting) return Promise.resolve()
+  if (props.deleteReport) return props.deleteReport(props.report.id)
+  emit('delete-report', props.report.id)
+}
 </script>
 
 <style scoped>

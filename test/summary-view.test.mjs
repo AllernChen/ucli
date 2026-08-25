@@ -486,7 +486,7 @@ test('summary workspace components cover generation, safe reading, history, retr
     assert.match(all, new RegExp(text))
   }
   assert.match(all, /themeId:\s*['"]executive['"]/)
-  assert.match(all, /@confirm="\$emit\('delete-report', report\.id\)"/)
+  assert.match(all, /@confirm="confirmDelete"/)
   assert.match(all, /MarkdownIt\(\{\s*html:\s*false/)
   assert.match(all, /DOMPurify\.sanitize/)
   assert.match(all, /failed|interrupted/)
