@@ -91,14 +91,14 @@ Windows package artifacts:
 
 | 工件 / 操作 | 结果 |
 | --- | --- |
-| Setup | PASS；静默安装到既有安装路径后启动，首次启动 PID `34668` 正常；第二次启动 exit 0，原窗口保持。Markdown 和 HTML 导出均打开原生另存为对话框后取消。 |
-| Portable | PASS；解包启动 PID `34180` 后正常加载工作总结；Markdown 和 HTML 导出按钮均可用。 |
+| Setup | PASS；最终工件静默安装到既有安装路径后启动，首次启动 PID `24064` 正常；工作总结详情删除模态框可打开并取消；第二次启动 exit 0，原窗口保持。Markdown 和 HTML 导出均打开原生另存为对话框后取消。 |
+| Portable | PASS；最终工件解包启动 PID `13068` 后正常加载工作总结；详情删除模态框可打开并触发取消，Markdown 和 HTML 导出按钮均可用。 |
 | 操作安全性 | PASS；未编辑或删除报告；所有保存、删除与导出对话框均取消；最终已停止全部 UCLI 进程。 |
 
 最终 Windows artifacts：
 
-- `UCLI-Setup-0.11.6-x64.exe` — 134,185,607 bytes；2026-08-25 22:07:46；SHA-256 `324F22DAA103334B83E1DB0A35A326BBAA80E8086A04208200BEAA771B9465C1`
-- `UCLI-Portable-0.11.6-x64.exe` — 133,931,389 bytes；2026-08-25 22:07:56；SHA-256 `5D640376805EC4ACCA8E1EFBC0132EBC86637CF4D49B754A1F02FEFED19983BB`
+- `UCLI-Setup-0.11.6-x64.exe` — 134,185,643 bytes；2026-08-25 22:57:30；SHA-256 `5609D792A05D478506AE29F834B13510D10E93A9B247FECA0007B580A0FB2C16`
+- `UCLI-Portable-0.11.6-x64.exe` — 133,931,364 bytes；2026-08-25 22:57:40；SHA-256 `CCD655B2230E733014527672F6AADE467BC860BA07FAAFBB82D0FE18BED4645B`
 
 ## Release decision
 
