@@ -184,7 +184,7 @@ async function exportHtml(style) {
 .work-summary-header__actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
 .summary-workspace { display:grid; grid-template-columns:minmax(300px, 360px) minmax(0, 1fr); gap:16px; align-items:start; }
 .summary-task-rail { min-width:0; max-height:calc(100vh - 220px); overflow:auto; }
-.summary-detail { min-width:0; display:grid; gap:14px; }
+.summary-detail { min-width:0; display:grid; grid-template-columns:minmax(0, 1fr); gap:14px; }
 .selected { background:#e6f4ff; }
 @media (max-width:959px) {
   .summary-workspace { grid-template-columns:minmax(0, 1fr); }

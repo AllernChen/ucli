@@ -543,6 +543,14 @@ test('report detail stylesheet gives rendered wide Markdown tables a usable over
   assert.match(reportView, /\.markdown-body\s*:deep\(table\)\s*\{[^}]*max-width\s*:\s*100%/)
 })
 
+test('summary panel detail grid declares a bounded track for wide report content', () => {
+  const panel = readFileSync(
+    new URL('../src/components/summaries/WorkSummaryPanel.vue', import.meta.url),
+    'utf8'
+  )
+  assert.match(panel, /\.summary-detail\s*\{[^}]*display\s*:\s*grid[^}]*grid-template-columns\s*:\s*minmax\(0,\s*1fr\)/)
+})
+
 test('summary store reconciles unknown cache-check progress without losing it', async () => {
   getCalls = 0
   const store = freshStore()
