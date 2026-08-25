@@ -21,6 +21,34 @@ const PHASE_DETAIL = Object.freeze({
   validating: '正在验证 Markdown 报告'
 })
 
+const ERROR_META = Object.freeze({
+  SUMMARY_ARTIFACT_INVALID: Object.freeze({
+    code: 'SUMMARY_ARTIFACT_INVALID',
+    message: '报告已生成，但内容结构或安全校验未通过。',
+    action: '请检查生成内容后重试。'
+  }),
+  SUMMARY_ARTIFACT_MISSING: Object.freeze({
+    code: 'SUMMARY_ARTIFACT_MISSING',
+    message: 'AI CLI 未写出报告文件。',
+    action: '请确认 AI CLI 已完成后重试。'
+  }),
+  SUMMARY_TURN_NOT_CONFIRMED: Object.freeze({
+    code: 'SUMMARY_TURN_NOT_CONFIRMED',
+    message: '生成指令未确认送达 AI CLI。',
+    action: '请重新生成总结。'
+  }),
+  SUMMARY_RUN_TIMEOUT: Object.freeze({
+    code: 'SUMMARY_RUN_TIMEOUT',
+    message: '生成超过允许时间。',
+    action: '请重试生成总结。'
+  }),
+  SUMMARY_RUN_FAILED: Object.freeze({
+    code: 'SUMMARY_RUN_FAILED',
+    message: '工作总结生成失败。',
+    action: '请重试生成总结。'
+  })
+})
+
 function invalidMetadata(message) {
   return Object.assign(new TypeError(message), { code: 'INVALID_SUMMARY_TASK_METADATA' })
 }
@@ -63,4 +91,8 @@ export function summaryTaskStatusMeta(report = {}, progress = null) {
     ...status,
     detail: terminal ? status.detail : progress?.text || PHASE_DETAIL[report.runPhase] || status.detail
   }
+}
+
+export function summaryTaskErrorMeta(errorText) {
+  return ERROR_META[errorText] || ERROR_META.SUMMARY_RUN_FAILED
 }

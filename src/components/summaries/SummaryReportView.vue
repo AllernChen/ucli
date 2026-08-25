@@ -18,7 +18,14 @@
       :description="generationPerformance"
     />
     <a-alert v-if="coverageWarning" style="margin-top:12px" type="warning" show-icon :message="coverageWarning" />
-    <a-alert v-if="report.status === 'failed'" style="margin-top:12px" type="error" show-icon message="总结生成失败，请重试。" />
+    <a-alert
+      v-if="failed"
+      style="margin-top:12px"
+      type="error"
+      show-icon
+      :message="error.message"
+      :description="`${error.action}（错误代码：${error.code}）`"
+    />
     <a-alert
       v-if="awaitingConfirmation"
       style="margin-top:12px"
@@ -69,7 +76,7 @@ import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
 import ipc from '../../ipc.js'
 import { openSummaryReportLink } from '../../summaryLinks.js'
-import { summaryTaskStatusMeta } from '../../../shared/summaryTaskContracts.js'
+import { summaryTaskErrorMeta, summaryTaskStatusMeta } from '../../../shared/summaryTaskContracts.js'
 
 const props = defineProps({ report: Object, progress: Object, htmlExporting: Boolean, deleting: Boolean, deleteReport: Function })
 const emit = defineEmits(['cancel', 'edit', 'export-markdown', 'export-html', 'delete-report', 'open-conversation'])
@@ -81,6 +88,8 @@ const exportable = computed(() => props.report?.status === 'completed')
 const awaitingConfirmation = computed(() => !terminal.value && props.report?.status === 'awaiting_confirmation')
 const visibleProgress = computed(() => terminal.value ? null : props.progress)
 const status = computed(() => summaryTaskStatusMeta(props.report, props.progress))
+const failed = computed(() => props.report?.status === 'failed')
+const error = computed(() => summaryTaskErrorMeta(props.report?.errorText))
 const displayEnd = computed(() => {
   if (!props.report) return null
   return props.report.partial ? props.report.periodEndExclusive : props.report.periodEndExclusive - 1

@@ -8,7 +8,8 @@
       </template>
       <template #description>
         <a-tag :color="status.color">{{ status.label }}</a-tag>
-        <span>{{ status.detail }}</span>
+        <span>{{ failed ? error.message : status.detail }}</span>
+        <span v-if="failed">{{ error.action }}</span>
         <span>{{ report.executorId || '—' }} · {{ createdAt }}</span>
         <span v-if="report.taskNote">{{ report.taskNote }}</span>
       </template>
@@ -40,7 +41,7 @@
 
 <script setup>
 import { computed } from 'vue'
-import { summaryTaskStatusMeta } from '../../../shared/summaryTaskContracts.js'
+import { summaryTaskErrorMeta, summaryTaskStatusMeta } from '../../../shared/summaryTaskContracts.js'
 
 const props = defineProps({
   report: { type: Object, required: true },
@@ -51,6 +52,8 @@ const props = defineProps({
 })
 const emit = defineEmits(['select', 'edit', 'delete-report', 'retry', 'open-conversation'])
 const status = computed(() => summaryTaskStatusMeta(props.report, props.progress))
+const failed = computed(() => props.report.status === 'failed')
+const error = computed(() => summaryTaskErrorMeta(props.report.errorText))
 const active = computed(() => ['queued', 'running', 'awaiting_confirmation'].includes(props.report.status))
 const retryable = computed(() => ['failed', 'interrupted', 'cancelled'].includes(props.report.status))
 const deleteTitle = computed(() => active.value ? '取消并删除这个总结任务？' : '删除这个总结任务？')

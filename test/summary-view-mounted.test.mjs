@@ -118,15 +118,16 @@ async function loadMountedReport(vite) {
   const compiledScript = compileScript(descriptor, { id: 'summary-report-mounted' })
   let code = compiledScript.content.replace(/^import[^\n]*\n/gm, '').replace('export default', 'return')
   code = `const { computed } = Vue\n${code}`
-  code = code.replace(/\bsummaryTaskStatusMeta\b/g, 'statusMeta')
-  const { summaryTaskStatusMeta } = await import('../shared/summaryTaskContracts.js')
-  const report = new Function('Vue', 'DOMPurify', 'MarkdownIt', 'ipc', 'openSummaryReportLink', 'statusMeta', code)(
+  code = code.replace(/\bsummaryTaskStatusMeta\b/g, 'statusMeta').replace(/\bsummaryTaskErrorMeta\b/g, 'errorMeta')
+  const { summaryTaskStatusMeta, summaryTaskErrorMeta } = await import('../shared/summaryTaskContracts.js')
+  const report = new Function('Vue', 'DOMPurify', 'MarkdownIt', 'ipc', 'openSummaryReportLink', 'statusMeta', 'errorMeta', code)(
     Vue,
     { sanitize: value => value },
     class { render(value) { return value } },
     { openExternal: () => {} },
     () => {},
-    summaryTaskStatusMeta
+    summaryTaskStatusMeta,
+    summaryTaskErrorMeta
   )
   return attachClientRender(report, fileName, compiledScript.bindings)
 }
@@ -140,9 +141,9 @@ async function loadMountedListItem(vite) {
   const compiledScript = compileScript(descriptor, { id: 'summary-list-item-mounted' })
   let code = compiledScript.content.replace(/^import[^\n]*\n/gm, '').replace('export default', 'return')
   code = `const { computed } = Vue\n${code}`
-  code = code.replace(/\bsummaryTaskStatusMeta\b/g, 'statusMeta')
-  const { summaryTaskStatusMeta } = await import('../shared/summaryTaskContracts.js')
-  const item = new Function('Vue', 'statusMeta', code)(Vue, summaryTaskStatusMeta)
+  code = code.replace(/\bsummaryTaskStatusMeta\b/g, 'statusMeta').replace(/\bsummaryTaskErrorMeta\b/g, 'errorMeta')
+  const { summaryTaskStatusMeta, summaryTaskErrorMeta } = await import('../shared/summaryTaskContracts.js')
+  const item = new Function('Vue', 'statusMeta', 'errorMeta', code)(Vue, summaryTaskStatusMeta, summaryTaskErrorMeta)
   return attachClientRender(item, fileName, compiledScript.bindings)
 }
 
@@ -215,6 +216,51 @@ test('summary task card presents terminal status and exposes edit/delete control
     assert.equal(wrapper.get('[data-testid="summary-task-delete-active-report"]').attributes('title'), '取消并删除这个总结任务？')
   } finally {
     wrapper?.unmount()
+    await vite.close()
+  }
+})
+
+test('mounted failed task presents mapped safe reason without persisted raw error text', async () => {
+  Vue = await import('vue')
+  ;({ createServer } = await import('vite'))
+  ;({ default: vuePlugin } = await import('@vitejs/plugin-vue'))
+  ;({ mount } = await import('@vue/test-utils'))
+  ;({ compileScript, compileTemplate, parse: parseSfc } = await import('@vue/compiler-sfc'))
+  const vite = await createServer({ plugins: [vuePlugin()], optimizeDeps: { noDiscovery: true }, server: { middlewareMode: true }, appType: 'custom' })
+  const report = {
+    id: 'failed-report', title: '工作总结（每周）2026-08-25 09:50', taskNote: '',
+    version: 1, status: 'failed', errorText: 'SUMMARY_ARTIFACT_INVALID',
+    periodType: 'week', periodStart: 1, periodEndExclusive: 2, timezone: 'Asia/Shanghai',
+    markdown: null
+  }
+  let listItem
+  let detail
+  try {
+    listItem = mount(await loadMountedListItem(vite), {
+      props: { report, progress: null, selected: false },
+      global: { stubs: {
+        'a-list-item': { template: '<section><slot /><slot name="actions" /></section>' },
+        'a-list-item-meta': { template: '<div><slot /><slot name="title" /><slot name="description" /></div>' },
+        'a-tag': { template: '<span><slot /></span>' }, 'a-button': true, 'a-popconfirm': true
+      } }
+    })
+    detail = mount(await loadMountedReport(vite), {
+      props: { report: { ...report, errorText: 'SUMMARY_ARTIFACT_INVALID C:\\private\\secret' }, progress: null },
+      global: { stubs: {
+        'a-card': { template: '<section><slot /><slot name="extra" /></section>' }, 'a-tag': true,
+        'a-descriptions': { template: '<div><slot /></div>' }, 'a-descriptions-item': { template: '<div><slot /></div>' },
+        'a-alert': { props: ['message', 'description'], template: '<div>{{ message }} {{ description }}</div>' },
+        'a-progress': true, 'a-button': true, 'a-popconfirm': true, 'a-empty': true
+      } }
+    })
+    assert.match(listItem.text(), /报告已生成，但内容结构或安全校验未通过。/)
+    assert.match(detail.text(), /工作总结生成失败。/)
+    assert.match(detail.text(), /请重试生成总结。/)
+    assert.match(detail.text(), /SUMMARY_RUN_FAILED/)
+    assert.doesNotMatch(`${listItem.text()} ${detail.text()}`, /C:\\private\\secret/)
+  } finally {
+    listItem?.unmount()
+    detail?.unmount()
     await vite.close()
   }
 })
