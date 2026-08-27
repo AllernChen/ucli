@@ -1,0 +1,12 @@
+[
+  {
+    "id": "skill-version-fixture-001",
+    "version": "1.2.3",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sizeBytes": 2048,
+    "publishedAt": "2026-08-20T04:00:00.000Z",
+    "createdAt": "2026-08-20T04:00:00.000Z",
+    "skill": { "slug": "fixture-skill", "name": "Fixture Skill", "description": "A fixture-only organization skill." },
+    "downloadUrl": "http://server.fixture.test/api/v1/skills/skill-version-fixture-001/download"
+  }
+]
