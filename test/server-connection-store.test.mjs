@@ -29,7 +29,15 @@ const initialState = {
   organization: { id: 'org-1', name: 'Example organization' },
   authorizationExpiresAt: '2026-09-01T00:00:00.000Z',
   serverTime: '2026-08-28T00:00:00.000Z',
-  lastSyncedAt: '2026-08-28T00:00:00.000Z'
+  lastSyncedAt: '2026-08-28T00:00:00.000Z',
+  connection: {
+    id: 'connection-1',
+    serverOrigin: 'https://server.example.test',
+    account: { id: 'member-1', displayName: 'Example member' },
+    organization: { id: 'org-1', name: 'Example organization' },
+    authorization: { expiresAt: '2026-09-01T00:00:00.000Z', serverTime: '2026-08-28T00:00:00.000Z' },
+    connectionRevision: 1
+  }
 }
 
 globalThis.window = {
@@ -304,6 +312,51 @@ test('catalog identity fences clear disconnected and stale organization results'
   await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(connection.skills, [{ versionId: 'org-b-version' }])
   assert.equal(connection.organization.id, 'org-b')
+})
+
+test('expiring authorization keeps the connected catalog available for cached and explicit sync results', async () => {
+  const connection = store()
+  let calls = 0
+  window.ucli.onServerConnectionState = (listener) => { stateListener = listener; return () => {} }
+  window.ucli.onServerConnectionRegistrationRequested = (listener) => { registrationListener = listener; return () => {} }
+  window.ucli.getServerConnectionState = async () => initialState
+  window.ucli.listServerConnectionSkills = async () => [{ versionId: `cached-${++calls}` }]
+  window.ucli.syncServerConnectionSkills = async () => [{ versionId: 'synced-expiring' }]
+  await connection.initialize()
+  stateListener({ ...initialState, revision: 2, status: 'expiring' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(connection.skills, [{ versionId: 'cached-1' }])
+  await connection.syncSkills()
+  assert.deepEqual(connection.skills, [{ versionId: 'synced-expiring' }])
+  await connection.loadCachedSkills()
+  assert.deepEqual(connection.skills, [{ versionId: 'cached-2' }])
+})
+
+test('a connection revision replacement fences a late catalog load for the same origin and organization', async () => {
+  const connection = store()
+  const oldCatalog = deferred()
+  const replacementCatalog = deferred()
+  const replacement = {
+    ...initialState,
+    revision: 2,
+    connection: { ...initialState.connection, connectionRevision: 2 }
+  }
+  let calls = 0
+  window.ucli.onServerConnectionState = (listener) => { stateListener = listener; return () => {} }
+  window.ucli.onServerConnectionRegistrationRequested = (listener) => { registrationListener = listener; return () => {} }
+  window.ucli.getServerConnectionState = async () => initialState
+  window.ucli.listServerConnectionSkills = async () => (++calls === 1 ? oldCatalog.promise : replacementCatalog.promise)
+  const initializing = connection.initialize()
+  await new Promise(resolve => setImmediate(resolve))
+  stateListener(replacement)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls, 2)
+  assert.deepEqual(connection.skills, [])
+  replacementCatalog.resolve([{ versionId: 'replacement-version' }])
+  oldCatalog.resolve([{ versionId: 'old-version' }])
+  await initializing
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(connection.skills, [{ versionId: 'replacement-version' }])
 })
 
 test('unknown server errors never retain attacker-controlled codes or text', async () => {

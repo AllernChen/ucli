@@ -33,8 +33,10 @@ function isCurrentState(value, revision) {
 }
 
 function catalogIdentity(state) {
-  if (state?.status !== 'connected' || typeof state.serverOrigin !== 'string' || typeof state.organization?.id !== 'string') return null
-  return `${state.serverOrigin}\u0000${state.organization.id}`
+  if (!['connected', 'expiring'].includes(state?.status) || typeof state.serverOrigin !== 'string' ||
+    typeof state.organization?.id !== 'string' || typeof state.connectionId !== 'string' ||
+    !Number.isSafeInteger(state.connectionRevision)) return null
+  return `${state.serverOrigin}\u0000${state.organization.id}\u0000${state.connectionId}\u0000${state.connectionRevision}`
 }
 
 function validateSkillTargets(value) {
@@ -60,6 +62,8 @@ export const useServerConnectionStore = defineStore('server-connection', {
     authorizationExpiresAt: null,
     serverTime: null,
     lastSyncedAt: null,
+    connectionId: null,
+    connectionRevision: null,
     attempt: null,
     pendingAttemptId: null,
     models: [],
@@ -93,6 +97,10 @@ export const useServerConnectionStore = defineStore('server-connection', {
       this.authorizationExpiresAt = value.authorizationExpiresAt || value.connection?.authorizationExpiresAt || null
       this.serverTime = value.serverTime || value.connection?.serverTime || null
       this.lastSyncedAt = value.lastSyncedAt || value.connection?.lastSyncedAt || null
+      this.connectionId = typeof value.connection?.id === 'string' ? value.connection.id : null
+      this.connectionRevision = Number.isSafeInteger(value.connection?.connectionRevision)
+        ? value.connection.connectionRevision
+        : null
       const nextIdentity = catalogIdentity(this)
       if (nextIdentity !== this._connectionIdentity) {
         this._catalogRequest += 1
