@@ -94,6 +94,7 @@ export class ConnectionManager {
     this.bootstrapCache = null
     this.bootstrapFlight = null
     this.persistencePending = null
+    this.pendingDisconnect = false
     this.retryTimer = null
     this.accessRefreshTimer = null
     this.expiryTimer = null
@@ -495,16 +496,17 @@ export class ConnectionManager {
   async handleLifecycleError(error) {
     const code = error?.code
     if (['invalid_grant', 'grant_deleted', 'invalid_device'].includes(code)) {
-      const previousRuntimeIdentity = runtimeConnectionIdentity(this.current)
-      this.accessToken = null
-      this.accessTokenExpiresAt = 0
-      this.bootstrapCache = null
-      if (code === 'grant_deleted') this.setRuntimeStatus('deleted', code)
-      await this.runCredentialMutation(() => this.credentials.disconnect())
-      this.current = null
-      this.connectionEpoch += 1
-      this.setRuntimeStatus('disconnected', null)
+      const previousRuntimeIdentity = this.invalidateRuntimeConnection()
       if (previousRuntimeIdentity) await this.revokeRevision(previousRuntimeIdentity)
+      try {
+        await this.runCredentialMutation(() => this.credentials.disconnect())
+      } catch (disconnectError) {
+        if (disconnectError?.code === 'PERSISTENCE_PENDING') {
+          this.pendingDisconnect = true
+          this.scheduleRetry()
+        }
+        throw disconnectError
+      }
       return
     }
     const disabledStatus = {
@@ -553,6 +555,24 @@ export class ConnectionManager {
     }
   }
 
+  invalidateRuntimeConnection() {
+    const identity = runtimeConnectionIdentity(this.current)
+    this.current = null
+    this.connectionEpoch += 1
+    this.accessToken = null
+    this.accessTokenExpiresAt = 0
+    if (this.accessRefreshTimer) this.timers.clearTimeout(this.accessRefreshTimer)
+    if (this.expiryTimer) this.timers.clearTimeout(this.expiryTimer)
+    this.accessRefreshTimer = null
+    this.expiryTimer = null
+    this.bootstrapCache = null
+    this.persistencePending = null
+    this.status = 'disconnected'
+    this.reason = null
+    this.emitState()
+    return identity
+  }
+
   assertLifecycleAvailable() {
     if (this.shuttingDown) throw Object.assign(new Error('Server connection is shutting down'), { code: 'SERVER_CONNECTION_SHUTDOWN' })
     if (this.credentials.isPersistencePending?.() && !this.persistencePending) {
@@ -588,27 +608,16 @@ export class ConnectionManager {
 
   async disconnect() {
     this.operationEpoch += 1
+    const previousRuntimeIdentity = this.invalidateRuntimeConnection()
+    if (previousRuntimeIdentity) await this.revokeRevision(previousRuntimeIdentity)
     try {
-      const previousRuntimeIdentity = await this.runCredentialMutation(async () => {
-        const previousRuntimeIdentity = runtimeConnectionIdentity(this.current)
-        await this.credentials.disconnect()
-        this.current = null
-        this.accessToken = null
-        this.accessTokenExpiresAt = 0
-        if (this.accessRefreshTimer) this.timers.clearTimeout(this.accessRefreshTimer)
-        if (this.expiryTimer) this.timers.clearTimeout(this.expiryTimer)
-        this.accessRefreshTimer = null
-        this.expiryTimer = null
-        this.bootstrapCache = null
-        this.persistencePending = null
-        this.status = 'disconnected'
-        this.reason = null
-        this.connectionEpoch += 1
-        this.emitState()
-        return previousRuntimeIdentity
-      })
-      if (previousRuntimeIdentity) await this.revokeRevision(previousRuntimeIdentity)
+      await this.runCredentialMutation(() => this.credentials.disconnect())
+      this.pendingDisconnect = false
     } catch (error) {
+      if (error?.code === 'PERSISTENCE_PENDING') {
+        this.pendingDisconnect = true
+        this.scheduleRetry()
+      }
       throw operationError(error)
     }
   }
@@ -616,6 +625,21 @@ export class ConnectionManager {
   async retry() {
     if (this.shuttingDown) throw Object.assign(new Error('Server connection is shutting down'), { code: 'SERVER_CONNECTION_SHUTDOWN' })
     await this.retryPendingRevocations()
+    if (this.pendingDisconnect) {
+      try {
+        await this.runCredentialMutation(async () => {
+          if (this.credentials.isPersistencePending?.()) {
+            await (this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.())
+          }
+          await this.credentials.disconnect()
+        })
+        this.pendingDisconnect = false
+      } catch (error) {
+        this.scheduleRetry()
+        throw operationError(error)
+      }
+      return this.getState()
+    }
     if (this.persistencePending) {
       try {
         const pending = this.persistencePending
@@ -708,7 +732,14 @@ export class ConnectionManager {
       ...this.previewFlights.values(), ...this.redeemFlights.values(),
       this.refreshFlight?.promise, this.bootstrapFlight?.promise, this.credentialMutation
     ].filter(Boolean))
-    if (this.persistencePending) {
+    if (this.pendingDisconnect) {
+      await this.runCredentialMutation(async () => {
+        if (this.credentials.isPersistencePending?.()) {
+          await (this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.())
+        }
+        await this.credentials.disconnect()
+      }).catch(() => {})
+    } else if (this.persistencePending) {
       await this.runCredentialMutation(() => this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.()).catch(() => {})
     }
     // In-flight work may have completed while shutdown awaited it; scrub again.
@@ -717,6 +748,7 @@ export class ConnectionManager {
     this.accessTokenExpiresAt = 0
     this.bootstrapCache = null
     this.persistencePending = null
+    this.pendingDisconnect = false
     this.refreshFlight = null
     this.bootstrapFlight = null
     this.previewFlights.clear()

@@ -59,9 +59,12 @@ function safeHeaders(headers) {
 }
 
 function safeResponseHeaders(headers) {
+  const connectionTokens = String(headers.get('connection') || '').split(',').map(value => value.trim().toLowerCase())
   const forwarded = {}
   for (const [name, value] of headers) {
-    if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) forwarded[name] = value
+    const lower = name.toLowerCase()
+    if (!HOP_BY_HOP_HEADERS.has(lower) && !connectionTokens.includes(lower) &&
+      lower !== 'content-encoding' && lower !== 'content-length') forwarded[name] = value
   }
   return forwarded
 }
@@ -75,11 +78,8 @@ function gatewayUrl(baseUrl, route) {
   return new URL(`${basePath}${route}`, base.origin)
 }
 
-function crossOriginRedirect(response, upstreamUrl) {
-  if (response.status < 300 || response.status >= 400) return false
-  const location = response.headers.get('location')
-  if (!location) return false
-  try { return new URL(location, upstreamUrl).origin !== upstreamUrl.origin } catch { return true }
+function isRedirect(response) {
+  return response.status >= 300 && response.status < 400
 }
 
 export function createLocalGatewayProxy({ connectionManager, fetchImpl = fetch, randomBytes = nodeRandomBytes, logger = () => {} } = {}) {
@@ -148,7 +148,7 @@ export function createLocalGatewayProxy({ connectionManager, fetchImpl = fetch, 
       }
       const forward = async token => fetchImpl(upstreamUrl, {
         method: request.method,
-        headers: { ...safeHeaders(request.headers), authorization: `Bearer ${token}` },
+        headers: { ...safeHeaders(request.headers), authorization: `Bearer ${token}`, 'accept-encoding': 'identity' },
         body: request.method === 'POST' ? Readable.toWeb(request) : undefined,
         duplex: request.method === 'POST' ? 'half' : undefined,
         redirect: 'manual',
@@ -164,7 +164,7 @@ export function createLocalGatewayProxy({ connectionManager, fetchImpl = fetch, 
         }
         upstream = await forward(accessToken)
       }
-      if (crossOriginRedirect(upstream, upstreamUrl)) {
+      if (isRedirect(upstream)) {
         await upstream.body?.cancel()
         reject(response, 502, { origin, route, startedAt, sessionId: session.sessionId })
         return
@@ -204,6 +204,7 @@ export function createLocalGatewayProxy({ connectionManager, fetchImpl = fetch, 
     createSession({ sessionId, connectionId, connectionRevision } = {}) {
       if (!baseUrl || closed || typeof sessionId !== 'string' || !sessionId) throw new Error('Loopback proxy is unavailable')
       const identity = immutableIdentity({ connectionId, connectionRevision })
+      this.revokeSession(sessionId)
       let bearer
       do { bearer = Buffer.from(randomBytes(32)).toString('base64url') } while (sessions.has(bearer))
       sessions.set(bearer, { sessionId, identity })

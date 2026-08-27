@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import test from 'node:test'
+import { gzipSync } from 'node:zlib'
 
 import { createLocalGatewayProxy } from '../electron/serverConnection/localGatewayProxy.js'
 
@@ -29,6 +30,19 @@ async function startedProxy(options = {}) {
   const proxy = createLocalGatewayProxy(options)
   await proxy.start()
   return proxy
+}
+
+async function startedUpstream(handler) {
+  const server = http.createServer(handler)
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const { port } = server.address()
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    close: () => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  }
 }
 
 test('binds only loopback and authorizes a distinct bearer bound to the immutable connection identity', async t => {
@@ -143,13 +157,65 @@ test('does not call upstream when the connection becomes stale while resolving g
   assert.equal(response.status, 401)
 })
 
-test('does not replay POST 401s, refreshes GET models once, and blocks cross-origin redirects', async t => {
+test('decompresses fetched gzip bodies without relaying stale framing or Connection-named headers', async t => {
+  const body = JSON.stringify({ object: 'list', data: [{ id: 'compressed-model' }] })
+  const compressed = gzipSync(body)
+  const upstream = await startedUpstream((request, response) => {
+    assert.equal(request.url, '/gateway/v1/models')
+    response.writeHead(200, {
+      'content-type': 'application/json',
+      'content-encoding': 'gzip',
+      'content-length': compressed.length,
+      connection: 'x-internal',
+      'x-internal': 'must-not-leak'
+    })
+    response.end(compressed)
+  })
+  t.after(() => upstream.close())
+  const manager = createManager({ bootstrap: { gateway: { baseUrl: `${upstream.baseUrl}/gateway` } } })
+  const proxy = await startedProxy({ connectionManager: manager })
+  t.after(() => proxy.shutdown())
+  const session = proxy.createSession({ sessionId: 'session-1', ...identity })
+
+  const response = await fetch(`${session.baseUrl}/v1/models`, {
+    headers: { authorization: `Bearer ${session.bearer}` }
+  })
+  assert.equal(response.status, 200)
+  assert.equal(await response.text(), body)
+  assert.equal(response.headers.get('content-encoding'), null)
+  assert.equal(response.headers.get('content-length'), null)
+  assert.equal(response.headers.get('x-internal'), null)
+})
+
+test('a replacement session bearer supersedes every prior bearer for that session ID', async t => {
+  const manager = createManager()
+  let upstreamCalls = 0
+  const proxy = await startedProxy({
+    connectionManager: manager,
+    fetchImpl: async () => {
+      upstreamCalls += 1
+      return new Response('ok')
+    }
+  })
+  t.after(() => proxy.shutdown())
+  const first = proxy.createSession({ sessionId: 'session-1', ...identity })
+  const replacement = proxy.createSession({ sessionId: 'session-1', ...identity })
+  assert.notEqual(first.bearer, replacement.bearer)
+
+  assert.equal((await fetch(`${proxy.baseUrl}/v1/models`, { headers: { authorization: `Bearer ${first.bearer}` } })).status, 401)
+  assert.equal((await fetch(`${proxy.baseUrl}/v1/models`, { headers: { authorization: `Bearer ${replacement.bearer}` } })).status, 200)
+  assert.equal(upstreamCalls, 1)
+})
+
+test('does not replay POST 401s, refreshes GET models once, and blocks every redirect', async t => {
   const manager = createManager()
   const calls = []
   const responses = [
     new Response('unauthorized', { status: 401 }),
     new Response('ok', { status: 200 }),
     new Response('unauthorized', { status: 401 }),
+    new Response(null, { status: 302, headers: { location: '/gateway/v1/models' } }),
+    new Response(null, { status: 302, headers: { location: 'https://gateway.example.test/other' } }),
     new Response(null, { status: 302, headers: { location: 'https://other.example.test/models' } })
   ]
   const proxy = await startedProxy({
@@ -173,6 +239,10 @@ test('does not replay POST 401s, refreshes GET models once, and blocks cross-ori
 
   assert.equal((await fetch(`${session.baseUrl}/v1/models`, { headers })).status, 502)
   assert.equal(calls.length, 4)
+  assert.equal((await fetch(`${session.baseUrl}/v1/models`, { headers })).status, 502)
+  assert.equal(calls.length, 5)
+  assert.equal((await fetch(`${session.baseUrl}/v1/models`, { headers })).status, 502)
+  assert.equal(calls.length, 6)
 })
 
 test('aborting a client model request aborts its upstream stream without changing manager state', async t => {

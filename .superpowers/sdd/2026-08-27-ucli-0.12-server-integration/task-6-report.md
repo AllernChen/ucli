@@ -32,3 +32,19 @@
 
 - Task 7 must call the supplied orchestrator session create/revoke facade from every server-profile launch/end path. This task intentionally does not modify profile selection or launch behavior.
 - No live network request or real invitation secret was used.
+
+## Review fix round 1
+
+- Forced upstream `Accept-Encoding: identity` and strip `content-encoding`/`content-length` from fetched responses, because undici decodes response bodies before the loopback stream writes them. Response filtering now also removes every token named by upstream `Connection`.
+- Reject every 3xx response, including relative and same-origin locations, so a loopback client never receives an upstream `Location` header.
+- Reissuing a session ID now revokes its prior bearer before issuing the replacement.
+- Disconnect now clears runtime identity, token/cache/timers, and revokes the immutable identity before waiting for credential deletion. A failed deletion stays detached and retries persistence/deletion without restoring runtime authority.
+- Added real gzip, response `Connection` token, all-redirect, session-supersession, deferred deletion, pending-deletion retry, and reminder-clock snapshot regressions.
+
+### Review-fix verification
+
+- `node --test test/server-connection-manager.test.mjs test/server-expiry-reminder.test.mjs` — 15 passed, 0 failed.
+- `node --test test/server-local-proxy.test.mjs test/gateway-root-lifecycle.test.mjs test/gateway-session-routing.test.mjs` — 24 passed, 0 failed.
+- `npm run build` — passed.
+- `npm test` — passed (exit 0).
+- `git diff --check` — passed.

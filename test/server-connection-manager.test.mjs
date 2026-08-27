@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { ConnectionManager } from '../electron/serverConnection/connectionManager.js'
+import { createLocalGatewayProxy } from '../electron/serverConnection/localGatewayProxy.js'
 
 const nowValue = Date.parse('2026-08-27T00:00:00.000Z')
 const current = {
@@ -162,6 +163,68 @@ test('a stale refresh completion after disconnect cannot alter the disconnected 
   assert.equal(manager.getState().connection, null)
 })
 
+test('disconnect invalidates runtime identity and bearer authority before credential deletion settles', async () => {
+  const deletion = deferred()
+  const revoked = []
+  const { manager } = createManager({ credentials: { disconnect: async () => deletion.promise } })
+  manager.installAccessToken('live-access', 900)
+  manager.bootstrapCache = { value: { gateway: { baseUrl: 'https://server.example.test/gateway' } } }
+  manager.revokeRuntimeRevision = identity => revoked.push(identity)
+  let upstreamCalls = 0
+  const proxy = createLocalGatewayProxy({
+    connectionManager: manager,
+    fetchImpl: async () => {
+      upstreamCalls += 1
+      return new Response('must not be reached')
+    }
+  })
+  await proxy.start()
+  const session = proxy.createSession({ sessionId: 'session-1', connectionId: 'connection-1', connectionRevision: 3 })
+
+  const disconnecting = manager.disconnect()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(manager.getRuntimeConnectionIdentity(), null)
+  assert.equal(manager.accessToken, null)
+  assert.equal(manager.bootstrapCache, null)
+  assert.deepEqual(revoked, [{ connectionId: 'connection-1', connectionRevision: 3 }])
+  assert.equal((await fetch(`${session.baseUrl}/v1/models`, { headers: { authorization: `Bearer ${session.bearer}` } })).status, 401)
+  assert.equal(upstreamCalls, 0)
+  deletion.resolve()
+  await disconnecting
+  await proxy.shutdown()
+})
+
+test('a failed disconnect flush remains detached and retries deletion without restoring runtime authority', async () => {
+  let pending = false
+  let disconnects = 0
+  let flushes = 0
+  const { manager } = createManager({
+    credentials: {
+      isPersistencePending: () => pending,
+      disconnect: async () => {
+        disconnects += 1
+        if (disconnects === 1) {
+          pending = true
+          throw Object.assign(new Error('disk unavailable'), { code: 'PERSISTENCE_PENDING' })
+        }
+      },
+      retryPendingPersistence: async () => {
+        flushes += 1
+        pending = false
+      }
+    }
+  })
+
+  await assert.rejects(manager.disconnect(), { code: 'PERSISTENCE_PENDING' })
+  assert.equal(manager.getRuntimeConnectionIdentity(), null)
+  assert.equal(manager.getState().status, 'disconnected')
+  await manager.retry()
+  assert.equal(flushes, 1)
+  assert.equal(disconnects, 2)
+  assert.equal(manager.getRuntimeConnectionIdentity(), null)
+  assert.equal(manager.getState().status, 'disconnected')
+})
+
 test('a replacement connection starts its own bootstrap while an old bootstrap is in flight', async () => {
   const oldBootstrap = deferred()
   const calls = []
@@ -244,6 +307,10 @@ test('manager expiry timer notifies 7, 3, 1, and 0 day thresholds and clears on 
   await clock.advance(86_400_001)
   for (let day = 0; day < 9; day += 1) await clock.advance(86_400_001)
   assert.deepEqual(notices, [7, 3, 1, 0])
+  assert.equal(manager.current.serverTime, authorization.serverTime)
+  assert.equal(manager.current.receivedLocalTime, 0)
+  assert.equal(manager.current.serverOffsetMs, 0)
+  assert.equal(manager.current.lastSyncedAt, 0)
   await manager.updateAuthorizationState({ ...authorization, expiresAt: null })
   assert.equal(manager.expiryTimer, null)
   await manager.disconnect()
