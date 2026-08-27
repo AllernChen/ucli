@@ -13,6 +13,8 @@ function sourceError(message, code = 'SKILL_SOURCE_INVALID') {
   return Object.assign(new Error(message), { code })
 }
 
+const MAX_SERVER_ARCHIVE_BYTES = 50 * 1024 * 1024
+
 function defaultRunGit(args) {
   try {
     return execFileSync('git', args, {
@@ -250,23 +252,23 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit, c
       guard?.()
       const before = lstatSync(path)
       if (!before.isFile() || before.isSymbolicLink() ||
+        before.size > MAX_SERVER_ARCHIVE_BYTES ||
         (identity && (before.size !== identity.size || before.ino !== identity.ino || before.dev !== identity.dev))) {
         throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
       }
-      if (sha256 && createHash('sha256').update(readFileSync(path)).digest('hex') !== sha256) {
+      const archive = readFileSync(path)
+      if (sha256 && createHash('sha256').update(archive).digest('hex') !== sha256) {
         throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
       }
-      return this.withPrepared({ type: 'local', path }, async (prepared) => {
-        guard?.()
-        const after = lstatSync(path)
-        if (!after.isFile() || after.isSymbolicLink() || after.size !== before.size || after.ino !== before.ino || after.dev !== before.dev) {
-          throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
-        }
-        if (sha256 && createHash('sha256').update(readFileSync(path)).digest('hex') !== sha256) {
-          throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
-        }
-        return work(prepared)
-      }, { guard })
+      guard?.()
+      const extracted = extractZipSource(archive, root)
+      const prepared = {
+        workingDirectory: extracted.workingDirectory,
+        source: { type: 'zip', locator: path, ref: '', subdir: '' },
+        resolvedRevision: null,
+        cleanup() { rmSync(extracted.destination, { recursive: true, force: true }) }
+      }
+      try { guard?.(); return await work(prepared) } finally { prepared.cleanup() }
     },
     async withPreparedMany(sources, work) {
       if (!Array.isArray(sources) || !sources.length || sources.length > 200) {

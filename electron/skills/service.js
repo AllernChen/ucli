@@ -534,11 +534,19 @@ export function createSkillsService({
       } catch (error) {
         if (error?.code === 'SKILL_PERSISTENCE_PENDING') throw error
         try {
-          await db.transaction(() => db.deleteSkillPackage(packageId))
-          await flush()
-        } catch { /* compensation is best effort but occurs before stale returns */ }
-        for (const item of created.reverse()) {
-          try { removeManagedSkillDirectory(item.path, item.sha256) } catch { /* preserve drifted data */ }
+          await db.transaction(() => {
+            for (const installation of db.listSkillInstallations({ packageId })) {
+              db.deleteSkillInstallation(installation.id)
+            }
+            db.deleteSkillPackage(packageId)
+          })
+          for (const item of created.reverse()) {
+            try { removeManagedSkillDirectory(item.path, item.sha256) } catch { /* preserve drifted data */ }
+          }
+          const result = await flush()
+          if (result === false) throw new Error('flush failed')
+        } catch {
+          throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
         }
         throw error
       }
@@ -950,27 +958,44 @@ export function createSkillsService({
     const pkg = db.getSkillPackage(item.packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
     if (Boolean(enabled) === item.enabled) return inspectInstallation(item)
-    if (enabled) {
-      guard?.()
-      const deployed = copySkillDirectoryAtomic(packageDirectory(pkg.id), item.targetPath)
-      db.updateSkillInstallation(item.id, {
-        enabled: true,
-        deployedSha256: deployed.contentSha256,
-        status: 'ready',
-        updatedAt: now()
-      })
-    } else {
-      guard?.()
-      removeManagedSkillDirectory(item.targetPath, item.deployedSha256)
-      db.updateSkillInstallation(item.id, {
-        enabled: false,
-        deployedSha256: null,
-        status: 'disabled',
-        updatedAt: now()
-      })
+    let changed = false
+    try {
+      if (enabled) {
+        guard?.()
+        const deployed = copySkillDirectoryAtomic(packageDirectory(pkg.id), item.targetPath)
+        changed = true
+        db.updateSkillInstallation(item.id, {
+          enabled: true, deployedSha256: deployed.contentSha256, status: 'ready', updatedAt: now()
+        })
+      } else {
+        guard?.()
+        removeManagedSkillDirectory(item.targetPath, item.deployedSha256)
+        changed = true
+        db.updateSkillInstallation(item.id, {
+          enabled: false, deployedSha256: null, status: 'disabled', updatedAt: now()
+        })
+      }
+      await persistOrThrow(guard)
+      return inspectInstallation(db.getSkillInstallation(item.id))
+    } catch (error) {
+      if (!changed) throw error
+      try {
+        if (item.enabled) {
+          copySkillDirectoryAtomic(packageDirectory(pkg.id), item.targetPath)
+        } else if (existsSync(item.targetPath)) {
+          const changedItem = db.getSkillInstallation(item.id)
+          removeManagedSkillDirectory(item.targetPath, changedItem?.deployedSha256)
+        }
+        db.updateSkillInstallation(item.id, {
+          enabled: item.enabled, deployedSha256: item.deployedSha256, status: item.status, updatedAt: item.updatedAt
+        })
+        const result = await flush()
+        if (result === false) throw new Error('flush failed')
+      } catch {
+        throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
+      }
+      throw error
     }
-    await persistOrThrow(guard)
-    return inspectInstallation(db.getSkillInstallation(item.id))
   }
 
   async function resolveDrift(installationId, resolution) {

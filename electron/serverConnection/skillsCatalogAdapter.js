@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, open, readdir, realpath, rm } from 'node:fs/promises'
-import { basename, join, resolve, relative, isAbsolute } from 'node:path'
+import { basename, dirname, join, resolve, relative, isAbsolute } from 'node:path'
 
 import { parseSkillsCatalogPage } from './contracts.js'
 
@@ -61,14 +61,14 @@ function identityOf(connectionManager) {
   return Object.freeze({ ...identity, serverOrigin, organizationId })
 }
 
-export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = globalThis.fetch, stagingRoot, sourceLoader, skillsService }) {
+export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = globalThis.fetch, stagingRoot, sourceLoader, skillsService, onStagingOpen = null }) {
   if (!connectionManager || !db || typeof fetchImpl !== 'function' || !stagingRoot || !sourceLoader || !skillsService) {
     throw new TypeError('Server Skills catalog dependencies are required')
   }
   const stagingParent = resolve(stagingRoot)
   const root = join(stagingParent, `.ucli-server-skills-${randomUUID()}`)
   const activeControllers = new Set()
-  const ownedFiles = new Set()
+  const ownedFiles = new Map()
   let closing = false
   let syncFlight = null
   const activeWork = new Set()
@@ -78,6 +78,7 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
     return promise
   }
   let rootRealPath = null
+  let rootIdentity = null
 
   const ensurePrivateRoot = async () => {
     await mkdir(stagingParent, { recursive: true })
@@ -89,13 +90,15 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
     const actual = await realpath(root)
     if (!stat.isDirectory() || stat.isSymbolicLink() || !isWithin(parentReal, actual)) throw adapterError('SERVER_SKILL_STAGING_INVALID')
     rootRealPath = actual
+    rootIdentity = { ino: stat.ino, dev: stat.dev }
     return actual
   }
   const assertPrivateRoot = async () => {
     if (!rootRealPath) return ensurePrivateRoot()
     const stat = await lstat(root)
     const actual = await realpath(root)
-    if (!stat.isDirectory() || stat.isSymbolicLink() || !samePath(actual, rootRealPath)) throw adapterError('SERVER_SKILL_STAGING_INVALID')
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.ino !== rootIdentity?.ino || stat.dev !== rootIdentity?.dev ||
+      !samePath(actual, rootRealPath)) throw adapterError('SERVER_SKILL_STAGING_INVALID')
     return actual
   }
 
@@ -176,6 +179,29 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
     }
     return bootstrap
   }
+  const publishCatalog = async ({ previous, persisted, identity }) => {
+    const guard = guardFor(identity)
+    let committed = false
+    try {
+      guard()
+      await db.transaction(() => { guard(); db.replaceServerSkillVersions({ connectionRevision: identity.connectionRevision, versions: persisted }); guard() })
+      committed = true
+      guard()
+      if (db.flush && await db.flush() === false) throw adapterError('SERVER_SKILL_PERSISTENCE_PENDING')
+      guard()
+    } catch (error) {
+      if (!committed || error?.code !== 'SERVER_SKILL_STALE') throw error
+      try {
+        const previousRevision = previous[0]?.connectionRevision ?? 0
+        await db.transaction(() => db.replaceServerSkillVersions({ connectionRevision: previousRevision, versions: previous }))
+        if (db.flush && await db.flush() === false) throw adapterError('SERVER_SKILL_PERSISTENCE_PENDING')
+      } catch (compensationError) {
+        if (compensationError?.code === 'SERVER_SKILL_PERSISTENCE_PENDING') throw compensationError
+        throw adapterError('SERVER_SKILL_PERSISTENCE_PENDING')
+      }
+      throw error
+    }
+  }
 
   async function sync() {
     if (syncFlight) return syncFlight
@@ -224,12 +250,8 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
         downloadUrl: item.downloadUrl, lifecycleStatus: revocations.get(item.id) || 'ACTIVE',
         connectionRevision: identity.connectionRevision
       }))
-      const guard = guardFor(identity)
-      guard()
-      await db.transaction(() => { guard(); db.replaceServerSkillVersions({ connectionRevision: identity.connectionRevision, versions: persisted }); guard() })
-      guard()
-      if (db.flush && await db.flush() === false) throw adapterError('SERVER_SKILL_PERSISTENCE_PENDING')
-      guard()
+      const previous = db.listServerSkillVersions ? db.listServerSkillVersions() : []
+      await publishCatalog({ previous, persisted, identity })
       return list()
     })()
     const flight = work.finally(() => { if (syncFlight === flight) syncFlight = null })
@@ -258,12 +280,13 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
   }
   async function removeStaged(path) {
     const resolved = resolve(path)
-    if (!ownedFiles.has(resolved) || !isWithin(root, resolved) || basename(resolved) !== basename(path)) return
+    const identity = ownedFiles.get(resolved)
+    if (!identity || !isWithin(root, resolved) || basename(resolved) !== basename(path)) return
     ownedFiles.delete(resolved)
     try {
       await assertPrivateRoot()
       const stat = await lstat(resolved)
-      if (stat.isFile() && !stat.isSymbolicLink()) await rm(resolved, { force: true })
+      if (stat.isFile() && !stat.isSymbolicLink() && stat.ino === identity.ino && stat.dev === identity.dev) await rm(resolved, { force: true })
     } catch { /* staged cleanup is best effort */ }
   }
   async function download(version, identity) {
@@ -274,12 +297,21 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
     }
     const path = resolve(root, `${randomUUID()}.zip`)
     if (!isWithin(root, path)) throw adapterError('SERVER_SKILL_STAGING_INVALID')
-    ownedFiles.add(path)
     let handle
     let transfer = null
     try {
       await assertPrivateRoot()
       handle = await open(path, 'wx')
+      const opened = await handle.stat()
+      ownedFiles.set(path, { ino: opened.ino, dev: opened.dev })
+      onStagingOpen?.({ path, root })
+      await assertPrivateRoot()
+      const namedAfterOpen = await lstat(path)
+      const realParent = await realpath(dirname(path))
+      if (!opened.isFile() || namedAfterOpen.isSymbolicLink() || opened.ino !== namedAfterOpen.ino ||
+        opened.dev !== namedAfterOpen.dev || !samePath(realParent, rootRealPath)) {
+        throw adapterError('SERVER_SKILL_STAGING_INVALID')
+      }
       transfer = await request(version.downloadUrl, identity, DOWNLOAD_TIMEOUT_MS, { keepOpen: true })
       const response = transfer.response
       const type = response.headers.get('content-type') || ''
@@ -388,11 +420,12 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
     closing = true
     for (const controller of activeControllers) controller.abort()
     await Promise.allSettled([syncFlight, ...activeWork].filter(Boolean))
-    for (const file of [...ownedFiles]) await removeStaged(file)
+    for (const file of [...ownedFiles.keys()]) await removeStaged(file)
     try {
       await assertPrivateRoot()
       await rm(root, { recursive: true, force: true })
       rootRealPath = null
+      rootIdentity = null
     } catch { /* never follow a substituted staging root during shutdown */ }
   }
 

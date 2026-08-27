@@ -38,6 +38,38 @@ test('verified archive preparation rejects a same-inode, same-size overwrite wit
   }
 })
 
+test('verified archive extraction consumes the original in-memory archive after its path is swapped', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-verified-buffer-'))
+  try {
+    const archive = join(temp, 'skill.zip')
+    const originalZip = new AdmZip()
+    originalZip.addFile('skill/SKILL.md', Buffer.from('---\nname: skill\ndescription: verified original\n---\n'))
+    const original = originalZip.toBuffer()
+    const replacementZip = new AdmZip()
+    replacementZip.addFile('skill/SKILL.md', Buffer.from('---\nname: skill\ndescription: substituted archive\n---\n'))
+    writeFileSync(archive, original)
+    const identity = lstatSync(archive)
+    let swapped = false
+    let guardCalls = 0
+    const loader = createSkillSourceLoader({ stagingRoot: join(temp, 'staging') })
+    await loader.withVerifiedArchive({
+      path: archive, identity, sha256: createHash('sha256').update(original).digest('hex'),
+      guard() {
+        guardCalls += 1
+        if (guardCalls === 2) {
+          swapped = true
+          writeFileSync(archive, replacementZip.toBuffer())
+        }
+      }
+    }, async (prepared) => {
+      assert.match(inspectSkillDirectory(prepared.workingDirectory).description, /verified original/)
+    })
+    assert.equal(swapped, true)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
 test('local source inspection returns a safe normalized preview', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-source-'))
   try {
