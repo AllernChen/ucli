@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -315,14 +315,66 @@ test('stale new server install preserves a drifted package parent', async () => 
   }
 })
 
-test('stale new server install does not remove an out-of-root package parent', async () => {
+test('stale new server install never removes matching content behind a substituted package parent', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-stale-package-junction-'))
+  const bytes = archive()
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  const archivePath = join(root, 'server.zip')
+  const packageId = 'substituted-package'
+  const packageParent = join(root, 'user-data', 'skills', 'packages', packageId)
+  const external = join(root, 'external-package')
+  let db
+  let externalCurrentIdentity
+  let externalSkillContents
+  try {
+    writeFileSync(archivePath, bytes)
+    db = await openDb(join(root, 'ucli.db'))
+    let stale = false
+    let identifiers = [packageId, 'stale-installation']
+    const sourceLoader = createSkillSourceLoader({ stagingRoot: join(root, 'source-staging') })
+    const service = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'), sourceLoader,
+      uuid: () => identifiers.shift(),
+      flush: async () => {
+        const result = await db.flush()
+        if (!stale) {
+          mkdirSync(external)
+          cpSync(join(packageParent, 'current'), join(external, 'current'), { recursive: true })
+          externalCurrentIdentity = lstatSync(join(external, 'current'))
+          externalSkillContents = readFileSync(join(external, 'current', 'SKILL.md'), 'utf8')
+          rmSync(packageParent, { recursive: true, force: true })
+          if (!symlinkOrSkip(t, external, packageParent, process.platform === 'win32' ? 'junction' : 'dir')) return result
+          stale = true
+        }
+        return result
+      }
+    })
+
+    await assert.rejects(service.installVerifiedServerArchive({
+      archivePath, archiveIdentity: lstatSync(archivePath), source: serverSource(sha256),
+      targets: { targetAdapterIds: ['codex'], scopeType: 'project', projectPath: join(root, 'project') },
+      guard: () => { if (stale) throw Object.assign(new Error('stale'), { code: 'SERVER_SKILL_STALE' }) }
+    }), error => error.code === 'SERVER_SKILL_STALE')
+
+    assert.equal(existsSync(join(external, 'current')), true)
+    const current = lstatSync(join(external, 'current'))
+    assert.equal(current.dev, externalCurrentIdentity.dev)
+    assert.equal(current.ino, externalCurrentIdentity.ino)
+    assert.equal(readFileSync(join(external, 'current', 'SKILL.md'), 'utf8'), externalSkillContents)
+  } finally {
+    try { db?.close() } catch { /* test cleanup */ }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stale new server install preserves an out-of-root package directory', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-stale-outside-package-parent-'))
   let db
   const outsidePackageId = join('..', 'outside-package-parent')
   const outsideParent = join(root, 'user-data', 'skills', 'outside-package-parent')
   try {
     ({ db } = await failNewServerInstallAfterPersistence(root, { packageId: outsidePackageId }))
-    assert.equal(existsSync(join(outsideParent, 'current')), false)
+    assert.equal(existsSync(join(outsideParent, 'current')), true)
     assert.equal(existsSync(outsideParent), true)
   } finally {
     try { db?.close() } catch { /* test cleanup */ }

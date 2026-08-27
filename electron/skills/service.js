@@ -25,6 +25,28 @@ function pathIsWithin(root, candidate) {
   return value === '' || (value !== '..' && !value.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(value))
 }
 
+function captureDirectoryIdentity(directory) {
+  try {
+    const inspected = lstatSync(directory)
+    if (!inspected.isDirectory() || inspected.isSymbolicLink()) return null
+    return {
+      dev: inspected.dev,
+      ino: inspected.ino,
+      realPath: normalizedPath(realpathSync(directory))
+    }
+  } catch {
+    return null
+  }
+}
+
+function directoryMatchesIdentity(directory, expected) {
+  const current = captureDirectoryIdentity(directory)
+  return !!current && !!expected &&
+    current.dev === expected.dev &&
+    current.ino === expected.ino &&
+    current.realPath === expected.realPath
+}
+
 function sourceForPackage(pkg) {
   if (pkg.sourceType === 'github' || pkg.sourceType === 'gitlab') {
     return {
@@ -116,6 +138,7 @@ export function createSkillsService({
   let ucodeDiscoveryCache = { key: null, checkedAt: 0, items: [] }
   mkdirSync(packagesRoot, { recursive: true })
   mkdirSync(updateStagingRoot, { recursive: true })
+  const packagesRootIdentity = captureDirectoryIdentity(packagesRoot)
   const migrationCopy = migrationFileOps.copy || copySkillDirectoryAtomic
   const migrationRemove = migrationFileOps.remove || removeManagedSkillDirectory
 
@@ -149,18 +172,41 @@ export function createSkillsService({
 
   const packageDirectory = (packageId) => join(packagesRoot, packageId, 'current')
 
+  function containedNewPackageDirectory(packageId) {
+    if (!directoryMatchesIdentity(packagesRoot, packagesRootIdentity)) return null
+    const packageParent = join(packagesRoot, packageId)
+    if (!pathIsWithin(packagesRoot, packageParent) || normalizedPath(dirname(packageParent)) !== normalizedPath(packagesRoot)) return null
+    const parentIdentity = captureDirectoryIdentity(packageParent)
+    if (!parentIdentity || !pathIsWithin(packagesRootIdentity.realPath, parentIdentity.realPath) || parentIdentity.realPath === packagesRootIdentity.realPath) {
+      return null
+    }
+    const current = join(packageParent, 'current')
+    const currentIdentity = captureDirectoryIdentity(current)
+    if (!currentIdentity || !pathIsWithin(parentIdentity.realPath, currentIdentity.realPath) || currentIdentity.realPath === parentIdentity.realPath) {
+      return null
+    }
+    if (!directoryMatchesIdentity(packagesRoot, packagesRootIdentity) || !directoryMatchesIdentity(packageParent, parentIdentity)) return null
+    return current
+  }
+
+  function removeContainedNewPackageDirectory(packageId, expectedSha256) {
+    const current = containedNewPackageDirectory(packageId)
+    return current ? removeManagedSkillDirectory(current, expectedSha256) : false
+  }
+
   function removeEmptyPackageParent(packageId) {
     const packageParent = join(packagesRoot, packageId)
-    if (!pathIsWithin(packagesRoot, packageParent) || normalizedPath(packageParent) === normalizedPath(packagesRoot)) return false
+    if (!directoryMatchesIdentity(packagesRoot, packagesRootIdentity)) return false
+    if (!pathIsWithin(packagesRoot, packageParent) || normalizedPath(dirname(packageParent)) !== normalizedPath(packagesRoot)) return false
     try {
       const original = lstatSync(packageParent)
       if (!original.isDirectory() || original.isSymbolicLink()) return false
-      const canonicalRoot = realpathSync(packagesRoot)
       const canonicalParent = realpathSync(packageParent)
-      if (!pathIsWithin(canonicalRoot, canonicalParent) || normalizedPath(canonicalParent) === normalizedPath(canonicalRoot)) return false
+      if (!pathIsWithin(packagesRootIdentity.realPath, canonicalParent) || normalizedPath(canonicalParent) === packagesRootIdentity.realPath) return false
       if (readdirSync(packageParent).length) return false
       const current = lstatSync(packageParent)
       if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== original.dev || current.ino !== original.ino) return false
+      if (!directoryMatchesIdentity(packagesRoot, packagesRootIdentity)) return false
       rmdirSync(packageParent)
       return true
     } catch {
@@ -562,7 +608,9 @@ export function createSkillsService({
           let removedCanonical = false
           for (const item of created.reverse()) {
             try {
-              const removed = removeManagedSkillDirectory(item.path, item.sha256)
+              const removed = normalizedPath(item.path) === normalizedPath(canonical)
+                ? removeContainedNewPackageDirectory(packageId, item.sha256)
+                : removeManagedSkillDirectory(item.path, item.sha256)
               if (normalizedPath(item.path) === normalizedPath(canonical)) removedCanonical = removed
             } catch { /* preserve drifted data */ }
           }
