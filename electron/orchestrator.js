@@ -103,6 +103,7 @@ import { ServerCredentialStore } from './serverConnection/credentialStore.js'
 import { RegistrationAttemptStore } from './serverConnection/registrationAttempts.js'
 import { createDeviceGrantClient } from './serverConnection/deviceGrantClient.js'
 import { ConnectionManager } from './serverConnection/connectionManager.js'
+import { ExpiryReminder } from './serverConnection/expiryReminder.js'
 import { registerServerConnectionIpc } from './serverConnection/ipc.js'
 import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
 import { scanStorageCategories } from './storage/storageScanner.js'
@@ -1576,13 +1577,21 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       restartSession: restartSessionForSkills,
       discoverUCodeSkills: listUCodeSkills
     })
+    const showAuthorizationReminder = ({ thresholdDays, authorizationExpiresAt }) => {
+      try {
+        const label = thresholdDays === 0 ? 'today' : `${thresholdDays} days`
+        new Notification({ title: 'UCLI server authorization', body: `Server authorization expires ${label} (${authorizationExpiresAt})` }).show()
+      } catch { /* notifications are advisory and must not affect connection state */ }
+    }
     serverConnectionManager = new ConnectionManager({
       attempts: new RegistrationAttemptStore(),
       credentials: new ServerCredentialStore({ db, safeStorage }),
       client: createDeviceGrantClient(),
       platform: ({ win32: 'windows', darwin: 'macos', linux: 'linux' })[process.platform],
-      deviceName: app.getName()
+      deviceName: app.getName(),
+      reminder: new ExpiryReminder({ notify: showAuthorizationReminder })
     })
+    void serverConnectionManager.start()
     try {
       await profileService.reconcileCodexProfiles()
     } catch (error) {
@@ -3774,6 +3783,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       for (const notification of completionNotifications) notification.close()
       completionNotifications.clear()
       await gatewayManager?.shutdown()
+      await serverConnectionManager?.shutdown()
       const db = getDb()
       for (const [id, entry] of sessions) {
         clearInteractiveProfileCapability(entry)
@@ -3817,6 +3827,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     startGateway,
     shutdown,
     getPersistenceRecovery: () => persistenceRecovery,
+    recoverServerConnection: () => serverConnectionManager?.retry(),
     submitServerConnection: connection => serverConnectionManager?.submitParsedConnection(connection) || Promise.reject(
       Object.assign(new Error('Server connection is unavailable'), { code: 'SERVER_CONNECTION_UNAVAILABLE' })
     )

@@ -326,6 +326,13 @@ app.whenReady().then(async () => {
       createWindow()
       orchestrator.setMainWindow(mainWindow)
     } else showMainWindow()
+    orchestrator?.recoverServerConnection()?.catch(() => {})
+  })
+  app.on('browser-window-focus', () => {
+    orchestrator?.recoverServerConnection()?.catch(() => {})
+  })
+  app.on('resume', () => {
+    orchestrator?.recoverServerConnection()?.catch(() => {})
   })
 }).catch((error) => {
   const failure = safeStartupFailure('application', error)

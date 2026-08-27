@@ -1,4 +1,5 @@
 import { parseConnectionInput, sanitiseServerError, TARGET_CLIENT_VERSION } from './contracts.js'
+import { DAY_MS, ExpiryReminder, THRESHOLDS } from './expiryReminder.js'
 
 const LOCAL_ERROR_MESSAGES = Object.freeze({
   SECURE_STORAGE_UNAVAILABLE: 'Secure storage is unavailable',
@@ -49,7 +50,11 @@ export class ConnectionManager {
     deviceName,
     clientVersion = TARGET_CLIENT_VERSION,
     bootstrap = null,
-    revokeRuntimeRevision = () => {}
+    revokeRuntimeRevision = () => {},
+    reminder = new ExpiryReminder(),
+    timers = { setTimeout, clearTimeout },
+    now = Date.now,
+    jitter = delay => delay
   } = {}) {
     if (!attempts || !client || !credentials) throw new TypeError('Registration dependencies are required')
     this.attempts = attempts
@@ -60,8 +65,14 @@ export class ConnectionManager {
     this.clientVersion = clientVersion
     this.bootstrap = bootstrap || client.bootstrap
     this.revokeRuntimeRevision = revokeRuntimeRevision
+    this.reminder = reminder
+    this.timers = timers
+    this.now = now
+    this.jitter = jitter
     this.current = credentials.readCurrent?.() || null
     this.status = this.current ? 'connected' : 'disconnected'
+    this.reason = null
+    this.stateRevision = 0
     this.listeners = new Set()
     this.registrationListeners = new Set()
     this.redeemFlights = new Map()
@@ -71,6 +82,17 @@ export class ConnectionManager {
     this.pendingRevocations = new Set()
     this.connectionEpoch = 0
     this.credentialMutation = Promise.resolve()
+    this.accessToken = null
+    this.accessTokenExpiresAt = 0
+    this.refreshFlight = null
+    this.bootstrapCache = null
+    this.bootstrapFlight = null
+    this.persistencePending = null
+    this.retryTimer = null
+    this.accessRefreshTimer = null
+    this.expiryTimer = null
+    this.retryIndex = 0
+    this.shuttingDown = false
   }
 
   subscribe(listener) {
@@ -84,10 +106,24 @@ export class ConnectionManager {
   }
 
   getState() {
-    return { status: this.status, connection: publicConnection(this.current) }
+    const connection = publicConnection(this.current)
+    return {
+      revision: this.stateRevision,
+      status: this.status,
+      reason: this.reason,
+      serverOrigin: connection?.serverOrigin || null,
+      account: connection?.account || null,
+      organization: connection?.organization || null,
+      authorizationExpiresAt: connection?.authorization?.expiresAt || null,
+      lastSyncedAt: this.current?.lastSyncedAt || null,
+      retryable: this.status === 'unreachable' || this.status === 'connecting',
+      // Kept for the Task 4 IPC bridge; it contains only sanitized metadata.
+      connection
+    }
   }
 
   emitState() {
+    this.stateRevision += 1
     const state = this.getState()
     for (const listener of this.listeners) {
       try { listener(state) } catch { /* state subscribers are isolated */ }
@@ -188,7 +224,7 @@ export class ConnectionManager {
       })
       if (promotion.previousRevision !== null) await this.revokeRevision(promotion.previousRevision)
       this.emitState()
-      await this.bootstrapAfterPromotion(promotion.connection, redeemed.accessToken, promotion.connectionEpoch)
+      await this.bootstrapAfterPromotion(promotion.connection, redeemed, promotion.connectionEpoch)
       return this.getState()
     } catch (error) {
       this.attempts.markRedeemAmbiguous(attemptId)
@@ -196,15 +232,249 @@ export class ConnectionManager {
     }
   }
 
-  async bootstrapAfterPromotion(connection, accessToken, connectionEpoch) {
-    if (typeof this.bootstrap !== 'function') return
-    try {
-      await this.bootstrap({ serverOrigin: connection.serverOrigin, accessToken })
-    } catch {
+  async bootstrapAfterPromotion(connection, redeemed, connectionEpoch) {
+    this.installAccessToken(redeemed.accessToken, redeemed.expiresIn)
+    try { await this.bootstrapWithAccessToken({ connection, connectionEpoch }) }
+    catch (error) {
       if (!this.isCurrentConnection(connection, connectionEpoch)) return
-      this.status = 'unreachable'
-      this.emitState()
+      await this.handleLifecycleError(error)
     }
+  }
+
+  async start() {
+    if (this.shuttingDown || !this.current) return this.getState()
+    try {
+      await this.refreshAndBootstrap()
+    } catch { /* state and retry policy are established by lifecycle handling */ }
+    return this.getState()
+  }
+
+  async getAccessToken({ minValidityMs = 60_000 } = {}) {
+    this.assertLifecycleAvailable()
+    if (this.accessToken && this.accessTokenExpiresAt - this.now() >= minValidityMs) return this.accessToken
+    return this.refreshAccessToken()
+  }
+
+  async getBootstrap({ force = false } = {}) {
+    this.assertLifecycleAvailable()
+    const connection = this.current
+    if (!connection) throw Object.assign(new Error('Server connection is unavailable'), { code: 'invalid_grant' })
+    if (!force && this.bootstrapCache && this.bootstrapCache.connectionId === connection.id &&
+      this.bootstrapCache.connectionRevision === connection.connectionRevision &&
+      this.bootstrapCache.connectionEpoch === this.connectionEpoch) return this.bootstrapCache.value
+    const accessToken = await this.getAccessToken()
+    return this.bootstrapWithAccessToken({ connection, connectionEpoch: this.connectionEpoch, accessToken })
+  }
+
+  async refreshAndBootstrap() {
+    await this.getAccessToken({ minValidityMs: Number.MAX_SAFE_INTEGER })
+    return this.getBootstrap()
+  }
+
+  refreshAccessToken() {
+    const connection = this.current
+    const connectionEpoch = this.connectionEpoch
+    const key = this.lifecycleKey(connection, connectionEpoch)
+    if (this.refreshFlight?.key === key) return this.refreshFlight.promise
+    const flight = this.refreshAccessTokenOnce().finally(() => {
+      if (this.refreshFlight?.promise === flight) this.refreshFlight = null
+    })
+    this.refreshFlight = { key, promise: flight }
+    return flight
+  }
+
+  async refreshAccessTokenOnce() {
+    this.assertLifecycleAvailable()
+    const connection = this.current
+    const connectionEpoch = this.connectionEpoch
+    if (!connection) throw Object.assign(new Error('Server connection is unavailable'), { code: 'invalid_grant' })
+    this.setRuntimeStatus('connecting', null)
+    try {
+      const refreshToken = this.credentials.decryptRefreshToken(connection)
+      if (!refreshToken) throw Object.assign(new Error('Stored server credential is unavailable'), { code: 'invalid_grant' })
+      const refreshed = await this.client.refresh({ serverOrigin: connection.serverOrigin, refreshToken })
+      if (!this.isCurrentConnection(connection, connectionEpoch)) throw Object.assign(new Error(), { code: 'STALE_CONNECTION_OPERATION' })
+      // From this point the old token is single-use and must never be sent.
+      this.persistencePending = {
+        connection, connectionEpoch, refreshed,
+        accessTokenExpiresAt: this.now() + refreshed.expiresIn * 1000
+      }
+      let updated
+      try {
+        updated = await this.runCredentialMutation(() => this.credentials.replaceRefreshToken({
+          connectionId: connection.id,
+          refreshToken: refreshed.refreshToken,
+          authorization: refreshed.authorization
+        }))
+      } catch (error) {
+        if (error?.code === 'PERSISTENCE_PENDING') {
+          this.setRuntimeStatus('unreachable', 'PERSISTENCE_PENDING')
+          throw error
+        }
+        throw error
+      }
+      if (!this.isCurrentConnection(connection, connectionEpoch)) throw Object.assign(new Error(), { code: 'STALE_CONNECTION_OPERATION' })
+      this.persistencePending = null
+      this.current = updated || this.current
+      this.installAccessToken(refreshed.accessToken, refreshed.expiresIn)
+      await this.updateAuthorizationState(refreshed.authorization, { connection: this.current, connectionEpoch })
+      this.retryIndex = 0
+      return this.accessToken
+    } catch (error) {
+      if (!this.isCurrentConnection(connection, connectionEpoch) && this.persistencePending?.connection === connection) {
+        this.persistencePending = null
+      }
+      if (error?.code !== 'STALE_CONNECTION_OPERATION') await this.handleLifecycleError(error)
+      throw operationError(error)
+    }
+  }
+
+  async bootstrapWithAccessToken({ connection = this.current, connectionEpoch = this.connectionEpoch, accessToken = this.accessToken } = {}) {
+    const key = this.lifecycleKey(connection, connectionEpoch)
+    if (this.bootstrapFlight?.key === key) return this.bootstrapFlight.promise
+    if (typeof this.bootstrap !== 'function') return null
+    const flight = (async () => {
+      this.assertLifecycleAvailable()
+      this.setRuntimeStatus('connecting', null)
+      try {
+        const value = await this.bootstrap({ serverOrigin: connection.serverOrigin, accessToken })
+        if (!this.isCurrentConnection(connection, connectionEpoch)) return null
+        this.bootstrapCache = { value, connectionId: connection.id, connectionRevision: connection.connectionRevision, connectionEpoch }
+        await this.updateAuthorizationState(value.authorization, { connection, connectionEpoch })
+        this.retryIndex = 0
+        return value
+      } catch (error) {
+        if (!this.isCurrentConnection(connection, connectionEpoch)) return null
+        await this.handleLifecycleError(error)
+        throw operationError(error)
+      }
+    })().finally(() => {
+      if (this.bootstrapFlight?.promise === flight) this.bootstrapFlight = null
+    })
+    this.bootstrapFlight = { key, promise: flight }
+    return flight
+  }
+
+  installAccessToken(accessToken, expiresInSeconds, accessTokenExpiresAt = null) {
+    this.accessToken = accessToken
+    this.accessTokenExpiresAt = accessTokenExpiresAt ?? (this.now() + expiresInSeconds * 1000)
+    if (this.accessRefreshTimer) this.timers.clearTimeout(this.accessRefreshTimer)
+    const delay = Math.max(0, this.accessTokenExpiresAt - this.now() - 60_000 + 1)
+    this.accessRefreshTimer = this.timers.setTimeout(async () => {
+      this.accessRefreshTimer = null
+      try { await this.getAccessToken() } catch { /* normal lifecycle error handling owns recovery */ }
+    }, delay)
+    this.accessRefreshTimer?.unref?.()
+  }
+
+  async updateAuthorizationState(authorization, { connection = this.current, connectionEpoch = this.connectionEpoch } = {}) {
+    if (!connection || !authorization || !this.isCurrentConnection(connection, connectionEpoch)) return false
+    const receivedLocalTime = this.now()
+    const reminderState = this.reminder.evaluate({
+      authorizationExpiresAt: authorization.expiresAt,
+      serverTime: authorization.serverTime,
+      receivedLocalTime,
+      reminderState: connection.reminderState || {}
+    })
+    const nextConnection = {
+      ...connection,
+      authorizationExpiresAt: authorization.expiresAt,
+      serverTime: authorization.serverTime,
+      serverOffsetMs: Date.parse(authorization.serverTime) - receivedLocalTime,
+      receivedLocalTime,
+      lastSyncedAt: receivedLocalTime,
+      reminderState
+    }
+    if (!this.isCurrentConnection(connection, connectionEpoch)) return false
+    this.current = nextConnection
+    if (this.credentials.updateConnectionMetadata) {
+      const persisted = await this.runCredentialMutation(async () => {
+        if (!this.isCurrentConnection(connection, connectionEpoch)) return null
+        return this.credentials.updateConnectionMetadata({
+          connectionId: connection.id,
+          authorization,
+          reminderState
+        })
+      })
+      if (!this.isCurrentConnection(connection, connectionEpoch)) return false
+      this.current = persisted || this.current
+    }
+    const remaining = authorization.expiresAt === null ? Infinity : Date.parse(authorization.expiresAt) - (this.now() + this.current.serverOffsetMs)
+    this.setRuntimeStatus(remaining <= 7 * 24 * 60 * 60 * 1000 ? 'expiring' : 'connected', null)
+    this.scheduleExpiryReminder(authorization, connection, connectionEpoch)
+    return true
+  }
+
+  scheduleExpiryReminder(authorization, connection, connectionEpoch) {
+    if (this.expiryTimer) this.timers.clearTimeout(this.expiryTimer)
+    this.expiryTimer = null
+    if (!authorization.expiresAt || !this.isCurrentConnection(connection, connectionEpoch)) return
+    const remaining = Date.parse(authorization.expiresAt) - (this.now() + this.current.serverOffsetMs)
+    const crossed = new Set(this.current.reminderState?.crossedThresholds || [])
+    const next = THRESHOLDS.find(days => remaining > days * DAY_MS && !crossed.has(days))
+    if (next === undefined) return
+    this.expiryTimer = this.timers.setTimeout(async () => {
+      this.expiryTimer = null
+      await this.updateAuthorizationState(authorization, { connection, connectionEpoch }).catch(() => {})
+    }, Math.max(0, remaining - next * DAY_MS + 1))
+    this.expiryTimer?.unref?.()
+  }
+
+  async handleLifecycleError(error) {
+    const code = error?.code
+    if (['invalid_grant', 'grant_deleted', 'invalid_device'].includes(code)) {
+      const previousRevision = this.current?.connectionRevision ?? null
+      this.accessToken = null
+      this.accessTokenExpiresAt = 0
+      this.bootstrapCache = null
+      if (code === 'grant_deleted') this.setRuntimeStatus('deleted', code)
+      await this.runCredentialMutation(() => this.credentials.disconnect())
+      this.current = null
+      this.connectionEpoch += 1
+      this.setRuntimeStatus('disconnected', null)
+      if (previousRevision !== null) await this.revokeRevision(previousRevision)
+      return
+    }
+    const disabledStatus = {
+      grant_disabled: 'disabled', grant_expired: 'expired', account_inactive: 'account_inactive', organization_inactive: 'org_inactive'
+    }[code]
+    if (disabledStatus) {
+      this.accessToken = null
+      this.accessTokenExpiresAt = 0
+      this.bootstrapCache = null
+      this.setRuntimeStatus(disabledStatus, code)
+      this.scheduleRetry(15 * 60_000)
+      return
+    }
+    if (code === 'PERSISTENCE_PENDING') return
+    this.setRuntimeStatus('unreachable', null)
+    if (error?.retryable) this.scheduleRetry()
+  }
+
+  setRuntimeStatus(status, reason) {
+    if (this.status === status && this.reason === reason) return
+    this.status = status
+    this.reason = reason
+    this.emitState()
+  }
+
+  scheduleRetry(delay) {
+    if (this.shuttingDown || this.retryTimer) return
+    const backoff = delay ?? [30_000, 60_000, 120_000, 300_000, 900_000][Math.min(this.retryIndex++, 4)]
+    this.retryTimer = this.timers.setTimeout(async () => {
+      this.retryTimer = null
+      try { await this.retry() } catch { /* retry scheduling happens in lifecycle handling */ }
+    }, Math.max(0, this.jitter(backoff)))
+    this.retryTimer?.unref?.()
+  }
+
+  assertLifecycleAvailable() {
+    if (this.shuttingDown) throw Object.assign(new Error('Server connection is shutting down'), { code: 'SERVER_CONNECTION_SHUTDOWN' })
+    if (this.persistencePending) throw Object.assign(new Error('Server credentials could not be saved'), { code: 'PERSISTENCE_PENDING' })
+  }
+
+  lifecycleKey(connection, connectionEpoch) {
+    return connection ? `${connection.id}:${connection.connectionRevision}:${connectionEpoch}` : `none:${connectionEpoch}`
   }
 
   cancel(attemptId) {
@@ -221,7 +491,16 @@ export class ConnectionManager {
         const previousRevision = this.current?.connectionRevision ?? null
         await this.credentials.disconnect()
         this.current = null
+        this.accessToken = null
+        this.accessTokenExpiresAt = 0
+        if (this.accessRefreshTimer) this.timers.clearTimeout(this.accessRefreshTimer)
+        if (this.expiryTimer) this.timers.clearTimeout(this.expiryTimer)
+        this.accessRefreshTimer = null
+        this.expiryTimer = null
+        this.bootstrapCache = null
+        this.persistencePending = null
         this.status = 'disconnected'
+        this.reason = null
         this.connectionEpoch += 1
         this.emitState()
         return previousRevision
@@ -233,12 +512,35 @@ export class ConnectionManager {
   }
 
   async retry() {
+    if (this.shuttingDown) throw Object.assign(new Error('Server connection is shutting down'), { code: 'SERVER_CONNECTION_SHUTDOWN' })
     await this.retryPendingRevocations()
+    if (this.persistencePending) {
+      try {
+        const pending = this.persistencePending
+        this.current = await this.runCredentialMutation(() => this.credentials.retryPendingRefreshPersistence()) || this.current
+        this.persistencePending = null
+        if (!this.isCurrentConnection(pending.connection, pending.connectionEpoch)) return this.getState()
+        if (pending.accessTokenExpiresAt - this.now() >= 60_000) {
+          this.installAccessToken(pending.refreshed.accessToken, pending.refreshed.expiresIn, pending.accessTokenExpiresAt)
+          await this.updateAuthorizationState(pending.refreshed.authorization, pending)
+          await this.getBootstrap({ force: true })
+        } else {
+          await this.refreshAndBootstrap()
+        }
+      } catch (error) {
+        this.setRuntimeStatus('unreachable', 'PERSISTENCE_PENDING')
+        throw operationError(error)
+      }
+      return this.getState()
+    }
+    if (this.current && typeof this.client.refresh === 'function') await this.refreshAndBootstrap()
     return this.getState()
   }
 
   async sync() {
     await this.retryPendingRevocations()
+    if (this.persistencePending) throw operationError(Object.assign(new Error(), { code: 'PERSISTENCE_PENDING' }))
+    if (this.current && typeof this.bootstrap === 'function') await this.getBootstrap({ force: true })
     return this.getState()
   }
   listModels() { return [] }
@@ -283,4 +585,28 @@ export class ConnectionManager {
       } catch { /* keep pending until a later safe retry */ }
     }
   }
+
+  async shutdown() {
+    if (this.shuttingDown) return
+    this.shuttingDown = true
+    if (this.retryTimer) {
+      this.timers.clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
+    if (this.accessRefreshTimer) this.timers.clearTimeout(this.accessRefreshTimer)
+    if (this.expiryTimer) this.timers.clearTimeout(this.expiryTimer)
+    this.accessRefreshTimer = null
+    this.expiryTimer = null
+    this.accessToken = null
+    this.accessTokenExpiresAt = 0
+    this.bootstrapCache = null
+    await Promise.allSettled([this.refreshFlight?.promise, this.bootstrapFlight?.promise, this.credentialMutation].filter(Boolean))
+    if (this.persistencePending && this.credentials.retryPendingRefreshPersistence) {
+      await this.runCredentialMutation(() => this.credentials.retryPendingRefreshPersistence()).catch(() => {})
+    }
+  }
+}
+
+export function createConnectionManager(options) {
+  return new ConnectionManager(options)
 }

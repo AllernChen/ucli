@@ -11,7 +11,8 @@ function credentialState(db) {
       pendingInstallationId: null,
       pendingCandidateIds: new Set(),
       durableCandidateIds: new Set(),
-      pendingPromotionId: null
+      pendingPromotionId: null,
+      pendingRefreshConnectionId: null
     }
     const candidate = db.getServerConnection('candidate')
     if (candidate) state.durableCandidateIds.add(candidate.id)
@@ -211,6 +212,37 @@ export class ServerCredentialStore {
       })
       if (!updated) throw credentialError('SERVER_CONNECTION_NOT_FOUND', 'Server connection was not found')
     })
+    try {
+      await this.flushOrThrow()
+      return this.db.getServerConnection('current')
+    } catch (error) {
+      // The old refresh token may already be invalid. Keep the rotated cipher
+      // in the live SQLite state and permit only a flush retry from here.
+      this.state.pendingRefreshConnectionId = connectionId
+      throw error
+    }
+  }
+
+  async retryPendingRefreshPersistence() {
+    if (!this.state.pendingRefreshConnectionId) return this.db.getServerConnection('current')
+    await this.flushOrThrow()
+    this.state.pendingRefreshConnectionId = null
+    return this.db.getServerConnection('current')
+  }
+
+  async updateConnectionMetadata({ connectionId, authorization, reminderState }) {
+    const receivedLocalTime = this.now()
+    await this.db.transaction(() => {
+      const updated = this.db.updateServerConnection(connectionId, {
+        authorizationExpiresAt: authorization.expiresAt,
+        serverTime: authorization.serverTime,
+        receivedLocalTime,
+        serverOffsetMs: serverOffsetMs(authorization.serverTime, receivedLocalTime),
+        lastSyncedAt: receivedLocalTime,
+        ...(reminderState === undefined ? {} : { reminderState })
+      })
+      if (!updated) throw credentialError('SERVER_CONNECTION_NOT_FOUND', 'Server connection was not found')
+    })
     await this.flushOrThrow()
     return this.db.getServerConnection('current')
   }
@@ -220,6 +252,7 @@ export class ServerCredentialStore {
     this.state.pendingCandidateIds.clear()
     this.state.durableCandidateIds.clear()
     this.state.pendingPromotionId = null
+    this.state.pendingRefreshConnectionId = null
     await this.flushOrThrow()
   }
 
