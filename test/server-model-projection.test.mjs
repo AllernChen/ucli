@@ -11,6 +11,7 @@ import { sanitiseProfileError } from '../electron/aiCliProfiles/contracts.js'
 
 function harness() {
   let stored = []
+  let identity = { connectionId: 'connection-1', connectionRevision: 7 }
   const calls = { create: [], revoke: [] }
   const projection = createServerModelProjection({
     db: {
@@ -18,7 +19,7 @@ function harness() {
       replaceServerModelProfiles: ({ profiles }) => { stored = profiles.map(profile => ({ ...profile })) }
     },
     proxy: {
-      getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: 7 }),
+      getRuntimeConnectionIdentity: () => identity,
       createServerGatewaySession: connection => {
         calls.create.push(connection)
         return { baseUrl: 'http://127.0.0.1:43210', bearer: 'session-bearer' }
@@ -29,7 +30,12 @@ function harness() {
       renderServerCodexProfileFile: profile => `# ucli-server-profile-id: ${profile.id}\n`
     }
   })
-  return { projection, calls, get stored() { return stored } }
+  return {
+    projection,
+    calls,
+    setIdentity(value) { identity = value },
+    get stored() { return stored }
+  }
 }
 
 test('projects every Bootstrap model into stable Codex Responses and Claude Bearer profiles', () => {
@@ -77,6 +83,70 @@ test('prepares runtime only for current ready profiles and revokes replaced sess
     () => context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'session-2' }),
     { code: 'PROFILE_NOT_READY' }
   )
+})
+
+test('Claude server runtime targets the proxy Anthropic route', () => {
+  const context = harness()
+  context.projection.reconcile({
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'org-1', name: 'Engineering' },
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    connectionRevision: 7
+  })
+  const claude = context.projection.listProfiles().find(profile => profile.adapterId === 'claude')
+  const launch = context.projection.prepareRuntime({ profileId: claude.id, sessionId: 'claude-session' })
+  assert.equal(launch.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:43210/anthropic')
+  assert.equal(launch.env.ANTHROPIC_AUTH_TOKEN, 'session-bearer')
+})
+
+test('persisted ready profiles remain unavailable until the matching runtime identity is online', () => {
+  const context = harness()
+  context.projection.reconcile({
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'org-1', name: 'Engineering' },
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    connectionRevision: 7
+  })
+  context.setIdentity(null)
+  assert.deepEqual(context.projection.listProfiles().map(profile => [profile.status, profile.canStart]), [
+    ['unreachable', false], ['unreachable', false]
+  ])
+  context.setIdentity({ connectionId: 'connection-1', connectionRevision: 7 })
+  assert.deepEqual(context.projection.listProfiles().map(profile => [profile.status, profile.canStart]), [
+    ['ready', true], ['ready', true]
+  ])
+})
+
+test('reconciliation revokes every tracked session before accepting a new connection revision', () => {
+  const context = harness()
+  const input = {
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'org-1', name: 'Engineering' },
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    connectionRevision: 7
+  }
+  context.projection.reconcile(input)
+  const profile = context.projection.listProfiles()[0]
+  context.projection.prepareRuntime({ profileId: profile.id, sessionId: 'session-1' })
+  context.setIdentity({ connectionId: 'connection-2', connectionRevision: 8 })
+  context.projection.reconcile({ ...input, connectionRevision: 8 })
+  assert.deepEqual(context.calls.revoke, ['session-1'])
+})
+
+test('rejects control-character organization and model identifiers so stable IDs cannot collide', () => {
+  const context = harness()
+  assert.throws(() => context.projection.reconcile({
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'a', name: 'Engineering' },
+    models: [{ id: 'b\u0000c', displayName: 'Gateway Model', contextSize: 128000 }],
+    connectionRevision: 7
+  }), { code: 'INVALID_SERVER_MODEL' })
+  assert.throws(() => context.projection.reconcile({
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'a\u0000b', name: 'Engineering' },
+    models: [{ id: 'c', displayName: 'Gateway Model', contextSize: 128000 }],
+    connectionRevision: 7
+  }), { code: 'INVALID_SERVER_MODEL' })
 })
 
 test('server Codex files use an isolated namespace and never persist a session bearer', () => {

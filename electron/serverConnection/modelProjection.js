@@ -19,8 +19,12 @@ function canonicalOrigin(value) {
 }
 
 function stableProfileId({ serverOrigin, organizationId, modelId, adapterId }) {
+  const fields = [serverOrigin, organizationId, modelId, adapterId]
+  if (fields.some(value => /[\u0000-\u001f\u007f]/.test(value))) {
+    throw projectionError('INVALID_SERVER_MODEL', 'Server model identifier is invalid')
+  }
   return createHash('sha256')
-    .update(`ucli-server-model-profile\u0000${serverOrigin}\u0000${organizationId}\u0000${modelId}\u0000${adapterId}`)
+    .update(fields.map(value => `${Buffer.byteLength(value, 'utf8')}:${value}`).join('|'))
     .digest('hex')
     .slice(0, 32)
 }
@@ -42,7 +46,9 @@ function safeOrganization(organization = {}) {
   return { id, name }
 }
 
-function asDto(profile) {
+function asDto(profile, online = false) {
+  const durableStatus = SERVER_STATUSES.has(profile.availabilityStatus) ? profile.availabilityStatus : 'unreachable'
+  const status = durableStatus === 'ready' && !online ? 'unreachable' : durableStatus
   return {
     id: profile.profileId,
     adapterId: profile.adapterId,
@@ -60,12 +66,12 @@ function asDto(profile) {
     sourceKind: 'server',
     readOnly: true,
     organizationName: profile.organizationName,
-    serverStatus: SERVER_STATUSES.has(profile.availabilityStatus) ? profile.availabilityStatus : 'unreachable',
+    serverStatus: status,
     connectionRevision: profile.connectionRevision,
     hasSecret: false,
     secretSuffix: null,
-    status: SERVER_STATUSES.has(profile.availabilityStatus) ? profile.availabilityStatus : 'unreachable',
-    canStart: profile.availabilityStatus === 'ready',
+    status,
+    canStart: status === 'ready',
     isAppDefault: false,
     isProjectDefault: false,
     updatedAt: null
@@ -122,6 +128,9 @@ export function createServerModelProjection({
       typeof identity.connectionId !== 'string' || !identity.connectionId) return null
     return identity
   }
+  function isOnline(profile) {
+    return profile.availabilityStatus === 'ready' && onlineRevision === profile.connectionRevision && Boolean(currentIdentity(profile))
+  }
   function revoke(sessionId) {
     if (!sessions.has(sessionId)) return false
     sessions.delete(sessionId)
@@ -133,18 +142,21 @@ export function createServerModelProjection({
   return {
     reconcile(input) {
       const profiles = profileRows(input)
+      if (onlineRevision !== null && onlineRevision !== input.connectionRevision) {
+        for (const sessionId of [...sessions.keys()]) revoke(sessionId)
+      }
       onlineRevision = input.connectionRevision
       db.replaceServerModelProfiles({ connectionRevision: input.connectionRevision, profiles })
-      return profiles.map(asDto)
+      return profiles.map(profile => asDto(profile, isOnline(profile)))
     },
 
     listProfiles() {
-      return stored().map(asDto)
+      return stored().map(profile => asDto(profile, isOnline(profile)))
     },
 
     prepareRuntime({ profileId, sessionId } = {}) {
       const profile = find(profileId)
-      if (!profile || profile.availabilityStatus !== 'ready' || onlineRevision !== profile.connectionRevision) {
+      if (!profile || !isOnline(profile)) {
         throw projectionError('PROFILE_NOT_READY', 'Server profile is not ready')
       }
       if (typeof sessionId !== 'string' || !sessionId) {
@@ -191,7 +203,7 @@ export function createServerModelProjection({
           args: dto.model ? ['--model', dto.model] : [],
           env: {
             [envName]: issued.bearer,
-            ANTHROPIC_BASE_URL: issued.baseUrl,
+            ANTHROPIC_BASE_URL: `${issued.baseUrl.replace(/\/$/, '')}/anthropic`,
             CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
           },
           settingSources: ['project', 'local'],

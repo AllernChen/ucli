@@ -136,6 +136,27 @@ test('forwards only allowlisted traffic under the gateway root with sanitized he
   assert.equal(requests.length, 1)
 })
 
+test('forwards Claude Anthropic messages from the proxy Anthropic base path', async t => {
+  const manager = createManager()
+  const upstreamUrls = []
+  const proxy = await startedProxy({
+    connectionManager: manager,
+    fetchImpl: async url => {
+      upstreamUrls.push(String(url))
+      return new Response('{}', { headers: { 'content-type': 'application/json' } })
+    }
+  })
+  t.after(() => proxy.shutdown())
+  const session = proxy.createSession({ sessionId: 'claude-session', ...identity })
+  const response = await fetch(`${session.baseUrl}/anthropic/v1/messages`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${session.bearer}`, 'content-type': 'application/json' },
+    body: '{}'
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(upstreamUrls, ['https://gateway.example.test/gateway/anthropic/v1/messages'])
+})
+
 test('does not call upstream when the connection becomes stale while resolving gateway state', async t => {
   const manager = createManager()
   const proxy = await startedProxy({
