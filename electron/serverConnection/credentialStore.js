@@ -167,6 +167,28 @@ export class ServerCredentialStore {
     }
   }
 
+  async discardCandidate(candidateId) {
+    const candidate = this.db.getServerConnection('candidate')
+    if (!candidate || candidate.id !== candidateId) {
+      this.state.pendingCandidateIds.delete(candidateId)
+      this.state.durableCandidateIds.delete(candidateId)
+      return false
+    }
+    this.state.pendingCandidateIds.add(candidateId)
+    this.state.durableCandidateIds.delete(candidateId)
+    await this.db.transaction(() => {
+      this.db.sql.run("DELETE FROM server_connections WHERE slot = 'candidate' AND id = ?", [candidateId])
+    })
+    try {
+      await this.flushOrThrow()
+      this.state.pendingCandidateIds.delete(candidateId)
+      return true
+    } catch (error) {
+      await this.db.transaction(() => this.db.saveServerConnection(candidate))
+      throw error
+    }
+  }
+
   async restorePromotionSlots({ current, candidate }) {
     await this.db.transaction(() => {
       this.db.sql.run("DELETE FROM server_connections WHERE slot IN ('current', 'candidate')")

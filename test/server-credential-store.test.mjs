@@ -136,6 +136,43 @@ test('a failed promotion flush restores the durable current and leaves the candi
   })
 })
 
+test('discarding a candidate preserves current and installation, and a failed discard remains gated until retried', async () => {
+  await withStore(async ({ db }) => {
+    const ids = ['550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440002']
+    const store = new ServerCredentialStore({ db, safeStorage, now: () => 100, uuid: () => ids.shift() })
+    const installation = await store.getOrCreateInstallation({ deviceName: 'Workstation' })
+    const old = await store.stageCandidate(credentials({ refreshToken: 'old-token' }))
+    await store.promoteCandidate(old.id)
+    const oldCurrent = store.readCurrent()
+    const candidate = await store.stageCandidate(credentials({ refreshToken: 'next-token' }))
+    const originalFlush = db.flush.bind(db)
+    db.flush = () => false
+
+    await assert.rejects(store.discardCandidate(candidate.id), { code: 'PERSISTENCE_PENDING' })
+    assert.deepEqual(store.readCurrent(), oldCurrent)
+    assert.deepEqual(db.getServerConnection('candidate'), candidate)
+    await assert.rejects(store.promoteCandidate(candidate.id), { code: 'PERSISTENCE_PENDING' })
+
+    db.flush = originalFlush
+    assert.equal(await store.discardCandidate(candidate.id), true)
+    assert.equal(db.getServerConnection('candidate'), null)
+    assert.deepEqual(store.readCurrent(), oldCurrent)
+    assert.deepEqual(db.getServerInstallation(), installation)
+    assert.equal(await store.discardCandidate(candidate.id), false)
+  })
+})
+
+test('discarding after disconnect is an idempotent no-op', async () => {
+  await withStore(async ({ db }) => {
+    const ids = ['550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440001']
+    const store = new ServerCredentialStore({ db, safeStorage, uuid: () => ids.shift() })
+    const candidate = await store.stageCandidate(credentials())
+    await store.disconnect()
+    assert.equal(await store.discardCandidate(candidate.id), false)
+    assert.equal(db.getServerConnection('candidate'), null)
+  })
+})
+
 test('candidate remains runtime-invisible until ciphertext flushes and promotion replaces current atomically', async () => {
   await withStore(async ({ db }) => {
     const ids = ['550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440001']

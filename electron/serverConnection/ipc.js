@@ -5,7 +5,8 @@ const LOCAL_ERRORS = Object.freeze({
   SECURE_STORAGE_UNAVAILABLE: ['Secure storage is unavailable', false],
   PERSISTENCE_PENDING: ['Server credentials could not be saved', true],
   SERVER_CREDENTIAL_ENCRYPT_FAILED: ['Server credentials could not be encrypted', false],
-  SERVER_CANDIDATE_NOT_FOUND: ['Server registration could not be completed', false]
+  SERVER_CANDIDATE_NOT_FOUND: ['Server registration could not be completed', false],
+  REGISTRATION_BUSY: ['Another registration is already in progress', true]
 })
 
 function invalidIpc() {

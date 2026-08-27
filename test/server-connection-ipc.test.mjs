@@ -17,6 +17,16 @@ const redeemed = {
   authorization: { expiresAt: null, serverTime: '2026-08-27T00:00:00.000Z' }
 }
 
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((nextResolve, nextReject) => {
+    resolve = nextResolve
+    reject = nextReject
+  })
+  return { promise, resolve, reject }
+}
+
 function setup({ client = {}, credentials = {} } = {}) {
   const handlers = new Map()
   const events = []
@@ -92,4 +102,112 @@ test('secure-storage unavailability prevents redeem and preserves the current co
   await assert.rejects(handlers.get('server-connection:confirm')({}, attempt.attemptId), { code: 'SECURE_STORAGE_UNAVAILABLE' })
   assert.equal(redeemedCalled, false)
   assert.equal(current.id, 'old')
+})
+
+test('cancelling while redeem is pending prevents later candidate persistence', async () => {
+  const redeem = deferred()
+  const redeemStarted = deferred()
+  let stageCalls = 0
+  let promoteCalls = 0
+  const { handlers, manager } = setup({
+    client: { redeem: async () => { redeemStarted.resolve(); return redeem.promise } },
+    credentials: {
+      stageCandidate: async () => { stageCalls += 1; return { id: 'candidate' } },
+      promoteCandidate: async () => { promoteCalls += 1; return { id: 'new', connectionRevision: 8 } }
+    }
+  })
+  const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
+  const confirmation = handlers.get('server-connection:confirm')({}, attempt.attemptId)
+  await redeemStarted.promise
+  assert.equal(manager.cancel(attempt.attemptId), true)
+  redeem.resolve(redeemed)
+  await assert.rejects(confirmation, { code: 'invalid_link' })
+  assert.equal(stageCalls, 0)
+  assert.equal(promoteCalls, 0)
+  assert.equal(manager.getState().connection.id, 'old')
+})
+
+test('disconnecting while redeem is pending cannot resurrect credentials after the response', async () => {
+  const redeem = deferred()
+  const redeemStarted = deferred()
+  let stageCalls = 0
+  const { handlers, manager } = setup({
+    client: { redeem: async () => { redeemStarted.resolve(); return redeem.promise } },
+    credentials: { stageCandidate: async () => { stageCalls += 1; return { id: 'candidate' } } }
+  })
+  const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
+  const confirmation = handlers.get('server-connection:confirm')({}, attempt.attemptId)
+  await redeemStarted.promise
+  await manager.disconnect()
+  redeem.resolve(redeemed)
+  await assert.rejects(confirmation, { code: 'invalid_link' })
+  assert.equal(stageCalls, 0)
+  assert.equal(manager.getState().status, 'disconnected')
+  assert.equal(manager.getState().connection, null)
+})
+
+test('cancelling after candidate staging begins discards it without promotion', async () => {
+  const stage = deferred()
+  const stageStarted = deferred()
+  const discarded = []
+  let promoteCalls = 0
+  const { handlers, manager } = setup({
+    credentials: {
+      stageCandidate: async () => { stageStarted.resolve(); return stage.promise },
+      discardCandidate: async (candidateId) => { discarded.push(candidateId); return true },
+      promoteCandidate: async () => { promoteCalls += 1; return { id: 'new', connectionRevision: 8 } }
+    }
+  })
+  const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
+  const confirmation = handlers.get('server-connection:confirm')({}, attempt.attemptId)
+  await stageStarted.promise
+  assert.equal(manager.cancel(attempt.attemptId), true)
+  stage.resolve({ id: 'candidate' })
+  await assert.rejects(confirmation, { code: 'invalid_link' })
+  assert.deepEqual(discarded, ['candidate'])
+  assert.equal(promoteCalls, 0)
+  assert.equal(manager.getState().connection.id, 'old')
+})
+
+test('a different attempt is rejected while another attempt is redeeming', async () => {
+  const redeem = deferred()
+  const redeemStarted = deferred()
+  let redeemCalls = 0
+  const { handlers } = setup({ client: { redeem: async () => { redeemCalls += 1; redeemStarted.resolve(); return redeem.promise } } })
+  const first = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=one')
+  const second = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=two')
+  const firstConfirmation = handlers.get('server-connection:confirm')({}, first.attemptId)
+  await redeemStarted.promise
+  await assert.rejects(handlers.get('server-connection:confirm')({}, second.attemptId), { code: 'REGISTRATION_BUSY' })
+  assert.equal(redeemCalls, 1)
+  redeem.resolve(redeemed)
+  await firstConfirmation
+})
+
+test('cancelling another open attempt does not invalidate the active redeem', async () => {
+  const redeem = deferred()
+  const redeemStarted = deferred()
+  const { handlers, manager } = setup({ client: { redeem: async () => { redeemStarted.resolve(); return redeem.promise } } })
+  const active = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=one')
+  const other = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=two')
+  const confirmation = handlers.get('server-connection:confirm')({}, active.attemptId)
+  await redeemStarted.promise
+  assert.equal(manager.cancel(other.attemptId), true)
+  redeem.resolve(redeemed)
+  await confirmation
+  assert.equal(manager.getState().connection.id, 'new')
+})
+
+test('a stale Bootstrap failure cannot overwrite disconnected state', async () => {
+  const bootstrap = deferred()
+  const bootstrapStarted = deferred()
+  const { handlers, manager } = setup({ client: { bootstrap: async () => { bootstrapStarted.resolve(); return bootstrap.promise } } })
+  const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
+  const confirmation = handlers.get('server-connection:confirm')({}, attempt.attemptId)
+  await bootstrapStarted.promise
+  await manager.disconnect()
+  bootstrap.reject(Object.assign(new Error('network response body'), { retryable: true }))
+  await confirmation
+  assert.equal(manager.getState().status, 'disconnected')
+  assert.equal(manager.getState().connection, null)
 })
