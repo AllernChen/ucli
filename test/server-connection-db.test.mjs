@@ -139,7 +139,14 @@ test('server projections replace by revision and disconnect cleanup preserves lo
     assert.equal(db.getServerConnection('current'), null)
     assert.deepEqual(db.listServerModelProfiles(), [])
     assert.equal(db.sql.exec('SELECT COUNT(*) AS count FROM server_skill_versions')[0].values[0][0], 0)
-    assert.equal(db.sql.exec('SELECT COUNT(*) AS count FROM server_skill_packages')[0].values[0][0], 0)
+    assert.equal(db.sql.exec('SELECT COUNT(*) AS count FROM server_skill_packages')[0].values[0][0], 1)
+    assert.deepEqual(db.findServerSkillPackage({
+      serverOrigin: 'https://server.example.test', organizationId: 'organization-1',
+      slug: 'server-skill', version: '1.0.0'
+    }), {
+      packageId: 'local-package', versionId: 'version-1', serverOrigin: 'https://server.example.test',
+      organizationId: 'organization-1', slug: 'server-skill', version: '1.0.0'
+    })
     assert.equal(db.getSkillPackage('local-package').id, 'local-package')
   })
 })

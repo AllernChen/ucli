@@ -42,6 +42,7 @@ function sourceForPackage(pkg) {
 }
 
 function sourceRefType(source, prepared) {
+  if (prepared.source.type === 'server') return 'fixed'
   if (!['github', 'gitlab'].includes(prepared.source.type)) return prepared.source.type === 'zip' ? 'fixed' : 'local'
   if (['branch', 'tag', 'commit', 'default'].includes(source.refType)) return source.refType
   if (/^[a-f0-9]{40}$/i.test(prepared.source.ref)) return 'commit'
@@ -395,7 +396,7 @@ export function createSkillsService({
     return { targetAdapterIds, projectionIds, scopeType, scopeKey: [...scopeKeys][0] }
   }
 
-  async function installPrepared(request, prepared, validated) {
+  async function installPrepared(request, prepared, validated, serverMapping = null) {
       const { targetAdapterIds, projectionIds, scopeType, scopeKey } = validated
       const inspected = inspectSkillDirectory(prepared.workingDirectory)
       const compatibility = validateSkillCompatibility(inspected.name)
@@ -407,11 +408,16 @@ export function createSkillsService({
         .filter((pkg) => pkg.contentSha256 === inspected.contentSha256)
         .sort((left, right) => Number(samePreparedSource(right, prepared.source)) - Number(samePreparedSource(left, prepared.source)))[0]
       if (reusable) {
-        return reuseManagedPackage(
+        const result = await reuseManagedPackage(
           reusable,
           targetAdapterIds,
           samePreparedSource(reusable, prepared.source) ? 'same_source_and_content' : 'same_content'
         )
+        if (serverMapping) {
+          await db.transaction(() => db.linkServerSkillPackage({ ...serverMapping, packageId: reusable.id }))
+          await persistOrThrow()
+        }
+        return result
       }
       if (packagesInScope.some((pkg) => samePreparedSource(pkg, prepared.source))) {
         throw serviceError('The installed source has changed; preview and update the existing Skill', 'SKILL_SOURCE_CHANGED')
@@ -487,6 +493,7 @@ export function createSkillsService({
             updatedAt: timestamp
           })
           for (const installation of installations) db.insertSkillInstallation(installation)
+          if (serverMapping) db.linkServerSkillPackage({ ...serverMapping, packageId })
         })
         await persistOrThrow()
         const view = packageView(db.getSkillPackage(packageId))
@@ -513,6 +520,86 @@ export function createSkillsService({
   async function install(request = {}) {
     const validated = validateInstallRequest(request)
     return sourceLoader.withPrepared(request.source, (prepared) => installPrepared(request, prepared, validated))
+  }
+
+  function validServerSource(source = {}) {
+    const fields = ['locator', 'versionId', 'serverOrigin', 'organizationId', 'slug', 'version', 'sha256']
+    if (!source || typeof source !== 'object' || fields.some((key) => typeof source[key] !== 'string' || !source[key])) {
+      throw serviceError('Server Skill source is invalid', 'SKILL_SOURCE_INVALID')
+    }
+    if (!/^[a-f0-9]{64}$/i.test(source.sha256)) throw serviceError('Server Skill source is invalid', 'SKILL_SOURCE_INVALID')
+    return source
+  }
+
+  // This is deliberately not reachable through Skills IPC. The server catalog
+  // adapter is the only caller that can turn a verified staging archive into a
+  // persistent `server` package source.
+  async function installVerifiedServerArchive({ archivePath, source, targets }) {
+    const serverSource = validServerSource(source)
+    const validated = validateInstallRequest(targets)
+    return sourceLoader.withPrepared({ type: 'local', path: archivePath }, async (prepared) => {
+      const serverPrepared = {
+        ...prepared,
+        source: { type: 'server', locator: serverSource.locator, ref: serverSource.versionId, subdir: '' },
+        resolvedRevision: serverSource.sha256
+      }
+      return installPrepared({ ...targets, source: serverPrepared.source }, serverPrepared, validated, serverSource)
+    })
+  }
+
+  async function updateVerifiedServerArchive({ packageId, archivePath, source }) {
+    const serverSource = validServerSource(source)
+    const pkg = db.getSkillPackage(packageId)
+    if (!pkg || pkg.sourceType !== 'server') throw serviceError('Server Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    return sourceLoader.withPrepared({ type: 'local', path: archivePath }, async (prepared) => {
+      const next = inspectSkillDirectory(prepared.workingDirectory)
+      if (next.name !== pkg.name) throw serviceError('Updated source changed the skill name', 'SKILL_UPDATE_NAME_CHANGED')
+      const current = inspectSkillDirectory(packageDirectory(pkg.id))
+      if (current.contentSha256 !== pkg.contentSha256) throw serviceError('Managed package was modified outside UCLI', 'SKILL_DRIFTED')
+      const installations = db.listSkillInstallations({ packageId }).map(inspectInstallation)
+      if (installations.some((item) => item.enabled && item.status !== 'ready' && item.status !== 'update_available')) {
+        throw serviceError('A managed projection has drifted', 'SKILL_DRIFTED')
+      }
+      if (next.contentSha256 === pkg.contentSha256) {
+        await db.transaction(() => db.linkServerSkillPackage({ ...serverSource, packageId }))
+        await persistOrThrow()
+        return packageView(db.getSkillPackage(packageId))
+      }
+      const backup = join(updateStagingRoot, `${pkg.id}-${uuid()}`)
+      copySkillDirectoryAtomic(packageDirectory(pkg.id), backup)
+      const updatedTargets = []
+      try {
+        const canonical = copySkillDirectoryAtomic(prepared.workingDirectory, packageDirectory(pkg.id), {
+          expectedExistingSha256: pkg.contentSha256
+        })
+        for (const item of installations.filter((entry) => entry.enabled)) {
+          const deployed = copySkillDirectoryAtomic(canonical.root, item.targetPath, {
+            expectedExistingSha256: item.deployedSha256
+          })
+          updatedTargets.push(item)
+          db.updateSkillInstallation(item.id, { deployedSha256: deployed.contentSha256, status: 'ready', updatedAt: now() })
+        }
+        await db.transaction(() => {
+          db.updateSkillPackage(packageId, {
+            description: next.description, sourceLocator: serverSource.locator, sourceRef: serverSource.versionId,
+            sourceRefType: 'fixed', sourceSubdir: '', resolvedRevision: serverSource.sha256,
+            manifest: next.manifest, contentSha256: next.contentSha256, lastCheckedAt: now(), updatedAt: now()
+          })
+          db.linkServerSkillPackage({ ...serverSource, packageId })
+        })
+        await persistOrThrow()
+        return packageView(db.getSkillPackage(packageId))
+      } catch (error) {
+        if (error?.code === 'SKILL_PERSISTENCE_PENDING') throw error
+        for (const item of updatedTargets.reverse()) {
+          try { copySkillDirectoryAtomic(backup, item.targetPath, { expectedExistingSha256: next.contentSha256 }) } catch {}
+        }
+        try { copySkillDirectoryAtomic(backup, packageDirectory(pkg.id), { expectedExistingSha256: next.contentSha256 }) } catch {}
+        throw error
+      } finally {
+        if (existsSync(backup)) rmSync(backup, { recursive: true, force: true })
+      }
+    })
   }
 
   async function installMany(requests = []) {
@@ -1167,6 +1254,8 @@ export function createSkillsService({
     },
     install,
     installMany,
+    installVerifiedServerArchive,
+    updateVerifiedServerArchive,
     applyToAdapter,
     setEnabled,
     resolveDrift,

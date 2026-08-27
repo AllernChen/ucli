@@ -1849,7 +1849,6 @@ class Db {
 
   clearServerConnections() {
     this.sql.run('DELETE FROM server_model_profiles')
-    this.sql.run('DELETE FROM server_skill_packages')
     this.sql.run('DELETE FROM server_skill_versions')
     this.sql.run('DELETE FROM server_connections')
   }
@@ -1894,6 +1893,16 @@ class Db {
     }
   }
 
+  listServerSkillVersions() {
+    return rows(this.sql.exec(
+      'SELECT * FROM server_skill_versions ORDER BY created_at, version_id'
+    )).map(rowToServerSkillVersion)
+  }
+
+  clearServerSkillVersions() {
+    this.sql.run('DELETE FROM server_skill_versions')
+  }
+
   linkServerSkillPackage(mapping) {
     this.sql.run(
       `INSERT INTO server_skill_packages (
@@ -1910,6 +1919,32 @@ class Db {
         mapping.slug, mapping.version
       ]
     )
+  }
+
+  getServerSkillPackage(packageId) {
+    return rows(this.sql.exec('SELECT * FROM server_skill_packages WHERE package_id = ?', [packageId]))
+      .map(rowToServerSkillPackage)[0] || null
+  }
+
+  findServerSkillPackage({ serverOrigin, organizationId, slug, version }) {
+    return rows(this.sql.exec(
+      `SELECT * FROM server_skill_packages
+       WHERE server_origin = ? AND organization_id = ? AND slug = ? AND version = ?`,
+      [serverOrigin, organizationId, slug, version]
+    )).map(rowToServerSkillPackage)[0] || null
+  }
+
+  findServerSkillPackageForSkill({ serverOrigin, organizationId, slug }) {
+    return rows(this.sql.exec(
+      `SELECT * FROM server_skill_packages
+       WHERE server_origin = ? AND organization_id = ? AND slug = ?`,
+      [serverOrigin, organizationId, slug]
+    )).map(rowToServerSkillPackage)[0] || null
+  }
+
+  listServerSkillPackages() {
+    return rows(this.sql.exec('SELECT * FROM server_skill_packages ORDER BY package_id'))
+      .map(rowToServerSkillPackage)
   }
 
   // ---- Skills ----
@@ -2832,6 +2867,36 @@ function rowToServerModelProfile(row) {
     connectionRevision: row.connection_revision,
     availabilityStatus: row.availability_status,
     codexFileSha256: row.codex_file_sha256 ?? null
+  }
+}
+
+function rowToServerSkillVersion(row) {
+  return {
+    versionId: row.version_id,
+    serverOrigin: row.server_origin,
+    organizationId: row.organization_id,
+    slug: row.slug,
+    version: row.version,
+    name: row.name,
+    description: row.description,
+    sha256: row.sha256,
+    sizeBytes: row.size_bytes,
+    publishedAt: row.published_at,
+    createdAt: row.created_at,
+    downloadUrl: row.download_url,
+    lifecycleStatus: row.lifecycle_status,
+    connectionRevision: row.connection_revision
+  }
+}
+
+function rowToServerSkillPackage(row) {
+  return {
+    packageId: row.package_id,
+    versionId: row.version_id,
+    serverOrigin: row.server_origin,
+    organizationId: row.organization_id,
+    slug: row.slug,
+    version: row.version
   }
 }
 

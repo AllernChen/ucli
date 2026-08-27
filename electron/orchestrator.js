@@ -106,6 +106,7 @@ import { ConnectionManager } from './serverConnection/connectionManager.js'
 import { ExpiryReminder } from './serverConnection/expiryReminder.js'
 import { createLocalGatewayProxy } from './serverConnection/localGatewayProxy.js'
 import { createServerModelProjection } from './serverConnection/modelProjection.js'
+import { createSkillsCatalogAdapter } from './serverConnection/skillsCatalogAdapter.js'
 import { registerServerConnectionIpc } from './serverConnection/ipc.js'
 import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
 import { scanStorageCategories } from './storage/storageScanner.js'
@@ -849,6 +850,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   let serverConnectionManager = null
   let localGatewayProxy = null
   let serverModelProjection = null
+  let serverSkillsCatalog = null
   const approvalNotifications = new Map()
   const completionNotifications = new Set()
   const diagnostics = createDiagnosticsService({
@@ -1619,12 +1621,13 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       flush: () => db.flush(),
       serverModelProjection
     })
+    const skillsSourceLoader = createSkillSourceLoader({
+      stagingRoot: join(app.getPath('userData'), 'skills', '.source-staging')
+    })
     skillsService = createSkillsService({
       db,
       userDataPath: app.getPath('userData'),
-      sourceLoader: createSkillSourceLoader({
-        stagingRoot: join(app.getPath('userData'), 'skills', '.source-staging')
-      }),
+      sourceLoader: skillsSourceLoader,
       flush: () => db.flush(),
       listSessions,
       restartSession: restartSessionForSkills,
@@ -1655,6 +1658,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       localGatewayProxy = null
       log('Server gateway proxy unavailable')
     }
+    serverSkillsCatalog = createSkillsCatalogAdapter({
+      connectionManager: serverConnectionManager,
+      db,
+      fetchImpl: globalThis.fetch,
+      stagingRoot: join(app.getPath('userData'), 'server-skills', '.staging'),
+      sourceLoader: skillsSourceLoader,
+      skillsService
+    })
     let projectionSync = Promise.resolve()
     const syncServerModelProjection = (state = serverConnectionManager.getState()) => {
       projectionSync = projectionSync.then(async () => {
@@ -1686,9 +1697,13 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       }).catch(() => {})
       return projectionSync
     }
-    serverConnectionManager.subscribe(state => { void syncServerModelProjection(state) })
+    serverConnectionManager.subscribe(state => {
+      void syncServerModelProjection(state)
+      if (['connected', 'expiring'].includes(state.status)) void serverSkillsCatalog?.sync().catch(() => {})
+    })
     void serverConnectionManager.start()
     void syncServerModelProjection()
+    void serverSkillsCatalog.sync().catch(() => {})
     try {
       await profileService.reconcileCodexProfiles()
     } catch (error) {
@@ -3936,6 +3951,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       for (const notification of completionNotifications) notification.close()
       completionNotifications.clear()
       await gatewayManager?.shutdown()
+      await serverSkillsCatalog?.shutdown()
+      serverSkillsCatalog = null
       await localGatewayProxy?.shutdown()
       localGatewayProxy = null
       await serverConnectionManager?.shutdown()
