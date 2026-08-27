@@ -1606,7 +1606,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       },
       codexProfileFiles,
       resolveCodexHome: getCodexHome,
-      getRuntimeConnectionIdentity: () => serverConnectionManager?.getRuntimeConnectionIdentity() || null
+      getRuntimeConnectionIdentity: () => serverConnectionManager?.getRuntimeConnectionIdentity() || null,
+      flush: () => db.flush()
     })
     profileService = createProfileService({
       db,
@@ -1663,24 +1664,24 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             : state.status === 'expired' ? 'expired'
               : state.reason === 'grant_deleted' ? 'deleted'
                 : 'unreachable'
-          serverModelProjection.clearOnlineState(state.connection?.connectionRevision, status)
+          await serverModelProjection.clearOnlineState(state.connection?.connectionRevision, status)
           return
         }
         try {
           const bootstrap = await serverConnectionManager.getBootstrap()
           const current = serverConnectionManager.getRuntimeConnectionIdentity()
           if (!current || current.connectionId !== identity.connectionId || current.connectionRevision !== identity.connectionRevision) {
-            serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
+            await serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
             return
           }
-          serverModelProjection.reconcile({
+          await serverModelProjection.reconcile({
             serverOrigin: state.serverOrigin,
             organization: bootstrap.organization,
             models: bootstrap.models,
             connectionRevision: identity.connectionRevision
           })
         } catch {
-          serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
+          await serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
         }
       }).catch(() => {})
       return projectionSync
@@ -2048,6 +2049,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   }
 
   async function rejectInteractiveProfileConstruction(adapter, sessionId, error) {
+    serverModelProjection?.releaseRuntime(sessionId)
     try {
       await adapter.dispose?.()
     } catch (cleanupError) {
@@ -2150,25 +2152,32 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       session = prepared.session
       profileLaunch = prepared.profileLaunch
     }
-    engine.setSession(sessionId, { tier, rulesetId, ruleset: rulesets[rulesetId] })
-    const adapter = descriptor.create({
-      session,
-      engine,
-      settings: {
-        hookRunnerPath,
-        hookPort: null,
-        ruleset: rulesets[rulesetId],
-        codexHome: adapterId === 'codex' ? getCodexHome() : null,
-        profileEnvironment,
-        profileLaunch,
-        profileManager: adapterId === 'deepseek-harness' ? getDshProfileManager() : null,
-        initialStats: {
-          tokens: { input: 0, output: 0 },
-          turns: 0,
-          completedTurns: 0
+    let adapter
+    try {
+      engine.setSession(sessionId, { tier, rulesetId, ruleset: rulesets[rulesetId] })
+      adapter = descriptor.create({
+        session,
+        engine,
+        settings: {
+          hookRunnerPath,
+          hookPort: null,
+          ruleset: rulesets[rulesetId],
+          codexHome: adapterId === 'codex' ? getCodexHome() : null,
+          profileEnvironment,
+          profileLaunch,
+          profileManager: adapterId === 'deepseek-harness' ? getDshProfileManager() : null,
+          initialStats: {
+            tokens: { input: 0, output: 0 },
+            turns: 0,
+            completedTurns: 0
+          }
         }
-      }
-    })
+      })
+    } catch (error) {
+      serverModelProjection?.releaseRuntime(sessionId)
+      engine.removeSession(sessionId)
+      throw error
+    }
     try {
       assertInteractiveProfileSnapshotCurrent(pinnedProfile)
     } catch (error) {
@@ -2884,26 +2893,32 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         scheduleFlush()
       }
     }
-    const adapter = descriptor.create({
-      session: entry.session,
-      engine,
-      settings: {
-        hookRunnerPath,
-        hookPort: null,
-        ruleset: rulesets[entry.session.rulesetId],
-        codexHome: entry.session.adapterId === 'codex' ? getCodexHome() : null,
-        profileEnvironment,
-        profileLaunch,
-        profileManager: entry.session.adapterId === 'deepseek-harness'
-          ? getDshProfileManager()
-          : null,
-        initialStats: {
-          tokens: { ...entry.stats.tokens },
-          turns: entry.stats.turns,
-          completedTurns: entry.stats.turns
+    let adapter
+    try {
+      adapter = descriptor.create({
+        session: entry.session,
+        engine,
+        settings: {
+          hookRunnerPath,
+          hookPort: null,
+          ruleset: rulesets[entry.session.rulesetId],
+          codexHome: entry.session.adapterId === 'codex' ? getCodexHome() : null,
+          profileEnvironment,
+          profileLaunch,
+          profileManager: entry.session.adapterId === 'deepseek-harness'
+            ? getDshProfileManager()
+            : null,
+          initialStats: {
+            tokens: { ...entry.stats.tokens },
+            turns: entry.stats.turns,
+            completedTurns: entry.stats.turns
+          }
         }
-      }
-    })
+      })
+    } catch (error) {
+      serverModelProjection?.releaseRuntime(sessionId)
+      throw error
+    }
     entry.adapter = adapter
     entry.status = 'starting'
     entry._claudeProfileLaunchStamp = entry.session.adapterId === 'claude'

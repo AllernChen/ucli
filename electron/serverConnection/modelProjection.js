@@ -111,14 +111,15 @@ export function createServerModelProjection({
   proxy,
   codexProfileFiles = {},
   resolveCodexHome = null,
-  getRuntimeConnectionIdentity = () => proxy?.getRuntimeConnectionIdentity?.() || null
+  getRuntimeConnectionIdentity = () => proxy?.getRuntimeConnectionIdentity?.() || null,
+  flush = () => db.flush?.() ?? true
 } = {}) {
   if (!db || typeof db.listServerModelProfiles !== 'function' ||
     typeof db.replaceServerModelProfiles !== 'function') {
     throw new TypeError('A server model profile database is required')
   }
   const sessions = new Map()
-  let onlineRevision = null
+  let onlineIdentity = null
 
   function stored() { return db.listServerModelProfiles().map(profile => ({ ...profile })) }
   function find(profileId) { return stored().find(profile => profile.profileId === profileId) || null }
@@ -128,8 +129,37 @@ export function createServerModelProjection({
       typeof identity.connectionId !== 'string' || !identity.connectionId) return null
     return identity
   }
+  function sameIdentity(left, right) {
+    return Boolean(left && right && left.connectionId === right.connectionId &&
+      left.connectionRevision === right.connectionRevision)
+  }
   function isOnline(profile) {
-    return profile.availabilityStatus === 'ready' && onlineRevision === profile.connectionRevision && Boolean(currentIdentity(profile))
+    return profile.availabilityStatus === 'ready' && sameIdentity(onlineIdentity, currentIdentity(profile))
+  }
+  async function persistOrThrow() {
+    try {
+      if (await flush() === false) throw new Error('flush failed')
+    } catch {
+      throw projectionError('PROFILE_PERSISTENCE_PENDING', 'Server profile changes are pending persistence')
+    }
+  }
+  function persistDigestOrInvalidate() {
+    try {
+      const result = flush()
+      if (result === false) throw new Error('flush failed')
+      if (result && typeof result.then === 'function') {
+        void Promise.resolve(result).then(value => {
+          if (value === false) throw new Error('flush failed')
+        }).catch(() => invalidateOnlineState())
+      }
+    } catch {
+      invalidateOnlineState()
+      throw projectionError('PROFILE_PERSISTENCE_PENDING', 'Server profile changes are pending persistence')
+    }
+  }
+  function invalidateOnlineState() {
+    onlineIdentity = null
+    for (const sessionId of [...sessions.keys()]) revoke(sessionId)
   }
   function revoke(sessionId) {
     if (!sessions.has(sessionId)) return false
@@ -140,14 +170,33 @@ export function createServerModelProjection({
   }
 
   return {
-    reconcile(input) {
+    async reconcile(input) {
       const profiles = profileRows(input)
-      if (onlineRevision !== null && onlineRevision !== input.connectionRevision) {
+      const identity = getRuntimeConnectionIdentity()
+      if (!identity || identity.connectionRevision !== input.connectionRevision) {
+        invalidateOnlineState()
+        db.replaceServerModelProfiles({ connectionRevision: input.connectionRevision, profiles: profiles.map(profile => ({
+          ...profile, availabilityStatus: 'unreachable'
+        })) })
+        await persistOrThrow()
+        return this.listProfiles()
+      }
+      if (!sameIdentity(onlineIdentity, identity)) {
         for (const sessionId of [...sessions.keys()]) revoke(sessionId)
       }
-      onlineRevision = input.connectionRevision
       db.replaceServerModelProfiles({ connectionRevision: input.connectionRevision, profiles })
-      return profiles.map(profile => asDto(profile, isOnline(profile)))
+      try {
+        await persistOrThrow()
+      } catch (error) {
+        invalidateOnlineState()
+        throw error
+      }
+      if (!sameIdentity(identity, getRuntimeConnectionIdentity())) {
+        invalidateOnlineState()
+        throw projectionError('PROFILE_NOT_READY', 'Server profile is not ready')
+      }
+      onlineIdentity = Object.freeze({ ...identity })
+      return this.listProfiles()
     },
 
     listProfiles() {
@@ -179,14 +228,19 @@ export function createServerModelProjection({
           : 'ANTHROPIC_AUTH_TOKEN'
         if (profile.adapterId === 'codex') {
           if (typeof codexProfileFiles.writeServerCodexProfileFileAtomic === 'function' && resolveCodexHome) {
-            codexProfileFiles.writeServerCodexProfileFileAtomic({
+            const written = codexProfileFiles.writeServerCodexProfileFileAtomic({
               codexHome: resolveCodexHome(), profile: dto, baseUrl: issued.baseUrl, envKey: envName
             })
+            const next = stored().map(candidate => candidate.profileId === profile.profileId
+              ? { ...candidate, codexFileSha256: written.sha256 }
+              : candidate)
+            db.replaceServerModelProfiles({ connectionRevision: profile.connectionRevision, profiles: next })
+            persistDigestOrInvalidate()
           }
           if (!currentIdentity(profile) || currentIdentity(profile).connectionId !== identity.connectionId) {
             throw projectionError('PROFILE_NOT_READY', 'Server profile is not ready')
           }
-          sessions.set(sessionId, { profileId, connectionRevision: identity.connectionRevision })
+          sessions.set(sessionId, { profileId, identity: Object.freeze({ ...identity }) })
           return {
             args: ['--profile', dto.nativeProfileName],
             env: { [envName]: issued.bearer },
@@ -198,7 +252,7 @@ export function createServerModelProjection({
         if (!currentIdentity(profile) || currentIdentity(profile).connectionId !== identity.connectionId) {
           throw projectionError('PROFILE_NOT_READY', 'Server profile is not ready')
         }
-        sessions.set(sessionId, { profileId, connectionRevision: identity.connectionRevision })
+        sessions.set(sessionId, { profileId, identity: Object.freeze({ ...identity }) })
         return {
           args: dto.model ? ['--model', dto.model] : [],
           env: {
@@ -222,8 +276,8 @@ export function createServerModelProjection({
       return revoke(sessionId)
     },
 
-    clearOnlineState(connectionRevision, status = 'unreachable') {
-      onlineRevision = null
+    async clearOnlineState(connectionRevision, status = 'unreachable') {
+      onlineIdentity = null
       const profiles = stored()
       for (const sessionId of [...sessions.keys()]) revoke(sessionId)
       if (!profiles.length) return []
@@ -233,7 +287,8 @@ export function createServerModelProjection({
         availabilityStatus: SERVER_STATUSES.has(status) && status !== 'ready' ? status : 'unreachable'
       }))
       db.replaceServerModelProfiles({ connectionRevision, profiles: next })
-      return next.map(asDto)
+      await persistOrThrow()
+      return this.listProfiles()
     }
   }
 }

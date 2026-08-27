@@ -9,7 +9,7 @@ import * as codexProfileFiles from '../electron/aiCliProfiles/codexProfileFile.j
 import { createProfileService } from '../electron/aiCliProfiles/profileService.js'
 import { sanitiseProfileError } from '../electron/aiCliProfiles/contracts.js'
 
-function harness() {
+function harness({ flush = () => true, fileOps, resolveCodexHome } = {}) {
   let stored = []
   let identity = { connectionId: 'connection-1', connectionRevision: 7 }
   const calls = { create: [], revoke: [] }
@@ -26,9 +26,11 @@ function harness() {
       },
       revokeServerGatewaySession: sessionId => calls.revoke.push(sessionId)
     },
-    codexProfileFiles: {
+    codexProfileFiles: fileOps || {
       renderServerCodexProfileFile: profile => `# ucli-server-profile-id: ${profile.id}\n`
-    }
+    },
+    resolveCodexHome,
+    flush
   })
   return {
     projection,
@@ -38,7 +40,7 @@ function harness() {
   }
 }
 
-test('projects every Bootstrap model into stable Codex Responses and Claude Bearer profiles', () => {
+test('projects every Bootstrap model into stable Codex Responses and Claude Bearer profiles', async () => {
   const context = harness()
   const input = {
     serverOrigin: 'HTTP://server.example.test:80/',
@@ -47,9 +49,9 @@ test('projects every Bootstrap model into stable Codex Responses and Claude Bear
     connectionRevision: 7
   }
 
-  context.projection.reconcile(input)
+  await context.projection.reconcile(input)
   const first = context.projection.listProfiles()
-  context.projection.reconcile({ ...input, serverOrigin: 'http://server.example.test' })
+  await context.projection.reconcile({ ...input, serverOrigin: 'http://server.example.test' })
   const second = context.projection.listProfiles()
 
   assert.equal(first.length, 2)
@@ -63,9 +65,9 @@ test('projects every Bootstrap model into stable Codex Responses and Claude Bear
   assert.equal(first.find(profile => profile.adapterId === 'claude').config.connectionMode, 'bearer')
 })
 
-test('prepares runtime only for current ready profiles and revokes replaced session authority', () => {
+test('prepares runtime only for current ready profiles and revokes replaced session authority', async () => {
   const context = harness()
-  context.projection.reconcile({
+  await context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
     models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
@@ -78,16 +80,16 @@ test('prepares runtime only for current ready profiles and revokes replaced sess
 
   context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'session-1' })
   assert.deepEqual(context.calls.revoke, ['session-1'])
-  context.projection.clearOnlineState(8)
+  await context.projection.clearOnlineState(8)
   assert.throws(
     () => context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'session-2' }),
     { code: 'PROFILE_NOT_READY' }
   )
 })
 
-test('Claude server runtime targets the proxy Anthropic route', () => {
+test('Claude server runtime targets the proxy Anthropic route', async () => {
   const context = harness()
-  context.projection.reconcile({
+  await context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
     models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
@@ -99,9 +101,9 @@ test('Claude server runtime targets the proxy Anthropic route', () => {
   assert.equal(launch.env.ANTHROPIC_AUTH_TOKEN, 'session-bearer')
 })
 
-test('persisted ready profiles remain unavailable until the matching runtime identity is online', () => {
+test('persisted ready profiles remain unavailable until the matching runtime identity is online', async () => {
   const context = harness()
-  context.projection.reconcile({
+  await context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
     models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
@@ -117,7 +119,7 @@ test('persisted ready profiles remain unavailable until the matching runtime ide
   ])
 })
 
-test('reconciliation revokes every tracked session before accepting a new connection revision', () => {
+test('reconciliation revokes every tracked session before accepting a new connection revision', async () => {
   const context = harness()
   const input = {
     serverOrigin: 'http://server.example.test',
@@ -125,23 +127,51 @@ test('reconciliation revokes every tracked session before accepting a new connec
     models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
     connectionRevision: 7
   }
-  context.projection.reconcile(input)
+  await context.projection.reconcile(input)
   const profile = context.projection.listProfiles()[0]
   context.projection.prepareRuntime({ profileId: profile.id, sessionId: 'session-1' })
   context.setIdentity({ connectionId: 'connection-2', connectionRevision: 8 })
-  context.projection.reconcile({ ...input, connectionRevision: 8 })
+  await context.projection.reconcile({ ...input, connectionRevision: 8 })
   assert.deepEqual(context.calls.revoke, ['session-1'])
 })
 
-test('rejects control-character organization and model identifiers so stable IDs cannot collide', () => {
+test('same-revision replacement identity revokes prior server sessions', async () => {
   const context = harness()
-  assert.throws(() => context.projection.reconcile({
+  const input = {
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'org-1', name: 'Engineering' },
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    connectionRevision: 7
+  }
+  await context.projection.reconcile(input)
+  context.projection.prepareRuntime({ profileId: context.projection.listProfiles()[0].id, sessionId: 'session-1' })
+  context.setIdentity({ connectionId: 'connection-replaced', connectionRevision: 7 })
+  await context.projection.reconcile(input)
+  assert.deepEqual(context.calls.revoke, ['session-1'])
+})
+
+test('failed projection persistence leaves rows fail-closed and rejects reconciliation', async () => {
+  const context = harness({ flush: () => false })
+  await assert.rejects(() => context.projection.reconcile({
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'org-1', name: 'Engineering' },
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    connectionRevision: 7
+  }), { code: 'PROFILE_PERSISTENCE_PENDING' })
+  assert.deepEqual(context.projection.listProfiles().map(profile => [profile.status, profile.canStart]), [
+    ['unreachable', false], ['unreachable', false]
+  ])
+})
+
+test('rejects control-character organization and model identifiers so stable IDs cannot collide', async () => {
+  const context = harness()
+  await assert.rejects(() => context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'a', name: 'Engineering' },
     models: [{ id: 'b\u0000c', displayName: 'Gateway Model', contextSize: 128000 }],
     connectionRevision: 7
   }), { code: 'INVALID_SERVER_MODEL' })
-  assert.throws(() => context.projection.reconcile({
+  await assert.rejects(() => context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'a\u0000b', name: 'Engineering' },
     models: [{ id: 'c', displayName: 'Gateway Model', contextSize: 128000 }],
@@ -171,6 +201,27 @@ test('server Codex files use an isolated namespace and never persist a session b
     assert.equal(content.includes('session-bearer'), false)
     assert.throws(() => codexProfileFiles.inspectCodexProfileFile(written.path), { code: 'PROFILE_FILE_NOT_OWNED' })
     assert.equal(codexProfileFiles.inspectServerCodexProfileFile(written.path).profileId, profile.id)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('Codex runtime records only the generated server file digest in the projection row', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-digest-'))
+  try {
+    const context = harness({ fileOps: codexProfileFiles, resolveCodexHome: () => root })
+    await context.projection.reconcile({
+      serverOrigin: 'http://server.example.test',
+      organization: { id: 'org-1', name: 'Engineering' },
+      models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+      connectionRevision: 7
+    })
+    const codex = context.projection.listProfiles().find(profile => profile.adapterId === 'codex')
+    context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'session-digest' })
+    const row = context.stored.find(profile => profile.profileId === codex.id)
+    assert.match(row.codexFileSha256, /^[a-f0-9]{64}$/)
+    assert.equal(JSON.stringify(row).includes('session-bearer'), false)
+    assert.equal(JSON.stringify(row).includes('127.0.0.1'), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
