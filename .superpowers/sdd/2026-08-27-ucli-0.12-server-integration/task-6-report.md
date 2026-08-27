@@ -48,3 +48,17 @@
 - `npm run build` — passed.
 - `npm test` — passed (exit 0).
 - `git diff --check` — passed.
+
+## Review fix round 2
+
+- Added an operation-epoch ownership marker for runtime connections. Disconnect captures its epoch, immediately fences the prior runtime, then finalizes after queued credential deletion. Finalization clears and revokes only a connection committed by an older operation, so it cannot target a later reconnection.
+- Promotion startup now verifies that its committed connection is still current before installing an access token, preventing a late Bootstrap continuation from restoring authority after disconnect finalization.
+- Added deterministic success and `PERSISTENCE_PENDING` promotion/disconnect interleavings. Both prove the database delete is attempted, old and late immutable identities are revoked, and the final runtime has no current connection, token, cache, or timers.
+
+### Review-fix round 2 verification
+
+- `node --test test/server-connection-manager.test.mjs test/server-expiry-reminder.test.mjs test/server-connection-ipc.test.mjs` — 29 passed, 0 failed.
+- `node --test test/server-local-proxy.test.mjs test/gateway-root-lifecycle.test.mjs test/gateway-session-routing.test.mjs` — 24 passed, 0 failed.
+- `npm run build` — passed.
+- `npm test` — passed (exit 0).
+- `git diff --check` — passed.

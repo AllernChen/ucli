@@ -84,6 +84,7 @@ export class ConnectionManager {
     this.previewFlights = new Map()
     this.committingAttempts = new Set()
     this.operationEpoch = 0
+    this.currentOperationEpoch = this.operationEpoch
     this.invalidatedAttempts = new Set()
     this.pendingRevocations = new Set()
     this.connectionEpoch = 0
@@ -94,7 +95,7 @@ export class ConnectionManager {
     this.bootstrapCache = null
     this.bootstrapFlight = null
     this.persistencePending = null
-    this.pendingDisconnect = false
+    this.pendingDisconnect = null
     this.retryTimer = null
     this.accessRefreshTimer = null
     this.expiryTimer = null
@@ -243,12 +244,15 @@ export class ConnectionManager {
         // Promotion is the Task 4 non-cancellable commit point. A shutdown or
         // cancellation observed after it must not roll back durable current.
         this.current = connection
+        this.currentOperationEpoch = operationEpoch
         this.status = 'connected'
         this.connectionEpoch += 1
         this.attempts.finish(attemptId)
         return { connection, previousRuntimeIdentity, connectionEpoch: this.connectionEpoch }
       })
-      if (promotion.previousRuntimeIdentity) await this.revokeRevision(promotion.previousRuntimeIdentity)
+      if (promotion.previousRuntimeIdentity && this.operationEpoch === operationEpoch) {
+        await this.revokeRevision(promotion.previousRuntimeIdentity)
+      }
       this.emitState()
       await this.bootstrapAfterPromotion(promotion.connection, redeemed, promotion.connectionEpoch)
       return this.getState()
@@ -259,6 +263,7 @@ export class ConnectionManager {
   }
 
   async bootstrapAfterPromotion(connection, redeemed, connectionEpoch) {
+    if (!this.isCurrentConnection(connection, connectionEpoch)) return
     this.installAccessToken(redeemed.accessToken, redeemed.expiresIn)
     try { await this.bootstrapWithAccessToken({ connection, connectionEpoch }) }
     catch (error) {
@@ -573,6 +578,13 @@ export class ConnectionManager {
     return identity
   }
 
+  async finalizeDisconnect(disconnectEpoch) {
+    if (!this.current || this.currentOperationEpoch >= disconnectEpoch) return false
+    const lateRuntimeIdentity = this.invalidateRuntimeConnection()
+    if (lateRuntimeIdentity) await this.revokeRevision(lateRuntimeIdentity)
+    return true
+  }
+
   assertLifecycleAvailable() {
     if (this.shuttingDown) throw Object.assign(new Error('Server connection is shutting down'), { code: 'SERVER_CONNECTION_SHUTDOWN' })
     if (this.credentials.isPersistencePending?.() && !this.persistencePending) {
@@ -608,16 +620,19 @@ export class ConnectionManager {
 
   async disconnect() {
     this.operationEpoch += 1
+    const disconnectEpoch = this.operationEpoch
     const previousRuntimeIdentity = this.invalidateRuntimeConnection()
     if (previousRuntimeIdentity) await this.revokeRevision(previousRuntimeIdentity)
     try {
       await this.runCredentialMutation(() => this.credentials.disconnect())
-      this.pendingDisconnect = false
+      await this.finalizeDisconnect(disconnectEpoch)
+      this.pendingDisconnect = null
     } catch (error) {
       if (error?.code === 'PERSISTENCE_PENDING') {
-        this.pendingDisconnect = true
+        this.pendingDisconnect = { disconnectEpoch }
         this.scheduleRetry()
       }
+      await this.finalizeDisconnect(disconnectEpoch)
       throw operationError(error)
     }
   }
@@ -627,13 +642,15 @@ export class ConnectionManager {
     await this.retryPendingRevocations()
     if (this.pendingDisconnect) {
       try {
+        const pendingDisconnect = this.pendingDisconnect
         await this.runCredentialMutation(async () => {
           if (this.credentials.isPersistencePending?.()) {
             await (this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.())
           }
           await this.credentials.disconnect()
         })
-        this.pendingDisconnect = false
+        await this.finalizeDisconnect(pendingDisconnect.disconnectEpoch)
+        if (this.pendingDisconnect === pendingDisconnect) this.pendingDisconnect = null
       } catch (error) {
         this.scheduleRetry()
         throw operationError(error)
@@ -748,7 +765,7 @@ export class ConnectionManager {
     this.accessTokenExpiresAt = 0
     this.bootstrapCache = null
     this.persistencePending = null
-    this.pendingDisconnect = false
+    this.pendingDisconnect = null
     this.refreshFlight = null
     this.bootstrapFlight = null
     this.previewFlights.clear()

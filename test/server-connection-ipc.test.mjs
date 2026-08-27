@@ -187,6 +187,70 @@ test('cancellation loses at the promotion commit point and the committed connect
   assert.equal(manager.getAttempt(attempt.attemptId), null)
 })
 
+test('disconnect finalization clears a promotion that commits after disconnect begins', async () => {
+  const promotion = deferred()
+  const promotionStarted = deferred()
+  const committed = { id: 'new', serverOrigin: 'https://server.example.test', accountId: 'account-1', accountDisplayName: 'Ada', organizationId: 'org-1', organizationName: 'Example', authorizationExpiresAt: null, serverTime: '2026-08-27T00:00:00.000Z', connectionRevision: 8 }
+  const revoked = []
+  let disconnects = 0
+  const { handlers, manager } = setup({
+    credentials: {
+      promoteCandidate: async () => { promotionStarted.resolve(); return promotion.promise },
+      disconnect: async () => { disconnects += 1 }
+    }
+  })
+  manager.revokeRuntimeRevision = identity => revoked.push(identity)
+  const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
+  const confirmation = handlers.get('server-connection:confirm')({}, attempt.attemptId)
+  await promotionStarted.promise
+  const disconnecting = manager.disconnect()
+  promotion.resolve(committed)
+  await Promise.all([confirmation, disconnecting])
+
+  assert.equal(disconnects, 1)
+  assert.equal(manager.current, null)
+  assert.equal(manager.getRuntimeConnectionIdentity(), null)
+  assert.equal(manager.getState().status, 'disconnected')
+  assert.equal(manager.accessToken, null)
+  assert.equal(manager.bootstrapCache, null)
+  assert.equal(manager.accessRefreshTimer, null)
+  assert.equal(manager.expiryTimer, null)
+  assert.deepEqual(revoked, [
+    { connectionId: 'old', connectionRevision: 7 },
+    { connectionId: 'new', connectionRevision: 8 }
+  ])
+})
+
+test('a persistence-pending disconnect still finalizes a late promotion as disconnected', async () => {
+  const promotion = deferred()
+  const promotionStarted = deferred()
+  const committed = { id: 'new', serverOrigin: 'https://server.example.test', accountId: 'account-1', accountDisplayName: 'Ada', organizationId: 'org-1', organizationName: 'Example', authorizationExpiresAt: null, serverTime: '2026-08-27T00:00:00.000Z', connectionRevision: 8 }
+  const revoked = []
+  const { handlers, manager } = setup({
+    credentials: {
+      promoteCandidate: async () => { promotionStarted.resolve(); return promotion.promise },
+      disconnect: async () => { throw Object.assign(new Error('disk unavailable'), { code: 'PERSISTENCE_PENDING' }) }
+    }
+  })
+  manager.revokeRuntimeRevision = identity => revoked.push(identity)
+  const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
+  const confirmation = handlers.get('server-connection:confirm')({}, attempt.attemptId)
+  await promotionStarted.promise
+  const disconnecting = manager.disconnect()
+  promotion.resolve(committed)
+  await confirmation
+  await assert.rejects(disconnecting, { code: 'PERSISTENCE_PENDING' })
+
+  assert.equal(manager.current, null)
+  assert.equal(manager.getRuntimeConnectionIdentity(), null)
+  assert.equal(manager.getState().status, 'disconnected')
+  assert.equal(manager.accessToken, null)
+  assert.deepEqual(revoked, [
+    { connectionId: 'old', connectionRevision: 7 },
+    { connectionId: 'new', connectionRevision: 8 }
+  ])
+})
+
 test('a different attempt is rejected while another attempt is redeeming', async () => {
   const redeem = deferred()
   const redeemStarted = deferred()
