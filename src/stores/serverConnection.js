@@ -19,16 +19,29 @@ const PUBLIC_ERROR_MESSAGES = Object.freeze({
 })
 
 function publicError(error, fallback = '服务端操作失败，请稍后重试') {
-  const code = typeof error?.code === 'string' ? error.code : 'SERVER_CONNECTION_OPERATION_FAILED'
+  const rawCode = typeof error?.code === 'string' ? error.code : ''
+  const code = Object.hasOwn(PUBLIC_ERROR_MESSAGES, rawCode) ? rawCode : 'SERVER_CONNECTION_OPERATION_FAILED'
   return {
     code,
-    message: PUBLIC_ERROR_MESSAGES[code] || fallback,
+    message: PUBLIC_ERROR_MESSAGES[code] || '服务端操作失败，请稍后重试',
     retryable: error?.retryable === true
   }
 }
 
 function isCurrentState(value, revision) {
   return value && Number.isSafeInteger(value.revision) && value.revision >= revision
+}
+
+function validateSkillTargets(value) {
+  const targetAdapterIds = Array.isArray(value?.targetAdapterIds)
+    ? [...new Set(value.targetAdapterIds.filter((id) => typeof id === 'string' && id))]
+    : []
+  const scopeType = value?.scopeType
+  const projectPath = typeof value?.projectPath === 'string' ? value.projectPath.trim() : ''
+  if (!targetAdapterIds.length || !['user', 'project'].includes(scopeType) || (scopeType === 'project' && !projectPath)) {
+    throw Object.assign(new Error('Invalid Skill targets'), { code: 'INVALID_SKILL_TARGETS', retryable: false })
+  }
+  return { targetAdapterIds, scopeType, projectPath: scopeType === 'project' ? projectPath : '' }
 }
 
 export const useServerConnectionStore = defineStore('server-connection', {
@@ -50,8 +63,11 @@ export const useServerConnectionStore = defineStore('server-connection', {
     initialized: false,
     _initializePromise: null,
     _confirmPromise: null,
+    _redeemPromise: null,
     _unsubscribeState: null,
-    _unsubscribeRegistration: null
+    _unsubscribeRegistration: null,
+    _lifecycle: 0,
+    _attemptRequest: 0
   }),
   getters: {
     canConfirm: (state) => state.attempt?.preview?.link?.status === 'AVAILABLE' &&
@@ -74,36 +90,52 @@ export const useServerConnectionStore = defineStore('server-connection', {
     async initialize() {
       if (this.initialized) return this
       if (this._initializePromise) return this._initializePromise
+      const lifecycle = this._lifecycle
       this._initializePromise = (async () => {
         const api = ipc.serverConnection
-        this._unsubscribeState = api.onStateChanged((state) => this.applyState(state))
+        this._unsubscribeState = api.onStateChanged((state) => {
+          if (this._lifecycle === lifecycle) this.applyState(state)
+        })
         this._unsubscribeRegistration = api.onRegistrationRequested(({ attemptId }) => {
-          if (typeof attemptId === 'string') void this.loadAttempt(attemptId)
+          if (this._lifecycle === lifecycle && typeof attemptId === 'string') void this.loadAttempt(attemptId, lifecycle)
         })
         try {
-          this.applyState(await api.getState())
+          const state = await api.getState()
+          if (this._lifecycle !== lifecycle) return this
+          this.applyState(state)
           this.initialized = true
+          if (this.status !== 'disconnected') await this.loadCachedSkills(lifecycle)
           return this
         } catch (error) {
-          this.error = publicError(error, '无法读取服务端连接状态')
+          if (this._lifecycle === lifecycle) {
+            this.error = publicError(error)
+            this.unsubscribe()
+          }
           throw error
         } finally {
-          this._initializePromise = null
+          if (this._lifecycle === lifecycle) this._initializePromise = null
         }
       })()
       return this._initializePromise
     },
     dispose() {
+      this._lifecycle += 1
+      this._attemptRequest += 1
+      this.unsubscribe()
+      this.initialized = false
+      this._initializePromise = null
+    },
+    unsubscribe() {
       this._unsubscribeState?.()
       this._unsubscribeRegistration?.()
       this._unsubscribeState = null
       this._unsubscribeRegistration = null
-      this.initialized = false
-      this._initializePromise = null
     },
-    async loadAttempt(attemptId) {
+    async loadAttempt(attemptId, expectedLifecycle = this._lifecycle) {
+      const request = ++this._attemptRequest
       try {
         const attempt = await ipc.serverConnection.getAttempt(attemptId)
+        if (this._lifecycle !== expectedLifecycle || request !== this._attemptRequest || attempt?.attemptId !== attemptId) return null
         this.attempt = attempt || null
         return this.attempt
       } catch (error) {
@@ -112,10 +144,12 @@ export const useServerConnectionStore = defineStore('server-connection', {
       }
     },
     async submitLink(input) {
+      const lifecycle = this._lifecycle
       this.error = null
       try {
         const result = await ipc.serverConnection.submitLink(input)
-        return await this.loadAttempt(result.attemptId)
+        if (this._lifecycle !== lifecycle || typeof result?.attemptId !== 'string') return null
+        return await this.loadAttempt(result.attemptId, lifecycle)
       } catch (error) {
         this.error = publicError(error, '无法读取连接链接')
         throw error
@@ -150,20 +184,29 @@ export const useServerConnectionStore = defineStore('server-connection', {
     },
     async retryRedeem() {
       if (!this.attempt?.attemptId) return null
-      this.busy = true
-      try {
-        const state = await ipc.serverConnection.retryRedeem(this.attempt.attemptId)
-        this.applyState(state)
-        this.attempt = null
-        await Promise.all([this.syncConnection(), this.syncModels(), this.syncSkills()])
-        return state
-      } catch (error) {
-        this.error = publicError(error, '无法重试服务端连接')
-        throw error
-      } finally { this.busy = false }
+      if (this._redeemPromise) return this._redeemPromise
+      const attemptId = this.attempt.attemptId
+      this._redeemPromise = (async () => {
+        this.busy = true
+        try {
+          const state = await ipc.serverConnection.retryRedeem(attemptId)
+          this.applyState(state)
+          this.attempt = null
+          await Promise.all([this.syncConnection(), this.syncModels(), this.syncSkills()])
+          return state
+        } catch (error) {
+          this.error = publicError(error)
+          throw error
+        } finally {
+          this.busy = false
+          this._redeemPromise = null
+        }
+      })()
+      return this._redeemPromise
     },
     async cancelAttempt() {
       const attemptId = this.attempt?.attemptId
+      this._attemptRequest += 1
       this.attempt = null
       if (attemptId) await ipc.serverConnection.cancel(attemptId)
     },
@@ -201,13 +244,25 @@ export const useServerConnectionStore = defineStore('server-connection', {
         throw error
       }
     },
+    async loadCachedSkills(expectedLifecycle = this._lifecycle) {
+      try {
+        const skills = await ipc.serverConnection.listSkills()
+        if (this._lifecycle === expectedLifecycle) this.skills = Array.isArray(skills) ? skills : []
+        return this.skills
+      } catch (error) {
+        if (this._lifecycle === expectedLifecycle) this.error = publicError(error)
+        throw error
+      }
+    },
     async installSkill(versionId, targets) {
-      const result = await ipc.serverConnection.installSkill(versionId, targets)
+      const target = validateSkillTargets(targets)
+      const result = await ipc.serverConnection.installSkill(versionId, target)
       await this.syncSkills()
       return result
     },
     async updateSkill(versionId, targets) {
-      const result = await ipc.serverConnection.updateSkill(versionId, targets)
+      const target = validateSkillTargets(targets)
+      const result = await ipc.serverConnection.updateSkill(versionId, target)
       await this.syncSkills()
       return result
     }

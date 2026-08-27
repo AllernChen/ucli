@@ -45,12 +45,12 @@
               <a-button
                 size="small"
                 type="primary"
-                :disabled="item.lifecycleStatus === 'REVOKED' || serverConnection.busy"
+                :disabled="item.lifecycleStatus === 'REVOKED' || serverConnection.busy || !canUseServerSkillTargets"
                 @click="installOrganizationSkill(item)"
               >安装</a-button>
               <a-button
                 size="small"
-                :disabled="item.lifecycleStatus === 'REVOKED' || serverConnection.busy"
+                :disabled="item.lifecycleStatus === 'REVOKED' || serverConnection.busy || !canUseServerSkillTargets"
                 @click="updateOrganizationSkill(item)"
               >更新</a-button>
             </template>
@@ -71,6 +71,14 @@
       </a-list>
       <div class="skills-muted">选择目标 AI CLI 后再安装；断开连接只会移除在线目录，已安装副本仍在普通列表中显示。</div>
       <a-select v-model:value="serverSkillTargets.targetAdapterIds" mode="multiple" :options="targetOptions" style="width: 100%; margin-top: 8px" />
+      <a-radio-group v-model:value="serverSkillTargets.scopeType" style="margin-top: 8px">
+        <a-radio value="user">用户级</a-radio>
+        <a-radio value="project">项目级</a-radio>
+      </a-radio-group>
+      <a-space v-if="serverSkillTargets.scopeType === 'project'" style="margin-top: 8px">
+        <a-input v-model:value="serverSkillTargets.projectPath" placeholder="选择项目目录" readonly />
+        <a-button @click="chooseServerSkillProject">选择项目</a-button>
+      </a-space>
     </a-card>
 
     <a-row :gutter="12">
@@ -645,6 +653,8 @@ const installDraft = reactive({
   targets: ['claude', 'codex', 'opencode', 'ucode', 'deepseek-harness'], scopeType: 'user', projectPath: ''
 })
 const serverSkillTargets = reactive({ targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
+const canUseServerSkillTargets = computed(() => serverSkillTargets.targetAdapterIds.length > 0 &&
+  (serverSkillTargets.scopeType === 'user' || Boolean(serverSkillTargets.projectPath.trim())))
 
 const catalog = computed(() => aggregateSkillCatalog({
   packages: skills.packages,
@@ -824,7 +834,11 @@ async function syncOrganizationSkills() {
   try {
     await serverConnection.syncSkills()
     await skills.load(projectPath.value)
-  } catch (error) { message.error(serverConnection.error?.message || error?.message || '无法同步组织 Skills') }
+  } catch { message.error(serverConnection.error?.message || '无法同步组织 Skills') }
+}
+async function chooseServerSkillProject() {
+  const selected = await ipc.pickDirectory()
+  if (selected) serverSkillTargets.projectPath = selected
 }
 function organizationSkillTargets() {
   return {
@@ -835,15 +849,15 @@ function organizationSkillTargets() {
 }
 async function installOrganizationSkill(item) {
   try {
-    await serverConnection.installSkill(item.id, organizationSkillTargets())
+    await serverConnection.installSkill(item.versionId, organizationSkillTargets())
     await skills.load(projectPath.value)
-  } catch (error) { message.error(serverConnection.error?.message || error?.message || '组织 Skill 安装失败') }
+  } catch { message.error(serverConnection.error?.message || '组织 Skill 安装失败') }
 }
 async function updateOrganizationSkill(item) {
   try {
-    await serverConnection.updateSkill(item.id, organizationSkillTargets())
+    await serverConnection.updateSkill(item.versionId, organizationSkillTargets())
     await skills.load(projectPath.value)
-  } catch (error) { message.error(serverConnection.error?.message || error?.message || '组织 Skill 更新失败') }
+  } catch { message.error(serverConnection.error?.message || '组织 Skill 更新失败') }
 }
 async function chooseProject() {
   const selected = await ipc.pickDirectory()

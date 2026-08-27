@@ -1247,6 +1247,17 @@ test('Skills page presents the online organization catalog with explicit lifecyc
   assert.match(page, /await skills\.load\(projectPath\.value\)/)
 })
 
+test('organization Skill actions use catalog version ids and bounded user or project targets', () => {
+  const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
+  assert.match(page, /serverConnection\.installSkill\(item\.versionId, organizationSkillTargets\(\)\)/)
+  assert.match(page, /serverConnection\.updateSkill\(item\.versionId, organizationSkillTargets\(\)\)/)
+  assert.doesNotMatch(page, /serverConnection\.(?:installSkill|updateSkill)\(item\.id/)
+  assert.match(page, /v-model:value="serverSkillTargets\.scopeType"/)
+  assert.match(page, /chooseServerSkillProject/)
+  assert.match(page, /serverSkillTargets\.scopeType === 'project' \? serverSkillTargets\.projectPath : ''/)
+  assert.doesNotMatch(page, /serverConnection\.error\?\.message \|\| error\?\.message/)
+})
+
 test('Skills page explains source ownership, entry paths and broken links', () => {
   const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
   assert.match(page, /来源与入口/)

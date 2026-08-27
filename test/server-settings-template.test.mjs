@@ -21,6 +21,9 @@ test('registration dialog renders independent link and authorization status and 
   assert.match(dialog, /authorization\.value\.status === 'AVAILABLE'/)
   assert.match(dialog, /@cancel="cancel"/)
   assert.match(panel, /disconnectConfirmation/)
+  assert.match(dialog, /:closable="!connection\.busy"/)
+  assert.match(dialog, /:mask-closable="!connection\.busy"/)
+  assert.match(dialog, /:keyboard="!connection\.busy"/)
 })
 
 test('connection templates do not retain an invitation secret or full input URL', () => {
@@ -32,6 +35,6 @@ test('connection templates do not retain an invitation secret or full input URL'
 test('the application root initializes the singleton connection store and disposes it once', () => {
   const app = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
   assert.match(app, /useServerConnectionStore/)
-  assert.match(app, /void serverConnection\.initialize\(\)/)
+  assert.match(app, /void serverConnection\.initialize\(\)\.catch\(\(\) => \{\}\)/)
   assert.match(app, /serverConnection\.dispose\(\)/)
 })

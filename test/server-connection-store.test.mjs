@@ -11,6 +11,13 @@ let listedModels = 0
 let listedSkills = 0
 let profileReloads = 0
 
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
 const initialState = {
   revision: 1,
   status: 'connected',
@@ -124,4 +131,93 @@ test('retains only stable public errors and refreshes catalog actions', async ()
   await connection.installSkill('version-1', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
   await connection.updateSkill('version-1', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
   assert.equal(listedSkills >= 3, true)
+})
+
+test('retry redeem is single-flight and invokes IPC only once', async () => {
+  const connection = store()
+  await connection.loadAttempt('attempt-1')
+  const pending = deferred()
+  let calls = 0
+  window.ucli.retryServerConnectionRedeem = async () => { calls += 1; return pending.promise }
+  window.ucli.syncServerConnection = async () => initialState
+  window.ucli.listServerConnectionModels = async () => []
+  window.ucli.syncServerConnectionSkills = async () => []
+  window.ucli.getAiCliProfileState = async () => ({ profiles: [], cliInventory: [], cliConfiguration: [] })
+  const first = connection.retryRedeem()
+  const second = connection.retryRedeem()
+  assert.equal(calls, 1)
+  pending.resolve(initialState)
+  await Promise.all([first, second])
+  assert.equal(calls, 1)
+})
+
+test('late attempt loads cannot overwrite a newer attempt or resurrect a cancelled one', async () => {
+  const connection = store()
+  const first = deferred()
+  const second = deferred()
+  window.ucli.getServerConnectionAttempt = async (attemptId) => attemptId === 'attempt-old' ? first.promise : second.promise
+  const oldLoad = connection.loadAttempt('attempt-old')
+  const newLoad = connection.loadAttempt('attempt-new')
+  second.resolve({ attemptId: 'attempt-new', preview: {} })
+  await newLoad
+  first.resolve({ attemptId: 'attempt-old', preview: {} })
+  await oldLoad
+  assert.equal(connection.attempt.attemptId, 'attempt-new')
+  const cancelled = deferred()
+  window.ucli.getServerConnectionAttempt = async () => cancelled.promise
+  const cancelledLoad = connection.loadAttempt('attempt-cancelled')
+  await connection.cancelAttempt()
+  cancelled.resolve({ attemptId: 'attempt-cancelled', preview: {} })
+  await cancelledLoad
+  assert.equal(connection.attempt, null)
+})
+
+test('initialize cleans up a failed subscription and ignores a late snapshot after dispose', async () => {
+  const failed = store()
+  let failedUnsubscribes = 0
+  window.ucli.onServerConnectionState = () => () => { failedUnsubscribes += 1 }
+  window.ucli.onServerConnectionRegistrationRequested = () => () => { failedUnsubscribes += 1 }
+  window.ucli.getServerConnectionState = async () => { throw Object.assign(new Error(), { code: 'NETWORK_UNREACHABLE' }) }
+  await assert.rejects(failed.initialize())
+  assert.equal(failedUnsubscribes, 2)
+  window.ucli.getServerConnectionState = async () => initialState
+  await failed.initialize()
+  assert.equal(failed.initialized, true)
+
+  const late = store()
+  const snapshot = deferred()
+  window.ucli.getServerConnectionState = async () => snapshot.promise
+  const initializing = late.initialize()
+  late.dispose()
+  snapshot.resolve(initialState)
+  await initializing
+  assert.equal(late.initialized, false)
+})
+
+test('initialization reads the cached catalog and validates catalog version targets', async () => {
+  const connection = store()
+  let listCalls = 0
+  let installed
+  let updated
+  window.ucli.getServerConnectionState = async () => initialState
+  window.ucli.listServerConnectionSkills = async () => { listCalls += 1; return [{ versionId: 'catalog-version-1', lifecycleStatus: 'AVAILABLE' }] }
+  window.ucli.installServerConnectionSkill = async (...args) => { installed = args; return {} }
+  window.ucli.updateServerConnectionSkill = async (...args) => { updated = args; return {} }
+  window.ucli.syncServerConnectionSkills = async () => []
+  await connection.initialize()
+  assert.equal(listCalls, 1)
+  assert.equal(connection.skills[0].versionId, 'catalog-version-1')
+  await connection.installSkill('catalog-version-1', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
+  await connection.updateSkill('catalog-version-1', { targetAdapterIds: ['claude'], scopeType: 'project', projectPath: 'F:/project' })
+  assert.deepEqual(installed, ['catalog-version-1', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' }])
+  assert.deepEqual(updated, ['catalog-version-1', { targetAdapterIds: ['claude'], scopeType: 'project', projectPath: 'F:/project' }])
+  await assert.rejects(connection.installSkill('catalog-version-1', { targetAdapterIds: [], scopeType: 'user', projectPath: '' }), { code: 'INVALID_SKILL_TARGETS' })
+  await assert.rejects(connection.installSkill('catalog-version-1', { targetAdapterIds: ['codex'], scopeType: 'project', projectPath: '' }), { code: 'INVALID_SKILL_TARGETS' })
+})
+
+test('unknown server errors never retain attacker-controlled codes or text', async () => {
+  const connection = store()
+  window.ucli.syncServerConnection = async () => { throw Object.assign(new Error('synthetic-secret'), { code: 'synthetic-secret-code', retryable: true }) }
+  await assert.rejects(connection.syncConnection())
+  assert.deepEqual(connection.error, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
 })

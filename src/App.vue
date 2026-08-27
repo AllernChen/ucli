@@ -109,7 +109,7 @@ const router = useRouter()
 const sessions = useSessionsStore()
 const serverConnection = useServerConnectionStore()
 const updates = useUpdatesStore()
-void serverConnection.initialize()
+void serverConnection.initialize().catch(() => {})
 const navCollapsed = ref(false)
 watch(navCollapsed, (v) => sessions.setNavCollapsed(v))
 const appVersion = __UCLI_VERSION__

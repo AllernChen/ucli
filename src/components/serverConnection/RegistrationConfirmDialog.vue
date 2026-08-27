@@ -4,6 +4,9 @@
     title="确认连接服务端"
     ok-text="确认连接"
     cancel-text="取消"
+    :closable="!connection.busy"
+    :mask-closable="!connection.busy"
+    :keyboard="!connection.busy"
     :ok-button-props="{ disabled: !canConfirm || connection.busy, loading: connection.busy }"
     @ok="confirm"
     @cancel="cancel"
@@ -51,6 +54,7 @@ async function confirm() {
 }
 
 async function cancel() {
+  if (connection.busy) return
   try { await connection.cancelAttempt() } finally { emit('update:open', false) }
 }
 </script>
