@@ -47,6 +47,33 @@ function deferred() {
   return { promise, resolve }
 }
 
+function scheduler(start = nowValue) {
+  let now = start
+  let next = 0
+  const timers = new Map()
+  return {
+    now: () => now,
+    timers: {
+      setTimeout(callback, delay) {
+        const handle = { id: ++next, unref() {} }
+        timers.set(handle, { callback, at: now + delay })
+        return handle
+      },
+      clearTimeout(handle) { timers.delete(handle) }
+    },
+    async advance(ms) {
+      now += ms
+      for (;;) {
+        const due = [...timers.entries()].filter(([, timer]) => timer.at <= now).sort((a, b) => a[1].at - b[1].at)[0]
+        if (!due) break
+        timers.delete(due[0])
+        await due[1].callback()
+      }
+    },
+    get size() { return timers.size }
+  }
+}
+
 test('startup refreshes then bootstraps and concurrent access-token calls share the refresh flight', async () => {
   const calls = []
   let releaseRefresh
@@ -181,4 +208,73 @@ test('metadata persistence failure gates lifecycle work and schedules a retry', 
   assert.equal(manager.getState().reason, 'PERSISTENCE_PENDING')
   await assert.rejects(manager.getBootstrap(), { code: 'PERSISTENCE_PENDING' })
   assert.equal(delays.at(-1), 30_000)
+})
+
+test('proactively refreshes once when an in-memory token crosses below sixty seconds', async () => {
+  const clock = scheduler()
+  let refreshes = 0
+  const { manager } = createManager({ now: clock.now, timers: clock.timers, client: { refresh: async () => {
+    refreshes += 1
+    return { accessToken: 'renewed', refreshToken: 'renewed-refresh', expiresIn: 900, authorization: { expiresAt: null, serverTime: '2026-08-27T00:00:00.000Z' } }
+  } } })
+  manager.installAccessToken('short-lived', 120)
+  await clock.advance(60_001)
+  assert.equal(refreshes, 1)
+  await clock.advance(1)
+  assert.equal(refreshes, 1)
+  await manager.shutdown()
+})
+
+test('manager expiry timer notifies 7, 3, 1, and 0 day thresholds and clears on permanent, disconnect, and shutdown', async () => {
+  const clock = scheduler(0)
+  const notices = []
+  const { manager } = createManager({ now: clock.now, timers: clock.timers })
+  manager.reminder = { evaluate: ({ authorizationExpiresAt, reminderState = {} }) => {
+    if (!authorizationExpiresAt) return {}
+    const thresholds = [7, 3, 1, 0]
+    const crossed = new Set(reminderState.crossedThresholds || [])
+    const remaining = Date.parse(authorizationExpiresAt) - clock.now()
+    const due = thresholds.filter(days => remaining <= days * 86_400_000 && !crossed.has(days))
+    if (due.length) notices.push(Math.min(...due))
+    due.forEach(day => crossed.add(day))
+    return { authorizationExpiresAt, crossedThresholds: thresholds.filter(day => crossed.has(day)) }
+  } }
+  const authorization = { expiresAt: new Date(8 * 86_400_000).toISOString(), serverTime: new Date(0).toISOString() }
+  await manager.updateAuthorizationState(authorization)
+  await clock.advance(86_400_001)
+  for (let day = 0; day < 9; day += 1) await clock.advance(86_400_001)
+  assert.deepEqual(notices, [7, 3, 1, 0])
+  await manager.updateAuthorizationState({ ...authorization, expiresAt: null })
+  assert.equal(manager.expiryTimer, null)
+  await manager.disconnect()
+  assert.equal(manager.expiryTimer, null)
+  await manager.shutdown()
+  assert.equal(clock.size, 0)
+})
+
+test('expired pending rotation refreshes only with the rotated token before bootstrap', async () => {
+  const clock = scheduler()
+  const tokens = []
+  let token = 'old-refresh-token'
+  let first = true
+  const { manager, stored } = createManager({
+    now: clock.now, timers: clock.timers,
+    credentials: {
+      decryptRefreshToken: () => token,
+      replaceRefreshToken: async ({ refreshToken }) => { token = refreshToken; Object.assign(stored, { refreshTokenCiphertext: `cipher:${refreshToken}` }); if (first) { first = false; throw Object.assign(new Error('disk'), { code: 'PERSISTENCE_PENDING' }) } return stored },
+      retryPendingPersistence: async () => stored
+    },
+    client: { refresh: async ({ refreshToken }) => {
+      tokens.push(refreshToken)
+      return tokens.length === 1
+        ? { accessToken: 'first-access', refreshToken: 'rotated-refresh', expiresIn: 30, authorization: { expiresAt: null, serverTime: new Date(clock.now()).toISOString() } }
+        : { accessToken: 'second-access', refreshToken: 'second-refresh', expiresIn: 900, authorization: { expiresAt: null, serverTime: new Date(clock.now()).toISOString() } }
+    } }
+  })
+  await assert.rejects(manager.getAccessToken(), { code: 'PERSISTENCE_PENDING' })
+  manager.clearOwnedTimers()
+  await clock.advance(31_000)
+  await manager.retry()
+  assert.deepEqual(tokens, ['old-refresh-token', 'rotated-refresh'])
+  await manager.shutdown()
 })

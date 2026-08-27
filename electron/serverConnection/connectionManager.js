@@ -445,7 +445,7 @@ export class ConnectionManager {
     if (next === undefined) return
     this.expiryTimer = this.timers.setTimeout(async () => {
       this.expiryTimer = null
-      await this.updateAuthorizationState(authorization, { connection, connectionEpoch }).catch(() => {})
+      await this.updateAuthorizationState(authorization, { connection: this.current, connectionEpoch }).catch(() => {})
     }, Math.max(0, remaining - next * DAY_MS + 1))
     this.expiryTimer?.unref?.()
   }
