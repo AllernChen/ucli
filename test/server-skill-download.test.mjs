@@ -25,6 +25,78 @@ function serverSource(sha256) {
   }
 }
 
+async function createFailedServerReuse(root) {
+  const bytes = archive()
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  const archivePath = join(root, 'server.zip')
+  writeFileSync(archivePath, bytes)
+  const db = await openDb(join(root, 'ucli.db'))
+  let stale = false
+  let reusing = false
+  let reuseFlushes = 0
+  let failCompensationFlush = true
+  const sourceLoader = createSkillSourceLoader({ stagingRoot: join(root, 'source-staging') })
+  const service = createSkillsService({
+    db, userDataPath: join(root, 'user-data'), home: join(root, 'home'), sourceLoader,
+    flush: async () => {
+      if (!reusing) return db.flush()
+      reuseFlushes += 1
+      if (reuseFlushes === 2 && failCompensationFlush) return false
+      const result = await db.flush()
+      if (reuseFlushes === 1) stale = true
+      return result
+    }
+  })
+  const targets = (targetAdapterIds) => ({
+    targetAdapterIds, scopeType: 'project', projectPath: join(root, 'project')
+  })
+  const initial = await service.installVerifiedServerArchive({
+    archivePath, archiveIdentity: lstatSync(archivePath), source: serverSource(sha256), targets: targets(['codex'])
+  })
+  return {
+    db,
+    initial,
+    installMissingProjection: () => {
+      reusing = true
+      return service.installVerifiedServerArchive({
+        archivePath, archiveIdentity: lstatSync(archivePath), source: serverSource(sha256), targets: targets(['claude']),
+        guard: () => { if (stale) throw Object.assign(new Error('stale'), { code: 'SERVER_SKILL_STALE' }) }
+      })
+    }
+  }
+}
+
+async function failNewServerInstallAfterPersistence(root, { packageId, marker = false, driftCurrent = false }) {
+  const bytes = archive()
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  const archivePath = join(root, 'server.zip')
+  const packageParent = join(root, 'user-data', 'skills', 'packages', packageId)
+  writeFileSync(archivePath, bytes)
+  const db = await openDb(join(root, 'ucli.db'))
+  let stale = false
+  let identifiers = [packageId, 'stale-installation']
+  const sourceLoader = createSkillSourceLoader({ stagingRoot: join(root, 'source-staging') })
+  const service = createSkillsService({
+    db, userDataPath: join(root, 'user-data'), home: join(root, 'home'), sourceLoader,
+    uuid: () => identifiers.shift(),
+    flush: async () => {
+      const result = await db.flush()
+      if (!stale) {
+        if (marker) writeFileSync(join(packageParent, 'keep'), 'keep')
+        if (driftCurrent) writeFileSync(join(packageParent, 'current', 'SKILL.md'), 'externally modified')
+        stale = true
+      }
+      return result
+    }
+  })
+  await assert.rejects(service.installVerifiedServerArchive({
+    archivePath, archiveIdentity: lstatSync(archivePath), source: serverSource(sha256),
+    targets: { targetAdapterIds: ['codex'], scopeType: 'project', projectPath: join(root, 'project') },
+    guard: () => { if (stale) throw Object.assign(new Error('stale'), { code: 'SERVER_SKILL_STALE' }) }
+  }), error => error.code === 'SERVER_SKILL_STALE')
+  return { db, packageParent }
+}
+
 test('verified server archive installs with sanitized provenance and removes staging data', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-download-'))
   const archiveBytes = archive()
@@ -203,6 +275,61 @@ test('substituted private staging root is rejected before a download request wri
   }
 })
 
+test('stale new server install removes its empty direct package parent', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-stale-package-parent-'))
+  let db
+  try {
+    ({ db } = await failNewServerInstallAfterPersistence(root, { packageId: 'stale-package' }))
+    assert.equal(existsSync(join(root, 'user-data', 'skills', 'packages', 'stale-package', 'current')), false)
+    assert.equal(existsSync(join(root, 'user-data', 'skills', 'packages', 'stale-package')), false)
+  } finally {
+    try { db?.close() } catch { /* test cleanup */ }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stale new server install preserves a nonempty package parent', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-stale-nonempty-package-parent-'))
+  let db
+  try {
+    const result = await failNewServerInstallAfterPersistence(root, { packageId: 'nonempty-package', marker: true })
+    db = result.db
+    assert.equal(existsSync(join(result.packageParent, 'current')), false)
+    assert.equal(existsSync(join(result.packageParent, 'keep')), true)
+  } finally {
+    try { db?.close() } catch { /* test cleanup */ }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stale new server install preserves a drifted package parent', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-stale-drifted-package-parent-'))
+  let db
+  try {
+    const result = await failNewServerInstallAfterPersistence(root, { packageId: 'drifted-package', driftCurrent: true })
+    db = result.db
+    assert.equal(existsSync(join(result.packageParent, 'current')), true)
+  } finally {
+    try { db?.close() } catch { /* test cleanup */ }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stale new server install does not remove an out-of-root package parent', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-stale-outside-package-parent-'))
+  let db
+  const outsidePackageId = join('..', 'outside-package-parent')
+  const outsideParent = join(root, 'user-data', 'skills', 'outside-package-parent')
+  try {
+    ({ db } = await failNewServerInstallAfterPersistence(root, { packageId: outsidePackageId }))
+    assert.equal(existsSync(join(outsideParent, 'current')), false)
+    assert.equal(existsSync(outsideParent), true)
+  } finally {
+    try { db?.close() } catch { /* test cleanup */ }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('stale server install after flush removes its new database rows and projections durably', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-stale-install-'))
   const bytes = archive()
@@ -282,6 +409,51 @@ test('failed stale-install compensation remains recoverable by a later database 
     } finally { reopened.close() }
   } finally {
     try { db.close() } catch { /* already closed for reopen verification */ }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('failed stale reuse compensation reports pending while a crash retains the durably inserted projection', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-pending-reuse-crash-'))
+  let db
+  try {
+    const setup = await createFailedServerReuse(root)
+    db = setup.db
+    await assert.rejects(setup.installMissingProjection(), error => error.code === 'SKILL_PERSISTENCE_PENDING')
+    assert.deepEqual(db.listSkillInstallations({ packageId: setup.initial.id }).map(item => item.targetAdapterId), ['codex'])
+
+    // Do not call Db.close(): it flushes. Closing sql.js directly models a process
+    // ending after the failed compensation flush, before the next scheduled retry.
+    db.sql.close()
+    const reopened = await openDb(join(root, 'ucli.db'))
+    try {
+      assert.deepEqual(
+        reopened.listSkillInstallations({ packageId: setup.initial.id }).map(item => item.targetAdapterId).sort(),
+        ['claude', 'codex']
+      )
+    } finally { reopened.sql.close() }
+  } finally {
+    try { db?.sql.close() } catch { /* simulated crash may have already closed it */ }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a later flush converges failed stale reuse compensation before reopening', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-pending-reuse-retry-'))
+  let db
+  try {
+    const setup = await createFailedServerReuse(root)
+    db = setup.db
+    await assert.rejects(setup.installMissingProjection(), error => error.code === 'SKILL_PERSISTENCE_PENDING')
+    assert.deepEqual(db.listSkillInstallations({ packageId: setup.initial.id }).map(item => item.targetAdapterId), ['codex'])
+    await db.flush()
+    db.close()
+    const reopened = await openDb(join(root, 'ucli.db'))
+    try {
+      assert.deepEqual(reopened.listSkillInstallations({ packageId: setup.initial.id }).map(item => item.targetAdapterId), ['codex'])
+    } finally { reopened.close() }
+  } finally {
+    try { db?.close() } catch { /* closed for reopen verification */ }
     rmSync(root, { recursive: true, force: true })
   }
 })

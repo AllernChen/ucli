@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, rmdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
@@ -148,6 +148,25 @@ export function createSkillsService({
   ])
 
   const packageDirectory = (packageId) => join(packagesRoot, packageId, 'current')
+
+  function removeEmptyPackageParent(packageId) {
+    const packageParent = join(packagesRoot, packageId)
+    if (!pathIsWithin(packagesRoot, packageParent) || normalizedPath(packageParent) === normalizedPath(packagesRoot)) return false
+    try {
+      const original = lstatSync(packageParent)
+      if (!original.isDirectory() || original.isSymbolicLink()) return false
+      const canonicalRoot = realpathSync(packagesRoot)
+      const canonicalParent = realpathSync(packageParent)
+      if (!pathIsWithin(canonicalRoot, canonicalParent) || normalizedPath(canonicalParent) === normalizedPath(canonicalRoot)) return false
+      if (readdirSync(packageParent).length) return false
+      const current = lstatSync(packageParent)
+      if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== original.dev || current.ino !== original.ino) return false
+      rmdirSync(packageParent)
+      return true
+    } catch {
+      return false
+    }
+  }
 
   async function persistOrThrow(guard = null) {
     try {
@@ -540,9 +559,14 @@ export function createSkillsService({
             }
             db.deleteSkillPackage(packageId)
           })
+          let removedCanonical = false
           for (const item of created.reverse()) {
-            try { removeManagedSkillDirectory(item.path, item.sha256) } catch { /* preserve drifted data */ }
+            try {
+              const removed = removeManagedSkillDirectory(item.path, item.sha256)
+              if (normalizedPath(item.path) === normalizedPath(canonical)) removedCanonical = removed
+            } catch { /* preserve drifted data */ }
           }
+          if (removedCanonical) removeEmptyPackageParent(packageId)
           const result = await flush()
           if (result === false) throw new Error('flush failed')
         } catch {
@@ -940,13 +964,23 @@ export function createSkillsService({
       await persistOrThrow(guard)
       return packageView(db.getSkillPackage(packageId))
     } catch (error) {
+      const requiresDurableCompensation = error?.code === 'SKILL_PERSISTENCE_PENDING' || error?.code === 'SERVER_SKILL_STALE'
+      let compensationPending = false
       try {
         if (db.getSkillInstallation(installationId)) db.deleteSkillInstallation(installationId)
-        if (error?.code === 'SKILL_PERSISTENCE_PENDING' || error?.code === 'SERVER_SKILL_STALE') await flush()
-      } catch { /* keep the original operation error */ }
+        if (requiresDurableCompensation) {
+          const result = await flush()
+          if (result === false) throw new Error('flush failed')
+        }
+      } catch {
+        if (requiresDurableCompensation) {
+          compensationPending = true
+        }
+      }
       if (created) {
         try { removeManagedSkillDirectory(targetPath, deployed.contentSha256) } catch { /* preserve changed data */ }
       }
+      if (compensationPending) throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
       throw error
     }
   }
