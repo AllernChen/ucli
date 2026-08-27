@@ -357,6 +357,77 @@ class Db {
       )
     `)
     this.sql.run(`
+      CREATE TABLE IF NOT EXISTS server_installation (
+        singleton_key   INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+        installation_id TEXT NOT NULL,
+        device_name     TEXT NOT NULL,
+        created_at      INTEGER NOT NULL
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS server_connections (
+        id                       TEXT PRIMARY KEY,
+        slot                     TEXT NOT NULL UNIQUE CHECK (slot IN ('current', 'candidate')),
+        server_origin            TEXT NOT NULL,
+        refresh_token_ciphertext TEXT NOT NULL,
+        account_id               TEXT NOT NULL,
+        account_display_name     TEXT NOT NULL,
+        organization_id          TEXT NOT NULL,
+        organization_name        TEXT NOT NULL,
+        authorization_expires_at TEXT,
+        server_time              TEXT,
+        received_local_time      INTEGER NOT NULL,
+        server_offset_ms         INTEGER NOT NULL,
+        last_synced_at           INTEGER,
+        connection_revision      INTEGER NOT NULL,
+        degraded_reason          TEXT,
+        reminder_state_json      TEXT NOT NULL DEFAULT '{}'
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS server_model_profiles (
+        profile_id          TEXT PRIMARY KEY,
+        server_origin       TEXT NOT NULL,
+        organization_id     TEXT NOT NULL,
+        organization_name   TEXT NOT NULL,
+        model_id            TEXT NOT NULL,
+        adapter_id          TEXT NOT NULL,
+        display_name        TEXT NOT NULL,
+        context_size        INTEGER NOT NULL,
+        connection_revision INTEGER NOT NULL,
+        availability_status TEXT NOT NULL,
+        codex_file_sha256   TEXT
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS server_skill_versions (
+        version_id          TEXT PRIMARY KEY,
+        server_origin       TEXT NOT NULL,
+        organization_id     TEXT NOT NULL,
+        slug                TEXT NOT NULL,
+        version             TEXT NOT NULL,
+        name                TEXT NOT NULL,
+        description         TEXT NOT NULL,
+        sha256              TEXT NOT NULL,
+        size_bytes          INTEGER NOT NULL,
+        published_at        TEXT NOT NULL,
+        created_at          TEXT NOT NULL,
+        download_url        TEXT NOT NULL,
+        lifecycle_status    TEXT NOT NULL,
+        connection_revision INTEGER NOT NULL
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS server_skill_packages (
+        package_id      TEXT PRIMARY KEY,
+        version_id      TEXT NOT NULL,
+        server_origin   TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        slug            TEXT NOT NULL,
+        version         TEXT NOT NULL
+      )
+    `)
+    this.sql.run(`
       CREATE TABLE IF NOT EXISTS skill_packages (
         id                TEXT PRIMARY KEY,
         name              TEXT NOT NULL,
@@ -1678,6 +1749,169 @@ class Db {
     return this.sql.getRowsModified() > 0
   }
 
+  // ---- Server connection persistence ----
+  getServerInstallation() {
+    return rows(this.sql.exec('SELECT * FROM server_installation WHERE singleton_key = 1'))
+      .map(rowToServerInstallation)[0] || null
+  }
+
+  createServerInstallation({ installationId, deviceName, createdAt }) {
+    this.sql.run(
+      `INSERT INTO server_installation (singleton_key, installation_id, device_name, created_at)
+       VALUES (1, ?, ?, ?)`,
+      [installationId, deviceName, createdAt]
+    )
+    return this.getServerInstallation()
+  }
+
+  getServerConnection(slot) {
+    if (slot !== 'current' && slot !== 'candidate') return null
+    return rows(this.sql.exec('SELECT * FROM server_connections WHERE slot = ?', [slot]))
+      .map(rowToServerConnection)[0] || null
+  }
+
+  saveServerConnection(record) {
+    this.sql.run(
+      `INSERT INTO server_connections (
+         id, slot, server_origin, refresh_token_ciphertext, account_id, account_display_name,
+         organization_id, organization_name, authorization_expires_at, server_time,
+         received_local_time, server_offset_ms, last_synced_at, connection_revision,
+         degraded_reason, reminder_state_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(slot) DO UPDATE SET
+         id = excluded.id,
+         server_origin = excluded.server_origin,
+         refresh_token_ciphertext = excluded.refresh_token_ciphertext,
+         account_id = excluded.account_id,
+         account_display_name = excluded.account_display_name,
+         organization_id = excluded.organization_id,
+         organization_name = excluded.organization_name,
+         authorization_expires_at = excluded.authorization_expires_at,
+         server_time = excluded.server_time,
+         received_local_time = excluded.received_local_time,
+         server_offset_ms = excluded.server_offset_ms,
+         last_synced_at = excluded.last_synced_at,
+         connection_revision = excluded.connection_revision,
+         degraded_reason = excluded.degraded_reason,
+         reminder_state_json = excluded.reminder_state_json`,
+      serverConnectionValues(record)
+    )
+    return this.getServerConnection(record.slot)
+  }
+
+  promoteServerConnection({ candidateId, nextRevision }) {
+    const candidate = this.getServerConnection('candidate')
+    if (!candidate || candidate.id !== candidateId) {
+      throw Object.assign(new Error('Candidate server connection was not found'), {
+        code: 'SERVER_CANDIDATE_NOT_FOUND'
+      })
+    }
+    this.sql.run("DELETE FROM server_connections WHERE slot = 'current'")
+    this.sql.run(
+      "UPDATE server_connections SET slot = 'current', connection_revision = ? WHERE id = ? AND slot = 'candidate'",
+      [nextRevision, candidateId]
+    )
+    return this.getServerConnection('current')
+  }
+
+  updateServerConnection(connectionId, fields = {}) {
+    const columns = {
+      serverOrigin: 'server_origin',
+      refreshTokenCiphertext: 'refresh_token_ciphertext',
+      accountId: 'account_id',
+      accountDisplayName: 'account_display_name',
+      organizationId: 'organization_id',
+      organizationName: 'organization_name',
+      authorizationExpiresAt: 'authorization_expires_at',
+      serverTime: 'server_time',
+      receivedLocalTime: 'received_local_time',
+      serverOffsetMs: 'server_offset_ms',
+      lastSyncedAt: 'last_synced_at',
+      connectionRevision: 'connection_revision',
+      degradedReason: 'degraded_reason'
+    }
+    const sets = []
+    const values = []
+    for (const [field, column] of Object.entries(columns)) {
+      if (fields[field] === undefined) continue
+      sets.push(`${column} = ?`)
+      values.push(fields[field])
+    }
+    if (fields.reminderState !== undefined) {
+      sets.push('reminder_state_json = ?')
+      values.push(stringifyJsonObject(fields.reminderState))
+    }
+    if (!sets.length) return false
+    values.push(connectionId)
+    this.sql.run(`UPDATE server_connections SET ${sets.join(', ')} WHERE id = ?`, values)
+    return this.sql.getRowsModified() > 0
+  }
+
+  clearServerConnections() {
+    this.sql.run('DELETE FROM server_model_profiles')
+    this.sql.run('DELETE FROM server_skill_packages')
+    this.sql.run('DELETE FROM server_skill_versions')
+    this.sql.run('DELETE FROM server_connections')
+  }
+
+  listServerModelProfiles() {
+    return rows(this.sql.exec(
+      'SELECT * FROM server_model_profiles ORDER BY display_name, profile_id'
+    )).map(rowToServerModelProfile)
+  }
+
+  replaceServerModelProfiles({ connectionRevision, profiles }) {
+    this.sql.run('DELETE FROM server_model_profiles')
+    for (const profile of profiles) {
+      this.sql.run(
+        `INSERT INTO server_model_profiles (
+           profile_id, server_origin, organization_id, organization_name, model_id, adapter_id,
+           display_name, context_size, connection_revision, availability_status, codex_file_sha256
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          profile.profileId, profile.serverOrigin, profile.organizationId, profile.organizationName,
+          profile.modelId, profile.adapterId, profile.displayName, profile.contextSize,
+          connectionRevision, profile.availabilityStatus, profile.codexFileSha256 ?? null
+        ]
+      )
+    }
+  }
+
+  replaceServerSkillVersions({ connectionRevision, versions }) {
+    this.sql.run('DELETE FROM server_skill_versions')
+    for (const version of versions) {
+      this.sql.run(
+        `INSERT INTO server_skill_versions (
+           version_id, server_origin, organization_id, slug, version, name, description, sha256,
+           size_bytes, published_at, created_at, download_url, lifecycle_status, connection_revision
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          version.versionId, version.serverOrigin, version.organizationId, version.slug, version.version,
+          version.name, version.description, version.sha256, version.sizeBytes, version.publishedAt,
+          version.createdAt, version.downloadUrl, version.lifecycleStatus, connectionRevision
+        ]
+      )
+    }
+  }
+
+  linkServerSkillPackage(mapping) {
+    this.sql.run(
+      `INSERT INTO server_skill_packages (
+         package_id, version_id, server_origin, organization_id, slug, version
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(package_id) DO UPDATE SET
+         version_id = excluded.version_id,
+         server_origin = excluded.server_origin,
+         organization_id = excluded.organization_id,
+         slug = excluded.slug,
+         version = excluded.version`,
+      [
+        mapping.packageId, mapping.versionId, mapping.serverOrigin, mapping.organizationId,
+        mapping.slug, mapping.version
+      ]
+    )
+  }
+
   // ---- Skills ----
   listSkillPackages() {
     return rows(this.sql.exec('SELECT * FROM skill_packages ORDER BY updated_at DESC, id'))
@@ -2543,6 +2777,61 @@ function rowToAiCliProfileSecret(row) {
     profileId: row.profile_id,
     ciphertext: row.ciphertext,
     updatedAt: row.updated_at
+  }
+}
+
+function serverConnectionValues(record) {
+  return [
+    record.id, record.slot, record.serverOrigin, record.refreshTokenCiphertext,
+    record.accountId, record.accountDisplayName, record.organizationId, record.organizationName,
+    record.authorizationExpiresAt ?? null, record.serverTime ?? null, record.receivedLocalTime,
+    record.serverOffsetMs, record.lastSyncedAt ?? null, record.connectionRevision,
+    record.degradedReason ?? null, stringifyJsonObject(record.reminderState)
+  ]
+}
+
+function rowToServerInstallation(row) {
+  return {
+    installationId: row.installation_id,
+    deviceName: row.device_name,
+    createdAt: row.created_at
+  }
+}
+
+function rowToServerConnection(row) {
+  return {
+    id: row.id,
+    slot: row.slot,
+    serverOrigin: row.server_origin,
+    refreshTokenCiphertext: row.refresh_token_ciphertext,
+    accountId: row.account_id,
+    accountDisplayName: row.account_display_name,
+    organizationId: row.organization_id,
+    organizationName: row.organization_name,
+    authorizationExpiresAt: row.authorization_expires_at ?? null,
+    serverTime: row.server_time ?? null,
+    receivedLocalTime: row.received_local_time,
+    serverOffsetMs: row.server_offset_ms,
+    lastSyncedAt: row.last_synced_at ?? null,
+    connectionRevision: row.connection_revision,
+    degradedReason: row.degraded_reason ?? null,
+    reminderState: parseJsonObject(row.reminder_state_json)
+  }
+}
+
+function rowToServerModelProfile(row) {
+  return {
+    profileId: row.profile_id,
+    serverOrigin: row.server_origin,
+    organizationId: row.organization_id,
+    organizationName: row.organization_name,
+    modelId: row.model_id,
+    adapterId: row.adapter_id,
+    displayName: row.display_name,
+    contextSize: row.context_size,
+    connectionRevision: row.connection_revision,
+    availabilityStatus: row.availability_status,
+    codexFileSha256: row.codex_file_sha256 ?? null
   }
 }
 
