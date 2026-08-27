@@ -1,6 +1,10 @@
 appId: com.ucli.app
 asar: false
 productName: UCLI
+protocols:
+  - name: UCLI Connection
+    schemes:
+      - ucli
 electronDist: node_modules/electron/dist
 directories:
   output: dist
