@@ -84,10 +84,10 @@ test('candidate promotion revokes the old runtime only after durable promotion a
     client: { bootstrap: async () => { throw Object.assign(new Error('network body: refresh-token-secret'), { retryable: true }) } },
     credentials: { promoteCandidate: async () => ({ id: 'new', serverOrigin: 'https://server.example.test', accountId: 'account-1', accountDisplayName: 'Ada', organizationId: 'org-1', organizationName: 'Example', authorizationExpiresAt: null, serverTime: '2026-08-27T00:00:00.000Z', connectionRevision: 8 }) }
   })
-  manager.revokeRuntimeRevision = revision => revoked.push(revision)
+  manager.revokeRuntimeRevision = runtimeIdentity => revoked.push(runtimeIdentity)
   const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
   await handlers.get('server-connection:confirm')({}, attempt.attemptId)
-  assert.deepEqual(revoked, [7])
+  assert.deepEqual(revoked, [{ connectionId: 'old', connectionRevision: 7 }])
   assert.equal(manager.getState().connection.connectionRevision, 8)
   assert.equal(manager.getState().status, 'unreachable')
 })
@@ -245,7 +245,7 @@ test('post-commit listener and revoker failures do not reject confirmation and r
   await handlers.get('server-connection:confirm')({}, attempt.attemptId)
   assert.equal(manager.getState().connection.id, 'new')
   assert.deepEqual(states, ['connected'])
-  assert.deepEqual([...manager.pendingRevocations], [7])
+  assert.deepEqual([...manager.pendingRevocations], [{ connectionId: 'old', connectionRevision: 7 }])
   await manager.retry()
   assert.equal(revocationCalls, 2)
   assert.deepEqual([...manager.pendingRevocations], [])

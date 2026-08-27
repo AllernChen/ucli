@@ -24,6 +24,11 @@ function publicConnection(connection) {
   }
 }
 
+function runtimeConnectionIdentity(connection) {
+  if (!connection) return null
+  return Object.freeze({ connectionId: connection.id, connectionRevision: connection.connectionRevision })
+}
+
 function operationError(error) {
   if (LOCAL_ERROR_MESSAGES[error?.code]) {
     return Object.assign(new Error(LOCAL_ERROR_MESSAGES[error.code]), {
@@ -225,7 +230,7 @@ export class ConnectionManager {
           await this.credentials.discardCandidate?.(candidate.id)
           this.assertActiveAttempt(attemptId, operationEpoch)
         }
-        const previousRevision = this.current?.connectionRevision ?? null
+        const previousRuntimeIdentity = runtimeConnectionIdentity(this.current)
         this.assertActiveAttempt(attemptId, operationEpoch)
         this.committingAttempts.add(attemptId)
         let connection
@@ -240,9 +245,9 @@ export class ConnectionManager {
         this.status = 'connected'
         this.connectionEpoch += 1
         this.attempts.finish(attemptId)
-        return { connection, previousRevision, connectionEpoch: this.connectionEpoch }
+        return { connection, previousRuntimeIdentity, connectionEpoch: this.connectionEpoch }
       })
-      if (promotion.previousRevision !== null) await this.revokeRevision(promotion.previousRevision)
+      if (promotion.previousRuntimeIdentity) await this.revokeRevision(promotion.previousRuntimeIdentity)
       this.emitState()
       await this.bootstrapAfterPromotion(promotion.connection, redeemed, promotion.connectionEpoch)
       return this.getState()
@@ -277,6 +282,11 @@ export class ConnectionManager {
     this.assertLifecycleAvailable()
     if (this.accessToken && this.accessTokenExpiresAt - this.now() >= minValidityMs) return this.accessToken
     return this.refreshAccessToken()
+  }
+
+  getRuntimeConnectionIdentity() {
+    if (this.shuttingDown || !['connected', 'expiring'].includes(this.status)) return null
+    return runtimeConnectionIdentity(this.current)
   }
 
   async getBootstrap({ force = false } = {}) {
@@ -485,7 +495,7 @@ export class ConnectionManager {
   async handleLifecycleError(error) {
     const code = error?.code
     if (['invalid_grant', 'grant_deleted', 'invalid_device'].includes(code)) {
-      const previousRevision = this.current?.connectionRevision ?? null
+      const previousRuntimeIdentity = runtimeConnectionIdentity(this.current)
       this.accessToken = null
       this.accessTokenExpiresAt = 0
       this.bootstrapCache = null
@@ -494,7 +504,7 @@ export class ConnectionManager {
       this.current = null
       this.connectionEpoch += 1
       this.setRuntimeStatus('disconnected', null)
-      if (previousRevision !== null) await this.revokeRevision(previousRevision)
+      if (previousRuntimeIdentity) await this.revokeRevision(previousRuntimeIdentity)
       return
     }
     const disabledStatus = {
@@ -579,8 +589,8 @@ export class ConnectionManager {
   async disconnect() {
     this.operationEpoch += 1
     try {
-      const previousRevision = await this.runCredentialMutation(async () => {
-        const previousRevision = this.current?.connectionRevision ?? null
+      const previousRuntimeIdentity = await this.runCredentialMutation(async () => {
+        const previousRuntimeIdentity = runtimeConnectionIdentity(this.current)
         await this.credentials.disconnect()
         this.current = null
         this.accessToken = null
@@ -595,9 +605,9 @@ export class ConnectionManager {
         this.reason = null
         this.connectionEpoch += 1
         this.emitState()
-        return previousRevision
+        return previousRuntimeIdentity
       })
-      if (previousRevision !== null) await this.revokeRevision(previousRevision)
+      if (previousRuntimeIdentity) await this.revokeRevision(previousRuntimeIdentity)
     } catch (error) {
       throw operationError(error)
     }
@@ -662,19 +672,19 @@ export class ConnectionManager {
     return mutation
   }
 
-  async revokeRevision(revision) {
+  async revokeRevision(identity) {
     try {
-      await this.revokeRuntimeRevision(revision)
+      await this.revokeRuntimeRevision(identity)
     } catch {
-      this.pendingRevocations.add(revision)
+      this.pendingRevocations.add(identity)
     }
   }
 
   async retryPendingRevocations() {
-    for (const revision of [...this.pendingRevocations]) {
+    for (const identity of [...this.pendingRevocations]) {
       try {
-        await this.revokeRuntimeRevision(revision)
-        this.pendingRevocations.delete(revision)
+        await this.revokeRuntimeRevision(identity)
+        this.pendingRevocations.delete(identity)
       } catch { /* keep pending until a later safe retry */ }
     }
   }

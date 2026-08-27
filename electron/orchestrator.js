@@ -104,6 +104,7 @@ import { RegistrationAttemptStore } from './serverConnection/registrationAttempt
 import { createDeviceGrantClient } from './serverConnection/deviceGrantClient.js'
 import { ConnectionManager } from './serverConnection/connectionManager.js'
 import { ExpiryReminder } from './serverConnection/expiryReminder.js'
+import { createLocalGatewayProxy } from './serverConnection/localGatewayProxy.js'
 import { registerServerConnectionIpc } from './serverConnection/ipc.js'
 import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
 import { scanStorageCategories } from './storage/storageScanner.js'
@@ -845,6 +846,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
   let serverConnectionManager = null
+  let localGatewayProxy = null
   const approvalNotifications = new Map()
   const completionNotifications = new Set()
   const diagnostics = createDiagnosticsService({
@@ -1589,8 +1591,19 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       client: createDeviceGrantClient(),
       platform: ({ win32: 'windows', darwin: 'macos', linux: 'linux' })[process.platform],
       deviceName: app.getName(),
-      reminder: new ExpiryReminder({ notify: showAuthorizationReminder })
+      reminder: new ExpiryReminder({ notify: showAuthorizationReminder }),
+      revokeRuntimeRevision: identity => localGatewayProxy?.revokeConnection(identity)
     })
+    try {
+      localGatewayProxy = createLocalGatewayProxy({
+        connectionManager: serverConnectionManager,
+        logger: entry => log('Server gateway proxy:', entry)
+      })
+      await localGatewayProxy.start()
+    } catch {
+      localGatewayProxy = null
+      log('Server gateway proxy unavailable')
+    }
     void serverConnectionManager.start()
     try {
       await profileService.reconcileCodexProfiles()
@@ -3783,6 +3796,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       for (const notification of completionNotifications) notification.close()
       completionNotifications.clear()
       await gatewayManager?.shutdown()
+      await localGatewayProxy?.shutdown()
+      localGatewayProxy = null
       await serverConnectionManager?.shutdown()
       const db = getDb()
       for (const [id, entry] of sessions) {
@@ -3828,6 +3843,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     shutdown,
     getPersistenceRecovery: () => persistenceRecovery,
     recoverServerConnection: () => serverConnectionManager?.retry(),
+    createServerGatewaySession: connection => localGatewayProxy?.createSession(connection),
+    revokeServerGatewaySession: sessionId => localGatewayProxy?.revokeSession(sessionId),
     submitServerConnection: connection => serverConnectionManager?.submitParsedConnection(connection) || Promise.reject(
       Object.assign(new Error('Server connection is unavailable'), { code: 'SERVER_CONNECTION_UNAVAILABLE' })
     )
