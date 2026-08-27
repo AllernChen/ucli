@@ -13,7 +13,8 @@ function credentialState(db) {
       durableCandidateIds: new Set(),
       pendingPromotionId: null,
       pendingRefreshConnectionId: null,
-      pendingPersistence: false
+      pendingPersistence: false,
+      pendingOwner: null
     }
     const candidate = db.getServerConnection('candidate')
     if (candidate) state.durableCandidateIds.add(candidate.id)
@@ -100,7 +101,12 @@ export class ServerCredentialStore {
     return this.db.getServerConnection('current')
   }
 
+  isPersistencePending() {
+    return this.state.pendingPersistence || this.state.pendingRefreshConnectionId !== null
+  }
+
   decryptRefreshToken(connection) {
+    if (this.isPersistencePending() && this.state.pendingOwner !== this) throw persistencePendingError()
     if (!connection?.refreshTokenCiphertext) return null
     this.assertEncryptionAvailable()
     try {
@@ -200,6 +206,7 @@ export class ServerCredentialStore {
   }
 
   async replaceRefreshToken({ connectionId, refreshToken, authorization }) {
+    if (this.isPersistencePending()) throw persistencePendingError()
     const ciphertext = this.encryptRefreshToken(refreshToken)
     const receivedLocalTime = this.now()
     await this.db.transaction(() => {
@@ -233,10 +240,12 @@ export class ServerCredentialStore {
     await this.flushOrThrow()
     this.state.pendingRefreshConnectionId = null
     this.state.pendingPersistence = false
+    this.state.pendingOwner = null
     return this.db.getServerConnection('current')
   }
 
   async updateConnectionMetadata({ connectionId, authorization, reminderState }) {
+    if (this.isPersistencePending()) throw persistencePendingError()
     const receivedLocalTime = this.now()
     await this.db.transaction(() => {
       const updated = this.db.updateServerConnection(connectionId, {
@@ -278,8 +287,10 @@ export class ServerCredentialStore {
       const persisted = await this.db.flush()
       if (persisted !== true) throw persistencePendingError()
       this.state.pendingPersistence = false
+      this.state.pendingOwner = null
     } catch (error) {
       this.state.pendingPersistence = true
+      this.state.pendingOwner = this
       if (error?.code === 'PERSISTENCE_PENDING') throw error
       throw persistencePendingError()
     }

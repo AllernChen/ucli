@@ -94,6 +94,11 @@ export class ConnectionManager {
     this.expiryTimer = null
     this.retryIndex = 0
     this.shuttingDown = false
+    if (credentials.isPersistencePending?.()) {
+      this.persistencePending = { connection: this.current, connectionEpoch: this.connectionEpoch, shared: true }
+      this.status = 'unreachable'
+      this.reason = 'PERSISTENCE_PENDING'
+    }
   }
 
   subscribe(listener) {
@@ -487,6 +492,19 @@ export class ConnectionManager {
     this.retryTimer?.unref?.()
   }
 
+  rescheduleRetry() {
+    if (this.retryTimer) this.timers.clearTimeout(this.retryTimer)
+    this.retryTimer = null
+    this.scheduleRetry()
+  }
+
+  clearOwnedTimers() {
+    for (const key of ['retryTimer', 'accessRefreshTimer', 'expiryTimer']) {
+      if (this[key]) this.timers.clearTimeout(this[key])
+      this[key] = null
+    }
+  }
+
   assertLifecycleAvailable() {
     if (this.shuttingDown) throw Object.assign(new Error('Server connection is shutting down'), { code: 'SERVER_CONNECTION_SHUTDOWN' })
     if (this.persistencePending) throw Object.assign(new Error('Server credentials could not be saved'), { code: 'PERSISTENCE_PENDING' })
@@ -562,6 +580,7 @@ export class ConnectionManager {
         }
       } catch (error) {
         this.setRuntimeStatus('unreachable', 'PERSISTENCE_PENDING')
+        this.rescheduleRetry()
         throw operationError(error)
       }
       return this.getState()
@@ -630,14 +649,7 @@ export class ConnectionManager {
         this.attempts.cancel(attemptId)
       }
     }
-    if (this.retryTimer) {
-      this.timers.clearTimeout(this.retryTimer)
-      this.retryTimer = null
-    }
-    if (this.accessRefreshTimer) this.timers.clearTimeout(this.accessRefreshTimer)
-    if (this.expiryTimer) this.timers.clearTimeout(this.expiryTimer)
-    this.accessRefreshTimer = null
-    this.expiryTimer = null
+    this.clearOwnedTimers()
     this.accessToken = null
     this.accessTokenExpiresAt = 0
     this.bootstrapCache = null
@@ -649,6 +661,7 @@ export class ConnectionManager {
       await this.runCredentialMutation(() => this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.()).catch(() => {})
     }
     // In-flight work may have completed while shutdown awaited it; scrub again.
+    this.clearOwnedTimers()
     this.accessToken = null
     this.accessTokenExpiresAt = 0
     this.bootstrapCache = null
