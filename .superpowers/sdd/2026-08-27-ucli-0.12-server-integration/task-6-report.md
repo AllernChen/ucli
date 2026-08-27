@@ -62,3 +62,18 @@
 - `npm run build` — passed.
 - `npm test` — passed (exit 0).
 - `git diff --check` — passed.
+
+## Review fix round 3
+
+- Fenced the non-cancellable durable promotion before it can publish runtime state: `confirmOnce` now compares its captured operation epoch with the current epoch (and shutdown state) immediately after `promoteCandidate` resolves.
+- A disconnect- or shutdown-superseded promotion finishes and removes its attempt, revokes its immutable identity, and returns without assigning `current`, emitting `connected`, installing an access token, or starting Bootstrap/timers. Cancellation intentionally remains publishable because it does not advance the operation epoch.
+- Added a deterministic deferred-deletion regression that holds credential deletion after promotion resolves and proves the manager remains disconnected with no runtime identity, authority, access/bootstrap cache, timers, or proxy upstream call; it remains disconnected once deletion releases.
+
+### Review-fix round 3 verification
+
+- RED: the new deferred-deletion test initially observed the late promoted connection in `manager.current` while deletion was held.
+- `node --test test/server-connection-manager.test.mjs test/server-expiry-reminder.test.mjs test/server-connection-ipc.test.mjs` — 30 passed, 0 failed.
+- `node --test test/server-local-proxy.test.mjs test/gateway-root-lifecycle.test.mjs test/gateway-session-routing.test.mjs` — 24 passed, 0 failed.
+- `npm run build` — passed.
+- `npm test` — stopped after unrelated existing failures in summary/DSH tests, then an environmental hang in `test/summary-ipc.test.mjs`; the scoped suites above remained green. Only this invocation was interrupted.
+- `git diff --check` — passed.

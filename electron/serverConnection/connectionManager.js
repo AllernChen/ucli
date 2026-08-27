@@ -243,6 +243,11 @@ export class ConnectionManager {
         }
         // Promotion is the Task 4 non-cancellable commit point. A shutdown or
         // cancellation observed after it must not roll back durable current.
+        // Disconnect/shutdown supersession must not publish its runtime state.
+        if (this.operationEpoch !== operationEpoch || this.shuttingDown) {
+          this.attempts.finish(attemptId)
+          return { connection, previousRuntimeIdentity, connectionEpoch: null, superseded: true }
+        }
         this.current = connection
         this.currentOperationEpoch = operationEpoch
         this.status = 'connected'
@@ -250,6 +255,11 @@ export class ConnectionManager {
         this.attempts.finish(attemptId)
         return { connection, previousRuntimeIdentity, connectionEpoch: this.connectionEpoch }
       })
+      if (promotion.superseded) {
+        const promotedRuntimeIdentity = runtimeConnectionIdentity(promotion.connection)
+        if (promotedRuntimeIdentity) await this.revokeRevision(promotedRuntimeIdentity)
+        return this.getState()
+      }
       if (promotion.previousRuntimeIdentity && this.operationEpoch === operationEpoch) {
         await this.revokeRevision(promotion.previousRuntimeIdentity)
       }

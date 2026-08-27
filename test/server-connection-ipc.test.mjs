@@ -4,6 +4,7 @@ import test from 'node:test'
 import { ConnectionManager } from '../electron/serverConnection/connectionManager.js'
 import { registerServerConnectionIpc } from '../electron/serverConnection/ipc.js'
 import { RegistrationAttemptStore } from '../electron/serverConnection/registrationAttempts.js'
+import { createLocalGatewayProxy } from '../electron/serverConnection/localGatewayProxy.js'
 
 const preview = {
   account: { id: 'account-1', displayName: 'Ada' },
@@ -219,6 +220,58 @@ test('disconnect finalization clears a promotion that commits after disconnect b
     { connectionId: 'old', connectionRevision: 7 },
     { connectionId: 'new', connectionRevision: 8 }
   ])
+})
+
+test('a promotion superseded by disconnect is never published while deletion is held', async t => {
+  const promotion = deferred()
+  const promotionStarted = deferred()
+  const deletion = deferred()
+  const deletionStarted = deferred()
+  const committed = { id: 'new', serverOrigin: 'https://server.example.test', accountId: 'account-1', accountDisplayName: 'Ada', organizationId: 'org-1', organizationName: 'Example', authorizationExpiresAt: null, serverTime: '2026-08-27T00:00:00.000Z', connectionRevision: 8 }
+  let upstreamCalls = 0
+  const { handlers, manager } = setup({
+    credentials: {
+      promoteCandidate: async () => { promotionStarted.resolve(); return promotion.promise },
+      disconnect: async () => { deletionStarted.resolve(); return deletion.promise }
+    }
+  })
+  const proxy = createLocalGatewayProxy({
+    connectionManager: manager,
+    fetchImpl: async () => {
+      upstreamCalls += 1
+      return new Response('must not be reached')
+    }
+  })
+  await proxy.start()
+  let disconnecting = null
+  t.after(async () => {
+    deletion.resolve()
+    await disconnecting?.catch(() => {})
+    await proxy.shutdown()
+  })
+  const oldSession = proxy.createSession({ sessionId: 'session-1', connectionId: 'old', connectionRevision: 7 })
+  const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
+  const confirmation = handlers.get('server-connection:confirm')({}, attempt.attemptId)
+  await promotionStarted.promise
+  disconnecting = manager.disconnect()
+  promotion.resolve(committed)
+  await deletionStarted.promise
+  await confirmation
+
+  assert.equal(manager.current, null)
+  assert.equal(manager.getRuntimeConnectionIdentity(), null)
+  assert.equal(manager.getState().status, 'disconnected')
+  assert.equal(manager.accessToken, null)
+  assert.equal(manager.bootstrapCache, null)
+  assert.equal(manager.accessRefreshTimer, null)
+  assert.equal(manager.expiryTimer, null)
+  assert.equal(manager.getAttempt(attempt.attemptId), null)
+  assert.equal((await fetch(`${oldSession.baseUrl}/v1/models`, { headers: { authorization: `Bearer ${oldSession.bearer}` } })).status, 401)
+  assert.equal(upstreamCalls, 0)
+
+  deletion.resolve()
+  await disconnecting
+  await proxy.shutdown()
 })
 
 test('a persistence-pending disconnect still finalizes a late promotion as disconnected', async () => {
