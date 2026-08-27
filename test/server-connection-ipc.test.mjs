@@ -125,6 +125,7 @@ test('cancelling while redeem is pending prevents later candidate persistence', 
   assert.equal(stageCalls, 0)
   assert.equal(promoteCalls, 0)
   assert.equal(manager.getState().connection.id, 'old')
+  assert.equal(manager.invalidatedAttempts.has(attempt.attemptId), false)
 })
 
 test('disconnecting while redeem is pending cannot resurrect credentials after the response', async () => {
@@ -169,6 +170,23 @@ test('cancelling after candidate staging begins discards it without promotion', 
   assert.equal(manager.getState().connection.id, 'old')
 })
 
+test('cancellation loses at the promotion commit point and the committed connection succeeds', async () => {
+  const promotion = deferred()
+  const promotionStarted = deferred()
+  const committed = { id: 'new', serverOrigin: 'https://server.example.test', accountId: 'account-1', accountDisplayName: 'Ada', organizationId: 'org-1', organizationName: 'Example', authorizationExpiresAt: null, serverTime: '2026-08-27T00:00:00.000Z', connectionRevision: 8 }
+  const { handlers, manager } = setup({
+    credentials: { promoteCandidate: async () => { promotionStarted.resolve(); return promotion.promise } }
+  })
+  const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
+  const confirmation = handlers.get('server-connection:confirm')({}, attempt.attemptId)
+  await promotionStarted.promise
+  assert.equal(manager.cancel(attempt.attemptId), false)
+  promotion.resolve(committed)
+  await confirmation
+  assert.equal(manager.getState().connection.id, committed.id)
+  assert.equal(manager.getAttempt(attempt.attemptId), null)
+})
+
 test('a different attempt is rejected while another attempt is redeeming', async () => {
   const redeem = deferred()
   const redeemStarted = deferred()
@@ -196,6 +214,7 @@ test('cancelling another open attempt does not invalidate the active redeem', as
   redeem.resolve(redeemed)
   await confirmation
   assert.equal(manager.getState().connection.id, 'new')
+  assert.equal(manager.invalidatedAttempts.has(other.attemptId), false)
 })
 
 test('a stale Bootstrap failure cannot overwrite disconnected state', async () => {
@@ -210,4 +229,24 @@ test('a stale Bootstrap failure cannot overwrite disconnected state', async () =
   await confirmation
   assert.equal(manager.getState().status, 'disconnected')
   assert.equal(manager.getState().connection, null)
+})
+
+test('post-commit listener and revoker failures do not reject confirmation and revocation retries later', async () => {
+  let revocationCalls = 0
+  const states = []
+  const { handlers, manager } = setup()
+  manager.revokeRuntimeRevision = () => {
+    revocationCalls += 1
+    if (revocationCalls === 1) throw new Error('runtime unavailable')
+  }
+  manager.subscribe(() => { throw new Error('listener unavailable') })
+  manager.subscribe(state => states.push(state.status))
+  const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
+  await handlers.get('server-connection:confirm')({}, attempt.attemptId)
+  assert.equal(manager.getState().connection.id, 'new')
+  assert.deepEqual(states, ['connected'])
+  assert.deepEqual([...manager.pendingRevocations], [7])
+  await manager.retry()
+  assert.equal(revocationCalls, 2)
+  assert.deepEqual([...manager.pendingRevocations], [])
 })

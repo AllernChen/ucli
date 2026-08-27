@@ -65,8 +65,10 @@ export class ConnectionManager {
     this.listeners = new Set()
     this.registrationListeners = new Set()
     this.redeemFlights = new Map()
+    this.committingAttempts = new Set()
     this.operationEpoch = 0
     this.invalidatedAttempts = new Set()
+    this.pendingRevocations = new Set()
     this.connectionEpoch = 0
     this.credentialMutation = Promise.resolve()
   }
@@ -87,7 +89,9 @@ export class ConnectionManager {
 
   emitState() {
     const state = this.getState()
-    for (const listener of this.listeners) listener(state)
+    for (const listener of this.listeners) {
+      try { listener(state) } catch { /* state subscribers are isolated */ }
+    }
   }
 
   submitLink(input) {
@@ -117,7 +121,11 @@ export class ConnectionManager {
     if (this.redeemFlights.size) {
       return Promise.reject(operationError(Object.assign(new Error(), { code: 'REGISTRATION_BUSY' })))
     }
-    const flight = this.confirmOnce(attemptId).finally(() => this.redeemFlights.delete(attemptId))
+    const flight = this.confirmOnce(attemptId).finally(() => {
+      this.redeemFlights.delete(attemptId)
+      this.invalidatedAttempts.delete(attemptId)
+      this.committingAttempts.delete(attemptId)
+    })
     this.redeemFlights.set(attemptId, flight)
     return flight
   }
@@ -149,7 +157,7 @@ export class ConnectionManager {
           clientVersion: this.clientVersion
         }
       })
-      const promoted = await this.runCredentialMutation(async () => {
+      const promotion = await this.runCredentialMutation(async () => {
         this.assertActiveAttempt(attemptId, operationEpoch)
         const candidate = await this.credentials.stageCandidate({
           serverOrigin: attempt.serverOrigin,
@@ -164,17 +172,23 @@ export class ConnectionManager {
         }
         const previousRevision = this.current?.connectionRevision ?? null
         this.assertActiveAttempt(attemptId, operationEpoch)
-        const connection = await this.credentials.promoteCandidate(candidate.id)
+        this.committingAttempts.add(attemptId)
+        let connection
+        try {
+          connection = await this.credentials.promoteCandidate(candidate.id)
+        } finally {
+          this.committingAttempts.delete(attemptId)
+        }
         this.assertActiveAttempt(attemptId, operationEpoch)
         this.current = connection
         this.status = 'connected'
         this.connectionEpoch += 1
         this.attempts.finish(attemptId)
-        if (previousRevision !== null) this.revokeRuntimeRevision(previousRevision)
-        this.emitState()
-        return connection
+        return { connection, previousRevision, connectionEpoch: this.connectionEpoch }
       })
-      await this.bootstrapAfterPromotion(promoted, redeemed.accessToken, this.connectionEpoch)
+      if (promotion.previousRevision !== null) await this.revokeRevision(promotion.previousRevision)
+      this.emitState()
+      await this.bootstrapAfterPromotion(promotion.connection, redeemed.accessToken, promotion.connectionEpoch)
       return this.getState()
     } catch (error) {
       this.attempts.markRedeemAmbiguous(attemptId)
@@ -194,30 +208,39 @@ export class ConnectionManager {
   }
 
   cancel(attemptId) {
+    if (this.committingAttempts.has(attemptId)) return false
     const cancelled = this.attempts.cancel(attemptId)
-    if (cancelled) this.invalidatedAttempts.add(attemptId)
+    if (cancelled && this.redeemFlights.has(attemptId)) this.invalidatedAttempts.add(attemptId)
     return cancelled
   }
 
   async disconnect() {
     this.operationEpoch += 1
     try {
-      await this.runCredentialMutation(async () => {
+      const previousRevision = await this.runCredentialMutation(async () => {
         const previousRevision = this.current?.connectionRevision ?? null
         await this.credentials.disconnect()
         this.current = null
         this.status = 'disconnected'
         this.connectionEpoch += 1
-        if (previousRevision !== null) this.revokeRuntimeRevision(previousRevision)
         this.emitState()
+        return previousRevision
       })
+      if (previousRevision !== null) await this.revokeRevision(previousRevision)
     } catch (error) {
       throw operationError(error)
     }
   }
 
-  retry() { return this.getState() }
-  sync() { return this.getState() }
+  async retry() {
+    await this.retryPendingRevocations()
+    return this.getState()
+  }
+
+  async sync() {
+    await this.retryPendingRevocations()
+    return this.getState()
+  }
   listModels() { return [] }
   listSkills() { return [] }
 
@@ -242,5 +265,22 @@ export class ConnectionManager {
     const mutation = this.credentialMutation.then(work, work)
     this.credentialMutation = mutation.catch(() => {})
     return mutation
+  }
+
+  async revokeRevision(revision) {
+    try {
+      await this.revokeRuntimeRevision(revision)
+    } catch {
+      this.pendingRevocations.add(revision)
+    }
+  }
+
+  async retryPendingRevocations() {
+    for (const revision of [...this.pendingRevocations]) {
+      try {
+        await this.revokeRuntimeRevision(revision)
+        this.pendingRevocations.delete(revision)
+      } catch { /* keep pending until a later safe retry */ }
+    }
   }
 }
