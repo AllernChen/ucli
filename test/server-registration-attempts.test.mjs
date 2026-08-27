@@ -6,6 +6,27 @@ import { RegistrationAttemptStore } from '../electron/serverConnection/registrat
 const origin = 'http://10.44.100.100'
 const secret = 'one-time-link-secret'
 
+function timerHarness() {
+  const timers = []
+  return {
+    timers,
+    setTimeoutFn(callback, delay) {
+      const timer = {
+        callback,
+        delay,
+        cleared: false,
+        unrefed: false,
+        unref() { this.unrefed = true }
+      }
+      timers.push(timer)
+      return timer
+    },
+    clearTimeoutFn(timer) {
+      timer.cleared = true
+    }
+  }
+}
+
 test('registration attempts expose a renderer-safe DTO without the link secret', () => {
   const store = new RegistrationAttemptStore({ now: () => 100 })
 
@@ -19,16 +40,20 @@ test('registration attempts expose a renderer-safe DTO without the link secret',
   assert.equal(JSON.stringify(store.getPublic(created.attemptId)).includes(secret), false)
 })
 
-test('registration attempts remove the secret after fifteen minutes', () => {
-  let clock = 0
-  const store = new RegistrationAttemptStore({ now: () => clock })
+test('registration attempts automatically remove the secret at fifteen minutes without a later store operation', () => {
+  const timers = timerHarness()
+  const store = new RegistrationAttemptStore({ now: () => 0, ...timers })
   const { attemptId } = store.create({ serverOrigin: origin, linkSecret: secret })
+  const storedAttempt = store.attempts.get(attemptId)
 
-  clock = 15 * 60_000
-  store.sweep()
+  assert.equal(timers.timers.length, 1)
+  assert.equal(timers.timers[0].delay, 15 * 60_000)
+  assert.equal(timers.timers[0].unrefed, true)
+  timers.timers[0].callback()
 
-  assert.equal(store.getPublic(attemptId), null)
-  assert.equal(store.getSecret(attemptId), null)
+  assert.equal(timers.timers[0].cleared, true)
+  assert.equal(storedAttempt.linkSecret, null)
+  assert.equal(store.attempts.has(attemptId), false)
 })
 
 test('registration attempts allow only one redeem to begin at a time', () => {
@@ -75,7 +100,8 @@ test('registration attempts do not chain a second ambiguous redeem recovery', ()
 })
 
 test('finishing or cancelling an attempt removes its in-memory secret', () => {
-  const store = new RegistrationAttemptStore()
+  const timers = timerHarness()
+  const store = new RegistrationAttemptStore(timers)
   const finished = store.create({ serverOrigin: origin, linkSecret: secret }).attemptId
   const cancelled = store.create({ serverOrigin: origin, linkSecret: secret }).attemptId
 
@@ -83,4 +109,6 @@ test('finishing or cancelling an attempt removes its in-memory secret', () => {
   assert.equal(store.cancel(cancelled), true)
   assert.equal(store.getSecret(finished), null)
   assert.equal(store.getSecret(cancelled), null)
+  assert.equal(timers.timers[0].cleared, true)
+  assert.equal(timers.timers[1].cleared, true)
 })

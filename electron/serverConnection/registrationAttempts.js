@@ -10,10 +10,18 @@ function publicAttempt(attempt) {
 }
 
 export class RegistrationAttemptStore {
-  constructor({ now = Date.now, ttlMs = 15 * 60_000, recoveryMs = 10 * 60_000 } = {}) {
+  constructor({
+    now = Date.now,
+    ttlMs = 15 * 60_000,
+    recoveryMs = 10 * 60_000,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout
+  } = {}) {
     this.now = now
     this.ttlMs = ttlMs
     this.recoveryMs = recoveryMs
+    this.setTimeoutFn = setTimeoutFn
+    this.clearTimeoutFn = clearTimeoutFn
     this.attempts = new Map()
   }
 
@@ -29,9 +37,11 @@ export class RegistrationAttemptStore {
       expiresAt: createdAt + this.ttlMs,
       phase: 'open',
       recoveryExpiresAt: null,
-      recoveryUsed: false
+      recoveryUsed: false,
+      expiryTimer: null
     }
     this.attempts.set(attempt.attemptId, attempt)
+    this.scheduleExpiry(attempt)
     return publicAttempt(attempt)
   }
 
@@ -104,9 +114,20 @@ export class RegistrationAttemptStore {
   remove(attemptId) {
     const attempt = this.attempts.get(attemptId)
     if (!attempt) return false
+    if (attempt.expiryTimer !== null) {
+      this.clearTimeoutFn(attempt.expiryTimer)
+      attempt.expiryTimer = null
+    }
     attempt.linkSecret = null
     attempt.preview = null
     this.attempts.delete(attemptId)
     return true
+  }
+
+  scheduleExpiry(attempt) {
+    const delay = Math.max(0, attempt.expiresAt - this.now())
+    const timer = this.setTimeoutFn(() => this.remove(attempt.attemptId), delay)
+    attempt.expiryTimer = timer
+    timer?.unref?.()
   }
 }
