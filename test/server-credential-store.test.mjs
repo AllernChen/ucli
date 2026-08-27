@@ -65,6 +65,55 @@ test('creating an installation fails closed when its durable flush fails', async
   })
 })
 
+test('concurrent stores create one durable installation record', async () => {
+  await withStore(async ({ db }) => {
+    let uuidCalls = 0
+    const uuid = () => {
+      uuidCalls += 1
+      return '550e8400-e29b-41d4-a716-446655440000'
+    }
+    const first = new ServerCredentialStore({ db, safeStorage, now: () => 100, uuid })
+    const second = new ServerCredentialStore({ db, safeStorage, now: () => 200, uuid })
+
+    const [fromFirst, fromSecond] = await Promise.all([
+      first.getOrCreateInstallation({ deviceName: 'First workstation' }),
+      second.getOrCreateInstallation({ deviceName: 'Second workstation' })
+    ])
+
+    assert.deepEqual(fromFirst, fromSecond)
+    assert.equal(uuidCalls, 1)
+    assert.deepEqual(db.getServerInstallation(), fromFirst)
+  })
+})
+
+test('a second store cannot promote a candidate whose ciphertext flush failed', async () => {
+  await withStore(async ({ db }) => {
+    const candidateId = '550e8400-e29b-41d4-a716-446655440000'
+    const first = new ServerCredentialStore({ db, safeStorage, uuid: () => candidateId })
+    db.flush = () => false
+
+    await assert.rejects(first.stageCandidate(credentials()), { code: 'PERSISTENCE_PENDING' })
+
+    const second = new ServerCredentialStore({ db, safeStorage })
+    await assert.rejects(second.promoteCandidate(candidateId), { code: 'PERSISTENCE_PENDING' })
+    assert.equal(db.getServerConnection('candidate').id, candidateId)
+    assert.equal(db.getServerConnection('current'), null)
+  })
+})
+
+test('a second store hides a current connection whose promotion flush failed', async () => {
+  await withStore(async ({ db }) => {
+    const candidateId = '550e8400-e29b-41d4-a716-446655440000'
+    const first = new ServerCredentialStore({ db, safeStorage, uuid: () => candidateId })
+    const candidate = await first.stageCandidate(credentials())
+    db.flush = () => false
+    await assert.rejects(first.promoteCandidate(candidate.id), { code: 'PERSISTENCE_PENDING' })
+
+    const second = new ServerCredentialStore({ db, safeStorage })
+    assert.equal(second.readCurrent(), null)
+  })
+})
+
 test('candidate remains runtime-invisible until ciphertext flushes and promotion replaces current atomically', async () => {
   await withStore(async ({ db }) => {
     const ids = ['550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440001']

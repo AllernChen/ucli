@@ -1,6 +1,24 @@
 import { randomUUID } from 'node:crypto'
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const credentialStates = new WeakMap()
+
+function credentialState(db) {
+  let state = credentialStates.get(db)
+  if (!state) {
+    state = {
+      installationFlight: null,
+      pendingInstallationId: null,
+      pendingCandidateIds: new Set(),
+      durableCandidateIds: new Set(),
+      pendingPromotionId: null
+    }
+    const candidate = db.getServerConnection('candidate')
+    if (candidate) state.durableCandidateIds.add(candidate.id)
+    credentialStates.set(db, state)
+  }
+  return state
+}
 
 function credentialError(code, message) {
   return Object.assign(new Error(message), { code })
@@ -27,9 +45,7 @@ export class ServerCredentialStore {
     this.safeStorage = safeStorage
     this.now = now
     this.uuid = uuid
-    this.pendingInstallationId = null
-    this.pendingCandidateIds = new Set()
-    this.pendingPromotionId = null
+    this.state = credentialState(db)
   }
 
   isEncryptionAvailable() {
@@ -43,10 +59,21 @@ export class ServerCredentialStore {
   }
 
   async getOrCreateInstallation({ deviceName }) {
+    if (this.state.installationFlight) return this.state.installationFlight
+    const flight = this.getOrCreateInstallationOnce(deviceName)
+    this.state.installationFlight = flight
+    try {
+      return await flight
+    } finally {
+      if (this.state.installationFlight === flight) this.state.installationFlight = null
+    }
+  }
+
+  async getOrCreateInstallationOnce(deviceName) {
     let installation = this.db.getServerInstallation()
     if (installation) {
-      if (this.pendingInstallationId === installation.installationId) await this.flushOrThrow()
-      this.pendingInstallationId = null
+      if (this.state.pendingInstallationId === installation.installationId) await this.flushOrThrow()
+      this.state.pendingInstallationId = null
       return installation
     }
 
@@ -60,14 +87,14 @@ export class ServerCredentialStore {
       createdAt: this.now()
     }
     await this.db.transaction(() => this.db.createServerInstallation(installation))
-    this.pendingInstallationId = installationId
+    this.state.pendingInstallationId = installationId
     await this.flushOrThrow()
-    this.pendingInstallationId = null
+    this.state.pendingInstallationId = null
     return installation
   }
 
   readCurrent() {
-    if (this.pendingPromotionId) return null
+    if (this.state.pendingPromotionId) return null
     return this.db.getServerConnection('current')
   }
 
@@ -102,20 +129,23 @@ export class ServerCredentialStore {
       degradedReason: null,
       reminderState: {}
     }
-    this.pendingCandidateIds.add(record.id)
+    this.state.pendingCandidateIds.add(record.id)
     await this.db.transaction(() => this.db.saveServerConnection(record))
     await this.flushOrThrow()
-    this.pendingCandidateIds.delete(record.id)
+    this.state.pendingCandidateIds.delete(record.id)
+    this.state.durableCandidateIds.add(record.id)
     return this.db.getServerConnection('candidate')
   }
 
   async promoteCandidate(candidateId) {
-    if (this.pendingCandidateIds.has(candidateId)) throw persistencePendingError()
-    if (this.pendingPromotionId === candidateId) {
+    if (this.state.pendingPromotionId === candidateId) {
       await this.flushOrThrow()
-      this.pendingPromotionId = null
+      this.state.pendingPromotionId = null
+      this.state.durableCandidateIds.delete(candidateId)
       return this.db.getServerConnection('current')
     }
+    if (this.state.pendingCandidateIds.has(candidateId) ||
+      !this.state.durableCandidateIds.has(candidateId)) throw persistencePendingError()
 
     const candidate = this.db.getServerConnection('candidate')
     if (!candidate || candidate.id !== candidateId) {
@@ -124,9 +154,10 @@ export class ServerCredentialStore {
     const current = this.db.getServerConnection('current')
     const nextRevision = (current?.connectionRevision || 0) + 1
     await this.db.transaction(() => this.db.promoteServerConnection({ candidateId, nextRevision }))
-    this.pendingPromotionId = candidateId
+    this.state.pendingPromotionId = candidateId
     await this.flushOrThrow()
-    this.pendingPromotionId = null
+    this.state.pendingPromotionId = null
+    this.state.durableCandidateIds.delete(candidateId)
     return this.db.getServerConnection('current')
   }
 
@@ -150,8 +181,9 @@ export class ServerCredentialStore {
 
   async disconnect() {
     await this.db.transaction(() => this.db.clearServerConnections())
-    this.pendingCandidateIds.clear()
-    this.pendingPromotionId = null
+    this.state.pendingCandidateIds.clear()
+    this.state.durableCandidateIds.clear()
+    this.state.pendingPromotionId = null
     await this.flushOrThrow()
   }
 
