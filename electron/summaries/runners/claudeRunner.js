@@ -142,7 +142,16 @@ export function createClaudeRunner({
             }
           })
         } finally {
-          if (runtimeSessionId) profileService?.releaseRuntime?.(runtimeSessionId)
+          if (runtimeSessionId) {
+            try {
+              // Runtime release is a synchronous projection operation today, but
+              // cleanup must remain best-effort if a future facade makes it async.
+              // Never let either form replace the runner's result or primary error.
+              Promise.resolve(profileService?.releaseRuntime?.(runtimeSessionId)).catch(() => {})
+            } catch {
+              // Cleanup failures are intentionally isolated from the primary run.
+            }
+          }
         }
       }, {
         workingDirectory: options.workspaceDirectory || null,

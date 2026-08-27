@@ -406,6 +406,97 @@ test('Claude runner releases its resolved profile runtime after profile and exec
   }
 })
 
+test('Claude runner preserves a successful result when runtime release throws', async () => {
+  const released = []
+  const result = await createClaudeRunner({
+    profileService: {
+      resolveLaunchProfile() {
+        return { args: [], env: { ANTHROPIC_API_KEY: 'server-bearer' } }
+      },
+      releaseRuntime(sessionId) {
+        released.push(sessionId)
+        throw new Error('release unavailable')
+      }
+    },
+    createRuntimeSessionId: () => 'summary-runtime-release-success',
+    baseEnv: {},
+    resolveExecutable: () => ({ file: 'unused', prefixArgs: [] }),
+    processRunner: async () => ({
+      stdout: JSON.stringify({ type: 'result', structured_output: { summary: 'original result' } }),
+      stderr: '',
+      exitCode: 0
+    })
+  }).run({ prompt: 'summary', schema: SUMMARY_SCHEMA, profileId: 'server-profile' })
+
+  assert.equal(result.value.summary, 'original result')
+  assert.deepEqual(released, ['summary-runtime-release-success'])
+})
+
+test('Claude runner preserves the primary error when runtime release throws', async () => {
+  const released = []
+  const primaryError = Object.assign(new Error('process unavailable'), { code: 'SUMMARY_RUNNER_PRIMARY_FAILURE' })
+  const runner = createClaudeRunner({
+    profileService: {
+      resolveLaunchProfile() {
+        return { args: [], env: { ANTHROPIC_API_KEY: 'server-bearer' } }
+      },
+      releaseRuntime(sessionId) {
+        released.push(sessionId)
+        throw new Error('release unavailable')
+      }
+    },
+    createRuntimeSessionId: () => 'summary-runtime-release-error',
+    baseEnv: {},
+    resolveExecutable: () => ({ file: 'unused', prefixArgs: [] }),
+    processRunner: async () => { throw primaryError }
+  })
+
+  await assert.rejects(
+    runner.run({ prompt: 'summary', schema: SUMMARY_SCHEMA, profileId: 'server-profile' }),
+    error => error === primaryError && error.code === 'SUMMARY_RUNNER_PRIMARY_FAILURE'
+  )
+  assert.deepEqual(released, ['summary-runtime-release-error'])
+})
+
+test('Claude runner observes rejected asynchronous runtime release without masking success', async () => {
+  const released = []
+  const unhandled = []
+  const onUnhandledRejection = reason => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandledRejection)
+  try {
+    const result = await createClaudeRunner({
+      profileService: {
+        resolveLaunchProfile() {
+          return { args: [], env: { ANTHROPIC_API_KEY: 'server-bearer' } }
+        },
+        releaseRuntime(sessionId) {
+          released.push(sessionId)
+          return {
+            then(resolve, reject) {
+              queueMicrotask(() => reject(new Error('asynchronous release unavailable')))
+            }
+          }
+        }
+      },
+      createRuntimeSessionId: () => 'summary-runtime-release-thenable',
+      baseEnv: {},
+      resolveExecutable: () => ({ file: 'unused', prefixArgs: [] }),
+      processRunner: async () => ({
+        stdout: JSON.stringify({ type: 'result', structured_output: { summary: 'original result' } }),
+        stderr: '',
+        exitCode: 0
+      })
+    }).run({ prompt: 'summary', schema: SUMMARY_SCHEMA, profileId: 'server-profile' })
+
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(result.value.summary, 'original result')
+    assert.deepEqual(released, ['summary-runtime-release-thenable'])
+    assert.deepEqual(unhandled, [])
+  } finally {
+    process.off('unhandledRejection', onUnhandledRejection)
+  }
+})
+
 test('Claude uses only an explicitly validated persistent work directory and deletes only isolated HOME', async () => {
   const fake = createFakeExecutable()
   const root = mkdtempSync(join(tmpdir(), 'ucli-persistent-workspace-'))
