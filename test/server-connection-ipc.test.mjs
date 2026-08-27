@@ -28,7 +28,7 @@ function deferred() {
   return { promise, resolve, reject }
 }
 
-function setup({ client = {}, credentials = {} } = {}) {
+function setup({ client = {}, credentials = {}, skillsCatalog = null } = {}) {
   const handlers = new Map()
   const events = []
   const current = {
@@ -51,10 +51,33 @@ function setup({ client = {}, credentials = {} } = {}) {
   })
   registerServerConnectionIpc({
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) }, manager,
-    send: (channel, payload) => events.push({ channel, payload })
+    skillsCatalog, send: (channel, payload) => events.push({ channel, payload })
   })
   return { handlers, manager, current, events }
 }
+
+test('server Skills IPC exposes only catalog-backed list, sync, install and update actions', async () => {
+  const calls = []
+  const { handlers } = setup({
+    skillsCatalog: {
+      list: () => [{ versionId: 'version-1' }],
+      sync: async () => { calls.push(['sync']); return [] },
+      install: async (...args) => { calls.push(['install', ...args]); return { id: 'package-1' } },
+      update: async (...args) => { calls.push(['update', ...args]); return { id: 'package-1' } }
+    }
+  })
+  assert.deepEqual(await handlers.get('server-connection:list-skills')({}), [{ versionId: 'version-1' }])
+  await handlers.get('server-connection:sync-skills')({})
+  await handlers.get('server-connection:install-skill')({}, 'version-1', {
+    targetAdapterIds: ['codex'], scopeType: 'project', projectPath: 'C:/project'
+  })
+  await assert.rejects(handlers.get('server-connection:update-skill')({}, 'bad/id', {
+    targetAdapterIds: ['codex'], scopeType: 'user'
+  }), { code: 'INVALID_SERVER_CONNECTION_IPC' })
+  assert.deepEqual(calls, [
+    ['sync'], ['install', 'version-1', { targetAdapterIds: ['codex'], scopeType: 'project', projectPath: 'C:/project' }]
+  ])
+})
 
 test('IPC returns only a sanitized preview and rejects extra confirm parameters', async () => {
   const { handlers } = setup()

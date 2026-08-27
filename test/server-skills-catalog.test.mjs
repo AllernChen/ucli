@@ -44,3 +44,28 @@ test('sync requests the catalog without a cursor, then advances from the final c
   ])
   assert.equal(requests.every(({ options }) => options.redirect === 'manual' && options.headers.Authorization === 'Bearer access-token'), true)
 })
+
+test('shutdown aborts a hanging catalog body before it can publish', async () => {
+  let aborts = 0
+  const connectionManager = {
+    getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: 1 }),
+    getState: () => ({ serverOrigin: 'https://server.example.test', organization: { id: 'org-1' } }),
+    getBootstrap: async () => ({ organization: { id: 'org-1' }, skillsCatalogUrl: 'https://server.example.test/api/v1/skills/catalog' }),
+    getAccessToken: async () => 'token'
+  }
+  const db = { transaction: async work => work(), replaceServerSkillVersions() {}, listServerSkillVersions: () => [] }
+  const adapter = createSkillsCatalogAdapter({
+    connectionManager, db, stagingRoot: '.ucli-test-staging', sourceLoader: {}, skillsService: {},
+    fetchImpl: async (_url, options) => new Response(new ReadableStream({
+      start(controller) {
+        options.signal.addEventListener('abort', () => { aborts += 1; controller.error(new Error('aborted')) }, { once: true })
+      }
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+  })
+  const sync = adapter.sync()
+  const rejected = assert.rejects(sync, error => error.code === 'SERVER_SKILL_SHUTDOWN')
+  await new Promise(resolve => setImmediate(resolve))
+  await adapter.shutdown()
+  await rejected
+  assert.equal(aborts, 1)
+})

@@ -64,7 +64,20 @@ test('verified server archive installs with sanitized provenance and removes sta
       packageId: installed.id, versionId: 'version-1', serverOrigin: 'https://server.example.test',
       organizationId: 'org-1', slug: 'example', version: '1.0.0'
     })
-    assert.equal(existsSync(stagingRoot) ? readdirSync(stagingRoot).length : 0, 0)
+    let view = (await skillsService.getState({ projectPath: join(root, 'project') })).packages.find(item => item.id === installed.id)
+    assert.deepEqual({ lifecycleStatus: view.server.lifecycleStatus, warning: view.server.warning, available: view.server.available }, {
+      lifecycleStatus: 'ACTIVE', warning: null, available: true
+    })
+    const revoked = db.listServerSkillVersions().map(item => ({ ...item, lifecycleStatus: 'REVOKED' }))
+    db.replaceServerSkillVersions({ connectionRevision: 1, versions: revoked })
+    view = (await skillsService.getState({ projectPath: join(root, 'project') })).packages.find(item => item.id === installed.id)
+    assert.deepEqual({ lifecycleStatus: view.server.lifecycleStatus, warning: view.server.warning, available: view.server.available }, {
+      lifecycleStatus: 'REVOKED', warning: 'revoked', available: true
+    })
+    const staged = existsSync(stagingRoot)
+      ? readdirSync(stagingRoot, { recursive: true }).filter(entry => String(entry).endsWith('.zip'))
+      : []
+    assert.deepEqual(staged, [])
     const download = requests.find(({ url }) => url.endsWith('/download'))
     assert.equal(download.options.headers.Authorization, 'Bearer test-access-token')
   } finally {
@@ -93,4 +106,44 @@ test('catalog rejects query-bearing download URLs before any archive request', a
   })
   await assert.rejects(adapter.sync(), error => error.code === 'SERVER_RESPONSE_INVALID')
   await adapter.shutdown()
+})
+
+test('stale connection identity reaches the internal install guard before a server archive can commit', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-stale-'))
+  const bytes = archive()
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  let revision = 1
+  let committed = false
+  const connectionManager = {
+    getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: revision }),
+    getState: () => ({ serverOrigin: 'https://server.example.test', organization: { id: 'org-1' } }),
+    getBootstrap: async () => ({ organization: { id: 'org-1' }, skillsCatalogUrl: 'https://server.example.test/api/v1/skills/catalog' }),
+    getAccessToken: async () => 'token'
+  }
+  const db = {
+    transaction: async work => work(), replaceServerSkillVersions: ({ versions }) => { db.versions = versions },
+    listServerSkillVersions: () => db.versions || []
+  }
+  const item = {
+    id: 'version-1', version: '1.0.0', sha256, sizeBytes: bytes.length,
+    publishedAt: '2026-08-27T00:00:00.000Z', createdAt: '2026-08-27T00:00:00.000Z',
+    skill: { slug: 'example', name: 'Example', description: 'Example skill' },
+    downloadUrl: 'https://server.example.test/api/v1/skills/version-1/download'
+  }
+  const adapter = createSkillsCatalogAdapter({
+    connectionManager, db, stagingRoot: join(root, 'staging'), sourceLoader: {},
+    skillsService: { installVerifiedServerArchive: async payload => { revision = 2; payload.guard(); committed = true } },
+    fetchImpl: async url => url.endsWith('/catalog') ? new Response(JSON.stringify([item]))
+      : url.endsWith('/revocations') ? new Response(JSON.stringify([]))
+        : new Response(bytes, { headers: { 'content-type': 'application/zip', 'x-ucli-sha256': sha256 } })
+  })
+  try {
+    await adapter.sync()
+    await assert.rejects(adapter.install('version-1', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' }),
+      error => error.code === 'SERVER_SKILL_STALE')
+    assert.equal(committed, false)
+  } finally {
+    await adapter.shutdown()
+    rmSync(root, { recursive: true, force: true })
+  }
 })

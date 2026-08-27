@@ -1,6 +1,8 @@
 import { sanitiseServerError } from './contracts.js'
 
 const ATTEMPT_ID = /^[A-Za-z0-9_-]{1,200}$/
+const VERSION_ID = /^[A-Za-z0-9_-]{1,200}$/
+const ADAPTER_IDS = new Set(['claude', 'codex', 'opencode', 'ucode', 'deepseek-harness'])
 const LOCAL_ERRORS = Object.freeze({
   SECURE_STORAGE_UNAVAILABLE: ['Secure storage is unavailable', false],
   PERSISTENCE_PENDING: ['Server credentials could not be saved', true],
@@ -23,6 +25,22 @@ function attemptId(value) {
 function input(value) {
   if (typeof value !== 'string' || !value || value.length > 16_384 || value.includes('\0')) throw invalidIpc()
   return value
+}
+
+function versionId(value) {
+  if (typeof value !== 'string' || !VERSION_ID.test(value)) throw invalidIpc()
+  return value
+}
+
+function targets(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.targetAdapterIds) ||
+    !value.targetAdapterIds.length || value.targetAdapterIds.length > ADAPTER_IDS.size || !['user', 'project'].includes(value.scopeType)) {
+    throw invalidIpc()
+  }
+  const targetAdapterIds = [...new Set(value.targetAdapterIds)]
+  if (targetAdapterIds.some(id => typeof id !== 'string' || !ADAPTER_IDS.has(id))) throw invalidIpc()
+  const projectPath = value.scopeType === 'project' ? input(value.projectPath) : ''
+  return { targetAdapterIds, scopeType: value.scopeType, projectPath }
 }
 
 function safeError(error) {
@@ -53,7 +71,7 @@ function exact(args, count) {
   if (args.length !== count) throw invalidIpc()
 }
 
-export function registerServerConnectionIpc({ ipcMain, manager, send = () => {} } = {}) {
+export function registerServerConnectionIpc({ ipcMain, manager, skillsCatalog = null, send = () => {} } = {}) {
   if (!ipcMain?.handle || !manager) throw new TypeError('IPC dependencies are required')
   ipcMain.handle('server-connection:submit-link', invoke((_event, ...args) => {
     exact(args, 1)
@@ -78,12 +96,30 @@ export function registerServerConnectionIpc({ ipcMain, manager, send = () => {} 
     ['server-connection:retry', 'retry'],
     ['server-connection:sync', 'sync'],
     ['server-connection:disconnect', 'disconnect'],
-    ['server-connection:list-models', 'listModels'],
-    ['server-connection:list-skills', 'listSkills']
+    ['server-connection:list-models', 'listModels']
   ]) {
     ipcMain.handle(channel, invoke((_event, ...args) => {
       exact(args, 0)
       return manager[method]()
+    }))
+  }
+  ipcMain.handle('server-connection:list-skills', invoke((_event, ...args) => {
+    exact(args, 0)
+    return skillsCatalog?.list() || []
+  }))
+  ipcMain.handle('server-connection:sync-skills', invoke((_event, ...args) => {
+    exact(args, 0)
+    if (!skillsCatalog) throw Object.assign(new Error(), { code: 'SERVER_SKILL_UNAVAILABLE' })
+    return skillsCatalog.sync()
+  }))
+  for (const [channel, method] of [
+    ['server-connection:install-skill', 'install'],
+    ['server-connection:update-skill', 'update']
+  ]) {
+    ipcMain.handle(channel, invoke((_event, ...args) => {
+      exact(args, 2)
+      if (!skillsCatalog) throw Object.assign(new Error(), { code: 'SERVER_SKILL_UNAVAILABLE' })
+      return skillsCatalog[method](versionId(args[0]), targets(args[1]))
     }))
   }
   manager.subscribe(state => send('server-connection:state', state))

@@ -146,6 +146,9 @@ export const ipc = {
     disconnect: () => u.disconnectServerConnection(),
     listModels: () => u.listServerConnectionModels(),
     listSkills: () => u.listServerConnectionSkills(),
+    syncSkills: () => u.syncServerConnectionSkills(),
+    installSkill: (versionId, targets) => u.installServerConnectionSkill(versionId, targets),
+    updateSkill: (versionId, targets) => u.updateServerConnectionSkill(versionId, targets),
     onStateChanged: (handler) => u.onServerConnectionState(handler),
     onRegistrationRequested: (handler) => u.onServerConnectionRegistrationRequested(handler)
   },

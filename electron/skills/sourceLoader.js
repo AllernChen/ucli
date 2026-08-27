@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, extname, relative, resolve } from 'node:path'
 import AdmZip from 'adm-zip'
 
@@ -240,9 +240,26 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit, c
   }
 
   return {
-    async withPrepared(source, work) {
+    async withPrepared(source, work, { guard = null } = {}) {
+      guard?.()
       const prepared = await prepare(source)
-      try { return await work(prepared) } finally { prepared.cleanup() }
+      try { guard?.(); return await work(prepared) } finally { prepared.cleanup() }
+    },
+    async withVerifiedArchive({ path, identity, guard = null } = {}, work) {
+      guard?.()
+      const before = lstatSync(path)
+      if (!before.isFile() || before.isSymbolicLink() ||
+        (identity && (before.size !== identity.size || before.ino !== identity.ino || before.dev !== identity.dev))) {
+        throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
+      }
+      return this.withPrepared({ type: 'local', path }, async (prepared) => {
+        guard?.()
+        const after = lstatSync(path)
+        if (!after.isFile() || after.isSymbolicLink() || after.size !== before.size || after.ino !== before.ino || after.dev !== before.dev) {
+          throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
+        }
+        return work(prepared)
+      }, { guard })
     },
     async withPreparedMany(sources, work) {
       if (!Array.isArray(sources) || !sources.length || sources.length > 200) {

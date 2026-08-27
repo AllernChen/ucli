@@ -230,6 +230,9 @@ const api = {
   disconnectServerConnection: () => ipcRenderer.invoke('server-connection:disconnect'),
   listServerConnectionModels: () => ipcRenderer.invoke('server-connection:list-models'),
   listServerConnectionSkills: () => ipcRenderer.invoke('server-connection:list-skills'),
+  syncServerConnectionSkills: () => ipcRenderer.invoke('server-connection:sync-skills'),
+  installServerConnectionSkill: (versionId, targets) => ipcRenderer.invoke('server-connection:install-skill', versionId, targets),
+  updateServerConnectionSkill: (versionId, targets) => ipcRenderer.invoke('server-connection:update-skill', versionId, targets),
   onServerConnectionState: (handler) => {
     const wrapped = (_event, payload) => handler(payload)
     ipcRenderer.on('server-connection:state', wrapped)

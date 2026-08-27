@@ -148,5 +148,7 @@ test('server projections replace by revision and disconnect cleanup preserves lo
       organizationId: 'organization-1', slug: 'server-skill', version: '1.0.0'
     })
     assert.equal(db.getSkillPackage('local-package').id, 'local-package')
+    db.deleteSkillPackage('local-package')
+    assert.equal(db.getServerSkillPackage('local-package'), null)
   })
 })

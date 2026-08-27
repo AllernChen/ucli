@@ -1899,6 +1899,11 @@ class Db {
     )).map(rowToServerSkillVersion)
   }
 
+  getServerSkillVersion(versionId) {
+    return rows(this.sql.exec('SELECT * FROM server_skill_versions WHERE version_id = ?', [versionId]))
+      .map(rowToServerSkillVersion)[0] || null
+  }
+
   clearServerSkillVersions() {
     this.sql.run('DELETE FROM server_skill_versions')
   }
@@ -1942,9 +1947,21 @@ class Db {
     )).map(rowToServerSkillPackage)[0] || null
   }
 
+  listServerSkillPackagesForSkill({ serverOrigin, organizationId, slug }) {
+    return rows(this.sql.exec(
+      `SELECT * FROM server_skill_packages
+       WHERE server_origin = ? AND organization_id = ? AND slug = ? ORDER BY package_id`,
+      [serverOrigin, organizationId, slug]
+    )).map(rowToServerSkillPackage)
+  }
+
   listServerSkillPackages() {
     return rows(this.sql.exec('SELECT * FROM server_skill_packages ORDER BY package_id'))
       .map(rowToServerSkillPackage)
+  }
+
+  removeServerSkillPackage(packageId) {
+    this.sql.run('DELETE FROM server_skill_packages WHERE package_id = ?', [packageId])
   }
 
   // ---- Skills ----
@@ -1996,6 +2013,7 @@ class Db {
   }
 
   deleteSkillPackage(packageId) {
+    this.removeServerSkillPackage(packageId)
     this.sql.run('DELETE FROM skill_packages WHERE id = ?', [packageId])
     return this.sql.getRowsModified() > 0
   }
