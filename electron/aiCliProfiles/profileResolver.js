@@ -22,8 +22,8 @@ function selectedProfile({ adapterId, profileId, selectionSource, profiles }) {
     profileId,
     profile,
     selectionSource,
-    status: profile ? null : 'missing_profile',
-    canStart: Boolean(profile)
+    status: profile ? (profile.status || profile.serverStatus || null) : 'missing_profile',
+    canStart: Boolean(profile) && profile.canStart !== false
   }
 }
 
@@ -94,7 +94,7 @@ function runtimeResult(profile, status, canStart) {
     providerId: profile?.providerId || null,
     status,
     canStart,
-    runtimeRevision: canStart ? (profile?.fileSha256 || null) : null
+    runtimeRevision: canStart ? (profile?.fileSha256 || profile?.connectionRevision || null) : null
   }
 }
 

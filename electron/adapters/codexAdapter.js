@@ -167,7 +167,7 @@ export function buildCodexArgs(session) {
   ]
   const hasProfile = Boolean(session.profileId)
   if (hasProfile) {
-    if (!/^ucli-[a-f0-9]{32}$/.test(session.nativeProfileName || '')) {
+    if (!/^(ucli-[a-f0-9]{32}|ucli-server-[a-f0-9]{32})$/.test(session.nativeProfileName || '')) {
       throw Object.assign(new TypeError('Native Codex profile name is invalid'), {
         code: 'INVALID_NATIVE_PROFILE_NAME'
       })
@@ -186,12 +186,12 @@ export function buildCodexArgs(session) {
   return args
 }
 
-const PROFILE_SECRET_ENV_PATTERN = /^UCLI_CODEX_PROFILE_[A-F0-9]{8}_[A-F0-9]{4}_[A-F0-9]{4}_[A-F0-9]{4}_[A-F0-9]{12}$/
+const PROFILE_SECRET_ENV_PATTERN = /^(UCLI_CODEX_PROFILE_[A-F0-9]{8}_[A-F0-9]{4}_[A-F0-9]{4}_[A-F0-9]{4}_[A-F0-9]{12}|UCLI_SERVER_PROFILE_[A-F0-9]{32})$/
 
 export function buildCodexEnvironment(session, settings = {}) {
   const env = { ...(settings.baseEnv || process.env) }
   for (const key of Object.keys(env)) {
-    if (key.startsWith('UCLI_CODEX_PROFILE_')) delete env[key]
+    if (key.startsWith('UCLI_CODEX_PROFILE_') || key.startsWith('UCLI_SERVER_PROFILE_')) delete env[key]
   }
   Object.assign(env, {
     CODEX_HOME: settings.codexHome || resolveCodexHome(),

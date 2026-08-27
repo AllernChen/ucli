@@ -145,7 +145,12 @@ test('sanitiseProfile exposes only the renderer contract and never sensitive val
     canStart: false,
     isAppDefault: true,
     isProjectDefault: false,
-    updatedAt: 1785970000000
+    updatedAt: 1785970000000,
+    sourceKind: 'user',
+    readOnly: false,
+    organizationName: null,
+    serverStatus: null,
+    connectionRevision: null
   })
 
   const serialised = JSON.stringify(rendered)

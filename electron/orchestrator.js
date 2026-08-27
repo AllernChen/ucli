@@ -105,6 +105,7 @@ import { createDeviceGrantClient } from './serverConnection/deviceGrantClient.js
 import { ConnectionManager } from './serverConnection/connectionManager.js'
 import { ExpiryReminder } from './serverConnection/expiryReminder.js'
 import { createLocalGatewayProxy } from './serverConnection/localGatewayProxy.js'
+import { createServerModelProjection } from './serverConnection/modelProjection.js'
 import { registerServerConnectionIpc } from './serverConnection/ipc.js'
 import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
 import { scanStorageCategories } from './storage/storageScanner.js'
@@ -847,6 +848,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   let gatewayManager = null
   let serverConnectionManager = null
   let localGatewayProxy = null
+  let serverModelProjection = null
   const approvalNotifications = new Map()
   const completionNotifications = new Set()
   const diagnostics = createDiagnosticsService({
@@ -1210,7 +1212,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       throw new Error('The selected Codex profile is no longer available. Choose another profile before starting.')
     }
     if (selection?.profileId) {
-      const launch = profileService.resolveCodexLaunchProfile(selection.profileId)
+      const launch = profileService.resolveCodexLaunchProfile(selection.profileId, session)
       return {
         session: {
           ...session,
@@ -1559,6 +1561,16 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       db.saveSettings(settings)
     }
 
+    serverModelProjection = createServerModelProjection({
+      db,
+      proxy: {
+        createSession: connection => localGatewayProxy?.createSession(connection),
+        revokeSession: sessionId => localGatewayProxy?.revokeSession(sessionId)
+      },
+      codexProfileFiles,
+      resolveCodexHome: getCodexHome,
+      getRuntimeConnectionIdentity: () => serverConnectionManager?.getRuntimeConnectionIdentity() || null
+    })
     profileService = createProfileService({
       db,
       secretStore: new ProfileSecretStore({ db, safeStorage }),
@@ -1566,7 +1578,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       readCodexRuntime: () => readCodexRuntimeSnapshot(getCodexHome()),
       readClaudeRuntime: () => readClaudeRuntimeSnapshot({ env: process.env }),
       fileOps: codexProfileFiles,
-      flush: () => db.flush()
+      flush: () => db.flush(),
+      serverModelProjection
     })
     skillsService = createSkillsService({
       db,
@@ -1604,7 +1617,40 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       localGatewayProxy = null
       log('Server gateway proxy unavailable')
     }
+    let projectionSync = Promise.resolve()
+    const syncServerModelProjection = (state = serverConnectionManager.getState()) => {
+      projectionSync = projectionSync.then(async () => {
+        const identity = serverConnectionManager?.getRuntimeConnectionIdentity()
+        if (!identity || !['connected', 'expiring'].includes(state.status)) {
+          const status = state.status === 'disabled' ? 'disabled'
+            : state.status === 'expired' ? 'expired'
+              : state.reason === 'grant_deleted' ? 'deleted'
+                : 'unreachable'
+          serverModelProjection.clearOnlineState(state.connection?.connectionRevision, status)
+          return
+        }
+        try {
+          const bootstrap = await serverConnectionManager.getBootstrap()
+          const current = serverConnectionManager.getRuntimeConnectionIdentity()
+          if (!current || current.connectionId !== identity.connectionId || current.connectionRevision !== identity.connectionRevision) {
+            serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
+            return
+          }
+          serverModelProjection.reconcile({
+            serverOrigin: state.serverOrigin,
+            organization: bootstrap.organization,
+            models: bootstrap.models,
+            connectionRevision: identity.connectionRevision
+          })
+        } catch {
+          serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
+        }
+      }).catch(() => {})
+      return projectionSync
+    }
+    serverConnectionManager.subscribe(state => { void syncServerModelProjection(state) })
     void serverConnectionManager.start()
+    void syncServerModelProjection()
     try {
       await profileService.reconcileCodexProfiles()
     } catch (error) {
@@ -2817,6 +2863,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     try {
       started = await adapter.start()
     } catch (error) {
+      serverModelProjection?.releaseRuntime(sessionId)
       let disposed = false
       try {
         await adapter.dispose()
@@ -3139,6 +3186,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         started = await e.adapter.start()
       } catch (error) {
         clearInteractiveProfileCapability(e)
+        serverModelProjection?.releaseRuntime(sessionId)
         let disposed = false
         try {
           await e.adapter.dispose()
@@ -3155,6 +3203,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         throw error
       }
       if (started === false) {
+        serverModelProjection?.releaseRuntime(sessionId)
         e.status = 'error'
         const db = getDb()
         if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
@@ -3181,6 +3230,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     const e = sessions.get(sessionId)
     if (e) {
       clearInteractiveProfileCapability(e)
+      serverModelProjection?.releaseRuntime(sessionId)
       engine.removeSession(sessionId)
       const cleanup = e.adapter?.dispose()
       gatewaySignals.publish({
@@ -3224,6 +3274,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     const e = sessions.get(sessionId)
     if (e) {
       clearInteractiveProfileCapability(e)
+      serverModelProjection?.releaseRuntime(sessionId)
       engine.removeSession(sessionId)
       gatewaySignals.publish({
         type: 'session_stopped',
@@ -3801,6 +3852,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       await serverConnectionManager?.shutdown()
       const db = getDb()
       for (const [id, entry] of sessions) {
+        serverModelProjection?.releaseRuntime(id)
         clearInteractiveProfileCapability(entry)
         engine.removeSession(id)
         if (entry.adapter) {

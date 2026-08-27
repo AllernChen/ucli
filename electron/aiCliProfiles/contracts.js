@@ -5,7 +5,11 @@ const PROFILE_STATUSES = new Set([
   'missing_file',
   'drifted',
   'missing_provider',
-  'secret_unavailable'
+  'secret_unavailable',
+  'unreachable',
+  'disabled',
+  'expired',
+  'deleted'
 ])
 
 const ADAPTER_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
@@ -161,7 +165,12 @@ export function sanitiseProfile(profile = {}, runtimeState = {}) {
     canStart: runtimeState.canStart !== false,
     isAppDefault: Boolean(runtimeState.isAppDefault),
     isProjectDefault: Boolean(runtimeState.isProjectDefault),
-    updatedAt: Number.isFinite(profile.updatedAt) ? profile.updatedAt : null
+    updatedAt: Number.isFinite(profile.updatedAt) ? profile.updatedAt : null,
+    sourceKind: 'user',
+    readOnly: false,
+    organizationName: null,
+    serverStatus: null,
+    connectionRevision: null
   }
 }
 
@@ -171,7 +180,8 @@ export function sanitiseProfileError(error) {
     'PROFILE_SECRET_REQUIRED', 'PROFILE_SECRET_UNAVAILABLE',
     'PROFILE_REVISION_NOT_FOUND', 'PROFILE_FILE_MISSING',
     'PROFILE_FILE_DRIFTED', 'PROFILE_FILE_NOT_OWNED',
-    'PROFILE_PERSISTENCE_PENDING', 'PROFILE_ADAPTER_UNAVAILABLE'
+    'PROFILE_PERSISTENCE_PENDING', 'PROFILE_ADAPTER_UNAVAILABLE',
+    'PROFILE_READ_ONLY'
   ])
   const candidate = typeof error?.code === 'string' ? error.code : ''
   const code = candidate.startsWith('INVALID_') || publicCodes.has(candidate)
@@ -194,7 +204,8 @@ export function sanitiseProfileError(error) {
     PROFILE_FILE_DRIFTED: 'AI CLI profile file was changed outside UCLI',
     PROFILE_FILE_NOT_OWNED: 'AI CLI profile file is not managed by UCLI',
     PROFILE_PERSISTENCE_PENDING: 'AI CLI profile changes are pending persistence',
-    PROFILE_ADAPTER_UNAVAILABLE: 'AI CLI profile adapter is unavailable'
+    PROFILE_ADAPTER_UNAVAILABLE: 'AI CLI profile adapter is unavailable',
+    PROFILE_READ_ONLY: 'Organization-provided AI CLI profiles are read-only'
   }
   return {
     code,
