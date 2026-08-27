@@ -6,6 +6,7 @@ export const SETTINGS_SECTIONS = Object.freeze([
   { id: 'storage', label: '空间管理' },
   { id: 'shortcuts', label: '快捷键' },
   { id: 'updates', label: '软件更新' },
+  { id: 'server', label: '服务端连接' },
   { id: 'support', label: '支持诊断' },
   { id: 'about', label: '关于' }
 ])

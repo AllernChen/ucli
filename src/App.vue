@@ -98,6 +98,7 @@ import {
   MenuUnfoldOutlined
 } from '@ant-design/icons-vue'
 import { useSessionsStore } from './stores/sessions.js'
+import { useServerConnectionStore } from './stores/serverConnection.js'
 import { useUpdatesStore } from './stores/updates.js'
 import UpdateSiderFooter from './components/updates/UpdateSiderFooter.vue'
 import { ipc } from './ipc.js'
@@ -106,7 +107,9 @@ import ucliLogo from '../resources/icons/ucli.png'
 const route = useRoute()
 const router = useRouter()
 const sessions = useSessionsStore()
+const serverConnection = useServerConnectionStore()
 const updates = useUpdatesStore()
+void serverConnection.initialize()
 const navCollapsed = ref(false)
 watch(navCollapsed, (v) => sessions.setNavCollapsed(v))
 const appVersion = __UCLI_VERSION__
@@ -165,6 +168,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopSessionFocus?.()
   stopSummaryOpen?.()
+  serverConnection.dispose()
   updates.dispose()
 })
 </script>

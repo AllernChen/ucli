@@ -1,0 +1,215 @@
+import { defineStore } from 'pinia'
+
+import { ipc } from '../ipc.js'
+import { useAiCliProfilesStore } from './aiCliProfiles.js'
+
+const PUBLIC_ERROR_MESSAGES = Object.freeze({
+  invalid_link: '连接链接无效，请获取新的链接',
+  link_expired: '连接链接已过期，请获取新的链接',
+  link_revoked: '连接链接已撤销，请获取新的链接',
+  link_consumed: '连接链接已使用，请获取新的链接',
+  grant_disabled: '服务端授权已停用',
+  grant_expired: '服务端授权已到期',
+  grant_deleted: '服务端授权已删除，请重新连接',
+  account_inactive: '账号或成员关系不可用',
+  organization_inactive: '组织不可用',
+  PERSISTENCE_PENDING: '凭证尚未安全保存，请稍后重试',
+  NETWORK_UNREACHABLE: '服务端连接暂时不可用，请稍后重试',
+  REGISTRATION_NOT_CONFIRMABLE: '当前链接或授权不可确认'
+})
+
+function publicError(error, fallback = '服务端操作失败，请稍后重试') {
+  const code = typeof error?.code === 'string' ? error.code : 'SERVER_CONNECTION_OPERATION_FAILED'
+  return {
+    code,
+    message: PUBLIC_ERROR_MESSAGES[code] || fallback,
+    retryable: error?.retryable === true
+  }
+}
+
+function isCurrentState(value, revision) {
+  return value && Number.isSafeInteger(value.revision) && value.revision >= revision
+}
+
+export const useServerConnectionStore = defineStore('server-connection', {
+  state: () => ({
+    revision: -1,
+    status: 'disconnected',
+    reason: null,
+    serverOrigin: null,
+    account: null,
+    organization: null,
+    authorizationExpiresAt: null,
+    serverTime: null,
+    lastSyncedAt: null,
+    attempt: null,
+    models: [],
+    skills: [],
+    error: null,
+    busy: false,
+    initialized: false,
+    _initializePromise: null,
+    _confirmPromise: null,
+    _unsubscribeState: null,
+    _unsubscribeRegistration: null
+  }),
+  getters: {
+    canConfirm: (state) => state.attempt?.preview?.link?.status === 'AVAILABLE' &&
+      state.attempt?.preview?.authorization?.status === 'AVAILABLE'
+  },
+  actions: {
+    applyState(value) {
+      if (!isCurrentState(value, this.revision)) return false
+      this.revision = value.revision
+      this.status = value.status || 'disconnected'
+      this.reason = value.reason || null
+      this.serverOrigin = value.serverOrigin || null
+      this.account = value.account || null
+      this.organization = value.organization || null
+      this.authorizationExpiresAt = value.authorizationExpiresAt || value.connection?.authorizationExpiresAt || null
+      this.serverTime = value.serverTime || value.connection?.serverTime || null
+      this.lastSyncedAt = value.lastSyncedAt || value.connection?.lastSyncedAt || null
+      return true
+    },
+    async initialize() {
+      if (this.initialized) return this
+      if (this._initializePromise) return this._initializePromise
+      this._initializePromise = (async () => {
+        const api = ipc.serverConnection
+        this._unsubscribeState = api.onStateChanged((state) => this.applyState(state))
+        this._unsubscribeRegistration = api.onRegistrationRequested(({ attemptId }) => {
+          if (typeof attemptId === 'string') void this.loadAttempt(attemptId)
+        })
+        try {
+          this.applyState(await api.getState())
+          this.initialized = true
+          return this
+        } catch (error) {
+          this.error = publicError(error, '无法读取服务端连接状态')
+          throw error
+        } finally {
+          this._initializePromise = null
+        }
+      })()
+      return this._initializePromise
+    },
+    dispose() {
+      this._unsubscribeState?.()
+      this._unsubscribeRegistration?.()
+      this._unsubscribeState = null
+      this._unsubscribeRegistration = null
+      this.initialized = false
+      this._initializePromise = null
+    },
+    async loadAttempt(attemptId) {
+      try {
+        const attempt = await ipc.serverConnection.getAttempt(attemptId)
+        this.attempt = attempt || null
+        return this.attempt
+      } catch (error) {
+        this.error = publicError(error, '无法读取连接确认信息')
+        throw error
+      }
+    },
+    async submitLink(input) {
+      this.error = null
+      try {
+        const result = await ipc.serverConnection.submitLink(input)
+        return await this.loadAttempt(result.attemptId)
+      } catch (error) {
+        this.error = publicError(error, '无法读取连接链接')
+        throw error
+      }
+    },
+    async confirmAttempt() {
+      if (!this.canConfirm) {
+        const error = Object.assign(new Error('Registration is not confirmable'), { code: 'REGISTRATION_NOT_CONFIRMABLE', retryable: false })
+        this.error = publicError(error)
+        throw error
+      }
+      if (this._confirmPromise) return this._confirmPromise
+      const attemptId = this.attempt.attemptId
+      this._confirmPromise = (async () => {
+        this.busy = true
+        this.error = null
+        try {
+          const state = await ipc.serverConnection.confirm(attemptId)
+          this.applyState(state)
+          this.attempt = null
+          await Promise.all([this.syncConnection(), this.syncModels(), this.syncSkills()])
+          return state
+        } catch (error) {
+          this.error = publicError(error, '无法完成服务端连接')
+          throw error
+        } finally {
+          this.busy = false
+          this._confirmPromise = null
+        }
+      })()
+      return this._confirmPromise
+    },
+    async retryRedeem() {
+      if (!this.attempt?.attemptId) return null
+      this.busy = true
+      try {
+        const state = await ipc.serverConnection.retryRedeem(this.attempt.attemptId)
+        this.applyState(state)
+        this.attempt = null
+        await Promise.all([this.syncConnection(), this.syncModels(), this.syncSkills()])
+        return state
+      } catch (error) {
+        this.error = publicError(error, '无法重试服务端连接')
+        throw error
+      } finally { this.busy = false }
+    },
+    async cancelAttempt() {
+      const attemptId = this.attempt?.attemptId
+      this.attempt = null
+      if (attemptId) await ipc.serverConnection.cancel(attemptId)
+    },
+    async runConnectionAction(operation, fallback) {
+      this.busy = true
+      this.error = null
+      try {
+        const state = await operation()
+        this.applyState(state)
+        return state
+      } catch (error) {
+        this.error = publicError(error, fallback)
+        throw error
+      } finally { this.busy = false }
+    },
+    retryConnection() { return this.runConnectionAction(() => ipc.serverConnection.retry(), '无法重试服务端连接') },
+    syncConnection() { return this.runConnectionAction(() => ipc.serverConnection.sync(), '无法同步服务端连接') },
+    disconnect() { return this.runConnectionAction(() => ipc.serverConnection.disconnect(), '无法断开服务端连接') },
+    async syncModels() {
+      try {
+        this.models = await ipc.serverConnection.listModels()
+        await useAiCliProfilesStore().load()
+        return this.models
+      } catch (error) {
+        this.error = publicError(error, '无法读取组织模型')
+        throw error
+      }
+    },
+    async syncSkills() {
+      try {
+        this.skills = await ipc.serverConnection.syncSkills()
+        return this.skills
+      } catch (error) {
+        this.error = publicError(error, '无法同步组织 Skills')
+        throw error
+      }
+    },
+    async installSkill(versionId, targets) {
+      const result = await ipc.serverConnection.installSkill(versionId, targets)
+      await this.syncSkills()
+      return result
+    },
+    async updateSkill(versionId, targets) {
+      const result = await ipc.serverConnection.updateSkill(versionId, targets)
+      await this.syncSkills()
+      return result
+    }
+  }
+})

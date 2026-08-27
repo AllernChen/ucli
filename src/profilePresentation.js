@@ -4,7 +4,11 @@ const STATUS = {
   missing_file: { label: '档案文件缺失', color: 'red', action: 'repair' },
   missing_provider: { label: '引用的 Provider 不存在', color: 'red', action: null },
   secret_unavailable: { label: '密钥不可用', color: 'red', action: null },
-  missing_profile: { label: '档案不存在', color: 'red', action: null }
+  missing_profile: { label: '档案不存在', color: 'red', action: null },
+  unreachable: { label: '服务端暂时不可达', color: 'orange', action: null },
+  disabled: { label: '服务端授权已停用', color: 'red', action: null },
+  expired: { label: '服务端授权已到期', color: 'red', action: null },
+  deleted: { label: '服务端授权已删除', color: 'red', action: null }
 }
 
 export function profileStatusPresentation(status) {
@@ -17,6 +21,12 @@ export function profileEndpointLabel(baseUrl) {
   } catch {
     return '未设置'
   }
+}
+
+export function profileOriginLabel(profile = {}) {
+  return profile.sourceKind === 'server'
+    ? `组织提供${profile.organizationName ? ` · ${profile.organizationName}` : ''}`
+    : null
 }
 
 export function profileSecretLabel(profile = {}) {
@@ -53,6 +63,9 @@ export function claudeInheritedAuthPresentation(mode) {
 }
 
 export function profileRuntimeNotice(session = {}) {
+  if (session.sourceKind === 'server' && (session.status && session.status !== 'ready')) {
+    return '组织提供的档案当前不可用'
+  }
   if (session.profileStatus && session.profileStatus !== 'ready') {
     return '当前档案不可启动，请先处理配置问题'
   }

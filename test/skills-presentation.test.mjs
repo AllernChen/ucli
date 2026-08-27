@@ -1238,6 +1238,15 @@ test('Skill cards open a management drawer while keeping the AI CLI usage summar
   assert.match(page, /const detailEntry = computed/)
 })
 
+test('Skills page presents the online organization catalog with explicit lifecycle actions', () => {
+  const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
+  for (const label of ['组织 Skills', 'REVOKED', 'DEPRECATED', '安装', '更新', '组织提供']) assert.match(page, new RegExp(label))
+  assert.match(page, /serverConnection\.skills/)
+  assert.match(page, /serverConnection\.installSkill/)
+  assert.match(page, /serverConnection\.updateSkill/)
+  assert.match(page, /await skills\.load\(projectPath\.value\)/)
+})
+
 test('Skills page explains source ownership, entry paths and broken links', () => {
   const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
   assert.match(page, /来源与入口/)

@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   profileBadges,
   profileEndpointLabel,
+  profileOriginLabel,
   profileRuntimeNotice,
   profileSecretLabel,
   profileStatusPresentation
@@ -16,6 +17,15 @@ test('profile presentation explains every actionable runtime state', () => {
   assert.equal(profileStatusPresentation('missing_file').action, 'repair')
   assert.equal(profileStatusPresentation('missing_provider').label, '引用的 Provider 不存在')
   assert.equal(profileStatusPresentation('secret_unavailable').label, '密钥不可用')
+})
+
+test('server profile presentation identifies organization ownership and explicit availability states', () => {
+  assert.equal(profileOriginLabel({ sourceKind: 'server', organizationName: 'Example organization' }), '组织提供 · Example organization')
+  assert.equal(profileStatusPresentation('unreachable').label, '服务端暂时不可达')
+  assert.equal(profileStatusPresentation('disabled').label, '服务端授权已停用')
+  assert.equal(profileStatusPresentation('expired').label, '服务端授权已到期')
+  assert.equal(profileStatusPresentation('deleted').label, '服务端授权已删除')
+  assert.equal(profileRuntimeNotice({ sourceKind: 'server', status: 'unreachable' }), '组织提供的档案当前不可用')
 })
 
 test('profile presentation shows hostname and masked secret only', () => {
