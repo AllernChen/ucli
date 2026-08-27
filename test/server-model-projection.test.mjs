@@ -317,6 +317,7 @@ test('profile service aggregates server profiles, allows binding, and rejects ev
     connectionRevision: 7
   }
   const bindings = []
+  const releasedRuntimeIds = []
   const db = {
     listAiCliProfiles: () => [],
     listAiCliProfileBindings: ({ profileId } = {}) => profileId
@@ -335,11 +336,19 @@ test('profile service aggregates server profiles, allows binding, and rejects ev
     resolveCodexHome: () => 'C:\\codex',
     readCodexRuntime: () => ({}),
     fileOps: {},
-    serverModelProjection: { listProfiles: () => [server] },
+    serverModelProjection: {
+      listProfiles: () => [server],
+      releaseRuntime(sessionId) {
+        releasedRuntimeIds.push(sessionId)
+        return true
+      }
+    },
     flush: () => true
   })
 
   assert.equal(service.listProfiles({ adapterId: 'codex' })[0].id, server.id)
+  assert.equal(service.releaseRuntime('summary-runtime-id'), true)
+  assert.deepEqual(releasedRuntimeIds, ['summary-runtime-id'])
   await service.setBinding({ scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: server.id })
   const selection = service.resolveSessionProfile({ adapterId: 'codex', cwd: 'C:\\project' })
   assert.equal(selection.profileId, server.id)
@@ -357,4 +366,14 @@ test('profile service aggregates server profiles, allows binding, and rejects ev
     code: 'PROFILE_READ_ONLY',
     message: 'Organization-provided AI CLI profiles are read-only'
   })
+
+  const userOnlyService = createProfileService({
+    db,
+    secretStore: {},
+    resolveCodexHome: () => 'C:\\codex',
+    readCodexRuntime: () => ({}),
+    fileOps: {},
+    flush: () => true
+  })
+  assert.equal(userOnlyService.releaseRuntime('summary-runtime-id'), false)
 })

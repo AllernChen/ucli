@@ -245,9 +245,10 @@ function executableResolver(fake, adapterId, extraEnv = {}) {
   })
 }
 
-test('Claude runner uses print JSON schema mode, a resolved profile, and an isolated cwd', async () => {
+test('Claude runner uses a per-run runtime ID and releases the resolved profile after success', async () => {
   const fake = createFakeExecutable()
   const profileCalls = []
+  const releasedRuntimeIds = []
   const profileService = {
     resolveLaunchProfile(options) {
       profileCalls.push(options)
@@ -263,11 +264,15 @@ test('Claude runner uses print JSON schema mode, a resolved profile, and an isol
         },
         artifact: { adapterId: 'claude' }
       }
+    },
+    releaseRuntime(sessionId) {
+      releasedRuntimeIds.push(sessionId)
     }
   }
   try {
     const result = await createClaudeRunner({
       profileService,
+      createRuntimeSessionId: () => 'summary-runtime-id-1',
       resolveExecutable: executableResolver(fake, 'claude')
     }).run({
       prompt: 'review work',
@@ -281,6 +286,9 @@ test('Claude runner uses print JSON schema mode, a resolved profile, and an isol
     })
 
     assert.equal(profileCalls[0].profileId, 'profile-1')
+    assert.equal(profileCalls[0].session.id, 'summary-runtime-id-1')
+    assert.equal(profileCalls[0].session.model, 'sonnet')
+    assert.deepEqual(releasedRuntimeIds, ['summary-runtime-id-1'])
     assert.deepEqual(result.value.args.slice(-15), [
       '--profile-marker', '--model', 'sonnet', '--disable-slash-commands',
       '--no-chrome', '-p', '--output-format', 'json',
@@ -305,6 +313,96 @@ test('Claude runner uses print JSON schema mode, a resolved profile, and an isol
     assert.equal(result.rawMetadata.adapterId, 'claude')
   } finally {
     fake.cleanup()
+  }
+})
+
+test('Claude runner releases its resolved profile runtime after profile and execution failures', async t => {
+  const cases = [
+    {
+      name: 'profile resolution failure',
+      resolveLaunchProfile() { throw new Error('profile unavailable') },
+      expected: /profile unavailable/
+    },
+    {
+      name: 'environment construction failure',
+      resolveLaunchProfile() {
+        return {
+          args: [],
+          env: new Proxy({}, { ownKeys() { throw new Error('environment unavailable') } })
+        }
+      },
+      expected: /environment unavailable/
+    },
+    {
+      name: 'process failure',
+      resolveLaunchProfile() {
+        return { args: [], env: { ANTHROPIC_AUTH_TOKEN: 'server-bearer' } }
+      },
+      processRunner: async () => { throw new Error('process unavailable') },
+      expected: /process unavailable/
+    },
+    {
+      name: 'output parsing failure',
+      resolveLaunchProfile() {
+        return { args: [], env: { ANTHROPIC_AUTH_TOKEN: 'server-bearer' } }
+      },
+      processRunner: async () => ({ stdout: 'not-json', stderr: '', exitCode: 0 }),
+      expected: /Summary runner returned invalid JSON/
+    },
+    {
+      name: 'cancellation',
+      resolveLaunchProfile() {
+        return { args: [], env: { ANTHROPIC_AUTH_TOKEN: 'server-bearer' } }
+      },
+      processRunner: async () => {
+        throw Object.assign(new Error('Summary runner was aborted'), { code: 'SUMMARY_RUNNER_ABORTED' })
+      },
+      expected: error => error?.code === 'SUMMARY_RUNNER_ABORTED'
+    },
+    {
+      name: 'timeout',
+      resolveLaunchProfile() {
+        return { args: [], env: { ANTHROPIC_AUTH_TOKEN: 'server-bearer' } }
+      },
+      processRunner: async () => {
+        throw Object.assign(new Error('Summary runner timed out'), { code: 'SUMMARY_RUNNER_TIMEOUT' })
+      },
+      expected: error => error?.code === 'SUMMARY_RUNNER_TIMEOUT'
+    }
+  ]
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const resolved = []
+      const released = []
+      const runtimeId = `summary-runtime-${scenario.name.replaceAll(' ', '-')}`
+      const profileService = {
+        resolveLaunchProfile(options) {
+          resolved.push(options)
+          return scenario.resolveLaunchProfile()
+        },
+        releaseRuntime(sessionId) {
+          released.push(sessionId)
+        }
+      }
+      const runner = createClaudeRunner({
+        profileService,
+        createRuntimeSessionId: () => runtimeId,
+        baseEnv: {},
+        resolveExecutable: () => ({ file: 'unused', prefixArgs: [] }),
+        processRunner: scenario.processRunner || (async () => {
+          throw new Error('process runner should not start')
+        })
+      })
+
+      await assert.rejects(
+        runner.run({ prompt: 'summary', schema: SUMMARY_SCHEMA, profileId: 'server-profile', model: 'sonnet' }),
+        scenario.expected
+      )
+      assert.equal(resolved.length, 1)
+      assert.equal(resolved[0].session.id, runtimeId)
+      assert.deepEqual(released, [runtimeId])
+    })
   }
 })
 

@@ -1025,7 +1025,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         const profileFingerprint = `sha256:${createHash('sha256').update(JSON.stringify({
           executorId: options.executorId || null,
           profileId: options.profileId || null,
-          runtimeRevision: profile?.updatedAt || profile?.runtimeRevision || null
+          runtimeRevision: profile?.updatedAt || profile?.runtimeRevision || profile?.connectionRevision || null
         })).digest('hex')}`
         return createSummaryPipeline({
           runner,

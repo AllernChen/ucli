@@ -427,6 +427,10 @@ export function createProfileService({
       }
     },
 
+    releaseRuntime(sessionId) {
+      return serverModelProjection?.releaseRuntime?.(sessionId) || false
+    },
+
     resolveCodexLaunchProfile(profileId, session = {}) {
       return service.resolveLaunchProfile({ profileId, session })
     },

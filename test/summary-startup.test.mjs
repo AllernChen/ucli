@@ -182,6 +182,17 @@ test('summary stale interruption and recovery happen before scheduler catch-up a
   assert.ok(legacyImport > workspaceRecovery && cacheMaintenance > legacyImport && catchUp > cacheMaintenance)
 })
 
+test('summary cache fingerprints fall back to server connection revisions', () => {
+  const orchestrator = readFileSync(
+    new URL('../electron/orchestrator.js', import.meta.url),
+    'utf8'
+  )
+  assert.match(
+    orchestrator,
+    /profile\?\.updatedAt \|\| profile\?\.runtimeRevision \|\| profile\?\.connectionRevision \|\| null/
+  )
+})
+
 test('orchestrator stops summary catch-up before gateway and database shutdown', () => {
   const source = readFileSync(
     new URL('../electron/orchestrator.js', import.meta.url),

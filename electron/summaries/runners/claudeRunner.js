@@ -1,4 +1,5 @@
 import { mkdir } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
 import {
@@ -33,110 +34,116 @@ export function createClaudeRunner({
   maxBudgetUsd = null,
   baseEnv = process.env,
   platform = process.platform,
-  validateWorkspaceDirectory = null
+  validateWorkspaceDirectory = null,
+  createRuntimeSessionId = randomUUID
 } = {}) {
   return {
     async run(options) {
       return withIsolatedWorkingDirectory(async (artifactDirectory, persistentWorkDirectory) => {
-        const workingDirectory = persistentWorkDirectory || join(artifactDirectory, 'work')
-        const isolatedHome = join(artifactDirectory, 'home')
-        if (!persistentWorkDirectory) await mkdir(workingDirectory)
-        const launch = resolveExecutable() || {}
-        const isolatedBaseEnv = await buildSummaryProcessEnvironment({
-          provider: 'claude',
-          isolatedHome,
-          baseEnv,
-          launchEnv: launch.env
-        })
-        let profileLaunch = { args: [], env: {} }
-        if (options.profileId) {
-          if (!profileService?.resolveLaunchProfile) {
-            throw runnerError('SUMMARY_RUNNER_PROFILE_UNAVAILABLE', 'Claude profile resolution is unavailable')
-          }
-          profileLaunch = profileService.resolveLaunchProfile({
-            profileId: options.profileId,
-            session: { model: options.model },
-            baseEnv: isolatedBaseEnv
+        const runtimeSessionId = options.profileId ? createRuntimeSessionId() : null
+        try {
+          const workingDirectory = persistentWorkDirectory || join(artifactDirectory, 'work')
+          const isolatedHome = join(artifactDirectory, 'home')
+          if (!persistentWorkDirectory) await mkdir(workingDirectory)
+          const launch = resolveExecutable() || {}
+          const isolatedBaseEnv = await buildSummaryProcessEnvironment({
+            provider: 'claude',
+            isolatedHome,
+            baseEnv,
+            launchEnv: launch.env
           })
-        }
-        const args = [
-          ...(launch.prefixArgs || []),
-          ...(profileLaunch.args || [])
-        ]
-        if (options.model && !args.includes('--model')) args.push('--model', options.model)
-        const textOutput = options.outputMode === 'text'
-        args.push(
-          '--disable-slash-commands',
-          '--no-chrome',
-          '-p',
-          '--output-format', textOutput ? 'text' : 'json',
-          ...(!textOutput ? ['--json-schema', JSON.stringify(options.schema || {})] : []),
-          '--no-session-persistence',
-          '--tools', ''
-        )
-        const budget = options.maxBudgetUsd ?? maxBudgetUsd
-        if (Number.isFinite(budget) && budget >= 0) {
-          args.push('--max-budget-usd', String(budget))
-        }
-
-        const env = await buildSummaryProcessEnvironment({
-          provider: 'claude',
-          isolatedHome,
-          baseEnv: isolatedBaseEnv,
-          launchEnv: launch.env,
-          profileEnv: profileLaunch.env
-        })
-        stripSummaryProviderEndpoints('claude', env)
-        if (!hasSummaryProviderAuthentication('claude', env)) {
-          const authentication = await bridgeClaudeAuthentication({
-            sourceEnv: { ...baseEnv, ...(launch.env || {}) },
-            isolatedConfigDirectory: env.CLAUDE_CONFIG_DIR,
-            platform
-          })
-          if (!authentication.available && platform !== 'darwin') {
-            throw runnerError(
-              'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE',
-              'Claude summary authentication is unavailable'
-            )
+          let profileLaunch = { args: [], env: {} }
+          if (options.profileId) {
+            if (!profileService?.resolveLaunchProfile) {
+              throw runnerError('SUMMARY_RUNNER_PROFILE_UNAVAILABLE', 'Claude profile resolution is unavailable')
+            }
+            profileLaunch = profileService.resolveLaunchProfile({
+              profileId: options.profileId,
+              session: { id: runtimeSessionId, model: options.model },
+              baseEnv: isolatedBaseEnv
+            })
           }
-        }
+          const args = [
+            ...(launch.prefixArgs || []),
+            ...(profileLaunch.args || [])
+          ]
+          if (options.model && !args.includes('--model')) args.push('--model', options.model)
+          const textOutput = options.outputMode === 'text'
+          args.push(
+            '--disable-slash-commands',
+            '--no-chrome',
+            '-p',
+            '--output-format', textOutput ? 'text' : 'json',
+            ...(!textOutput ? ['--json-schema', JSON.stringify(options.schema || {})] : []),
+            '--no-session-persistence',
+            '--tools', ''
+          )
+          const budget = options.maxBudgetUsd ?? maxBudgetUsd
+          if (Number.isFinite(budget) && budget >= 0) {
+            args.push('--max-budget-usd', String(budget))
+          }
 
-        const processResult = await processRunner({
-          file: launch.file,
-          args,
-          prompt: options.prompt,
-          cwd: workingDirectory,
-          env,
-          timeoutMs: options.timeoutMs,
-          maxOutputBytes: options.maxOutputBytes,
-          signal: options.signal,
-          onProgress: options.onProgress
-        })
-        if (textOutput) {
+          const env = await buildSummaryProcessEnvironment({
+            provider: 'claude',
+            isolatedHome,
+            baseEnv: isolatedBaseEnv,
+            launchEnv: launch.env,
+            profileEnv: profileLaunch.env
+          })
+          stripSummaryProviderEndpoints('claude', env)
+          if (!hasSummaryProviderAuthentication('claude', env)) {
+            const authentication = await bridgeClaudeAuthentication({
+              sourceEnv: { ...baseEnv, ...(launch.env || {}) },
+              isolatedConfigDirectory: env.CLAUDE_CONFIG_DIR,
+              platform
+            })
+            if (!authentication.available && platform !== 'darwin') {
+              throw runnerError(
+                'SUMMARY_EXECUTOR_AUTH_UNAVAILABLE',
+                'Claude summary authentication is unavailable'
+              )
+            }
+          }
+
+          const processResult = await processRunner({
+            file: launch.file,
+            args,
+            prompt: options.prompt,
+            cwd: workingDirectory,
+            env,
+            timeoutMs: options.timeoutMs,
+            maxOutputBytes: options.maxOutputBytes,
+            signal: options.signal,
+            onProgress: options.onProgress
+          })
+          if (textOutput) {
+            return normalizeRunnerResult({
+              value: processResult.stdout,
+              rawMetadata: {
+                adapterId: 'claude',
+                exitCode: processResult.exitCode,
+                resultType: 'text'
+              }
+            })
+          }
+          const envelope = parseJsonOutput(processResult.stdout)
           return normalizeRunnerResult({
-            value: processResult.stdout,
+            value: claudeValue(envelope),
+            schema: options.schema,
+            usage: {
+              inputTokens: envelope?.usage?.input_tokens,
+              outputTokens: envelope?.usage?.output_tokens,
+              costUsd: envelope?.total_cost_usd ?? envelope?.cost_usd
+            },
             rawMetadata: {
               adapterId: 'claude',
               exitCode: processResult.exitCode,
-              resultType: 'text'
+              resultType: envelope?.type || null
             }
           })
+        } finally {
+          if (runtimeSessionId) profileService?.releaseRuntime?.(runtimeSessionId)
         }
-        const envelope = parseJsonOutput(processResult.stdout)
-        return normalizeRunnerResult({
-          value: claudeValue(envelope),
-          schema: options.schema,
-          usage: {
-            inputTokens: envelope?.usage?.input_tokens,
-            outputTokens: envelope?.usage?.output_tokens,
-            costUsd: envelope?.total_cost_usd ?? envelope?.cost_usd
-          },
-          rawMetadata: {
-            adapterId: 'claude',
-            exitCode: processResult.exitCode,
-            resultType: envelope?.type || null
-          }
-        })
       }, {
         workingDirectory: options.workspaceDirectory || null,
         validateWorkingDirectory: validateWorkspaceDirectory
