@@ -200,6 +200,7 @@ export class ConnectionManager {
       this.assertActiveAttempt(attemptId, operationEpoch)
       const linkSecret = this.attempts.getSecret(attemptId)
       if (!linkSecret) throw Object.assign(new Error(), { code: 'invalid_link' })
+      this.assertLifecycleAvailable()
       const redeemed = await this.client.redeem({
         serverOrigin: attempt.serverOrigin,
         linkSecret,
@@ -210,6 +211,7 @@ export class ConnectionManager {
           clientVersion: this.clientVersion
         }
       })
+      this.assertLifecycleAvailable()
       const promotion = await this.runCredentialMutation(async () => {
         this.assertActiveAttempt(attemptId, operationEpoch)
         const candidate = await this.credentials.stageCandidate({
@@ -261,6 +263,10 @@ export class ConnectionManager {
 
   async start() {
     if (this.shuttingDown || !this.current) return this.getState()
+    if (this.persistencePending || this.credentials.isPersistencePending?.()) {
+      if (!this.persistencePending) this.enterPersistencePending({ connection: this.current, connectionEpoch: this.connectionEpoch, shared: true })
+      try { return await this.retry() } catch { return this.getState() }
+    }
     try {
       await this.refreshAndBootstrap()
     } catch { /* state and retry policy are established by lifecycle handling */ }
