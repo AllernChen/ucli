@@ -143,15 +143,14 @@ export function createServerModelProjection({
       throw projectionError('PROFILE_PERSISTENCE_PENDING', 'Server profile changes are pending persistence')
     }
   }
-  function persistDigestOrInvalidate() {
+  function persistDigestOrThrow() {
     try {
       const result = flush()
-      if (result === false) throw new Error('flush failed')
       if (result && typeof result.then === 'function') {
-        void Promise.resolve(result).then(value => {
-          if (value === false) throw new Error('flush failed')
-        }).catch(() => invalidateOnlineState())
+        void Promise.resolve(result).catch(() => {})
+        throw new Error('asynchronous flush is not permitted for runtime issuance')
       }
+      if (result !== true) throw new Error('flush failed')
     } catch {
       invalidateOnlineState()
       throw projectionError('PROFILE_PERSISTENCE_PENDING', 'Server profile changes are pending persistence')
@@ -173,6 +172,8 @@ export function createServerModelProjection({
     async reconcile(input) {
       const profiles = profileRows(input)
       const identity = getRuntimeConnectionIdentity()
+      const previousOnlineIdentity = onlineIdentity
+      onlineIdentity = null
       if (!identity || identity.connectionRevision !== input.connectionRevision) {
         invalidateOnlineState()
         db.replaceServerModelProfiles({ connectionRevision: input.connectionRevision, profiles: profiles.map(profile => ({
@@ -181,8 +182,13 @@ export function createServerModelProjection({
         await persistOrThrow()
         return this.listProfiles()
       }
-      if (!sameIdentity(onlineIdentity, identity)) {
+      if (!sameIdentity(previousOnlineIdentity, identity)) {
         for (const sessionId of [...sessions.keys()]) revoke(sessionId)
+      } else {
+        const nextProfileIds = new Set(profiles.map(profile => profile.profileId))
+        for (const [sessionId, runtime] of sessions) {
+          if (!nextProfileIds.has(runtime.profileId)) revoke(sessionId)
+        }
       }
       db.replaceServerModelProfiles({ connectionRevision: input.connectionRevision, profiles })
       try {
@@ -235,7 +241,7 @@ export function createServerModelProjection({
               ? { ...candidate, codexFileSha256: written.sha256 }
               : candidate)
             db.replaceServerModelProfiles({ connectionRevision: profile.connectionRevision, profiles: next })
-            persistDigestOrInvalidate()
+            persistDigestOrThrow()
           }
           if (!currentIdentity(profile) || currentIdentity(profile).connectionId !== identity.connectionId) {
             throw projectionError('PROFILE_NOT_READY', 'Server profile is not ready')

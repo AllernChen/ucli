@@ -9,6 +9,13 @@ import * as codexProfileFiles from '../electron/aiCliProfiles/codexProfileFile.j
 import { createProfileService } from '../electron/aiCliProfiles/profileService.js'
 import { sanitiseProfileError } from '../electron/aiCliProfiles/contracts.js'
 
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
+}
+
 function harness({ flush = () => true, fileOps, resolveCodexHome } = {}) {
   let stored = []
   let identity = { connectionId: 'connection-1', connectionRevision: 7 }
@@ -150,6 +157,20 @@ test('same-revision replacement identity revokes prior server sessions', async (
   assert.deepEqual(context.calls.revoke, ['session-1'])
 })
 
+test('reconciliation revokes server sessions whose projected models were removed', async () => {
+  const context = harness()
+  const input = {
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'org-1', name: 'Engineering' },
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    connectionRevision: 7
+  }
+  await context.projection.reconcile(input)
+  context.projection.prepareRuntime({ profileId: context.projection.listProfiles()[0].id, sessionId: 'session-1' })
+  await context.projection.reconcile({ ...input, models: [] })
+  assert.deepEqual(context.calls.revoke, ['session-1'])
+})
+
 test('failed projection persistence leaves rows fail-closed and rejects reconciliation', async () => {
   const context = harness({ flush: () => false })
   await assert.rejects(() => context.projection.reconcile({
@@ -161,6 +182,34 @@ test('failed projection persistence leaves rows fail-closed and rejects reconcil
   assert.deepEqual(context.projection.listProfiles().map(profile => [profile.status, profile.canStart]), [
     ['unreachable', false], ['unreachable', false]
   ])
+})
+
+test('reconciliation remains fail-closed until held persistence succeeds or fails', async () => {
+  const hold = deferred()
+  const context = harness({ flush: () => hold.promise })
+  const request = context.projection.reconcile({
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'org-1', name: 'Engineering' },
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    connectionRevision: 7
+  })
+  assert.deepEqual(context.projection.listProfiles().map(profile => profile.canStart), [false, false])
+  hold.resolve(true)
+  await request
+  assert.deepEqual(context.projection.listProfiles().map(profile => profile.canStart), [true, true])
+
+  const failed = deferred()
+  const failedContext = harness({ flush: () => failed.promise })
+  const failedRequest = failedContext.projection.reconcile({
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'org-1', name: 'Engineering' },
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    connectionRevision: 7
+  })
+  assert.deepEqual(failedContext.projection.listProfiles().map(profile => profile.canStart), [false, false])
+  failed.reject(new Error('flush failure'))
+  await assert.rejects(() => failedRequest, { code: 'PROFILE_PERSISTENCE_PENDING' })
+  assert.deepEqual(failedContext.projection.listProfiles().map(profile => profile.canStart), [false, false])
 })
 
 test('rejects control-character organization and model identifiers so stable IDs cannot collide', async () => {
@@ -224,6 +273,36 @@ test('Codex runtime records only the generated server file digest in the project
     assert.equal(JSON.stringify(row).includes('127.0.0.1'), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('runtime digest persistence rejects false, thrown, and asynchronous flushes before launch issuance', async () => {
+  for (const flush of [
+    () => false,
+    () => { throw new Error('flush failure') },
+    () => deferred().promise
+  ]) {
+    const fileOps = {
+      serverCodexProfileSecretEnvName: () => 'UCLI_SERVER_PROFILE_0123456789ABCDEF0123456789ABCDEF',
+      writeServerCodexProfileFileAtomic: () => ({ sha256: 'a'.repeat(64) })
+    }
+    let flushCalls = 0
+    const context = harness({
+      fileOps,
+      resolveCodexHome: () => 'C:\\codex',
+      flush: () => ++flushCalls === 1 ? true : flush()
+    })
+    await context.projection.reconcile({
+      serverOrigin: 'http://server.example.test',
+      organization: { id: 'org-1', name: 'Engineering' },
+      models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+      connectionRevision: 7
+    })
+    const codex = context.projection.listProfiles().find(profile => profile.adapterId === 'codex')
+    assert.throws(() => context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'digest-session' }), {
+      code: 'PROFILE_PERSISTENCE_PENDING'
+    })
+    assert.deepEqual(context.calls.revoke, ['digest-session'])
   }
 })
 

@@ -2173,19 +2173,15 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           }
         }
       })
-    } catch (error) {
-      serverModelProjection?.releaseRuntime(sessionId)
-      engine.removeSession(sessionId)
-      throw error
-    }
-    try {
+
+      try {
       assertInteractiveProfileSnapshotCurrent(pinnedProfile)
-    } catch (error) {
-      return rejectInteractiveProfileConstruction(adapter, sessionId, error)
-    }
-    const pinnedProfileReadiness = interactiveProfileReadiness(pinnedProfile)
-    const costAvailable = descriptor.costAvailable !== false
-    const entry = {
+      } catch (error) {
+        return rejectInteractiveProfileConstruction(adapter, sessionId, error)
+      }
+      const pinnedProfileReadiness = interactiveProfileReadiness(pinnedProfile)
+      const costAvailable = descriptor.costAvailable !== false
+      const entry = {
       adapter, session,
       surfaceState: adapterConfig.surfacePreference === 'web'
         ? normalizeDshWebSurfaceState({ status: 'starting', url: null, errorCode: null })
@@ -2242,6 +2238,22 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       ),
       capabilities: normalizeAdapterCapabilities(entry.session.capabilities),
       surfaceState: entry.surfaceState || null
+    }
+    } catch (error) {
+      serverModelProjection?.releaseRuntime(sessionId)
+      try {
+        const disposal = adapter?.dispose?.()
+        if (disposal && typeof disposal.then === 'function') {
+          void disposal.catch((cleanupError) => log('session-construction-cleanup-failed',
+            safeSummaryErrorCode(cleanupError?.code, 'DSH_CLEANUP_FAILED')))
+        }
+      } catch (cleanupError) {
+        log('session-construction-cleanup-failed',
+          safeSummaryErrorCode(cleanupError?.code, 'DSH_CLEANUP_FAILED'))
+      }
+      if (sessions.has(sessionId)) sessions.delete(sessionId)
+      engine.removeSession(sessionId)
+      throw error
     }
   }
 
@@ -2847,10 +2859,12 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     if (entry.adapter) throw new Error('session already running')
     const descriptor = adapters.get(entry.session.adapterId)
     if (!descriptor) throw new Error('unknown adapter: ' + entry.session.adapterId)
-    engine.setSession(sessionId, { tier: entry.session.tier, rulesetId: entry.session.rulesetId, ruleset: rulesets[entry.session.rulesetId] })
-    let profileEnvironment = {}
-    let profileLaunch = null
-    if (entry.session.adapterId === 'codex') {
+    let adapter = null
+    try {
+      engine.setSession(sessionId, { tier: entry.session.tier, rulesetId: entry.session.rulesetId, ruleset: rulesets[entry.session.rulesetId] })
+      let profileEnvironment = {}
+      let profileLaunch = null
+      if (entry.session.adapterId === 'codex') {
       if (entry.session.profileId) {
         const prepared = prepareCodexSessionRuntime(entry.session, {
           imported: Boolean(entry.session.cliSessionId),
@@ -2876,7 +2890,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         })
         scheduleFlush()
       }
-    } else if (entry.session.adapterId === 'claude') {
+      } else if (entry.session.adapterId === 'claude') {
       const prepared = prepareClaudeSessionRuntime(entry.session, {
         imported: Boolean(entry.session.cliSessionId),
         explicitProfileId: entry.session.profileId || null,
@@ -2892,9 +2906,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         })
         scheduleFlush()
       }
-    }
-    let adapter
-    try {
+      }
       adapter = descriptor.create({
         session: entry.session,
         engine,
@@ -2915,67 +2927,65 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           }
         }
       })
-    } catch (error) {
-      serverModelProjection?.releaseRuntime(sessionId)
-      throw error
-    }
-    entry.adapter = adapter
-    entry.status = 'starting'
-    entry._claudeProfileLaunchStamp = entry.session.adapterId === 'claude'
+      entry.adapter = adapter
+      entry.status = 'starting'
+      entry._claudeProfileLaunchStamp = entry.session.adapterId === 'claude'
       ? claudeProfileLaunchStamp(entry.session)
       : null
-    entry._dirtyStats = null
-    entry._lastCumTokens = null
-    entry._lastCompletedTurns = entry.session.adapterId === 'deepseek-harness'
+      entry._dirtyStats = null
+      entry._lastCumTokens = null
+      entry._lastCompletedTurns = entry.session.adapterId === 'deepseek-harness'
       ? entry.stats.turns
       : entry.session.cliSessionId ? null : 0
-    entry._lastNotification = null
-    entry._gatewayTurnActive = false
-    adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
-    wireAdapterGateway(sessionId, adapter)
-    adapter.hookPort = hookPort
-    if (entry.session.adapterId === 'claude') {
-      armClaudeSessionLaunch(entry)
-    }
-    let started
-    try {
-      started = await adapter.start()
+      entry._lastNotification = null
+      entry._gatewayTurnActive = false
+      adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
+      wireAdapterGateway(sessionId, adapter)
+      adapter.hookPort = hookPort
+      if (entry.session.adapterId === 'claude') {
+        armClaudeSessionLaunch(entry)
+      }
+      const started = await adapter.start()
+      if (started === false) {
+        serverModelProjection?.releaseRuntime(sessionId)
+        entry.status = 'error'
+        entry.adapter = null
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+        return false
+      }
+      if (['codex', 'claude'].includes(entry.session.adapterId)) {
+        if (entry.session.adapterId === 'codex') {
+          entry.session.activeProfileId = entry.session.profileId || null
+          entry.session.pendingProfileId = null
+          entry.session.pendingProfileRuntimeRevision = null
+          entry.session.restartRequired = false
+        }
+        publishProfileRuntime(sessionId, entry.session)
+      }
+      const db = getDb()
+      if (db) { db.updateSession(sessionId, { status: 'idle' }); scheduleFlush() }
+      send('session:event', { sessionId, type: 'ready', status: entry.status })
+      await gatewayManager?.resyncSession(sessionId)
     } catch (error) {
       serverModelProjection?.releaseRuntime(sessionId)
-      let disposed = false
+      if (adapter) {
+        try {
+          await adapter.dispose()
+        } catch (cleanupError) {
+          error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
+        }
+      }
+      if (entry.adapter === adapter) entry.adapter = null
+      entry.status = 'error'
       try {
-        await adapter.dispose()
-        disposed = true
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
       } catch (cleanupError) {
         error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
       }
-      if (disposed) entry.adapter = null
-      entry.status = 'error'
-      const db = getDb()
-      if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
       throw error
     }
-    if (started === false) {
-      serverModelProjection?.releaseRuntime(sessionId)
-      entry.status = 'error'
-      entry.adapter = null
-      const db = getDb()
-      if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
-      return false
-    }
-    if (['codex', 'claude'].includes(entry.session.adapterId)) {
-      if (entry.session.adapterId === 'codex') {
-        entry.session.activeProfileId = entry.session.profileId || null
-        entry.session.pendingProfileId = null
-        entry.session.pendingProfileRuntimeRevision = null
-        entry.session.restartRequired = false
-      }
-      publishProfileRuntime(sessionId, entry.session)
-    }
-    const db = getDb()
-    if (db) { db.updateSession(sessionId, { status: 'idle' }); scheduleFlush() }
-    send('session:event', { sessionId, type: 'ready', status: entry.status })
-    await gatewayManager?.resyncSession(sessionId)
   }
 
   async function restartSessionForSkills(sessionId) {
