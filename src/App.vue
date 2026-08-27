@@ -81,6 +81,7 @@
     </a-layout>
   </a-layout>
   <router-view v-else />
+  <RegistrationConfirmDialog v-if="!isPreviewRoute" v-model:open="registrationDialogOpen" />
 </template>
 
 <script setup>
@@ -100,6 +101,8 @@ import {
 import { useSessionsStore } from './stores/sessions.js'
 import { useServerConnectionStore } from './stores/serverConnection.js'
 import { useUpdatesStore } from './stores/updates.js'
+import RegistrationConfirmDialog from './components/serverConnection/RegistrationConfirmDialog.vue'
+import { createServerConnectionRegistrationController } from './serverConnectionRegistrationController.js'
 import UpdateSiderFooter from './components/updates/UpdateSiderFooter.vue'
 import { ipc } from './ipc.js'
 import ucliLogo from '../resources/icons/ucli.png'
@@ -110,6 +113,16 @@ const sessions = useSessionsStore()
 const serverConnection = useServerConnectionStore()
 const updates = useUpdatesStore()
 void serverConnection.initialize().catch(() => {})
+const registrationDialogOpen = ref(false)
+const registrationController = createServerConnectionRegistrationController({
+  getAttempt: () => serverConnection.attempt,
+  setVisible: (visible) => { registrationDialogOpen.value = visible },
+  navigate: (target) => { void router.replace(target) }
+})
+watch(() => serverConnection.attempt?.attemptId, (attemptId) => {
+  if (attemptId) registrationController.presentCurrentAttempt()
+  else registrationController.clear()
+})
 const navCollapsed = ref(false)
 watch(navCollapsed, (v) => sessions.setNavCollapsed(v))
 const appVersion = __UCLI_VERSION__

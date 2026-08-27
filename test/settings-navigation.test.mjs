@@ -59,9 +59,11 @@ test('section deep links preserve unrelated queries and scrolling replaces histo
 
 test('the server section is mounted exactly once and accepts only its section id', () => {
   const source = readFileSync(new URL('../src/views/Settings.vue', import.meta.url), 'utf8')
+  const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
   assert.equal((source.match(/id="settings-section-server"/g) || []).length, 1)
   assert.match(source, /<ServerConnectionPanel\b/)
-  assert.match(source, /<RegistrationConfirmDialog\b/)
+  assert.doesNotMatch(source, /<RegistrationConfirmDialog\b/)
+  assert.match(appSource, /<RegistrationConfirmDialog\b/)
   assert.equal(normalizeSettingsSection('server'), 'server')
   assert.equal(normalizeSettingsSection('server?link=synthetic'), 'general')
 })

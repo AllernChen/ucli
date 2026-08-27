@@ -251,7 +251,7 @@
       </section>
 
       <section id="settings-section-server" class="settings-section">
-        <ServerConnectionPanel @attempt="registrationOpen = true" />
+        <ServerConnectionPanel />
       </section>
 
       <section id="settings-section-support" class="settings-section">
@@ -285,7 +285,6 @@
       v-model:open="gatewayDrawerOpen"
       @closed="onGatewayDrawerClosed"
     />
-    <RegistrationConfirmDialog v-model:open="registrationOpen" />
   </div>
 </template>
 
@@ -302,7 +301,6 @@ import SummaryCacheSettings from '../components/settings/SummaryCacheSettings.vu
 import SettingsSectionNav from '../components/settings/SettingsSectionNav.vue'
 import SoftwareUpdatePanel from '../components/settings/SoftwareUpdatePanel.vue'
 import ServerConnectionPanel from '../components/settings/ServerConnectionPanel.vue'
-import RegistrationConfirmDialog from '../components/serverConnection/RegistrationConfirmDialog.vue'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { presentDshManagement } from '../dshManagementPresentation.js'
@@ -320,7 +318,6 @@ const gateway = useGatewayStore()
 const route = useRoute()
 const router = useRouter()
 const gatewayDrawerOpen = ref(false)
-const registrationOpen = ref(false)
 const gatewayTrigger = ref(null)
 const activeSection = ref(normalizeSettingsSection(route.query.section))
 const adapters = ref([])

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createPinia, setActivePinia } from 'pinia'
 
+import { createServerConnectionRegistrationController } from '../src/serverConnectionRegistrationController.js'
+
 let stateListener
 let registrationListener
 let unsubscribed = 0
@@ -172,6 +174,41 @@ test('late attempt loads cannot overwrite a newer attempt or resurrect a cancell
   assert.equal(connection.attempt, null)
 })
 
+test('cancelling an event attempt before it loads still cancels the known attempt id', async () => {
+  const connection = store()
+  const pending = deferred()
+  window.ucli.getServerConnectionAttempt = async () => pending.promise
+  const loading = connection.loadAttempt('attempt-event')
+  await connection.cancelAttempt()
+  assert.deepEqual(cancelled, ['attempt-event'])
+  pending.resolve({ attemptId: 'attempt-event', preview: {} })
+  await loading
+  assert.equal(connection.attempt, null)
+})
+
+test('an external registration event opens the root dialog and navigates without putting attempt data in the route', async () => {
+  const connection = store()
+  let visible = false
+  let navigation = null
+  window.ucli.onServerConnectionState = (listener) => { stateListener = listener; return () => {} }
+  window.ucli.onServerConnectionRegistrationRequested = (listener) => { registrationListener = listener; return () => {} }
+  window.ucli.getServerConnectionState = async () => ({ ...initialState, status: 'disconnected' })
+  window.ucli.getServerConnectionAttempt = async () => ({ attemptId: 'attempt-external', serverOrigin: 'https://server.example.test', preview: {} })
+  const controller = createServerConnectionRegistrationController({
+    getAttempt: () => connection.attempt,
+    setVisible: (value) => { visible = value },
+    navigate: (target) => { navigation = target }
+  })
+  await connection.initialize()
+  registrationListener({ attemptId: 'attempt-external', serverOrigin: 'https://server.example.test' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(controller.presentCurrentAttempt(), true)
+  assert.equal(visible, true)
+  assert.deepEqual(navigation, { name: 'settings', query: { section: 'server' } })
+  assert.equal(JSON.stringify(navigation).includes('attempt-external'), false)
+  assert.equal(JSON.stringify(navigation).includes('server.example.test'), false)
+})
+
 test('initialize cleans up a failed subscription and ignores a late snapshot after dispose', async () => {
   const failed = store()
   let failedUnsubscribes = 0
@@ -194,11 +231,23 @@ test('initialize cleans up a failed subscription and ignores a late snapshot aft
   assert.equal(late.initialized, false)
 })
 
+test('initialization releases an already-registered listener when the next subscription fails', async () => {
+  const connection = store()
+  let stateUnsubscribes = 0
+  window.ucli.onServerConnectionState = () => () => { stateUnsubscribes += 1 }
+  window.ucli.onServerConnectionRegistrationRequested = () => { throw Object.assign(new Error(), { code: 'NETWORK_UNREACHABLE' }) }
+  await assert.rejects(connection.initialize())
+  assert.equal(stateUnsubscribes, 1)
+  assert.equal(connection.initialized, false)
+})
+
 test('initialization reads the cached catalog and validates catalog version targets', async () => {
   const connection = store()
   let listCalls = 0
   let installed
   let updated
+  window.ucli.onServerConnectionState = (listener) => { stateListener = listener; return () => {} }
+  window.ucli.onServerConnectionRegistrationRequested = (listener) => { registrationListener = listener; return () => {} }
   window.ucli.getServerConnectionState = async () => initialState
   window.ucli.listServerConnectionSkills = async () => { listCalls += 1; return [{ versionId: 'catalog-version-1', lifecycleStatus: 'AVAILABLE' }] }
   window.ucli.installServerConnectionSkill = async (...args) => { installed = args; return {} }
@@ -213,6 +262,48 @@ test('initialization reads the cached catalog and validates catalog version targ
   assert.deepEqual(updated, ['catalog-version-1', { targetAdapterIds: ['claude'], scopeType: 'project', projectPath: 'F:/project' }])
   await assert.rejects(connection.installSkill('catalog-version-1', { targetAdapterIds: [], scopeType: 'user', projectPath: '' }), { code: 'INVALID_SKILL_TARGETS' })
   await assert.rejects(connection.installSkill('catalog-version-1', { targetAdapterIds: ['codex'], scopeType: 'project', projectPath: '' }), { code: 'INVALID_SKILL_TARGETS' })
+})
+
+test('a cached catalog failure preserves initialized subscriptions for later events', async () => {
+  const connection = store()
+  let eventState
+  let eventRegistration
+  window.ucli.onServerConnectionState = (listener) => { eventState = listener; return () => {} }
+  window.ucli.onServerConnectionRegistrationRequested = (listener) => { eventRegistration = listener; return () => {} }
+  window.ucli.getServerConnectionState = async () => initialState
+  window.ucli.listServerConnectionSkills = async () => { throw Object.assign(new Error(), { code: 'NETWORK_UNREACHABLE' }) }
+  window.ucli.getServerConnectionAttempt = async () => ({ attemptId: 'attempt-later', preview: {} })
+  await connection.initialize()
+  assert.equal(connection.initialized, true)
+  eventState({ ...initialState, revision: 2, status: 'unreachable' })
+  eventRegistration({ attemptId: 'attempt-later' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(connection.status, 'unreachable')
+  assert.equal(connection.attempt.attemptId, 'attempt-later')
+})
+
+test('catalog identity fences clear disconnected and stale organization results', async () => {
+  const connection = store()
+  const orgA = { ...initialState, revision: 1, organization: { id: 'org-a', name: 'A' } }
+  const orgB = { ...initialState, revision: 3, organization: { id: 'org-b', name: 'B' } }
+  const lateA = deferred()
+  const freshB = deferred()
+  let calls = 0
+  window.ucli.onServerConnectionState = (listener) => { stateListener = listener; return () => {} }
+  window.ucli.onServerConnectionRegistrationRequested = (listener) => { registrationListener = listener; return () => {} }
+  window.ucli.getServerConnectionState = async () => orgA
+  window.ucli.listServerConnectionSkills = async () => (++calls === 1 ? lateA.promise : freshB.promise)
+  const initialize = connection.initialize()
+  await new Promise(resolve => setImmediate(resolve))
+  stateListener({ ...orgA, revision: 2, status: 'disconnected' })
+  assert.deepEqual(connection.skills, [])
+  stateListener(orgB)
+  freshB.resolve([{ versionId: 'org-b-version' }])
+  lateA.resolve([{ versionId: 'org-a-version' }])
+  await initialize
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(connection.skills, [{ versionId: 'org-b-version' }])
+  assert.equal(connection.organization.id, 'org-b')
 })
 
 test('unknown server errors never retain attacker-controlled codes or text', async () => {

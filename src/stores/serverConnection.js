@@ -32,6 +32,11 @@ function isCurrentState(value, revision) {
   return value && Number.isSafeInteger(value.revision) && value.revision >= revision
 }
 
+function catalogIdentity(state) {
+  if (state?.status !== 'connected' || typeof state.serverOrigin !== 'string' || typeof state.organization?.id !== 'string') return null
+  return `${state.serverOrigin}\u0000${state.organization.id}`
+}
+
 function validateSkillTargets(value) {
   const targetAdapterIds = Array.isArray(value?.targetAdapterIds)
     ? [...new Set(value.targetAdapterIds.filter((id) => typeof id === 'string' && id))]
@@ -56,6 +61,7 @@ export const useServerConnectionStore = defineStore('server-connection', {
     serverTime: null,
     lastSyncedAt: null,
     attempt: null,
+    pendingAttemptId: null,
     models: [],
     skills: [],
     error: null,
@@ -67,7 +73,9 @@ export const useServerConnectionStore = defineStore('server-connection', {
     _unsubscribeState: null,
     _unsubscribeRegistration: null,
     _lifecycle: 0,
-    _attemptRequest: 0
+    _attemptRequest: 0,
+    _catalogRequest: 0,
+    _connectionIdentity: null
   }),
   getters: {
     canConfirm: (state) => state.attempt?.preview?.link?.status === 'AVAILABLE' &&
@@ -85,7 +93,21 @@ export const useServerConnectionStore = defineStore('server-connection', {
       this.authorizationExpiresAt = value.authorizationExpiresAt || value.connection?.authorizationExpiresAt || null
       this.serverTime = value.serverTime || value.connection?.serverTime || null
       this.lastSyncedAt = value.lastSyncedAt || value.connection?.lastSyncedAt || null
+      const nextIdentity = catalogIdentity(this)
+      if (nextIdentity !== this._connectionIdentity) {
+        this._catalogRequest += 1
+        this.skills = []
+        this._connectionIdentity = nextIdentity
+      }
       return true
+    },
+    handleState(value, lifecycle = this._lifecycle) {
+      const previousIdentity = this._connectionIdentity
+      const applied = this.applyState(value)
+      if (applied && this._lifecycle === lifecycle && this._connectionIdentity && this._connectionIdentity !== previousIdentity) {
+        void this.loadCachedSkills(lifecycle, this._connectionIdentity).catch(() => {})
+      }
+      return applied
     },
     async initialize() {
       if (this.initialized) return this
@@ -93,18 +115,20 @@ export const useServerConnectionStore = defineStore('server-connection', {
       const lifecycle = this._lifecycle
       this._initializePromise = (async () => {
         const api = ipc.serverConnection
-        this._unsubscribeState = api.onStateChanged((state) => {
-          if (this._lifecycle === lifecycle) this.applyState(state)
-        })
-        this._unsubscribeRegistration = api.onRegistrationRequested(({ attemptId }) => {
-          if (this._lifecycle === lifecycle && typeof attemptId === 'string') void this.loadAttempt(attemptId, lifecycle)
-        })
         try {
+          this._unsubscribeState = api.onStateChanged((state) => {
+            if (this._lifecycle === lifecycle) this.handleState(state, lifecycle)
+          })
+          this._unsubscribeRegistration = api.onRegistrationRequested(({ attemptId }) => {
+            if (this._lifecycle === lifecycle && typeof attemptId === 'string') void this.loadAttempt(attemptId, lifecycle).catch(() => {})
+          })
           const state = await api.getState()
           if (this._lifecycle !== lifecycle) return this
           this.applyState(state)
           this.initialized = true
-          if (this.status !== 'disconnected') await this.loadCachedSkills(lifecycle)
+          if (this._connectionIdentity) {
+            try { await this.loadCachedSkills(lifecycle, this._connectionIdentity) } catch { /* catalog availability does not end core subscriptions */ }
+          }
           return this
         } catch (error) {
           if (this._lifecycle === lifecycle) {
@@ -133,13 +157,18 @@ export const useServerConnectionStore = defineStore('server-connection', {
     },
     async loadAttempt(attemptId, expectedLifecycle = this._lifecycle) {
       const request = ++this._attemptRequest
+      this.pendingAttemptId = attemptId
       try {
         const attempt = await ipc.serverConnection.getAttempt(attemptId)
         if (this._lifecycle !== expectedLifecycle || request !== this._attemptRequest || attempt?.attemptId !== attemptId) return null
         this.attempt = attempt || null
+        this.pendingAttemptId = null
         return this.attempt
       } catch (error) {
-        this.error = publicError(error, '无法读取连接确认信息')
+        if (this._lifecycle === expectedLifecycle && request === this._attemptRequest) {
+          this.pendingAttemptId = null
+          this.error = publicError(error, '无法读取连接确认信息')
+        }
         throw error
       }
     },
@@ -205,9 +234,10 @@ export const useServerConnectionStore = defineStore('server-connection', {
       return this._redeemPromise
     },
     async cancelAttempt() {
-      const attemptId = this.attempt?.attemptId
+      const attemptId = this.attempt?.attemptId || this.pendingAttemptId
       this._attemptRequest += 1
       this.attempt = null
+      this.pendingAttemptId = null
       if (attemptId) await ipc.serverConnection.cancel(attemptId)
     },
     async runConnectionAction(operation, fallback) {
@@ -236,21 +266,31 @@ export const useServerConnectionStore = defineStore('server-connection', {
       }
     },
     async syncSkills() {
+      const lifecycle = this._lifecycle
+      const identity = this._connectionIdentity
+      const request = ++this._catalogRequest
       try {
-        this.skills = await ipc.serverConnection.syncSkills()
+        const skills = await ipc.serverConnection.syncSkills()
+        if (this._lifecycle === lifecycle && identity && identity === this._connectionIdentity && request === this._catalogRequest) {
+          this.skills = Array.isArray(skills) ? skills : []
+        }
         return this.skills
       } catch (error) {
         this.error = publicError(error, '无法同步组织 Skills')
         throw error
       }
     },
-    async loadCachedSkills(expectedLifecycle = this._lifecycle) {
+    async loadCachedSkills(expectedLifecycle = this._lifecycle, expectedIdentity = this._connectionIdentity) {
+      if (!expectedIdentity) return []
+      const request = ++this._catalogRequest
       try {
         const skills = await ipc.serverConnection.listSkills()
-        if (this._lifecycle === expectedLifecycle) this.skills = Array.isArray(skills) ? skills : []
+        if (this._lifecycle === expectedLifecycle && expectedIdentity === this._connectionIdentity && request === this._catalogRequest) {
+          this.skills = Array.isArray(skills) ? skills : []
+        }
         return this.skills
       } catch (error) {
-        if (this._lifecycle === expectedLifecycle) this.error = publicError(error)
+        if (this._lifecycle === expectedLifecycle && expectedIdentity === this._connectionIdentity && request === this._catalogRequest) this.error = publicError(error)
         throw error
       }
     },
