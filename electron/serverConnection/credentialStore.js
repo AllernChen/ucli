@@ -12,7 +12,8 @@ function credentialState(db) {
       pendingCandidateIds: new Set(),
       durableCandidateIds: new Set(),
       pendingPromotionId: null,
-      pendingRefreshConnectionId: null
+      pendingRefreshConnectionId: null,
+      pendingPersistence: false
     }
     const candidate = db.getServerConnection('candidate')
     if (candidate) state.durableCandidateIds.add(candidate.id)
@@ -224,9 +225,14 @@ export class ServerCredentialStore {
   }
 
   async retryPendingRefreshPersistence() {
-    if (!this.state.pendingRefreshConnectionId) return this.db.getServerConnection('current')
+    return this.retryPendingPersistence()
+  }
+
+  async retryPendingPersistence() {
+    if (!this.state.pendingPersistence && !this.state.pendingRefreshConnectionId) return this.db.getServerConnection('current')
     await this.flushOrThrow()
     this.state.pendingRefreshConnectionId = null
+    this.state.pendingPersistence = false
     return this.db.getServerConnection('current')
   }
 
@@ -253,6 +259,7 @@ export class ServerCredentialStore {
     this.state.durableCandidateIds.clear()
     this.state.pendingPromotionId = null
     this.state.pendingRefreshConnectionId = null
+    this.state.pendingPersistence = false
     await this.flushOrThrow()
   }
 
@@ -270,7 +277,9 @@ export class ServerCredentialStore {
     try {
       const persisted = await this.db.flush()
       if (persisted !== true) throw persistencePendingError()
+      this.state.pendingPersistence = false
     } catch (error) {
+      this.state.pendingPersistence = true
       if (error?.code === 'PERSISTENCE_PENDING') throw error
       throw persistencePendingError()
     }

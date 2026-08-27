@@ -155,3 +155,30 @@ test('a replacement connection starts its own bootstrap while an old bootstrap i
   assert.deepEqual(calls, ['https://server.example.test', 'https://replacement.example.test'])
   assert.equal((await manager.getBootstrap()).gateway.baseUrl, 'https://replacement.example.test/gateway')
 })
+
+test('shutdown fences a pending refresh and scrubs runtime token, cache, and timers', async () => {
+  const refresh = deferred()
+  const timers = { setTimeout: () => ({ unref() {} }), clearTimeout: () => {} }
+  const { manager } = createManager({ client: { refresh: async () => refresh.promise }, timers })
+  const pending = manager.getAccessToken()
+  const shutdown = manager.shutdown()
+  refresh.resolve({ accessToken: 'late-access', refreshToken: 'late-refresh', expiresIn: 900, authorization: { expiresAt: null, serverTime: '2026-08-27T00:00:00.000Z' } })
+  await shutdown
+  await assert.rejects(pending)
+  await assert.rejects(manager.getAccessToken(), { code: 'SERVER_CONNECTION_SHUTDOWN' })
+  assert.equal(manager.accessToken, null)
+  assert.equal(manager.bootstrapCache, null)
+  assert.equal(manager.accessRefreshTimer, null)
+})
+
+test('metadata persistence failure gates lifecycle work and schedules a retry', async () => {
+  const delays = []
+  const { manager } = createManager({
+    credentials: { updateConnectionMetadata: async () => { throw Object.assign(new Error('disk'), { code: 'PERSISTENCE_PENDING' }) } },
+    timers: { setTimeout: (_callback, delay) => { delays.push(delay); return { unref() {} } }, clearTimeout: () => {} }
+  })
+  await assert.rejects(manager.getAccessToken(), { code: 'PERSISTENCE_PENDING' })
+  assert.equal(manager.getState().reason, 'PERSISTENCE_PENDING')
+  await assert.rejects(manager.getBootstrap(), { code: 'PERSISTENCE_PENDING' })
+  assert.equal(delays.at(-1), 30_000)
+})

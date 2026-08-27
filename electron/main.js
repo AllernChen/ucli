@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, screen, ipcMain } from 'electron'
+import { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, screen, ipcMain, powerMonitor } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
@@ -331,7 +331,7 @@ app.whenReady().then(async () => {
   app.on('browser-window-focus', () => {
     orchestrator?.recoverServerConnection()?.catch(() => {})
   })
-  app.on('resume', () => {
+  powerMonitor.on('resume', () => {
     orchestrator?.recoverServerConnection()?.catch(() => {})
   })
 }).catch((error) => {

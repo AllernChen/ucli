@@ -46,6 +46,12 @@ test('second-instance registration can reference a module-scoped window focus fu
     'showMainWindow must be declared at module scope')
 })
 
+test('system resume uses Electron powerMonitor rather than the app event emitter', () => {
+  const source = readFileSync(new URL('../electron/main.js', import.meta.url), 'utf8')
+  assert.match(source, /powerMonitor\.on\('resume'/)
+  assert.doesNotMatch(source, /app\.on\('resume'/)
+})
+
 test('primary-instance forwarding preserves argv and workingDirectory for validated deep-link handling', () => {
   let handler = null
   const received = []

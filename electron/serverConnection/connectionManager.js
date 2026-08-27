@@ -76,6 +76,7 @@ export class ConnectionManager {
     this.listeners = new Set()
     this.registrationListeners = new Set()
     this.redeemFlights = new Map()
+    this.previewFlights = new Map()
     this.committingAttempts = new Set()
     this.operationEpoch = 0
     this.invalidatedAttempts = new Set()
@@ -131,13 +132,23 @@ export class ConnectionManager {
   }
 
   submitLink(input) {
+    this.assertNotShuttingDown()
     return this.submitParsedConnection(parseConnectionInput(input))
   }
 
   async submitParsedConnection({ serverOrigin, linkSecret }) {
+    this.assertNotShuttingDown()
     const attempt = this.attempts.create({ serverOrigin, linkSecret })
+    const generation = this.operationEpoch
+    const flight = this.previewOnce(attempt, generation)
+    this.previewFlights.set(attempt.attemptId, flight)
+    try { return await flight } finally { this.previewFlights.delete(attempt.attemptId) }
+  }
+
+  async previewOnce(attempt, generation) {
     try {
-      const preview = await this.client.preview({ serverOrigin, linkSecret })
+      const preview = await this.client.preview({ serverOrigin: attempt.serverOrigin, linkSecret: this.attempts.getSecret(attempt.attemptId) })
+      this.assertActiveAttempt(attempt.attemptId, generation)
       const publicAttempt = this.attempts.markPreview(attempt.attemptId, preview)
       if (!publicAttempt) throw Object.assign(new Error('Registration attempt was not found'), { code: 'invalid_link' })
       for (const listener of this.registrationListeners) listener(publicAttempt)
@@ -152,6 +163,7 @@ export class ConnectionManager {
   }
 
   confirm(attemptId) {
+    this.assertNotShuttingDown()
     const existing = this.redeemFlights.get(attemptId)
     if (existing) return existing
     if (this.redeemFlights.size) {
@@ -215,7 +227,8 @@ export class ConnectionManager {
         } finally {
           this.committingAttempts.delete(attemptId)
         }
-        this.assertActiveAttempt(attemptId, operationEpoch)
+        // Promotion is the Task 4 non-cancellable commit point. A shutdown or
+        // cancellation observed after it must not roll back durable current.
         this.current = connection
         this.status = 'connected'
         this.connectionEpoch += 1
@@ -293,6 +306,7 @@ export class ConnectionManager {
       const refreshToken = this.credentials.decryptRefreshToken(connection)
       if (!refreshToken) throw Object.assign(new Error('Stored server credential is unavailable'), { code: 'invalid_grant' })
       const refreshed = await this.client.refresh({ serverOrigin: connection.serverOrigin, refreshToken })
+      this.assertLifecycleAvailable()
       if (!this.isCurrentConnection(connection, connectionEpoch)) throw Object.assign(new Error(), { code: 'STALE_CONNECTION_OPERATION' })
       // From this point the old token is single-use and must never be sent.
       this.persistencePending = {
@@ -308,7 +322,7 @@ export class ConnectionManager {
         }))
       } catch (error) {
         if (error?.code === 'PERSISTENCE_PENDING') {
-          this.setRuntimeStatus('unreachable', 'PERSISTENCE_PENDING')
+          this.enterPersistencePending(this.persistencePending)
           throw error
         }
         throw error
@@ -338,6 +352,7 @@ export class ConnectionManager {
       this.setRuntimeStatus('connecting', null)
       try {
         const value = await this.bootstrap({ serverOrigin: connection.serverOrigin, accessToken })
+        this.assertLifecycleAvailable()
         if (!this.isCurrentConnection(connection, connectionEpoch)) return null
         this.bootstrapCache = { value, connectionId: connection.id, connectionRevision: connection.connectionRevision, connectionEpoch }
         await this.updateAuthorizationState(value.authorization, { connection, connectionEpoch })
@@ -388,14 +403,18 @@ export class ConnectionManager {
     if (!this.isCurrentConnection(connection, connectionEpoch)) return false
     this.current = nextConnection
     if (this.credentials.updateConnectionMetadata) {
-      const persisted = await this.runCredentialMutation(async () => {
-        if (!this.isCurrentConnection(connection, connectionEpoch)) return null
-        return this.credentials.updateConnectionMetadata({
-          connectionId: connection.id,
-          authorization,
-          reminderState
+      let persisted
+      try {
+        persisted = await this.runCredentialMutation(async () => {
+          if (!this.isCurrentConnection(connection, connectionEpoch) || this.shuttingDown) return null
+          return this.credentials.updateConnectionMetadata({ connectionId: connection.id, authorization, reminderState })
         })
-      })
+      } catch (error) {
+        if (error?.code === 'PERSISTENCE_PENDING') {
+          this.enterPersistencePending({ connection, connectionEpoch, authorization, accessToken: this.accessToken, accessTokenExpiresAt: this.accessTokenExpiresAt })
+        }
+        throw error
+      }
       if (!this.isCurrentConnection(connection, connectionEpoch)) return false
       this.current = persisted || this.current
     }
@@ -473,6 +492,20 @@ export class ConnectionManager {
     if (this.persistencePending) throw Object.assign(new Error('Server credentials could not be saved'), { code: 'PERSISTENCE_PENDING' })
   }
 
+  assertNotShuttingDown() {
+    if (this.shuttingDown) throw Object.assign(new Error('Server connection is shutting down'), { code: 'SERVER_CONNECTION_SHUTDOWN' })
+  }
+
+  enterPersistencePending(pending) {
+    this.persistencePending = pending
+    if (this.accessRefreshTimer) this.timers.clearTimeout(this.accessRefreshTimer)
+    this.accessRefreshTimer = null
+    this.setRuntimeStatus('unreachable', 'PERSISTENCE_PENDING')
+    if (this.retryTimer) this.timers.clearTimeout(this.retryTimer)
+    this.retryTimer = null
+    this.scheduleRetry()
+  }
+
   lifecycleKey(connection, connectionEpoch) {
     return connection ? `${connection.id}:${connection.connectionRevision}:${connectionEpoch}` : `none:${connectionEpoch}`
   }
@@ -517,12 +550,12 @@ export class ConnectionManager {
     if (this.persistencePending) {
       try {
         const pending = this.persistencePending
-        this.current = await this.runCredentialMutation(() => this.credentials.retryPendingRefreshPersistence()) || this.current
+        this.current = await this.runCredentialMutation(() => this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence()) || this.current
         this.persistencePending = null
         if (!this.isCurrentConnection(pending.connection, pending.connectionEpoch)) return this.getState()
         if (pending.accessTokenExpiresAt - this.now() >= 60_000) {
-          this.installAccessToken(pending.refreshed.accessToken, pending.refreshed.expiresIn, pending.accessTokenExpiresAt)
-          await this.updateAuthorizationState(pending.refreshed.authorization, pending)
+          if (pending.refreshed) this.installAccessToken(pending.refreshed.accessToken, pending.refreshed.expiresIn, pending.accessTokenExpiresAt)
+          await this.updateAuthorizationState(pending.authorization || pending.refreshed.authorization, pending)
           await this.getBootstrap({ force: true })
         } else {
           await this.refreshAndBootstrap()
@@ -547,7 +580,7 @@ export class ConnectionManager {
   listSkills() { return [] }
 
   isActiveAttempt(attemptId, epoch) {
-    return this.operationEpoch === epoch && !this.invalidatedAttempts.has(attemptId) &&
+    return !this.shuttingDown && this.operationEpoch === epoch && !this.invalidatedAttempts.has(attemptId) &&
       this.attempts.getSecret(attemptId) !== null
   }
 
@@ -589,6 +622,14 @@ export class ConnectionManager {
   async shutdown() {
     if (this.shuttingDown) return
     this.shuttingDown = true
+    this.operationEpoch += 1
+    for (const attemptId of this.previewFlights.keys()) this.attempts.cancel(attemptId)
+    for (const attemptId of this.redeemFlights.keys()) {
+      if (!this.committingAttempts.has(attemptId)) {
+        this.invalidatedAttempts.add(attemptId)
+        this.attempts.cancel(attemptId)
+      }
+    }
     if (this.retryTimer) {
       this.timers.clearTimeout(this.retryTimer)
       this.retryTimer = null
@@ -600,10 +641,22 @@ export class ConnectionManager {
     this.accessToken = null
     this.accessTokenExpiresAt = 0
     this.bootstrapCache = null
-    await Promise.allSettled([this.refreshFlight?.promise, this.bootstrapFlight?.promise, this.credentialMutation].filter(Boolean))
-    if (this.persistencePending && this.credentials.retryPendingRefreshPersistence) {
-      await this.runCredentialMutation(() => this.credentials.retryPendingRefreshPersistence()).catch(() => {})
+    await Promise.allSettled([
+      ...this.previewFlights.values(), ...this.redeemFlights.values(),
+      this.refreshFlight?.promise, this.bootstrapFlight?.promise, this.credentialMutation
+    ].filter(Boolean))
+    if (this.persistencePending) {
+      await this.runCredentialMutation(() => this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.()).catch(() => {})
     }
+    // In-flight work may have completed while shutdown awaited it; scrub again.
+    this.accessToken = null
+    this.accessTokenExpiresAt = 0
+    this.bootstrapCache = null
+    this.persistencePending = null
+    this.refreshFlight = null
+    this.bootstrapFlight = null
+    this.previewFlights.clear()
+    this.redeemFlights.clear()
   }
 }
 
