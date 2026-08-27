@@ -204,11 +204,11 @@ const ERROR_MESSAGES = Object.freeze({
 export function sanitiseServerError(error) {
   const code = typeof error?.code === 'string' && SERVER_ERROR_CODE_SET.has(error.code)
     ? error.code
-    : 'server_operation_failed'
+    : null
   return {
     code,
     message: ERROR_MESSAGES[code] || 'Server operation failed',
-    retryable: false
+    retryable: code === null ? error?.retryable === true : false
   }
 }
 

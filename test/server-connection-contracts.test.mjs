@@ -117,6 +117,9 @@ test('sanitiseServerError emits only stable public fields and never serialises r
     assert.equal(serialised.includes(secret), false)
   }
   assert.deepEqual(sanitiseServerError({ code: 'grant_bound' }), {
-    code: 'server_operation_failed', message: 'Server operation failed', retryable: false
+    code: null, message: 'Server operation failed', retryable: false
+  })
+  assert.deepEqual(sanitiseServerError({ code: 'ETIMEDOUT', retryable: true }), {
+    code: null, message: 'Server operation failed', retryable: true
   })
 })
