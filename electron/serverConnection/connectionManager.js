@@ -445,9 +445,41 @@ export class ConnectionManager {
     if (next === undefined) return
     this.expiryTimer = this.timers.setTimeout(async () => {
       this.expiryTimer = null
-      await this.updateAuthorizationState(authorization, { connection: this.current, connectionEpoch }).catch(() => {})
+      await this.reevaluateReminder({ connection: this.current, connectionEpoch }).catch(() => {})
     }, Math.max(0, remaining - next * DAY_MS + 1))
     this.expiryTimer?.unref?.()
+  }
+
+  async reevaluateReminder({ connection = this.current, connectionEpoch = this.connectionEpoch } = {}) {
+    if (!connection || !this.isCurrentConnection(connection, connectionEpoch)) return false
+    const authorization = {
+      expiresAt: connection.authorizationExpiresAt,
+      serverTime: connection.serverTime
+    }
+    const reminderState = this.reminder.evaluate({
+      authorizationExpiresAt: authorization.expiresAt,
+      serverTime: authorization.serverTime,
+      receivedLocalTime: connection.receivedLocalTime,
+      reminderState: connection.reminderState || {}
+    })
+    const nextConnection = { ...connection, reminderState }
+    this.current = nextConnection
+    if (this.credentials.updateConnectionMetadata) {
+      const persisted = await this.runCredentialMutation(() => {
+        if (!this.isCurrentConnection(connection, connectionEpoch) || this.shuttingDown) return null
+        return this.credentials.updateConnectionMetadata({
+          connectionId: connection.id,
+          reminderState,
+          reminderOnly: true
+        })
+      })
+      if (!this.isCurrentConnection(connection, connectionEpoch)) return false
+      this.current = persisted || this.current
+    }
+    const remaining = authorization.expiresAt === null ? Infinity : Date.parse(authorization.expiresAt) - (this.now() + this.current.serverOffsetMs)
+    this.setRuntimeStatus(remaining <= 7 * DAY_MS ? 'expiring' : 'connected', null)
+    this.scheduleExpiryReminder(authorization, this.current, connectionEpoch)
+    return true
   }
 
   async handleLifecycleError(error) {

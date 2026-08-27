@@ -247,9 +247,17 @@ export class ServerCredentialStore {
     return this.db.getServerConnection('current')
   }
 
-  async updateConnectionMetadata({ connectionId, authorization, reminderState }) {
+  async updateConnectionMetadata({ connectionId, authorization, reminderState, reminderOnly = false }) {
     this.assertPersistenceWritable()
     if (this.isPersistencePending()) throw persistencePendingError()
+    if (reminderOnly) {
+      await this.db.transaction(() => {
+        const updated = this.db.updateServerConnection(connectionId, { reminderState })
+        if (!updated) throw credentialError('SERVER_CONNECTION_NOT_FOUND', 'Server connection was not found')
+      })
+      await this.flushOrThrow()
+      return this.db.getServerConnection('current')
+    }
     const receivedLocalTime = this.now()
     await this.db.transaction(() => {
       const updated = this.db.updateServerConnection(connectionId, {
