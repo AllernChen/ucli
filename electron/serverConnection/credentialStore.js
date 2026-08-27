@@ -155,10 +155,24 @@ export class ServerCredentialStore {
     const nextRevision = (current?.connectionRevision || 0) + 1
     await this.db.transaction(() => this.db.promoteServerConnection({ candidateId, nextRevision }))
     this.state.pendingPromotionId = candidateId
-    await this.flushOrThrow()
-    this.state.pendingPromotionId = null
-    this.state.durableCandidateIds.delete(candidateId)
-    return this.db.getServerConnection('current')
+    try {
+      await this.flushOrThrow()
+      this.state.pendingPromotionId = null
+      this.state.durableCandidateIds.delete(candidateId)
+      return this.db.getServerConnection('current')
+    } catch (error) {
+      await this.restorePromotionSlots({ current, candidate })
+      this.state.pendingPromotionId = null
+      throw error
+    }
+  }
+
+  async restorePromotionSlots({ current, candidate }) {
+    await this.db.transaction(() => {
+      this.db.sql.run("DELETE FROM server_connections WHERE slot IN ('current', 'candidate')")
+      if (current) this.db.saveServerConnection(current)
+      this.db.saveServerConnection(candidate)
+    })
   }
 
   async replaceRefreshToken({ connectionId, refreshToken, authorization }) {

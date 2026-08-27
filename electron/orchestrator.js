@@ -99,6 +99,11 @@ import {
   updateSummarySettings
 } from './summaries/summaryScheduler.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
+import { ServerCredentialStore } from './serverConnection/credentialStore.js'
+import { RegistrationAttemptStore } from './serverConnection/registrationAttempts.js'
+import { createDeviceGrantClient } from './serverConnection/deviceGrantClient.js'
+import { ConnectionManager } from './serverConnection/connectionManager.js'
+import { registerServerConnectionIpc } from './serverConnection/ipc.js'
 import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
 import { scanStorageCategories } from './storage/storageScanner.js'
 import { createStorageManagementService } from './storage/storageManagementService.js'
@@ -838,6 +843,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   }
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
+  let serverConnectionManager = null
   const approvalNotifications = new Map()
   const completionNotifications = new Set()
   const diagnostics = createDiagnosticsService({
@@ -1569,6 +1575,13 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       listSessions,
       restartSession: restartSessionForSkills,
       discoverUCodeSkills: listUCodeSkills
+    })
+    serverConnectionManager = new ConnectionManager({
+      attempts: new RegistrationAttemptStore(),
+      credentials: new ServerCredentialStore({ db, safeStorage }),
+      client: createDeviceGrantClient(),
+      platform: ({ win32: 'windows', darwin: 'macos', linux: 'linux' })[process.platform],
+      deviceName: app.getName()
     })
     try {
       await profileService.reconcileCodexProfiles()
@@ -3224,6 +3237,9 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       getClaudeRuntime: () => readClaudeRuntimeSnapshot({ env: process.env })
     })
     if (skillsService) registerSkillsIpc({ ipcMain, service: skillsService })
+    if (serverConnectionManager) {
+      registerServerConnectionIpc({ ipcMain, manager: serverConnectionManager, send })
+    }
     if (storageService) registerStorageIpc({ ipcMain, service: storageService })
     registerSummaryIpc({
       ipcMain,
@@ -3800,6 +3816,9 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     initPersistence,
     startGateway,
     shutdown,
-    getPersistenceRecovery: () => persistenceRecovery
+    getPersistenceRecovery: () => persistenceRecovery,
+    submitServerConnection: connection => serverConnectionManager?.submitParsedConnection(connection) || Promise.reject(
+      Object.assign(new Error('Server connection is unavailable'), { code: 'SERVER_CONNECTION_UNAVAILABLE' })
+    )
   }
 }

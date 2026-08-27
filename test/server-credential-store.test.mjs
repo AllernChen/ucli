@@ -114,6 +114,28 @@ test('a second store hides a current connection whose promotion flush failed', a
   })
 })
 
+test('a failed promotion flush restores the durable current and leaves the candidate retryable', async () => {
+  await withStore(async ({ db }) => {
+    const ids = ['550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440001']
+    const store = new ServerCredentialStore({ db, safeStorage, now: () => 100, uuid: () => ids.shift() })
+    const old = await store.stageCandidate(credentials({ refreshToken: 'old-token' }))
+    await store.promoteCandidate(old.id)
+    const oldCurrent = store.readCurrent()
+    const candidate = await store.stageCandidate(credentials({ refreshToken: 'next-token' }))
+    const originalFlush = db.flush.bind(db)
+    db.flush = () => false
+
+    await assert.rejects(store.promoteCandidate(candidate.id), { code: 'PERSISTENCE_PENDING' })
+    assert.deepEqual(store.readCurrent(), oldCurrent)
+    assert.deepEqual(db.getServerConnection('candidate'), candidate)
+
+    db.flush = originalFlush
+    const promoted = await store.promoteCandidate(candidate.id)
+    assert.equal(promoted.id, candidate.id)
+    assert.equal(promoted.connectionRevision, 2)
+  })
+})
+
 test('candidate remains runtime-invisible until ciphertext flushes and promotion replaces current atomically', async () => {
   await withStore(async ({ db }) => {
     const ids = ['550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440001']
