@@ -507,6 +507,9 @@ export class ConnectionManager {
 
   assertLifecycleAvailable() {
     if (this.shuttingDown) throw Object.assign(new Error('Server connection is shutting down'), { code: 'SERVER_CONNECTION_SHUTDOWN' })
+    if (this.credentials.isPersistencePending?.() && !this.persistencePending) {
+      this.enterPersistencePending({ connection: this.current, connectionEpoch: this.connectionEpoch, shared: true })
+    }
     if (this.persistencePending) throw Object.assign(new Error('Server credentials could not be saved'), { code: 'PERSISTENCE_PENDING' })
   }
 

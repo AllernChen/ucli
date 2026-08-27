@@ -13,8 +13,7 @@ function credentialState(db) {
       durableCandidateIds: new Set(),
       pendingPromotionId: null,
       pendingRefreshConnectionId: null,
-      pendingPersistence: false,
-      pendingOwner: null
+      pendingPersistence: false
     }
     const candidate = db.getServerConnection('candidate')
     if (candidate) state.durableCandidateIds.add(candidate.id)
@@ -62,6 +61,7 @@ export class ServerCredentialStore {
   }
 
   async getOrCreateInstallation({ deviceName }) {
+    this.assertPersistenceWritable()
     if (this.state.installationFlight) return this.state.installationFlight
     const flight = this.getOrCreateInstallationOnce(deviceName)
     this.state.installationFlight = flight
@@ -106,7 +106,7 @@ export class ServerCredentialStore {
   }
 
   decryptRefreshToken(connection) {
-    if (this.isPersistencePending() && this.state.pendingOwner !== this) throw persistencePendingError()
+    this.assertPersistenceWritable()
     if (!connection?.refreshTokenCiphertext) return null
     this.assertEncryptionAvailable()
     try {
@@ -117,6 +117,7 @@ export class ServerCredentialStore {
   }
 
   async stageCandidate({ serverOrigin, refreshToken, account, organization, authorization }) {
+    this.assertPersistenceWritable()
     const ciphertext = this.encryptRefreshToken(refreshToken)
     const receivedLocalTime = this.now()
     const record = {
@@ -146,6 +147,7 @@ export class ServerCredentialStore {
   }
 
   async promoteCandidate(candidateId) {
+    this.assertPersistenceWritable()
     if (this.state.pendingPromotionId === candidateId) {
       await this.flushOrThrow()
       this.state.pendingPromotionId = null
@@ -176,6 +178,7 @@ export class ServerCredentialStore {
   }
 
   async discardCandidate(candidateId) {
+    this.assertPersistenceWritable()
     const candidate = this.db.getServerConnection('candidate')
     if (!candidate || candidate.id !== candidateId) {
       this.state.pendingCandidateIds.delete(candidateId)
@@ -206,6 +209,7 @@ export class ServerCredentialStore {
   }
 
   async replaceRefreshToken({ connectionId, refreshToken, authorization }) {
+    this.assertPersistenceWritable()
     if (this.isPersistencePending()) throw persistencePendingError()
     const ciphertext = this.encryptRefreshToken(refreshToken)
     const receivedLocalTime = this.now()
@@ -240,11 +244,11 @@ export class ServerCredentialStore {
     await this.flushOrThrow()
     this.state.pendingRefreshConnectionId = null
     this.state.pendingPersistence = false
-    this.state.pendingOwner = null
     return this.db.getServerConnection('current')
   }
 
   async updateConnectionMetadata({ connectionId, authorization, reminderState }) {
+    this.assertPersistenceWritable()
     if (this.isPersistencePending()) throw persistencePendingError()
     const receivedLocalTime = this.now()
     await this.db.transaction(() => {
@@ -263,6 +267,7 @@ export class ServerCredentialStore {
   }
 
   async disconnect() {
+    this.assertPersistenceWritable()
     await this.db.transaction(() => this.db.clearServerConnections())
     this.state.pendingCandidateIds.clear()
     this.state.durableCandidateIds.clear()
@@ -282,15 +287,17 @@ export class ServerCredentialStore {
     }
   }
 
+  assertPersistenceWritable() {
+    if (this.isPersistencePending()) throw persistencePendingError()
+  }
+
   async flushOrThrow() {
     try {
       const persisted = await this.db.flush()
       if (persisted !== true) throw persistencePendingError()
       this.state.pendingPersistence = false
-      this.state.pendingOwner = null
     } catch (error) {
       this.state.pendingPersistence = true
-      this.state.pendingOwner = this
       if (error?.code === 'PERSISTENCE_PENDING') throw error
       throw persistencePendingError()
     }

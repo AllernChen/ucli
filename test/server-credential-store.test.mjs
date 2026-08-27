@@ -50,6 +50,7 @@ test('installation UUID is created once and survives disconnect, failed candidat
     await assert.rejects(store.stageCandidate(credentials()), { code: 'PERSISTENCE_PENDING' })
     await assert.rejects(store.promoteCandidate(installation.installationId), { code: 'PERSISTENCE_PENDING' })
     db.flush = originalFlush
+    await store.retryPendingPersistence()
     const candidate = await store.stageCandidate(credentials())
     await store.promoteCandidate(candidate.id)
     await store.disconnect()
@@ -130,6 +131,7 @@ test('a failed promotion flush restores the durable current and leaves the candi
     assert.deepEqual(db.getServerConnection('candidate'), candidate)
 
     db.flush = originalFlush
+    await store.retryPendingPersistence()
     const promoted = await store.promoteCandidate(candidate.id)
     assert.equal(promoted.id, candidate.id)
     assert.equal(promoted.connectionRevision, 2)
@@ -154,6 +156,7 @@ test('discarding a candidate preserves current and installation, and a failed di
     await assert.rejects(store.promoteCandidate(candidate.id), { code: 'PERSISTENCE_PENDING' })
 
     db.flush = originalFlush
+    await store.retryPendingPersistence()
     assert.equal(await store.discardCandidate(candidate.id), true)
     assert.equal(db.getServerConnection('candidate'), null)
     assert.deepEqual(store.readCurrent(), oldCurrent)
@@ -200,7 +203,7 @@ test('refresh rotation never restores the old token when the new ciphertext cann
     await assert.rejects(store.replaceRefreshToken({
       connectionId: candidate.id, refreshToken: 'new-token', authorization: credentials().authorization
     }), { code: 'PERSISTENCE_PENDING' })
-    assert.equal(store.decryptRefreshToken(store.readCurrent()), 'new-token')
+    await assert.rejects(async () => store.decryptRefreshToken(store.readCurrent()), { code: 'PERSISTENCE_PENDING' })
     assert.equal(store.readCurrent().refreshTokenCiphertext, tokenCiphertext('new-token'))
   })
 })
