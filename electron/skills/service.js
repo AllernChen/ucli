@@ -155,7 +155,8 @@ export function createSkillsService({
       const result = await flush()
       if (result === false) throw new Error('flush failed')
       guard?.()
-    } catch {
+    } catch (error) {
+      if (error?.code === 'SERVER_SKILL_STALE' || error?.code === 'SERVER_SKILL_SHUTDOWN') throw error
       throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
     }
   }
@@ -271,7 +272,8 @@ export function createSkillsService({
     )
   }
 
-  async function reuseManagedPackage(pkg, targetAdapterIds, matchType) {
+  async function reuseManagedPackage(pkg, targetAdapterIds, matchType, guard = null) {
+    guard?.()
     const canonical = inspectSkillDirectory(packageDirectory(pkg.id))
     if (canonical.contentSha256 !== pkg.contentSha256) {
       throw serviceError('Managed package was modified outside UCLI', 'SKILL_DRIFTED')
@@ -282,14 +284,15 @@ export function createSkillsService({
     const projectionIds = planSkillProjections(missingAdapterIds, projectionOptions(scope?.scopeType, scope?.scopeKey))
     const appliedAdapterIds = []
     for (const adapterId of projectionIds) {
+      guard?.()
       const existing = view.installations.find((item) => item.targetAdapterId === adapterId)
       if (existing) {
         if (existing.status !== 'disabled') {
           throw serviceError('Existing managed projection requires attention', 'SKILL_TARGET_EXISTS')
         }
-        await setEnabled(existing.id, true)
+        await setEnabled(existing.id, true, { guard })
       } else {
-        await applyToAdapter(pkg.id, adapterId)
+        await applyToAdapter(pkg.id, adapterId, { guard })
       }
       appliedAdapterIds.push(adapterId)
       view = packageView(db.getSkillPackage(pkg.id))
@@ -419,13 +422,15 @@ export function createSkillsService({
       }
       const packagesInScope = db.listSkillPackages().filter((pkg) => packageInScope(pkg, scopeType, scopeKey))
       const reusable = packagesInScope
+        .filter(pkg => !serverMapping || pkg.sourceType === 'server')
         .filter((pkg) => pkg.contentSha256 === inspected.contentSha256)
         .sort((left, right) => Number(samePreparedSource(right, prepared.source)) - Number(samePreparedSource(left, prepared.source)))[0]
       if (reusable) {
         const result = await reuseManagedPackage(
           reusable,
           targetAdapterIds,
-          samePreparedSource(reusable, prepared.source) ? 'same_source_and_content' : 'same_content'
+          samePreparedSource(reusable, prepared.source) ? 'same_source_and_content' : 'same_content',
+          guard
         )
         if (serverMapping) {
           await db.transaction(() => { guard?.(); db.linkServerSkillPackage({ ...serverMapping, packageId: reusable.id }); guard?.() })
@@ -528,6 +533,10 @@ export function createSkillsService({
           : view
       } catch (error) {
         if (error?.code === 'SKILL_PERSISTENCE_PENDING') throw error
+        try {
+          await db.transaction(() => db.deleteSkillPackage(packageId))
+          await flush()
+        } catch { /* compensation is best effort but occurs before stale returns */ }
         for (const item of created.reverse()) {
           try { removeManagedSkillDirectory(item.path, item.sha256) } catch { /* preserve drifted data */ }
         }
@@ -556,7 +565,7 @@ export function createSkillsService({
     const serverSource = validServerSource(source)
     const validated = validateInstallRequest(targets)
     const prepare = sourceLoader.withVerifiedArchive
-      ? work => sourceLoader.withVerifiedArchive({ path: archivePath, identity: archiveIdentity, guard }, work)
+      ? work => sourceLoader.withVerifiedArchive({ path: archivePath, identity: archiveIdentity, sha256: serverSource.sha256, guard }, work)
       : work => sourceLoader.withPrepared({ type: 'local', path: archivePath }, work, { guard })
     return prepare(async (prepared) => {
       guard?.()
@@ -579,7 +588,7 @@ export function createSkillsService({
       throw serviceError('Server Skill package is not installed for these targets', 'SKILL_PACKAGE_NOT_FOUND')
     }
     const prepare = sourceLoader.withVerifiedArchive
-      ? work => sourceLoader.withVerifiedArchive({ path: archivePath, identity: archiveIdentity, guard }, work)
+      ? work => sourceLoader.withVerifiedArchive({ path: archivePath, identity: archiveIdentity, sha256: serverSource.sha256, guard }, work)
       : work => sourceLoader.withPrepared({ type: 'local', path: archivePath }, work, { guard })
     return prepare(async (prepared) => {
       guard?.()
@@ -626,7 +635,6 @@ export function createSkillsService({
         return packageView(db.getSkillPackage(packageId))
       } catch (error) {
         if (error?.code === 'SKILL_PERSISTENCE_PENDING') throw error
-        try { await db.transaction(() => db.deleteSkillPackage(packageId)) } catch {}
         for (const item of updatedTargets.reverse()) {
           try { copySkillDirectoryAtomic(backup, item.targetPath, { expectedExistingSha256: next.contentSha256 }) } catch {}
         }
@@ -825,7 +833,8 @@ export function createSkillsService({
     return packageView(db.getSkillPackage(pkg.id))
   }
 
-  async function applyToAdapter(packageId, targetAdapterId) {
+  async function applyToAdapter(packageId, targetAdapterId, { guard = null } = {}) {
+    guard?.()
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
     if (!SKILL_ADAPTERS[targetAdapterId]) throw serviceError('Skill adapter is unavailable', 'SKILL_ADAPTER_UNAVAILABLE')
@@ -902,6 +911,7 @@ export function createSkillsService({
       }
       deployed = existing
     } else {
+      guard?.()
       deployed = copySkillDirectoryAtomic(packageDirectory(pkg.id), targetPath)
       created = true
     }
@@ -910,19 +920,21 @@ export function createSkillsService({
     const installationId = uuid()
     try {
       await db.transaction(async () => {
+        guard?.()
         db.insertSkillInstallation({
           id: installationId, packageId, targetAdapterId,
           scopeType: scope.scopeType, scopeKey: scope.scopeKey, targetPath,
           enabled: true, deployedSha256: deployed.contentSha256, status: 'ready',
           createdAt: timestamp, updatedAt: timestamp
         })
+        guard?.()
       })
-      await persistOrThrow()
+      await persistOrThrow(guard)
       return packageView(db.getSkillPackage(packageId))
     } catch (error) {
       try {
         if (db.getSkillInstallation(installationId)) db.deleteSkillInstallation(installationId)
-        if (error?.code === 'SKILL_PERSISTENCE_PENDING') await flush()
+        if (error?.code === 'SKILL_PERSISTENCE_PENDING' || error?.code === 'SERVER_SKILL_STALE') await flush()
       } catch { /* keep the original operation error */ }
       if (created) {
         try { removeManagedSkillDirectory(targetPath, deployed.contentSha256) } catch { /* preserve changed data */ }
@@ -931,13 +943,15 @@ export function createSkillsService({
     }
   }
 
-  async function setEnabled(installationId, enabled) {
+  async function setEnabled(installationId, enabled, { guard = null } = {}) {
+    guard?.()
     const item = db.getSkillInstallation(installationId)
     if (!item) throw serviceError('Skill installation was not found', 'SKILL_INSTALLATION_NOT_FOUND')
     const pkg = db.getSkillPackage(item.packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
     if (Boolean(enabled) === item.enabled) return inspectInstallation(item)
     if (enabled) {
+      guard?.()
       const deployed = copySkillDirectoryAtomic(packageDirectory(pkg.id), item.targetPath)
       db.updateSkillInstallation(item.id, {
         enabled: true,
@@ -946,6 +960,7 @@ export function createSkillsService({
         updatedAt: now()
       })
     } else {
+      guard?.()
       removeManagedSkillDirectory(item.targetPath, item.deployedSha256)
       db.updateSkillInstallation(item.id, {
         enabled: false,
@@ -954,7 +969,7 @@ export function createSkillsService({
         updatedAt: now()
       })
     }
-    await persistOrThrow()
+    await persistOrThrow(guard)
     return inspectInstallation(db.getSkillInstallation(item.id))
   }
 

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { dirname, extname, relative, resolve } from 'node:path'
 import AdmZip from 'adm-zip'
 
@@ -245,17 +246,23 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit, c
       const prepared = await prepare(source)
       try { guard?.(); return await work(prepared) } finally { prepared.cleanup() }
     },
-    async withVerifiedArchive({ path, identity, guard = null } = {}, work) {
+    async withVerifiedArchive({ path, identity, sha256 = null, guard = null } = {}, work) {
       guard?.()
       const before = lstatSync(path)
       if (!before.isFile() || before.isSymbolicLink() ||
         (identity && (before.size !== identity.size || before.ino !== identity.ino || before.dev !== identity.dev))) {
         throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
       }
+      if (sha256 && createHash('sha256').update(readFileSync(path)).digest('hex') !== sha256) {
+        throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
+      }
       return this.withPrepared({ type: 'local', path }, async (prepared) => {
         guard?.()
         const after = lstatSync(path)
         if (!after.isFile() || after.isSymbolicLink() || after.size !== before.size || after.ino !== before.ino || after.dev !== before.dev) {
+          throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
+        }
+        if (sha256 && createHash('sha256').update(readFileSync(path)).digest('hex') !== sha256) {
           throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
         }
         return work(prepared)

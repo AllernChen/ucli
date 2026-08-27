@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -12,6 +13,30 @@ function createSkill(root, name = 'local-skill', description = 'Local test skill
   mkdirSync(root, { recursive: true })
   writeFileSync(join(root, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n\n# Test\n`)
 }
+
+test('verified archive preparation rejects a same-inode, same-size overwrite with a changed digest', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-verified-'))
+  try {
+    const archive = join(temp, 'skill.zip')
+    const zip = new AdmZip()
+    zip.addFile('skill/SKILL.md', Buffer.from('---\nname: skill\ndescription: test\n---\n'))
+    const original = zip.toBuffer()
+    writeFileSync(archive, original)
+    const identity = lstatSync(archive)
+    const replacement = Buffer.from(original)
+    replacement[replacement.length - 1] ^= 1
+    writeFileSync(archive, replacement)
+    const loader = createSkillSourceLoader({ stagingRoot: join(temp, 'staging') })
+    await assert.rejects(
+      loader.withVerifiedArchive({
+        path: archive, identity, sha256: createHash('sha256').update(original).digest('hex')
+      }, async () => {}),
+      error => error.code === 'SKILL_SOURCE_INVALID'
+    )
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
 
 test('local source inspection returns a safe normalized preview', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'ucli-skill-source-'))
