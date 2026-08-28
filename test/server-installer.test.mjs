@@ -9,7 +9,11 @@ const mainSource = readFileSync(new URL('../electron/main.js', import.meta.url),
 function extractOwnedExecutable(value, suffix) {
   if (!value.startsWith('"') || !value.endsWith(suffix)) return null
   const executable = value.slice(1, -suffix.length)
-  return /^[A-Za-z]:\\/.test(executable) ? executable : null
+  return /^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+\\)/.test(executable) ? executable : null
+}
+
+function nsisStrCpy(value, length, startOffset) {
+  return value.slice(startOffset, startOffset + length)
 }
 
 test('builder declares the UCLI Connection URL scheme for installed macOS metadata', () => {
@@ -42,8 +46,16 @@ test('NSIS overwrites this install registration and only removes both normalized
   assert.ok(commandPath && iconPath, 'uninstaller path extraction helpers must exist')
   assert.match(installerScript, /!ifdef BUILD_UNINSTALLER[\s\S]*?Function un\.UcliProtocolCommandPath/)
   assert.match(commandPath[1], /StrCmp \$R3.*%1/)
+  assert.match(commandPath[1], /IntOp \$R4 \$R2 - 1/)
+  assert.match(commandPath[1], /StrCpy \$R1 \$R0 \$R4 1/)
+  assert.match(commandPath[1], /unUcliProtocolCommandPathCheckUnc/)
+  assert.ok(commandPath[1].includes('StrCmp $R3 "\\" unUcliProtocolCommandPathCheckUnc'))
   assert.match(commandPath[1], /GetFullPathName/)
   assert.match(iconPath[1], /StrCmp \$R3.*,0/)
+  assert.match(iconPath[1], /IntOp \$R4 \$R2 - 1/)
+  assert.match(iconPath[1], /StrCpy \$R1 \$R0 \$R4 1/)
+  assert.match(iconPath[1], /unUcliProtocolIconPathCheckUnc/)
+  assert.ok(iconPath[1].includes('StrCmp $R3 "\\" unUcliProtocolIconPathCheckUnc'))
   assert.match(iconPath[1], /GetFullPathName/)
   assert.match(installerScript, /Function un\.UcliProtocolPathsMatch[\s\S]*?lstrcmpi[\s\S]*?FunctionEnd/)
   assert.doesNotMatch(installerScript, /Function UcliProtocolValueMatches|Call UcliProtocolValueMatches/)
@@ -58,12 +70,32 @@ test('protocol ownership normalization accepts only a quoted absolute executable
     extractOwnedExecutable('"C:\\Program Files\\UCLI\\UCLI.exe",0', '",0'),
     'C:\\Program Files\\UCLI\\UCLI.exe'
   )
+  assert.equal(
+    extractOwnedExecutable('"\\\\server\\share\\UCLI\\UCLI.exe" "%1"', '" "%1"'),
+    '\\\\server\\share\\UCLI\\UCLI.exe'
+  )
   for (const [value, suffix] of [
     ['C:\\Program Files\\UCLI\\UCLI.exe" "%1"', '" "%1"'],
     ['"relative\\UCLI.exe" "%1"', '" "%1"'],
+    ['"\\\\server" "%1"', '" "%1"'],
     ['"C:\\Program Files\\UCLI\\UCLI.exe" --open "%1"', '" "%1"'],
     ['"C:\\Program Files\\UCLI\\UCLI.exe",1', '",0']
   ]) assert.equal(extractOwnedExecutable(value, suffix), null)
+})
+
+test('NSIS path extraction excludes the closing quote at its discovered index', () => {
+  const value = '"C:\\Program Files\\UCLI\\UCLI.exe" "%1"'
+  const closingQuoteIndex = value.indexOf('"', 1)
+
+  assert.equal(
+    nsisStrCpy(value, closingQuoteIndex, 1),
+    'C:\\Program Files\\UCLI\\UCLI.exe"',
+    'using the quote index as NSIS length retains the closing quote'
+  )
+  assert.equal(
+    nsisStrCpy(value, closingQuoteIndex - 1, 1),
+    'C:\\Program Files\\UCLI\\UCLI.exe'
+  )
 })
 
 test('portable packaging and runtime leave installed protocol ownership untouched', () => {

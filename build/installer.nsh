@@ -24,13 +24,24 @@ Function un.UcliProtocolCommandPath
     Goto unUcliProtocolCommandPathFindQuote
 
   unUcliProtocolCommandPathValidate:
-    StrCpy $R1 $R0 $R2 1
+    IntOp $R4 $R2 - 1
+    StrCpy $R1 $R0 $R4 1
     StrCpy $R3 $R0 "" $R2
     StrCmp $R3 "$\" $\"%1$\"" 0 unUcliProtocolCommandPathInvalid
+    StrCpy $R3 $R1 1
+    StrCmp $R3 "\" unUcliProtocolCommandPathCheckUnc unUcliProtocolCommandPathCheckDrive
+
+  unUcliProtocolCommandPathCheckUnc:
+    StrCpy $R3 $R1 1 1
+    StrCmp $R3 "\" unUcliProtocolCommandPathCanonical unUcliProtocolCommandPathInvalid
+
+  unUcliProtocolCommandPathCheckDrive:
     StrCpy $R3 $R1 1 1
     StrCmp $R3 ":" 0 unUcliProtocolCommandPathInvalid
     StrCpy $R3 $R1 1 2
     StrCmp $R3 "\" 0 unUcliProtocolCommandPathInvalid
+
+  unUcliProtocolCommandPathCanonical:
     GetFullPathName $R1 "$R1"
     Push $R1
     Return
@@ -55,13 +66,24 @@ Function un.UcliProtocolIconPath
     Goto unUcliProtocolIconPathFindQuote
 
   unUcliProtocolIconPathValidate:
-    StrCpy $R1 $R0 $R2 1
+    IntOp $R4 $R2 - 1
+    StrCpy $R1 $R0 $R4 1
     StrCpy $R3 $R0 "" $R2
     StrCmp $R3 "$\",0" 0 unUcliProtocolIconPathInvalid
+    StrCpy $R3 $R1 1
+    StrCmp $R3 "\" unUcliProtocolIconPathCheckUnc unUcliProtocolIconPathCheckDrive
+
+  unUcliProtocolIconPathCheckUnc:
+    StrCpy $R3 $R1 1 1
+    StrCmp $R3 "\" unUcliProtocolIconPathCanonical unUcliProtocolIconPathInvalid
+
+  unUcliProtocolIconPathCheckDrive:
     StrCpy $R3 $R1 1 1
     StrCmp $R3 ":" 0 unUcliProtocolIconPathInvalid
     StrCpy $R3 $R1 1 2
     StrCmp $R3 "\" 0 unUcliProtocolIconPathInvalid
+
+  unUcliProtocolIconPathCanonical:
     GetFullPathName $R1 "$R1"
     Push $R1
     Return
