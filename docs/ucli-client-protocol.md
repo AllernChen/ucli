@@ -263,7 +263,8 @@ Authorization: Bearer <accessToken>
     {
       "id": "example-model",
       "displayName": "示例模型",
-      "contextSize": 128000
+      "contextSize": 128000,
+      "protocols": ["openai_responses"]
     }
   ],
   "skillsCatalogUrl": "http://10.44.100.100/api/v1/skills/catalog",
@@ -341,16 +342,20 @@ Refresh、Bootstrap、Skills 和网关鉴权失败使用 HTTP `401`。授权生�
 
 Bootstrap 的 `gateway.baseUrl` 是带路径的网关基址。拼接端点时必须保留其 `/gateway` 路径，不能使用会丢弃基址 pathname 的绝对 URL 替换方式。
 
-当前完整端点：
+Bootstrap 中每个模型的 `models[].protocols` 为必填且非空。公开值仅为 `openai_responses`、`openai_chat` 和 `anthropic_messages`；未知、缺失或空集合必须 fail closed。客户端按用户显式选择的协议和下列固定端点选择模型，绝不从模型标识、显示名称或目录顺序推断协议。
 
-| 能力 | 方法与地址 | 鉴权 |
+| 协议 | 固定端点 | 鉴权 |
 | --- | --- | --- |
-| 模型列表 | `GET http://10.44.100.100/gateway/v1/models` | Bearer |
-| OpenAI Responses | `POST http://10.44.100.100/gateway/v1/responses` | Bearer |
-| OpenAI Chat | `POST http://10.44.100.100/gateway/v1/chat/completions` | Bearer |
-| Anthropic Messages | `POST http://10.44.100.100/gateway/anthropic/v1/messages` | Bearer；兼容客户端可使用 `x-api-key` |
+| 模型目录 | `GET /v1/models` | Bearer |
+| `openai_responses` | `POST /v1/responses` | Bearer |
+| `openai_chat` | `POST /v1/chat/completions` | Bearer |
+| `anthropic_messages` | `POST /anthropic/v1/messages` | Bearer；兼容客户端可使用 `x-api-key` |
 
-`GET /v1/models` 返回 OpenAI 风格的 `{ "object": "list", "data": [...] }`。模型请求使用 Bootstrap 中模型的 `id`。
+`GET /v1/models` 返回 OpenAI 风格的 `{ "object": "list", "data": [...] }`，且目录中同一模型的协议集合必须与 Bootstrap 一致。客户端只会在选中模型同时出现在两份目录、并且两处均声明所选协议后发起 live 请求。
+
+Codex 仅投影 `openai_responses`；Claude 仅投影 `anthropic_messages`；仅有 `openai_chat` 的模型不创建 0.12.0 托管档案。一个模型同时声明两种托管协议时可分别投影给对应客户端。
+
+网关路由的稳定失败必须是 HTTP `503`，并同时具有 `Cache-Control: no-store`、`X-UCLI-Request-ID`、稳定错误码和规定的 `retryable` 值。仅允许 `model_protocol_unavailable`（不可重试）、`model_channel_unavailable`（可重试）和 `upstream_unavailable`（可重试）；客户端严格解析这些字段。它们是路由可用性而非授权失败，不清除凭证、不降级授权状态，也不影响本地能力。
 
 流式请求沿用 OpenAI/Anthropic 的取消与错误处理。单个上游模型失败不得映射为设备授权失效。
 
@@ -415,10 +420,10 @@ Authorization: Bearer <accessToken>
 
 服务端 `0.3.0` 已部署完成。客户端 0.12.0 发布前必须在可访问目标内网的环境完成至少一次真实设备注册、刷新、模型调用和 Skill 下载。
 
-## 17. 工作树验证状态（2026-08-28）
+## 17. 工作树验证状态（2026-08-29）
 
-此副本同步自用户提供的协议；它记录的是合同而不是已完成发布。当前工作树的固定 fixtures 覆盖 Preview、Redeem、Refresh、Bootstrap、Skills、稳定错误和合成 SSE，并对未知字段/枚举、日期、必填字段、URL、内容类型和 `no-store` 作本地 fail-closed 检查。
+此副本记录合同而不是已完成发布。当前工作树的固定 fixtures 覆盖 Preview、Redeem、Refresh、Bootstrap、Skills、稳定错误、模型协议投影与合成 SSE，并对未知字段/枚举、日期、必填字段、URL、内容类型和 `no-store` 作本地 fail-closed 检查。
 
-2026-08-28 的首次真实内网 smoke 在 Refresh 缺少 `Cache-Control: no-store` 时按合同 fail closed；第二次在服务端修复该响应头后越过 Refresh，并因 Bootstrap 模型 `contextSize=null` 被严格 parser 拒绝。服务端提交 `28bdc40` / runtime `sha256:ef15c26f8d80` 修复模型元数据后，第三次新授权重跑已通过 Preview、首次 Redeem、同一 installationId 幂等 Redeem、强制 Refresh、Bootstrap 和 `/gateway/v1/models`，证明客户端的正整数 `contextSize` 合同无需放宽。
+2026-08-28 的前两次真实内网 smoke 分别在 Refresh 缺少 `Cache-Control: no-store` 和 Bootstrap 模型 `contextSize` 无效时按合同 fail closed。第三次 smoke 是历史证据：它在模型流之前的阶段通过，但随后因旧的“可见即可路由”假设在模型流阶段停止；它不构成当前部署的基线或接受证据。
 
-第三次重跑随后在最小模型流阶段阻断：使用 `bootstrap.models[0].id` 调用 `POST /gateway/v1/responses` 得到非成功状态，测试没有读取 HTTP 状态或响应正文，并在 Skills catalog/download 前停止。只读服务端实现对照显示 Bootstrap 与模型列表公开所有已发布且有权限的公共模型，而 Responses 路由只选择具备 `OPENAI_RESPONSES` 健康渠道、健康 Key 和成本配置的候选；当前没有测试保证两组模型一致。服务端须用本轮时间和测试设备核对脱敏 Gateway/usage 日志，确认是无候选、配额还是上游失败，并建立可见性与可路由性合同门后再创建新授权。三轮链接均已绑定，客户端临时数据库、环境变量和 smoke 目录均已清理。
+已部署的协议能力合同取代旧的可见性/可路由性假设：真实 smoke 必须以显式协议选取模型、确认 Bootstrap 与 Gateway 双目录一致，再验证最小模型流、Skills 哈希和清理。该 smoke 仍需一次新的授权以及已确认的新服务端提交和运行时摘要；在这些条件满足前不得接受 0.12.0。

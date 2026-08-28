@@ -8,12 +8,12 @@
 
 | 项目 | 当前证据 / 状态 |
 | --- | --- |
-| 固定 Device Grant Link v1 合约 | 已由本地 fixtures 覆盖 Preview、Redeem、Refresh、Bootstrap、Skills、稳定错误和合成 SSE；未知字段忽略，未知枚举、日期、必填字段、跨源或错误固定路径 URL、错误 JSON 内容类型及缺失 `Cache-Control: no-store` 均 fail closed。 |
+| 本地协议合同 | PASS：Tasks 1–5 后四文件客户端/服务端合同门 48/48 通过。它覆盖 `openai_responses`、`openai_chat`、`anthropic_messages`，固定端点、Bootstrap/Gateway 双目录协议一致性、无 `models[0]` 推断、Codex/Claude 投影、Chat-only 无托管档案、稳定 503/no-store/request ID/retryable，以及凭证和本地能力保留。 |
 | 本地回滚兼容性 | 已做静态命名空间证明：当前版本的 `ucli-server-*` 文件不属于旧 `ucli-<32hex>` 所有权规则；这不是 0.11.6 二进制降级实证。 |
 | Task 10 Windows 产物 | 2026-08-28 12:52（Asia/Shanghai）从运行时代码提交 `d35b9bd` 构建的 Windows x64 产物：Setup `UCLI-Setup-0.12.0-x64.exe`（134,216,065 bytes，SHA-256 `163BF3D15066AAA66C6DBC8B2D867C92631C9ADDEAEC839ABC4722CCF5446B23`），Portable `UCLI-Portable-0.12.0-x64.exe`（133,961,257 bytes，SHA-256 `04A7E6B3965B81303EE4C20BF752E75756B60C39C57E618111D65867533B29F6`）；`latest.yml` 与 blockmap 均由同一次 `npm run dist:win` 生成，`npm run verify:release` 已通过。其后的紧邻提交仅修改此证据文档；该文档不在 `electron-builder.yml` 的打包输入中。 |
 | Windows 原生人工检查 | 待完成：安装版 URL scheme、cold start、第二实例、升级、条件卸载，以及 portable 不接管协议。 |
 | macOS / Linux | 待完成：原生 macOS DMG/ZIP 验证；Linux 打包验证。未以静态检查替代。 |
-| 真实内网冒烟 | 阻断（2026-08-28 17:09，服务端 `28bdc40` / runtime `sha256:ef15c26f8d80`）：客户端离线合同 45/45 通过；Preview、首次 Redeem、同一 installationId 幂等 Redeem、强制 Refresh、Bootstrap 和 `/gateway/v1/models` 均通过，证明 `contextSize` 修复生效。使用 Bootstrap 首个模型调用 `POST /gateway/v1/responses` 时返回非成功状态，smoke 在 `model-stream` 阶段停止；HTTP 状态和响应正文未读取，Skills catalog/download 未执行。单次链接已绑定，临时数据库、凭证环境变量和 smoke 目录已清理。服务端须按本轮时间与测试设备核对脱敏 Gateway/usage 日志，并建立“可见模型可被 Responses 实际路由”的一致性门后再创建新授权。 |
+| 真实协议 smoke | PENDING：须先确认新的服务端提交和运行时摘要，并取得新的单次授权；以显式协议执行，确认 Bootstrap/Gateway 双目录一致，再完成模型流、Skills 下载哈希和清理。2026-08-28 的第三次 smoke 仅为历史证据，不是新部署的基线或接受证据；不得重用其授权。 |
 | 真实降级 | 待完成：用真实 0.11.6 二进制验证其忽略 `server_*` 表和 `ucli-server-*` 文件。 |
 
 ### 0.12.0 数据与紧急关闭
@@ -21,7 +21,7 @@
 - [x] 服务端能力没有自动默认模型或自动安装 Skills；独立模式、已有本地会话、Profiles、Skills 和数据保持可用。
 - [x] 紧急关闭只移除服务端入口/能力，不删除本地会话、Profiles、Skills 或数据。
 - [ ] 在隔离安装中手工确认断网、5xx、disabled/expired/account/org inactive 状态不影响本地能力。
-- [ ] 服务端确认 Bootstrap 与 `/gateway/v1/models` 返回的模型具有可用 `OPENAI_RESPONSES` 健康渠道、Key 和成本配置，或提供等价协议转换；用合同测试锁定可见性与可路由性一致。重新部署后使用新授权完成最小模型流和 Skills 下载哈希检查。不要记录链接、token、header 或成功响应正文。
+- [ ] 新部署的真实 smoke 完成模型流、Skills 下载哈希和清理前，0.12.0 不得标记为接受。验收仅保留协议、阶段、allowlisted 稳定诊断和清理结果；不得记录链接、URL、token、请求/响应体、完整 headers、身份信息或堆栈。
 
 ## 0. 验收记录
 

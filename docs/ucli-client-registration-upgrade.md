@@ -20,6 +20,7 @@
 - link secret、access token 和本机代理 bearer 不得持久化。
 - 服务端模型不得自动成为默认模型，失效时不得静默回退。
 - 服务端 Skill 不自动安装或更新，断开后不删除已安装副本。
+- 模型协议只接受 `openai_responses`、`openai_chat` 和 `anthropic_messages`；Bootstrap 每个模型的 `protocols` 必填且非空，模型选择不得依赖 `models[0]`、模型名称或目录顺序。
 
 ---
 
@@ -256,6 +257,8 @@ access token 只存在内存，并在到期前 60 秒 Refresh。refresh token �
 
 网络失败、超时和 HTTP 5xx 统一为可恢复的服务端不可达，不清除凭证。
 
+模型路由失败只有在 HTTP `503`、`Cache-Control: no-store`、`X-UCLI-Request-ID`、JSON 结构、稳定 `code` 和 `retryable` 全部匹配时才可作为稳定诊断接受。允许的组合仅为 `model_protocol_unavailable` / 不可重试、`model_channel_unavailable` / 可重试、`upstream_unavailable` / 可重试。其余组合 fail closed；三类稳定 503 都不是授权失败，不清除凭证、不改变授权状态，并保留本地模型、Skills、会话和数据。
+
 ## 11. 本机模型代理
 
 服务端 access token 默认 900 秒过期，而 CLI 子进程环境不能随 Refresh 安全轮换，因此不能把服务端 token 直接写入模型档案。
@@ -269,6 +272,8 @@ access token 只存在内存，并在到期前 60 秒 Refresh。refresh token �
 - `POST /v1/chat/completions`
 - `POST /anthropic/v1/messages`
 
+请求必须由显式协议选择固定路径：`openai_responses` 到 `/v1/responses`，`openai_chat` 到 `/v1/chat/completions`，`anthropic_messages` 到 `/anthropic/v1/messages`。选择模型前，Bootstrap 与 Gateway 模型目录中同一模型的协议集合必须一致且都包含所选协议；不得从模型身份或目录顺序推断。
+
 向上游拼接时必须保留 Bootstrap `gateway.baseUrl` 的 `/gateway` pathname。不能使用会把基址路径替换掉的绝对 URL 构造。
 
 代理移除客户端 Authorization、Cookie 和逐跳头，统一向服务端注入 Bearer access token。服务端的 `x-api-key` 兼容入口不作为 UCLI 首选路径。
@@ -279,7 +284,7 @@ access token 只存在内存，并在到期前 60 秒 Refresh。refresh token �
 
 ## 12. 服务端模型投影
 
-Bootstrap 中每个模型创建一个 Codex Responses 投影和一个 Claude Anthropic Bearer 投影。
+Bootstrap 模型只按其协议集合创建投影：Codex 仅创建 `openai_responses` 投影，Claude 仅创建 `anthropic_messages` 投影；仅有 `openai_chat` 的模型不创建 0.12.0 托管档案。一个模型同时具备两种托管协议时可创建两个对应投影。
 
 `profileService` 聚合用户档案和 `sourceKind: server` 的只读投影。服务端投影拒绝创建、编辑、密钥、修复、回滚和删除操作。
 
@@ -540,10 +545,44 @@ IPC 错误只包含稳定错误码、用户信息和可重试标记，不包含 
 - 在目标内网完成至少一次真实注册、刷新、模型调用和 Skill 下载。
 - 文档、错误提示、协议 fixtures 和发布说明与最终实现一致。
 
-## 22. 工作树验证状态（2026-08-28）
+## 22. 0.12.0 本地合同与真实冒烟执行
 
-此副本同步自用户提供的实施方案。当前工作树已加入固定合约门和默认跳过的真实 smoke 测试。2026-08-28 前两次真实内网运行分别确认并推动服务端修复 Refresh `no-store` 与 Bootstrap `contextSize` 合同；客户端始终保持严格 fail-closed，没有增加默认值或旧协议兼容。
+Tasks 1–5 后，本地四文件客户端/服务端合同门为 48/48。它覆盖三种公开协议、固定端点、双目录协议一致性、投影规则、稳定 503 解析、凭证保留和本地能力保留；真实 smoke 仍默认跳过。
 
-服务端提交 `28bdc40` / runtime `sha256:ef15c26f8d80` 部署后，第三次新授权运行通过客户端离线合同 45/45、Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap 和 `/gateway/v1/models`。随后使用 Bootstrap 首个模型调用 `POST /gateway/v1/responses` 时返回非成功状态，测试在 model-stream 阶段停止，未读取 HTTP 状态或响应正文，Skills catalog/download 未执行。只读实现对照显示服务端模型可见性尚未与 `OPENAI_RESPONSES` 健康渠道、Key、成本和上游成功能力建立一致性门；服务端须用脱敏 Gateway/usage 日志确认具体失败类别，补测试、修复并部署后再创建新授权。单次链接已绑定，临时数据库、凭证环境变量和 smoke 目录已清理。
+真实 smoke 只能在已确认的新服务端提交与运行时摘要、并取得新的单次授权后执行。操作者仅可经安全的一次性输入通道提供必要的 origin 和链接秘密；文档、命令历史、日志、验收记录和报告不得写入真实 URL、token、请求/响应体、完整响应头、身份信息或堆栈。执行时必须显式设置 `UCLI_SERVER_SMOKE_PROTOCOL=openai_responses`，并在受控环境中启用 smoke。
+
+一旦尝试进入 Redeem，不论结果如何都不得用同一授权重跑。先完成清理和秘密扫描，再申请新的单次授权；测试内部的同 installationId 恢复语义不授权操作者重放一次已使用的外部 smoke。
+
+只记录下列 allowlist YAML 形状；不得扩展为原始请求、响应或任意 header 转储：
+
+```yaml
+success:
+  status: PASS
+  protocol: openai_responses
+  stages: [preview, redeem, refresh, bootstrap, gateway-models, model-stream, skills-catalog, skills-download, cleanup]
+  evidence:
+    bootstrapGatewayProtocolConsistency: true
+    streamReceivedNonEmptyData: true
+    skillDownloadHash: true
+    temporaryMaterialRemoved: true
+failure:
+  status: FAIL
+  protocol: openai_responses
+  failedStage: <allowlisted-stage>
+  diagnostic:
+    httpStatus: <status-or-not-received>
+    contentType: <application-json-or-not-received>
+    cacheControl: <no-store-or-not-received>
+    stableCode: <model_protocol_unavailable|model_channel_unavailable|upstream_unavailable|not-received>
+    requestId: <opaque-request-id-or-not-received>
+    retryable: <true|false|null>
+  cleanup: <pass|fail>
+```
+
+## 23. 工作树验证状态（2026-08-29）
+
+此副本同步自用户提供的实施方案。当前工作树已加入 48/48 固定合约门和默认跳过的真实 smoke 测试。2026-08-28 前两次真实内网运行分别确认并推动服务端修复 Refresh `no-store` 与 Bootstrap `contextSize` 合同；客户端始终保持严格 fail-closed，没有增加默认值或旧协议兼容。
+
+第三次 smoke 仍仅是历史证据，不能作为新部署基线。它使用旧的“可见即可路由”假设并在模型流阶段停止；它之后的协议能力合同要求显式协议、双目录一致性和稳定 503 处理。新的真实 smoke 必须使用新的单次授权，并在已确认的新服务端提交与运行时摘要上完成模型流、Skills 哈希和清理，才可进入发布接受判断。
 
 Windows 产物存在于 Task 10 的 post-HEAD 构建证据中；真实完整内网 smoke、原生 macOS、Linux、URL-scheme/portable 人工检查和真实 0.11.6 二进制降级仍为发布阻断项。紧急关闭仅移除服务端入口/能力，不迁移或删除本地模型、Skills、会话或数据。
