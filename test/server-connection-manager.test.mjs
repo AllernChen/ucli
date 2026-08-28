@@ -360,6 +360,96 @@ test('a failed disconnect flush remains detached and retries deletion without re
   assert.equal(manager.getState().status, 'disconnected')
 })
 
+test('disconnect queues global durable cleanup before revoking A so a fresh B is preserved', async (t) => {
+  const clearStarted = deferred()
+  const allowClear = deferred()
+  const revocation = deferred()
+  let durable = { ...current }
+  let candidate = { id: 'candidate-a' }
+  const { manager } = createManager({
+    credentials: {
+      readCurrent: () => durable,
+      disconnect: async () => {
+        clearStarted.resolve()
+        await allowClear.promise
+        durable = null
+        candidate = null
+      }
+    }
+  })
+  manager.revokeRuntimeRevision = async () => revocation.promise
+  const disconnecting = manager.disconnect()
+  t.after(async () => {
+    allowClear.resolve()
+    revocation.resolve()
+    await disconnecting.catch(() => {})
+  })
+
+  const clearQueued = await Promise.race([
+    clearStarted.promise.then(() => true),
+    new Promise(resolve => setImmediate(() => resolve(false)))
+  ])
+  assert.equal(clearQueued, true)
+  allowClear.resolve()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(candidate, null)
+
+  const replacement = {
+    ...current, id: 'connection-2', serverOrigin: 'https://replacement.example.test', organizationId: 'org-2', connectionRevision: 4
+  }
+  await manager.runCredentialMutation(async () => {
+    durable = { ...replacement }
+    manager.current = { ...replacement }
+    manager.connectionEpoch += 1
+    manager.currentOperationEpoch = manager.operationEpoch
+    manager.status = 'connected'
+  })
+  revocation.resolve()
+  await disconnecting
+
+  assert.equal(durable.id, replacement.id)
+  assert.equal(manager.getState().connection.id, replacement.id)
+})
+
+test('pending explicit-disconnect retry queues before B or skips after B without erasing durable state', async () => {
+  let pending = false
+  let disconnects = 0
+  let durable = { ...current }
+  const { manager } = createManager({
+    credentials: {
+      readCurrent: () => durable,
+      isPersistencePending: () => pending,
+      disconnect: async () => {
+        disconnects += 1
+        if (disconnects === 1) {
+          pending = true
+          throw Object.assign(new Error('disk unavailable'), { code: 'PERSISTENCE_PENDING' })
+        }
+        durable = null
+      },
+      retryPendingPersistence: async () => { pending = false; return durable }
+    }
+  })
+  await assert.rejects(manager.disconnect(), { code: 'PERSISTENCE_PENDING' })
+  const replacement = {
+    ...current, id: 'connection-2', serverOrigin: 'https://replacement.example.test', organizationId: 'org-2', connectionRevision: 4
+  }
+  pending = false
+  await manager.runCredentialMutation(async () => {
+    durable = { ...replacement }
+    manager.current = { ...replacement }
+    manager.connectionEpoch += 1
+    manager.currentOperationEpoch = manager.operationEpoch
+    manager.status = 'connected'
+  })
+
+  await manager.retry()
+
+  assert.equal(disconnects, 1)
+  assert.equal(durable.id, replacement.id)
+  assert.equal(manager.getState().connection.id, replacement.id)
+})
+
 test('a replacement connection starts its own bootstrap while an old bootstrap is in flight', async () => {
   const oldBootstrap = deferred()
   const calls = []

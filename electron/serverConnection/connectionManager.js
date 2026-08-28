@@ -684,6 +684,20 @@ export class ConnectionManager {
     })
   }
 
+  async disconnectExplicitConnection(disconnectEpoch, { retryPersistence = false } = {}) {
+    return this.runCredentialMutation(async () => {
+      if (retryPersistence && this.credentials.isPersistencePending?.()) {
+        await (this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.())
+      }
+      // A connection promoted after this disconnect began owns a newer
+      // operation epoch. This check and the durable mutation share the
+      // credential queue, so a delayed retry cannot erase that replacement.
+      if (this.current && this.currentOperationEpoch >= disconnectEpoch) return false
+      await this.credentials.disconnect()
+      return true
+    })
+  }
+
   cancel(attemptId) {
     if (this.committingAttempts.has(attemptId)) return false
     const cancelled = this.attempts.cancel(attemptId)
@@ -695,19 +709,24 @@ export class ConnectionManager {
     this.operationEpoch += 1
     const disconnectEpoch = this.operationEpoch
     const previousRuntimeIdentity = this.invalidateRuntimeConnection()
+    // Queue global durable cleanup before awaiting runtime revocation. A
+    // later connection promotion is ordered behind this cleanup and must
+    // survive the old connection's delayed revocation.
+    const durableDisconnect = this.disconnectExplicitConnection(disconnectEpoch).then(
+      () => null,
+      error => error
+    )
     if (previousRuntimeIdentity) await this.revokeRevision(previousRuntimeIdentity)
-    try {
-      await this.runCredentialMutation(() => this.credentials.disconnect())
-      await this.finalizeDisconnect(disconnectEpoch)
-      this.pendingDisconnect = null
-    } catch (error) {
-      if (error?.code === 'PERSISTENCE_PENDING') {
-        this.pendingDisconnect = { disconnectEpoch }
+    const disconnectError = await durableDisconnect
+    await this.finalizeDisconnect(disconnectEpoch)
+    if (disconnectError) {
+      if (disconnectError.code === 'PERSISTENCE_PENDING') {
+        this.pendingDisconnect = { kind: 'explicit', disconnectEpoch }
         this.scheduleRetry()
       }
-      await this.finalizeDisconnect(disconnectEpoch)
-      throw operationError(error)
+      throw operationError(disconnectError)
     }
+    this.pendingDisconnect = null
   }
 
   async retry() {
@@ -721,12 +740,7 @@ export class ConnectionManager {
           if (this.pendingDisconnect === pendingDisconnect) this.pendingDisconnect = null
           return this.getState()
         }
-        await this.runCredentialMutation(async () => {
-          if (this.credentials.isPersistencePending?.()) {
-            await (this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.())
-          }
-          await this.credentials.disconnect()
-        })
+        await this.disconnectExplicitConnection(pendingDisconnect.disconnectEpoch, { retryPersistence: true })
         await this.finalizeDisconnect(pendingDisconnect.disconnectEpoch)
         if (this.pendingDisconnect === pendingDisconnect) this.pendingDisconnect = null
       } catch (error) {
@@ -832,12 +846,7 @@ export class ConnectionManager {
       if (pendingDisconnect.kind === 'terminal') {
         await this.disconnectTerminalConnection(pendingDisconnect.connection, { retryPersistence: true }).catch(() => {})
       } else {
-        await this.runCredentialMutation(async () => {
-          if (this.credentials.isPersistencePending?.()) {
-            await (this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.())
-          }
-          await this.credentials.disconnect()
-        }).catch(() => {})
+        await this.disconnectExplicitConnection(pendingDisconnect.disconnectEpoch, { retryPersistence: true }).catch(() => {})
       }
     } else if (this.persistencePending) {
       await this.runCredentialMutation(() => this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.()).catch(() => {})
