@@ -1,6 +1,13 @@
 import { createHash } from 'node:crypto'
 
+import { PUBLIC_MODEL_PROTOCOLS } from './contracts.js'
+
 const SERVER_STATUSES = new Set(['ready', 'unreachable', 'disabled', 'expired', 'deleted'])
+const PUBLIC_MODEL_PROTOCOL_SET = new Set(PUBLIC_MODEL_PROTOCOLS)
+const ADAPTER_PROTOCOLS = Object.freeze({
+  codex: 'openai_responses',
+  claude: 'anthropic_messages'
+})
 
 function projectionError(code, message) {
   return Object.assign(new Error(message), { code })
@@ -33,10 +40,12 @@ function safeModel(model = {}) {
   const id = String(model.id || '').trim()
   const displayName = String(model.displayName || '').trim()
   const contextSize = Number(model.contextSize)
-  if (!id || !displayName || !Number.isSafeInteger(contextSize) || contextSize <= 0) {
+  const protocols = Array.isArray(model.protocols) ? [...model.protocols] : []
+  if (!id || !displayName || !Number.isSafeInteger(contextSize) || contextSize <= 0 ||
+    protocols.length === 0 || protocols.some(protocol => !PUBLIC_MODEL_PROTOCOL_SET.has(protocol))) {
     throw projectionError('INVALID_SERVER_MODEL', 'Server model is invalid')
   }
-  return { id, displayName, contextSize }
+  return { id, displayName, contextSize, protocols }
 }
 
 function safeOrganization(organization = {}) {
@@ -87,7 +96,8 @@ function profileRows({ serverOrigin, organization, models, connectionRevision })
   const rows = []
   for (const model of models || []) {
     const safe = safeModel(model)
-    for (const adapterId of ['codex', 'claude']) {
+    for (const [adapterId, protocol] of Object.entries(ADAPTER_PROTOCOLS)) {
+      if (!safe.protocols.includes(protocol)) continue
       rows.push({
         profileId: stableProfileId({ serverOrigin: origin, organizationId: org.id, modelId: safe.id, adapterId }),
         serverOrigin: origin,

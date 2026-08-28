@@ -52,7 +52,7 @@ test('projects every Bootstrap model into stable Codex Responses and Claude Bear
   const input = {
     serverOrigin: 'HTTP://server.example.test:80/',
     organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   }
 
@@ -72,12 +72,93 @@ test('projects every Bootstrap model into stable Codex Responses and Claude Bear
   assert.equal(first.find(profile => profile.adapterId === 'claude').config.connectionMode, 'bearer')
 })
 
+test('projects only adapters supported by each model protocol set', async () => {
+  const context = harness()
+  await context.projection.reconcile({
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'org-1', name: 'Engineering' },
+    models: [
+      { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'] },
+      { id: 'anthropic', displayName: 'Anthropic', contextSize: 128000, protocols: ['anthropic_messages'] },
+      { id: 'chat', displayName: 'Chat', contextSize: 64000, protocols: ['openai_chat'] }
+    ],
+    connectionRevision: 7
+  })
+  assert.deepEqual(context.projection.listProfiles()
+    .map(profile => [profile.model, profile.adapterId])
+    .sort(([leftModel, leftAdapter], [rightModel, rightAdapter]) => (
+      leftModel.localeCompare(rightModel) || leftAdapter.localeCompare(rightAdapter)
+    )), [
+    ['anthropic', 'claude'],
+    ['responses', 'codex']
+  ])
+})
+
+test('projects both adapters for models that support both managed protocols', async () => {
+  const context = harness()
+  await context.projection.reconcile({
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'org-1', name: 'Engineering' },
+    models: [{
+      id: 'multi-protocol',
+      displayName: 'Multi-protocol',
+      contextSize: 128000,
+      protocols: ['openai_responses', 'anthropic_messages']
+    }],
+    connectionRevision: 7
+  })
+  assert.deepEqual(context.projection.listProfiles().map(profile => profile.adapterId).sort(), ['claude', 'codex'])
+})
+
+test('rejects missing, empty, unknown, and gemini model protocol sets', async () => {
+  for (const protocols of [undefined, [], ['unknown'], ['gemini']]) {
+    const context = harness()
+    const model = { id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }
+    if (protocols !== undefined) model.protocols = protocols
+    await assert.rejects(() => context.projection.reconcile({
+      serverOrigin: 'http://server.example.test',
+      organization: { id: 'org-1', name: 'Engineering' },
+      models: [model],
+      connectionRevision: 7
+    }), { code: 'INVALID_SERVER_MODEL' })
+  }
+})
+
+test('revokes removed Codex authority while retaining compatible Claude profile', async () => {
+  const context = harness()
+  const input = {
+    serverOrigin: 'http://server.example.test',
+    organization: { id: 'org-1', name: 'Engineering' },
+    models: [{
+      id: 'model-1',
+      displayName: 'Gateway Model',
+      contextSize: 128000,
+      protocols: ['openai_responses', 'anthropic_messages']
+    }],
+    connectionRevision: 7
+  }
+  await context.projection.reconcile(input)
+  const codex = context.projection.listProfiles().find(profile => profile.adapterId === 'codex')
+  const claude = context.projection.listProfiles().find(profile => profile.adapterId === 'claude')
+  context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'codex-session' })
+
+  await context.projection.reconcile({
+    ...input,
+    models: [{ ...input.models[0], protocols: ['anthropic_messages'] }]
+  })
+
+  assert.deepEqual(context.calls.revoke, ['codex-session'])
+  assert.deepEqual(context.projection.listProfiles().map(profile => [profile.id, profile.adapterId]), [
+    [claude.id, 'claude']
+  ])
+})
+
 test('prepares runtime only for current ready profiles and revokes replaced session authority', async () => {
   const context = harness()
   await context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   })
   const codex = context.projection.listProfiles().find(profile => profile.adapterId === 'codex')
@@ -99,7 +180,7 @@ test('Claude server runtime targets the proxy Anthropic route', async () => {
   await context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   })
   const claude = context.projection.listProfiles().find(profile => profile.adapterId === 'claude')
@@ -113,7 +194,7 @@ test('persisted ready profiles remain unavailable until the matching runtime ide
   await context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   })
   context.setIdentity(null)
@@ -131,7 +212,7 @@ test('reconciliation revokes every tracked session before accepting a new connec
   const input = {
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   }
   await context.projection.reconcile(input)
@@ -147,7 +228,7 @@ test('same-revision replacement identity revokes prior server sessions', async (
   const input = {
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   }
   await context.projection.reconcile(input)
@@ -162,7 +243,7 @@ test('reconciliation revokes server sessions whose projected models were removed
   const input = {
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   }
   await context.projection.reconcile(input)
@@ -176,7 +257,7 @@ test('failed projection persistence leaves rows fail-closed and rejects reconcil
   await assert.rejects(() => context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   }), { code: 'PROFILE_PERSISTENCE_PENDING' })
   assert.deepEqual(context.projection.listProfiles().map(profile => [profile.status, profile.canStart]), [
@@ -190,7 +271,7 @@ test('reconciliation remains fail-closed until held persistence succeeds or fail
   const request = context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   })
   assert.deepEqual(context.projection.listProfiles().map(profile => profile.canStart), [false, false])
@@ -203,7 +284,7 @@ test('reconciliation remains fail-closed until held persistence succeeds or fail
   const failedRequest = failedContext.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   })
   assert.deepEqual(failedContext.projection.listProfiles().map(profile => profile.canStart), [false, false])
@@ -217,13 +298,13 @@ test('rejects control-character organization and model identifiers so stable IDs
   await assert.rejects(() => context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'a', name: 'Engineering' },
-    models: [{ id: 'b\u0000c', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'b\u0000c', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   }), { code: 'INVALID_SERVER_MODEL' })
   await assert.rejects(() => context.projection.reconcile({
     serverOrigin: 'http://server.example.test',
     organization: { id: 'a\u0000b', name: 'Engineering' },
-    models: [{ id: 'c', displayName: 'Gateway Model', contextSize: 128000 }],
+    models: [{ id: 'c', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
     connectionRevision: 7
   }), { code: 'INVALID_SERVER_MODEL' })
 })
@@ -262,7 +343,7 @@ test('Codex runtime records only the generated server file digest in the project
     await context.projection.reconcile({
       serverOrigin: 'http://server.example.test',
       organization: { id: 'org-1', name: 'Engineering' },
-      models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+      models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
       connectionRevision: 7
     })
     const codex = context.projection.listProfiles().find(profile => profile.adapterId === 'codex')
@@ -295,7 +376,7 @@ test('runtime digest persistence rejects false, thrown, and asynchronous flushes
     await context.projection.reconcile({
       serverOrigin: 'http://server.example.test',
       organization: { id: 'org-1', name: 'Engineering' },
-      models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }],
+      models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
       connectionRevision: 7
     })
     const codex = context.projection.listProfiles().find(profile => profile.adapterId === 'codex')
