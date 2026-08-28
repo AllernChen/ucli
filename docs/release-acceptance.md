@@ -13,7 +13,7 @@
 | Task 10 Windows 产物 | 2026-08-28 12:52（Asia/Shanghai）从运行时代码提交 `d35b9bd` 构建的 Windows x64 产物：Setup `UCLI-Setup-0.12.0-x64.exe`（134,216,065 bytes，SHA-256 `163BF3D15066AAA66C6DBC8B2D867C92631C9ADDEAEC839ABC4722CCF5446B23`），Portable `UCLI-Portable-0.12.0-x64.exe`（133,961,257 bytes，SHA-256 `04A7E6B3965B81303EE4C20BF752E75756B60C39C57E618111D65867533B29F6`）；`latest.yml` 与 blockmap 均由同一次 `npm run dist:win` 生成，`npm run verify:release` 已通过。其后的紧邻提交仅修改此证据文档；该文档不在 `electron-builder.yml` 的打包输入中。 |
 | Windows 原生人工检查 | 待完成：安装版 URL scheme、cold start、第二实例、升级、条件卸载，以及 portable 不接管协议。 |
 | macOS / Linux | 待完成：原生 macOS DMG/ZIP 验证；Linux 打包验证。未以静态检查替代。 |
-| 真实内网冒烟 | 阻断（2026-08-28 重跑，服务端 `a65361d` / runtime `sha256:d351803a621d`）：生产健康与 Refresh 无凭证探针通过，客户端离线合同 45/45 通过；Preview、首次 Redeem、同一 installationId 幂等 Redeem和强制 Refresh 均通过，显式 Bootstrap 随后按合同 fail closed（稳定码 `null`），模型与 Skills 未执行。单次链接已绑定，临时数据库、凭证环境变量和 smoke 目录已清理。只读合同对照发现服务端 `PublicModel.contextSize` 允许 `null`，客户端 Bootstrap 合同要求正整数；服务端须先统计生产已发布模型的无效 `context_size` 并核对脱敏 Bootstrap 字段，再创建新授权重跑。 |
+| 真实内网冒烟 | 阻断（2026-08-28 17:09，服务端 `28bdc40` / runtime `sha256:ef15c26f8d80`）：客户端离线合同 45/45 通过；Preview、首次 Redeem、同一 installationId 幂等 Redeem、强制 Refresh、Bootstrap 和 `/gateway/v1/models` 均通过，证明 `contextSize` 修复生效。使用 Bootstrap 首个模型调用 `POST /gateway/v1/responses` 时返回非成功状态，smoke 在 `model-stream` 阶段停止；HTTP 状态和响应正文未读取，Skills catalog/download 未执行。单次链接已绑定，临时数据库、凭证环境变量和 smoke 目录已清理。服务端须按本轮时间与测试设备核对脱敏 Gateway/usage 日志，并建立“可见模型可被 Responses 实际路由”的一致性门后再创建新授权。 |
 | 真实降级 | 待完成：用真实 0.11.6 二进制验证其忽略 `server_*` 表和 `ucli-server-*` 文件。 |
 
 ### 0.12.0 数据与紧急关闭
@@ -21,7 +21,7 @@
 - [x] 服务端能力没有自动默认模型或自动安装 Skills；独立模式、已有本地会话、Profiles、Skills 和数据保持可用。
 - [x] 紧急关闭只移除服务端入口/能力，不删除本地会话、Profiles、Skills 或数据。
 - [ ] 在隔离安装中手工确认断网、5xx、disabled/expired/account/org inactive 状态不影响本地能力。
-- [ ] 服务端确认所有已发布模型的 `context_size` 均为正整数，并用合同测试锁定 Bootstrap 不返回 `null`；重新部署后使用新授权完成 Bootstrap、`/gateway/v1/models`、最小模型流和 Skills 下载哈希检查。不要记录链接、token、header 或成功响应正文。
+- [ ] 服务端确认 Bootstrap 与 `/gateway/v1/models` 返回的模型具有可用 `OPENAI_RESPONSES` 健康渠道、Key 和成本配置，或提供等价协议转换；用合同测试锁定可见性与可路由性一致。重新部署后使用新授权完成最小模型流和 Skills 下载哈希检查。不要记录链接、token、header 或成功响应正文。
 
 ## 0. 验收记录
 
