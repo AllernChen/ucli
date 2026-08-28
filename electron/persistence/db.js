@@ -149,6 +149,7 @@ class Db {
     this.path = path
     this.recoveryInfo = recoveryInfo
     this._transactionTail = Promise.resolve()
+    this._transactionActive = false
   }
 
   // ---- schema ----
@@ -2309,6 +2310,7 @@ class Db {
   async transaction(work) {
     const run = async () => {
       this.sql.run('BEGIN IMMEDIATE')
+      this._transactionActive = true
       try {
         const result = await work()
         this.sql.run('COMMIT')
@@ -2316,6 +2318,8 @@ class Db {
       } catch (error) {
         try { this.sql.run('ROLLBACK') } catch { /* preserve original error */ }
         throw error
+      } finally {
+        this._transactionActive = false
       }
     }
     const result = this._transactionTail.then(run, run)
@@ -2326,6 +2330,7 @@ class Db {
   transactionSync(work) {
     const run = () => {
       this.sql.run('BEGIN IMMEDIATE')
+      this._transactionActive = true
       try {
         const result = work()
         if (result && typeof result.then === 'function') {
@@ -2338,6 +2343,8 @@ class Db {
       } catch (error) {
         try { this.sql.run('ROLLBACK') } catch { /* preserve original error */ }
         throw error
+      } finally {
+        this._transactionActive = false
       }
     }
     const result = this._transactionTail.then(run, run)
@@ -2397,6 +2404,7 @@ class Db {
 
   // ---- flush to disk ----
   flush() {
+    if (this._transactionActive) return false
     try {
       const data = Buffer.from(this.sql.export())
       if (!hasSqliteHeader(data)) throw new Error('Refusing to persist an invalid SQLite export.')

@@ -586,6 +586,36 @@ test('database transaction preserves existing async callback compatibility', asy
   }
 })
 
+test('database flush refuses to export while an asynchronous transaction is active', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-summary-transaction-flush-'))
+  const db = await openDb(join(root, 'ucli.db'))
+  let releaseTransaction
+  let markStarted
+  const started = new Promise(resolve => { markStarted = resolve })
+  const gate = new Promise(resolve => { releaseTransaction = resolve })
+  try {
+    const transaction = db.transaction(async () => {
+      db.saveGatewaySetting('gateway.flush-isolation', { enabled: true })
+      markStarted()
+      await gate
+    })
+    await started
+
+    const flushResult = db.flush()
+    releaseTransaction()
+    const [settled] = await Promise.allSettled([transaction])
+
+    assert.equal(flushResult, false)
+    assert.equal(settled.status, 'fulfilled')
+    assert.deepEqual(db.getGatewaySetting('gateway.flush-isolation'), { enabled: true })
+    assert.equal(db.flush(), true)
+  } finally {
+    releaseTransaction?.()
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('a failing async transaction preserves an unrelated summary created while it awaits', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ucli-summary-async-transaction-ownership-'))
   const db = await openDb(join(root, 'ucli.db'))
