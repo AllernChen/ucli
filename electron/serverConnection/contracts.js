@@ -20,6 +20,18 @@ export const MODEL_PROTOCOL_LOCAL_PATHS = Object.freeze({
   anthropic_messages: '/anthropic/v1/messages'
 })
 
+const GATEWAY_ROUTE_ERRORS = Object.freeze({
+  model_protocol_unavailable: Object.freeze({
+    message: 'The model does not support the requested protocol', retryable: false
+  }),
+  model_channel_unavailable: Object.freeze({
+    message: 'No model channel is currently available', retryable: true
+  }),
+  upstream_unavailable: Object.freeze({
+    message: 'No upstream channel succeeded', retryable: true
+  })
+})
+
 // Keep the protocol target decoupled from package metadata until the release bump.
 export const TARGET_CLIENT_VERSION = '0.12.0'
 
@@ -32,6 +44,49 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/i
 
 function responseError() {
   return Object.assign(new TypeError('Server response is invalid'), { code: 'SERVER_RESPONSE_INVALID' })
+}
+
+function responseHeader(headers, name) {
+  try { return new Headers(headers).get(name) } catch { return null }
+}
+
+export function gatewayResponseMetadata({ status, headers } = {}) {
+  return {
+    httpStatus: Number.isSafeInteger(status) ? status : 'not-received',
+    contentType: responseHeader(headers, 'content-type') || 'not-received',
+    cacheControl: responseHeader(headers, 'cache-control') || 'not-received',
+    stableCode: 'not-received',
+    requestId: responseHeader(headers, 'x-ucli-request-id') || 'not-received',
+    retryable: null
+  }
+}
+
+function hasJsonContentType(contentType) {
+  return /^application\/json(?:\s*;\s*charset\s*=\s*[^;\s](?:[^;]*[^;\s])?)?$/i.test(contentType)
+}
+
+function hasNoStoreDirective(cacheControl) {
+  return cacheControl.split(',').some(directive => directive.trim().toLowerCase() === 'no-store')
+}
+
+export function parseGatewayRouteFailure(value = {}) {
+  const { status, headers, body } = value && typeof value === 'object' ? value : {}
+  const diagnostic = gatewayResponseMetadata({ status, headers })
+  const invalid = () => {
+    const error = responseError()
+    error.diagnostic = diagnostic
+    throw error
+  }
+  if (status !== 503 || !hasJsonContentType(diagnostic.contentType) ||
+    !hasNoStoreDirective(diagnostic.cacheControl) || !body || typeof body !== 'object' || Array.isArray(body) ||
+    body.statusCode !== 503 || typeof body.requestId !== 'string' || !body.requestId ||
+    diagnostic.requestId === 'not-received' || body.requestId !== diagnostic.requestId ||
+    typeof body.code !== 'string' || !Object.hasOwn(GATEWAY_ROUTE_ERRORS, body.code)) {
+    return invalid()
+  }
+  const routeError = GATEWAY_ROUTE_ERRORS[body.code]
+  if (body.message !== routeError.message || body.retryable !== routeError.retryable) return invalid()
+  return { ...diagnostic, stableCode: body.code, requestId: body.requestId, retryable: routeError.retryable }
 }
 
 function object(value) {

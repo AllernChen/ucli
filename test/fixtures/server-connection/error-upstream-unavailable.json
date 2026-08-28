@@ -1,0 +1,7 @@
+{
+  "statusCode": 503,
+  "code": "upstream_unavailable",
+  "message": "No upstream channel succeeded",
+  "requestId": "fixture-request-upstream",
+  "retryable": true
+}

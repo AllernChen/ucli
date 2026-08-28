@@ -4,6 +4,7 @@ import test from 'node:test'
 
 import {
   SERVER_ERROR_CODES,
+  parseGatewayRouteFailure,
   parseBootstrapResponse,
   parseGatewayModelsResponse,
   parsePreviewResponse,
@@ -59,6 +60,32 @@ test('model directory fixtures reject missing, empty, and unsupported protocol a
       ...gateway,
       data: [{ ...gateway.data[0], protocols }]
     }), { code: 'SERVER_RESPONSE_INVALID' })
+  }
+})
+
+test('stable Gateway 503 fixtures parse to the exact safe diagnostics', () => {
+  for (const [name, stableCode, retryable] of [
+    ['error-model-protocol-unavailable.json', 'model_protocol_unavailable', false],
+    ['error-model-channel-unavailable.json', 'model_channel_unavailable', true],
+    ['error-upstream-unavailable.json', 'upstream_unavailable', true]
+  ]) {
+    const body = fixture(name)
+    assert.deepEqual(parseGatewayRouteFailure({
+      status: 503,
+      headers: new Headers({
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-ucli-request-id': body.requestId
+      }),
+      body
+    }), {
+      httpStatus: 503,
+      contentType: 'application/json; charset=utf-8',
+      cacheControl: 'no-store',
+      stableCode,
+      requestId: body.requestId,
+      retryable
+    })
   }
 })
 

@@ -1,0 +1,7 @@
+{
+  "statusCode": 503,
+  "code": "model_channel_unavailable",
+  "message": "No model channel is currently available",
+  "requestId": "fixture-request-channel",
+  "retryable": true
+}

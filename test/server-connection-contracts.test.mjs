@@ -10,9 +10,11 @@ import {
   PUBLIC_MODEL_PROTOCOLS,
   SERVER_ERROR_CODES,
   assertGatewayModelProtocolConsistency,
+  gatewayResponseMetadata,
   localGatewayPathForProtocol,
   parseBootstrapResponse,
   parseGatewayModelsResponse,
+  parseGatewayRouteFailure,
   parsePreviewResponse,
   parseRedeemResponse,
   parseRefreshResponse,
@@ -98,6 +100,111 @@ test('model selection and directory agreement never fall back to the first model
     modelId: 'fixture-model',
     protocol: 'openai_responses'
   }), { code: 'SERVER_RESPONSE_INVALID' })
+})
+
+test('Gateway response metadata contains only allowlisted response fields', () => {
+  const safe = gatewayResponseMetadata({
+    status: 503,
+    headers: new Headers({
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-ucli-request-id': 'fixture-request-metadata',
+      authorization: 'Bearer fixture-access-token'
+    })
+  })
+  assert.deepEqual(safe, {
+    httpStatus: 503,
+    contentType: 'application/json; charset=utf-8',
+    cacheControl: 'no-store',
+    stableCode: 'not-received',
+    requestId: 'fixture-request-metadata',
+    retryable: null
+  })
+  assert.deepEqual(Object.keys(safe).sort(), [
+    'cacheControl', 'contentType', 'httpStatus', 'requestId', 'retryable', 'stableCode'
+  ])
+})
+
+test('stable Gateway 503 fixtures produce only allowlisted diagnostics', () => {
+  for (const [name, stableCode, retryable] of [
+    ['error-model-protocol-unavailable.json', 'model_protocol_unavailable', false],
+    ['error-model-channel-unavailable.json', 'model_channel_unavailable', true],
+    ['error-upstream-unavailable.json', 'upstream_unavailable', true]
+  ]) {
+    const body = fixture(name)
+    const safe = parseGatewayRouteFailure({
+      status: 503,
+      headers: new Headers({
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-ucli-request-id': body.requestId
+      }),
+      body
+    })
+    assert.deepEqual(safe, {
+      httpStatus: 503,
+      contentType: 'application/json; charset=utf-8',
+      cacheControl: 'no-store',
+      stableCode,
+      requestId: body.requestId,
+      retryable
+    })
+    assert.deepEqual(Object.keys(safe).sort(), [
+      'cacheControl', 'contentType', 'httpStatus', 'requestId', 'retryable', 'stableCode'
+    ])
+  }
+})
+
+test('Gateway route failures reject malformed stable 503 responses without serialising secrets', () => {
+  const body = fixture('error-model-protocol-unavailable.json')
+  const headers = new Headers({
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-ucli-request-id': body.requestId
+  })
+  const cases = [
+    { headers: new Headers({ ...Object.fromEntries(headers), 'cache-control': 'private' }) },
+    { headers: new Headers({
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store'
+    }) },
+    { headers: new Headers({ ...Object.fromEntries(headers), 'x-ucli-request-id': 'fixture-request-other' }) },
+    { status: 502 },
+    { body: { ...body, statusCode: 502 } },
+    { body: { ...body, message: 'untrusted route message' } },
+    { body: { ...body, retryable: true } },
+    { headers: new Headers({ ...Object.fromEntries(headers), 'content-type': 'text/plain' }) },
+    { body: { ...body, code: 'future_gateway_error' } }
+  ]
+  for (const value of cases) {
+    assert.throws(() => parseGatewayRouteFailure({
+      status: value.status ?? 503,
+      headers: value.headers || headers,
+      body: {
+        ...body,
+        secret: 'fixture-gateway-secret',
+        accessToken: 'fixture-gateway-token',
+        url: 'http://gateway.fixture.test/route#fixture-gateway-secret',
+        stack: 'fixture-gateway-stack',
+        ...value.body
+      }
+    }), error => {
+      assert.equal(error?.code, 'SERVER_RESPONSE_INVALID')
+      const serialised = JSON.stringify(error?.diagnostic)
+      assert.deepEqual(Object.keys(error?.diagnostic).sort(), [
+        'cacheControl', 'contentType', 'httpStatus', 'requestId', 'retryable', 'stableCode'
+      ])
+      for (const unsafe of [
+        'The model does not support the requested protocol',
+        'untrusted route message',
+        'fixture-gateway-secret',
+        'fixture-gateway-token',
+        'http://gateway.fixture.test/route',
+        'fixture-gateway-stack'
+      ]) assert.equal(serialised.includes(unsafe), false)
+      return true
+    })
+  }
 })
 
 test('response parsers return known protocol fields and ignore unknown fields', () => {
