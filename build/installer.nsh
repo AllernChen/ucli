@@ -5,23 +5,87 @@
 !define UCLI_PROCESS_MARKER ".ucli-scoped-process-check"
 !define UCLI_PROCESS_SCRIPT "ucli-installer-process.ps1"
 
-; Compare registry values case-insensitively, matching Windows path semantics
-; while retaining the canonical command and icon forms written by this installer.
-Function UcliProtocolValueMatches
+!ifdef BUILD_UNINSTALLER
+; The installer and uninstaller are compiled separately. Keep these helpers in
+; the uninstaller namespace and accept only the exact forms written above.
+Function un.UcliProtocolCommandPath
+  Pop $R0
+  StrCpy $R1 $R0 1
+  StrCmp $R1 "$\"" 0 unUcliProtocolCommandPathInvalid
+  StrCpy $R2 1
+
+  unUcliProtocolCommandPathFindQuote:
+    StrCpy $R3 $R0 1 $R2
+    StrCmp $R3 "" unUcliProtocolCommandPathInvalid
+    StrCmp $R3 "$\"" unUcliProtocolCommandPathValidate unUcliProtocolCommandPathNext
+
+  unUcliProtocolCommandPathNext:
+    IntOp $R2 $R2 + 1
+    Goto unUcliProtocolCommandPathFindQuote
+
+  unUcliProtocolCommandPathValidate:
+    StrCpy $R1 $R0 $R2 1
+    StrCpy $R3 $R0 "" $R2
+    StrCmp $R3 "$\" $\"%1$\"" 0 unUcliProtocolCommandPathInvalid
+    StrCpy $R3 $R1 1 1
+    StrCmp $R3 ":" 0 unUcliProtocolCommandPathInvalid
+    StrCpy $R3 $R1 1 2
+    StrCmp $R3 "\" 0 unUcliProtocolCommandPathInvalid
+    GetFullPathName $R1 "$R1"
+    Push $R1
+    Return
+
+  unUcliProtocolCommandPathInvalid:
+    Push ""
+FunctionEnd
+
+Function un.UcliProtocolIconPath
+  Pop $R0
+  StrCpy $R1 $R0 1
+  StrCmp $R1 "$\"" 0 unUcliProtocolIconPathInvalid
+  StrCpy $R2 1
+
+  unUcliProtocolIconPathFindQuote:
+    StrCpy $R3 $R0 1 $R2
+    StrCmp $R3 "" unUcliProtocolIconPathInvalid
+    StrCmp $R3 "$\"" unUcliProtocolIconPathValidate unUcliProtocolIconPathNext
+
+  unUcliProtocolIconPathNext:
+    IntOp $R2 $R2 + 1
+    Goto unUcliProtocolIconPathFindQuote
+
+  unUcliProtocolIconPathValidate:
+    StrCpy $R1 $R0 $R2 1
+    StrCpy $R3 $R0 "" $R2
+    StrCmp $R3 "$\",0" 0 unUcliProtocolIconPathInvalid
+    StrCpy $R3 $R1 1 1
+    StrCmp $R3 ":" 0 unUcliProtocolIconPathInvalid
+    StrCpy $R3 $R1 1 2
+    StrCmp $R3 "\" 0 unUcliProtocolIconPathInvalid
+    GetFullPathName $R1 "$R1"
+    Push $R1
+    Return
+
+  unUcliProtocolIconPathInvalid:
+    Push ""
+FunctionEnd
+
+Function un.UcliProtocolPathsMatch
   Pop $R1
   Pop $R0
   System::Call 'kernel32::lstrcmpi(t r0, t r1) i.r2'
-  StrCmp $R2 0 ucliProtocolValueMatchesYes ucliProtocolValueMatchesNo
+  StrCmp $R2 0 unUcliProtocolPathsMatchYes unUcliProtocolPathsMatchNo
 
-  ucliProtocolValueMatchesYes:
+  unUcliProtocolPathsMatchYes:
     Push 1
-    Goto ucliProtocolValueMatchesDone
+    Goto unUcliProtocolPathsMatchDone
 
-  ucliProtocolValueMatchesNo:
+  unUcliProtocolPathsMatchNo:
     Push 0
 
-  ucliProtocolValueMatchesDone:
+  unUcliProtocolPathsMatchDone:
 FunctionEnd
+!endif
 
 !macro stageUcliProcessScript
   InitPluginsDir
@@ -80,22 +144,38 @@ FunctionEnd
 !macro customUnInstall
   ReadRegStr $R0 HKCU "Software\Classes\ucli\shell\open\command" ""
   ReadRegStr $R1 HKCU "Software\Classes\ucli\DefaultIcon" ""
-  StrCpy $R2 "$\"$INSTDIR\${APP_EXECUTABLE_FILENAME}$\" $\"%1$\""
-  StrCpy $R3 "$\"$INSTDIR\${APP_EXECUTABLE_FILENAME}$\",0"
+  StrCpy $0 $R0
+  StrCpy $1 $R1
+  StrCpy $2 "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+  GetFullPathName $2 "$2"
 
-  Push $R0
-  Push $R2
-  Call UcliProtocolValueMatches
-  Pop $R4
-  ${if} $R4 != 1
+  Push $0
+  Call un.UcliProtocolCommandPath
+  Pop $3
+  ${if} $3 == ""
     Goto ucliProtocolNotOwned
   ${endIf}
 
-  Push $R1
-  Push $R3
-  Call UcliProtocolValueMatches
-  Pop $R4
-  ${if} $R4 != 1
+  Push $3
+  Push $2
+  Call un.UcliProtocolPathsMatch
+  Pop $4
+  ${if} $4 != 1
+    Goto ucliProtocolNotOwned
+  ${endIf}
+
+  Push $1
+  Call un.UcliProtocolIconPath
+  Pop $3
+  ${if} $3 == ""
+    Goto ucliProtocolNotOwned
+  ${endIf}
+
+  Push $3
+  Push $2
+  Call un.UcliProtocolPathsMatch
+  Pop $4
+  ${if} $4 != 1
     Goto ucliProtocolNotOwned
   ${endIf}
 
