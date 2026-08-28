@@ -1,0 +1,5 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"fixture-response"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"fixture-response"}}

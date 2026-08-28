@@ -24,7 +24,10 @@ const device = {
 function response(body, { status = 200, cacheControl = 'no-store' } = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: cacheControl === null ? {} : { 'Cache-Control': cacheControl }
+    headers: {
+      'Content-Type': 'application/json',
+      ...(cacheControl === null ? {} : { 'Cache-Control': cacheControl })
+    }
   })
 }
 

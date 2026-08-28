@@ -55,6 +55,11 @@ function hasNoStore(response) {
   return typeof cacheControl === 'string' && /(?:^|,)\s*no-store\s*(?:,|$)/i.test(cacheControl)
 }
 
+function hasJsonContentType(response) {
+  const contentType = response.headers?.get?.('content-type')
+  return typeof contentType === 'string' && /^application\/json(?:;|$)/i.test(contentType)
+}
+
 async function errorFromResponse(response, expectedErrorStatus) {
   if (response.status !== expectedErrorStatus) throw invalidResponse()
   let body
@@ -87,7 +92,7 @@ export function createDeviceGrantClient({ fetchImpl = fetch, timeoutMs = 15_000,
 
     if (!response || typeof response.status !== 'number') throw retryableFailure()
     if (response.status >= 500) throw retryableFailure()
-    if (requireNoStore && !hasNoStore(response)) throw invalidResponse()
+    if (!hasJsonContentType(response) || (requireNoStore && !hasNoStore(response))) throw invalidResponse()
     if (!response.ok) return errorFromResponse(response, expectedErrorStatus)
 
     let value

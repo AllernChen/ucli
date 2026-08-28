@@ -113,6 +113,12 @@ function parseSameOriginUrl(value, serverOrigin) {
   return url.toString()
 }
 
+function parseFixedSameOriginUrl(value, serverOrigin, pathname) {
+  const parsed = parseSameOriginUrl(value, serverOrigin)
+  if (new URL(parsed).pathname !== pathname) throw responseError()
+  return parsed
+}
+
 export function parsePreviewResponse(value) {
   value = object(value)
   const link = object(value.link)
@@ -146,7 +152,7 @@ export function parseBootstrapResponse(value, { serverOrigin } = {}) {
   if (!Array.isArray(value.models)) throw responseError()
   return {
     organization: parseOrganization(value.organization, { timezone: true }),
-    gateway: { baseUrl: parseSameOriginUrl(gateway.baseUrl, serverOrigin) },
+    gateway: { baseUrl: parseFixedSameOriginUrl(gateway.baseUrl, serverOrigin, '/gateway') },
     models: value.models.map(model => {
       model = object(model)
       if (!Number.isSafeInteger(model.contextSize) || model.contextSize <= 0) throw responseError()
@@ -156,7 +162,7 @@ export function parseBootstrapResponse(value, { serverOrigin } = {}) {
         contextSize: model.contextSize
       }
     }),
-    skillsCatalogUrl: parseSameOriginUrl(value.skillsCatalogUrl, serverOrigin),
+    skillsCatalogUrl: parseFixedSameOriginUrl(value.skillsCatalogUrl, serverOrigin, '/api/v1/skills/catalog'),
     authorization: parseAuthorization(value.authorization)
   }
 }
@@ -182,7 +188,7 @@ export function parseSkillsCatalogPage(value, { serverOrigin } = {}) {
         name: requiredString(skill.name),
         description: requiredString(skill.description)
       },
-      downloadUrl: parseSameOriginUrl(item.downloadUrl, serverOrigin)
+      downloadUrl: parseFixedSameOriginUrl(item.downloadUrl, serverOrigin, `/api/v1/skills/${encodeURIComponent(item.id)}/download`)
     }
   })
 }

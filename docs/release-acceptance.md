@@ -2,6 +2,27 @@
 
 本清单用于 UCLI Windows x64 发布前和 GitHub Release 发布后的人工验收。自动化 `npm run verify:release` 只验证构建产物和更新元数据的一致性；以下交互行为必须在实际 Windows 环境中验证。
 
+## 0. 0.12.0 服务端接入发布矩阵
+
+本节记录 Task 11 的本地合同门与待完成的外部发布门。固定 fixtures、静态安装器检查和本机构建都不能替代原生平台、真实服务或旧二进制验证。
+
+| 项目 | 当前证据 / 状态 |
+| --- | --- |
+| 固定 Device Grant Link v1 合约 | 已由本地 fixtures 覆盖 Preview、Redeem、Refresh、Bootstrap、Skills、稳定错误和合成 SSE；未知字段忽略，未知枚举、日期、必填字段、跨源或错误固定路径 URL、错误 JSON 内容类型及缺失 `Cache-Control: no-store` 均 fail closed。 |
+| 本地回滚兼容性 | 已做静态命名空间证明：当前版本的 `ucli-server-*` 文件不属于旧 `ucli-<32hex>` 所有权规则；这不是 0.11.6 二进制降级实证。 |
+| Task 10 Windows 产物 | 在 `7e1044a` 之后保留的 2026-08-28 Windows x64 构建：Setup `UCLI-Setup-0.12.0-x64.exe`（134,215,024 bytes，SHA-256 `28C97BDA974B4D7750601249D9A0C71F87B4458827EB63D5D2CBE713D1D36170`），Portable `UCLI-Portable-0.12.0-x64.exe`（133,960,212 bytes，SHA-256 `E9959F62C08DABF87E729A02A31AC138A9539A618CD4F17DAE563958B6B6BB80`），`latest.yml` 和 unpacked application manifest 均为 `0.12.0`。 |
+| Windows 原生人工检查 | 待完成：安装版 URL scheme、cold start、第二实例、升级、条件卸载，以及 portable 不接管协议。 |
+| macOS / Linux | 待完成：原生 macOS DMG/ZIP 验证；Linux 打包验证。未以静态检查替代。 |
+| 真实内网冒烟 | 待完成：须取得新的一次性测试授权后，显式启用隔离 smoke，覆盖注册、刷新、模型和 Skills 下载。 |
+| 真实降级 | 待完成：用真实 0.11.6 二进制验证其忽略 `server_*` 表和 `ucli-server-*` 文件。 |
+
+### 0.12.0 数据与紧急关闭
+
+- [x] 服务端能力没有自动默认模型或自动安装 Skills；独立模式、已有本地会话、Profiles、Skills 和数据保持可用。
+- [x] 紧急关闭只移除服务端入口/能力，不删除本地会话、Profiles、Skills 或数据。
+- [ ] 在隔离安装中手工确认断网、5xx、disabled/expired/account/org inactive 状态不影响本地能力。
+- [ ] 在新授权的真实内网中完成注册、Refresh、`/gateway/v1/models`、最小模型流和 Skills 下载哈希检查；不要记录链接、token、header 或响应正文。
+
 ## 0. 验收记录
 
 | 字段 | 填写内容 |
