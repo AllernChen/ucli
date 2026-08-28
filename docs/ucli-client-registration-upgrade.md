@@ -542,6 +542,8 @@ IPC 错误只包含稳定错误码、用户信息和可重试标记，不包含 
 
 ## 22. 工作树验证状态（2026-08-28）
 
-此副本同步自用户提供的实施方案。当前工作树已加入固定合约门和默认跳过的真实 smoke 测试。2026-08-28 的真实内网运行已通过 Preview、首次 Redeem 和同一 installationId 的幂等 Redeem；强制 Refresh 因部署实例的 `POST /api/v1/auth/token/refresh` 未返回 `Cache-Control: no-store` 而按合同 fail closed，Bootstrap、模型和 Skill 下载未执行。本次单次链接已消费，临时数据库、凭证环境变量和 smoke 目录已清理。服务端补齐响应头并重新部署后，须使用新的单次授权重跑完整 smoke。
+此副本同步自用户提供的实施方案。当前工作树已加入固定合约门和默认跳过的真实 smoke 测试。2026-08-28 首次真实内网运行通过 Preview、首次 Redeem 和同一 installationId 的幂等 Redeem，并在 Refresh 缺少 `Cache-Control: no-store` 时正确 fail closed。服务端提交 `a65361d` 修复并部署后，第二次新授权重跑通过生产预检、客户端离线合同 45/45、Preview、首次/幂等 Redeem 和强制 Refresh，但显式 Bootstrap 随后以脱敏稳定码 `null` fail closed，模型和 Skill 下载未执行。单次链接已绑定，临时数据库、凭证环境变量和 smoke 目录已清理。
+
+只读合同对照显示服务端 `PublicModel.contextSize` 允许 `null` 且 Bootstrap 原样返回，而客户端合同要求每个模型提供正整数 `contextSize`；本地最小对照证明 `null` 会触发 `SERVER_RESPONSE_INVALID`。服务端仍须用只统计数量的生产查询确认无效 `context_size`，并核对 Bootstrap 的其他脱敏字段后修复、测试和部署，再为完整 smoke 创建新的单次授权。
 
 Windows 产物存在于 Task 10 的 post-HEAD 构建证据中；真实完整内网 smoke、原生 macOS、Linux、URL-scheme/portable 人工检查和真实 0.11.6 二进制降级仍为发布阻断项。紧急关闭仅移除服务端入口/能力，不迁移或删除本地模型、Skills、会话或数据。

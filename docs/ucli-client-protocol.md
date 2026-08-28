@@ -419,4 +419,6 @@ Authorization: Bearer <accessToken>
 
 此副本同步自用户提供的协议；它记录的是合同而不是已完成发布。当前工作树的固定 fixtures 覆盖 Preview、Redeem、Refresh、Bootstrap、Skills、稳定错误和合成 SSE，并对未知字段/枚举、日期、必填字段、URL、内容类型和 `no-store` 作本地 fail-closed 检查。
 
-2026-08-28 的真实内网 smoke 已通过 Preview、首次 Redeem 和同一 installationId 的幂等 Redeem，但在强制 Refresh 时按合同 fail closed：部署实例的 `POST /api/v1/auth/token/refresh` 响应缺少本协议第 3 节要求的 `Cache-Control: no-store`。因此 Bootstrap、模型调用和 Skill 下载未继续执行；本次单次链接已消费，临时数据库、凭证环境变量和 smoke 目录已清理。服务端补齐响应头并重新部署后，须使用新的单次授权重新运行完整 smoke。
+2026-08-28 的首次真实内网 smoke 已通过 Preview、首次 Redeem 和同一 installationId 的幂等 Redeem，并在 Refresh 缺少 `Cache-Control: no-store` 时按合同 fail closed。服务端提交 `a65361d` 修复并部署该响应头后，第二次新授权重跑又通过强制 Refresh，但显式 Bootstrap 随后返回不符合合同的响应并以脱敏稳定码 `null` fail closed；模型调用和 Skill 下载仍未执行。两次单次链接均已绑定，客户端临时数据库、凭证环境变量和 smoke 目录均已清理。
+
+只读对照确认一个待服务端核实的生产数据边界：服务端 `PublicModel.contextSize` 为可空字段并由 Bootstrap 原样返回，而本协议第 10 节要求每个已发布模型提供正整数 `contextSize`。相同负载的本地对照中，正整数可通过 parser，`null` 会得到 `SERVER_RESPONSE_INVALID`。服务端须先统计生产已发布模型的无效 `context_size`，核对 Bootstrap 的 URL、组织、模型和授权字段，并用合同测试锁定响应，再使用新的单次授权重跑完整 smoke。
