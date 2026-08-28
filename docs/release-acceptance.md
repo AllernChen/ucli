@@ -10,7 +10,7 @@
 | --- | --- |
 | 固定 Device Grant Link v1 合约 | 已由本地 fixtures 覆盖 Preview、Redeem、Refresh、Bootstrap、Skills、稳定错误和合成 SSE；未知字段忽略，未知枚举、日期、必填字段、跨源或错误固定路径 URL、错误 JSON 内容类型及缺失 `Cache-Control: no-store` 均 fail closed。 |
 | 本地回滚兼容性 | 已做静态命名空间证明：当前版本的 `ucli-server-*` 文件不属于旧 `ucli-<32hex>` 所有权规则；这不是 0.11.6 二进制降级实证。 |
-| Task 10 Windows 产物 | 在 `7e1044a` 之后保留的 2026-08-28 Windows x64 构建：Setup `UCLI-Setup-0.12.0-x64.exe`（134,215,024 bytes，SHA-256 `28C97BDA974B4D7750601249D9A0C71F87B4458827EB63D5D2CBE713D1D36170`），Portable `UCLI-Portable-0.12.0-x64.exe`（133,960,212 bytes，SHA-256 `E9959F62C08DABF87E729A02A31AC138A9539A618CD4F17DAE563958B6B6BB80`），`latest.yml` 和 unpacked application manifest 均为 `0.12.0`。 |
+| Task 10 Windows 产物 | 2026-08-28 11:07（Asia/Shanghai）从运行时代码提交 `7d53482` 构建的 Windows x64 产物：Setup `UCLI-Setup-0.12.0-x64.exe`（134,216,169 bytes，SHA-256 `02CA938CB5BFC5B04A385A88C1FE56A9A4E077522F6D83BDD36CE6F658D89F3D`），Portable `UCLI-Portable-0.12.0-x64.exe`（133,961,427 bytes，SHA-256 `D4382FE7107E0AB862CB076B9D62D3CECDE1AFFD470F93709E343F4714739547`）；`latest.yml` 与 blockmap 均生成于 11:07，`npm run verify:release` 已通过。其后的紧邻提交仅修改此证据文档；该文档不在 `electron-builder.yml` 的打包输入中。 |
 | Windows 原生人工检查 | 待完成：安装版 URL scheme、cold start、第二实例、升级、条件卸载，以及 portable 不接管协议。 |
 | macOS / Linux | 待完成：原生 macOS DMG/ZIP 验证；Linux 打包验证。未以静态检查替代。 |
 | 真实内网冒烟 | 待完成：须取得新的一次性测试授权后，显式启用隔离 smoke，覆盖注册、刷新、模型和 Skills 下载。 |
