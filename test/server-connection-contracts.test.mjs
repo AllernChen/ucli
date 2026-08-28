@@ -48,7 +48,9 @@ test('model protocols are explicit and map to fixed local Gateway paths', () => 
     anthropic_messages: '/anthropic/v1/messages'
   })
   assert.equal(localGatewayPathForProtocol('openai_chat'), '/v1/chat/completions')
-  assert.throws(() => localGatewayPathForProtocol('gemini'), { code: 'SERVER_RESPONSE_INVALID' })
+  for (const protocol of ['gemini', 'toString', 'constructor', '__proto__']) {
+    assert.throws(() => localGatewayPathForProtocol(protocol), { code: 'SERVER_RESPONSE_INVALID' })
+  }
 })
 
 test('Bootstrap and Gateway model directories require known non-empty protocols', () => {

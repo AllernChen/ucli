@@ -212,8 +212,8 @@ export function selectModelForProtocol(models, protocol) {
 }
 
 export function localGatewayPathForProtocol(protocol) {
+  if (!PUBLIC_MODEL_PROTOCOL_SET.has(protocol)) throw responseError()
   const path = MODEL_PROTOCOL_LOCAL_PATHS[protocol]
-  if (!path) throw responseError()
   return path
 }
 
