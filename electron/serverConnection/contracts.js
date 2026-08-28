@@ -79,10 +79,12 @@ export function parseGatewayRouteFailure(value = {}) {
     retryable: null
   }
   let ownError
+  let didThrowOwnError = false
   const invalid = () => {
     const error = responseError()
     error.diagnostic = diagnostic
     ownError = error
+    didThrowOwnError = true
     throw error
   }
   try {
@@ -99,7 +101,7 @@ export function parseGatewayRouteFailure(value = {}) {
     if (body.message !== routeError.message || body.retryable !== routeError.retryable) return invalid()
     return { ...diagnostic, stableCode: body.code, requestId: body.requestId, retryable: routeError.retryable }
   } catch (error) {
-    if (error === ownError) throw error
+    if (didThrowOwnError && error === ownError) throw error
     return invalid()
   }
 }

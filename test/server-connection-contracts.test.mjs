@@ -242,6 +242,38 @@ test('Gateway route failures fail closed when body getters throw untrusted error
   })
 })
 
+test('Gateway route failures fail closed when body getters throw nullish values', () => {
+  for (const thrown of [undefined, null]) {
+    const body = fixture('error-model-protocol-unavailable.json')
+    Object.defineProperty(body, 'code', {
+      get() { throw thrown }
+    })
+    let caught
+    try {
+      parseGatewayRouteFailure({
+        status: 503,
+        headers: new Headers({
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-ucli-request-id': 'fixture-request-protocol'
+        }),
+        body
+      })
+    } catch (error) {
+      caught = error
+    }
+    assert.equal(caught?.code, 'SERVER_RESPONSE_INVALID')
+    assert.deepEqual(caught?.diagnostic, {
+      httpStatus: 503,
+      contentType: 'application/json; charset=utf-8',
+      cacheControl: 'no-store',
+      stableCode: 'not-received',
+      requestId: 'fixture-request-protocol',
+      retryable: null
+    })
+  }
+})
+
 test('response parsers return known protocol fields and ignore unknown fields', () => {
   const preview = parsePreviewResponse({ ...fixture('preview-available.json'), unexpected: 'discard me' })
   assert.deepEqual(preview.link, { status: 'AVAILABLE', expiresAt: '2026-09-02T04:00:00.000Z' })
