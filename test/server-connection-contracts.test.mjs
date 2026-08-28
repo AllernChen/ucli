@@ -207,6 +207,41 @@ test('Gateway route failures reject malformed stable 503 responses without seria
   }
 })
 
+test('Gateway route failures fail closed when body getters throw untrusted errors', () => {
+  const body = fixture('error-model-protocol-unavailable.json')
+  const untrusted = Object.assign(new Error('untrusted getter'), {
+    code: 'SERVER_RESPONSE_INVALID',
+    diagnostic: { secret: 'untrusted-getter-secret' }
+  })
+  Object.defineProperty(body, 'code', {
+    get() { throw untrusted }
+  })
+  assert.throws(() => parseGatewayRouteFailure({
+    status: 503,
+    headers: new Headers({
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-ucli-request-id': body.requestId
+    }),
+    body
+  }), error => {
+    assert.notEqual(error, untrusted)
+    assert.equal(error?.code, 'SERVER_RESPONSE_INVALID')
+    assert.deepEqual(error?.diagnostic, {
+      httpStatus: 503,
+      contentType: 'application/json; charset=utf-8',
+      cacheControl: 'no-store',
+      stableCode: 'not-received',
+      requestId: body.requestId,
+      retryable: null
+    })
+    const serialised = JSON.stringify(error?.diagnostic)
+    assert.equal(serialised.includes('untrusted getter'), false)
+    assert.equal(serialised.includes('untrusted-getter-secret'), false)
+    return true
+  })
+})
+
 test('response parsers return known protocol fields and ignore unknown fields', () => {
   const preview = parsePreviewResponse({ ...fixture('preview-available.json'), unexpected: 'discard me' })
   assert.deepEqual(preview.link, { status: 'AVAILABLE', expiresAt: '2026-09-02T04:00:00.000Z' })

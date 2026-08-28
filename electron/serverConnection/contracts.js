@@ -70,23 +70,38 @@ function hasNoStoreDirective(cacheControl) {
 }
 
 export function parseGatewayRouteFailure(value = {}) {
-  const { status, headers, body } = value && typeof value === 'object' ? value : {}
-  const diagnostic = gatewayResponseMetadata({ status, headers })
+  let diagnostic = {
+    httpStatus: 'not-received',
+    contentType: 'not-received',
+    cacheControl: 'not-received',
+    stableCode: 'not-received',
+    requestId: 'not-received',
+    retryable: null
+  }
+  let ownError
   const invalid = () => {
     const error = responseError()
     error.diagnostic = diagnostic
+    ownError = error
     throw error
   }
-  if (status !== 503 || !hasJsonContentType(diagnostic.contentType) ||
-    !hasNoStoreDirective(diagnostic.cacheControl) || !body || typeof body !== 'object' || Array.isArray(body) ||
-    body.statusCode !== 503 || typeof body.requestId !== 'string' || !body.requestId ||
-    diagnostic.requestId === 'not-received' || body.requestId !== diagnostic.requestId ||
-    typeof body.code !== 'string' || !Object.hasOwn(GATEWAY_ROUTE_ERRORS, body.code)) {
+  try {
+    const { status, headers, body } = value && typeof value === 'object' ? value : {}
+    diagnostic = gatewayResponseMetadata({ status, headers })
+    if (status !== 503 || !hasJsonContentType(diagnostic.contentType) ||
+      !hasNoStoreDirective(diagnostic.cacheControl) || !body || typeof body !== 'object' || Array.isArray(body) ||
+      body.statusCode !== 503 || typeof body.requestId !== 'string' || !body.requestId ||
+      diagnostic.requestId === 'not-received' || body.requestId !== diagnostic.requestId ||
+      typeof body.code !== 'string' || !Object.hasOwn(GATEWAY_ROUTE_ERRORS, body.code)) {
+      return invalid()
+    }
+    const routeError = GATEWAY_ROUTE_ERRORS[body.code]
+    if (body.message !== routeError.message || body.retryable !== routeError.retryable) return invalid()
+    return { ...diagnostic, stableCode: body.code, requestId: body.requestId, retryable: routeError.retryable }
+  } catch (error) {
+    if (error === ownError) throw error
     return invalid()
   }
-  const routeError = GATEWAY_ROUTE_ERRORS[body.code]
-  if (body.message !== routeError.message || body.retryable !== routeError.retryable) return invalid()
-  return { ...diagnostic, stableCode: body.code, requestId: body.requestId, retryable: routeError.retryable }
 }
 
 function object(value) {
