@@ -152,6 +152,7 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
     })
     failureDiagnostic = gatewayResponseMetadata(modelsResponse)
     assert.equal(modelsResponse.ok, true, 'gateway models request failed')
+    failedStage = 'model-directory'
     const gatewayModels = parseGatewayModelsResponse(await modelsResponse.json()).data
     const selectedModel = selectModelForProtocol(bootstrap.models, selectedProtocol)
     assert.ok(selectedModel, 'no compatible server model')
