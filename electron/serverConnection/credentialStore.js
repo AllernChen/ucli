@@ -285,6 +285,18 @@ export class ServerCredentialStore {
     await this.flushOrThrow()
   }
 
+  async disconnectCurrent({ connectionId, connectionRevision, serverOrigin, organizationId } = {}) {
+    this.assertPersistenceWritable()
+    const current = this.db.getServerConnection('current')
+    if (!current || current.id !== connectionId || current.connectionRevision !== connectionRevision ||
+      current.serverOrigin !== serverOrigin || current.organizationId !== organizationId) return false
+    const deleted = await this.db.transaction(() => this.db.clearCurrentServerConnection({ connectionId }))
+    if (!deleted) return false
+    if (this.state.pendingRefreshConnectionId === connectionId) this.state.pendingRefreshConnectionId = null
+    await this.flushOrThrow()
+    return true
+  }
+
   encryptRefreshToken(refreshToken) {
     const value = ensureRefreshToken(refreshToken)
     this.assertEncryptionAvailable()

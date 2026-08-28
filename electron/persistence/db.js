@@ -1853,6 +1853,14 @@ class Db {
     this.sql.run('DELETE FROM server_connections')
   }
 
+  clearCurrentServerConnection({ connectionId }) {
+    this.sql.run("DELETE FROM server_connections WHERE slot = 'current' AND id = ?", [connectionId])
+    if (this.sql.getRowsModified() === 0) return false
+    this.sql.run('DELETE FROM server_model_profiles')
+    this.sql.run('DELETE FROM server_skill_versions')
+    return true
+  }
+
   listServerModelProfiles() {
     return rows(this.sql.exec(
       'SELECT * FROM server_model_profiles ORDER BY display_name, profile_id'

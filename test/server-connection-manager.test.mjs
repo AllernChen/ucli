@@ -44,8 +44,18 @@ function createManager({ client = {}, credentials = {}, now = () => nowValue, ti
 
 function deferred() {
   let resolve
-  const promise = new Promise(nextResolve => { resolve = nextResolve })
-  return { promise, resolve }
+  let reject
+  const promise = new Promise((nextResolve, nextReject) => { resolve = nextResolve; reject = nextReject })
+  return { promise, resolve, reject }
+}
+
+function serverIdentity(connection) {
+  return {
+    connectionId: connection.id,
+    connectionRevision: connection.connectionRevision,
+    serverOrigin: connection.serverOrigin,
+    organizationId: connection.organizationId
+  }
 }
 
 function scheduler(start = nowValue) {
@@ -161,6 +171,119 @@ test('a server lifecycle error cannot mutate a replacement connection with a dif
   assert.equal(applied, false)
   assert.equal(manager.getState().status, 'connected')
   assert.equal(manager.getState().connection.id, current.id)
+})
+
+test('a delayed terminal lifecycle revoke for A cannot delete a persisted replacement B', async () => {
+  const revocation = deferred()
+  const { manager, stored } = createManager({
+    credentials: {
+      disconnectCurrent: async ({ connectionId }) => {
+        if (stored.id !== connectionId) return false
+        stored.deleted = true
+        return true
+      },
+      disconnect: async () => { stored.deleted = true; stored.id = null }
+    }
+  })
+  manager.revokeRuntimeRevision = async () => revocation.promise
+  const terminal = manager.handleServerLifecycleError({ code: 'grant_deleted' }, serverIdentity(current))
+  await new Promise(resolve => setImmediate(resolve))
+  const replacement = {
+    ...current, id: 'connection-2', serverOrigin: 'https://replacement.example.test', organizationId: 'org-2', connectionRevision: 4
+  }
+  Object.assign(stored, replacement)
+  manager.current = { ...replacement }
+  manager.connectionEpoch += 1
+  manager.status = 'connected'
+  revocation.resolve()
+  await terminal
+
+  assert.equal(stored.id, replacement.id)
+  assert.equal(stored.deleted, undefined)
+  assert.equal(manager.getState().connection.id, replacement.id)
+})
+
+test('a delayed terminal Refresh error for A cannot delete a persisted replacement B', async () => {
+  const refresh = deferred()
+  const revocation = deferred()
+  const { manager, stored } = createManager({
+    client: { refresh: async () => refresh.promise },
+    credentials: {
+      disconnectCurrent: async ({ connectionId }) => {
+        if (stored.id !== connectionId) return false
+        stored.deleted = true
+        return true
+      },
+      disconnect: async () => { stored.deleted = true; stored.id = null }
+    }
+  })
+  manager.revokeRuntimeRevision = async () => revocation.promise
+  const access = manager.getAccessToken()
+  refresh.reject(Object.assign(new Error('grant no longer valid'), { code: 'grant_deleted' }))
+  await new Promise(resolve => setImmediate(resolve))
+  const replacement = {
+    ...current, id: 'connection-2', serverOrigin: 'https://replacement.example.test', organizationId: 'org-2', connectionRevision: 4
+  }
+  Object.assign(stored, replacement)
+  manager.current = { ...replacement }
+  manager.connectionEpoch += 1
+  manager.status = 'connected'
+  revocation.resolve()
+
+  await assert.rejects(access, { code: 'grant_deleted' })
+  assert.equal(stored.id, replacement.id)
+  assert.equal(stored.deleted, undefined)
+  assert.equal(manager.getState().connection.id, replacement.id)
+})
+
+test('a pending terminal disconnect retry cannot delete a persisted replacement B', async () => {
+  let persistencePending = false
+  const { manager, stored } = createManager({
+    credentials: {
+      isPersistencePending: () => persistencePending,
+      disconnectCurrent: async ({ connectionId }) => {
+        if (stored.id !== connectionId) return false
+        persistencePending = true
+        throw Object.assign(new Error('disk unavailable'), { code: 'PERSISTENCE_PENDING' })
+      },
+      retryPendingPersistence: async () => { persistencePending = false; return stored },
+      disconnect: async () => {
+        persistencePending = true
+        throw Object.assign(new Error('disk unavailable'), { code: 'PERSISTENCE_PENDING' })
+      }
+    }
+  })
+  await assert.rejects(manager.handleServerLifecycleError({ code: 'invalid_grant' }, serverIdentity(current)), { code: 'PERSISTENCE_PENDING' })
+  const replacement = {
+    ...current, id: 'connection-2', serverOrigin: 'https://replacement.example.test', organizationId: 'org-2', connectionRevision: 4
+  }
+  Object.assign(stored, replacement)
+  manager.current = { ...replacement }
+  manager.connectionEpoch += 1
+  manager.status = 'connected'
+  persistencePending = false
+
+  await manager.retry()
+
+  assert.equal(stored.id, replacement.id)
+  assert.equal(manager.getState().connection.id, replacement.id)
+})
+
+test('a matching terminal lifecycle error deletes its persisted current connection', async () => {
+  const { manager, stored } = createManager({
+    credentials: {
+      disconnectCurrent: async ({ connectionId }) => {
+        if (stored.id !== connectionId) return false
+        stored.deleted = true
+        return true
+      },
+      disconnect: async () => { stored.deleted = true }
+    }
+  })
+
+  assert.equal(await manager.handleServerLifecycleError({ code: 'invalid_device' }, serverIdentity(current)), true)
+  assert.equal(stored.deleted, true)
+  assert.equal(manager.getState().status, 'disconnected')
 })
 
 test('a stale refresh completion after disconnect cannot alter the disconnected state', async () => {

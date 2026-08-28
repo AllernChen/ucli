@@ -435,3 +435,20 @@ test('unknown server errors never retain attacker-controlled codes or text', asy
   await assert.rejects(connection.syncConnection())
   assert.deepEqual(connection.error, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
 })
+
+test('stable terminal grant errors retain reauthorization guidance', async () => {
+  const connection = store()
+  const previousSync = window.ucli.syncServerConnection
+  try {
+    for (const [code, message] of [
+      ['invalid_grant', '服务端授权无效，请重新连接'],
+      ['invalid_device', '设备注册无效，请重新连接']
+    ]) {
+      window.ucli.syncServerConnection = async () => { throw Object.assign(new Error('opaque server detail'), { code }) }
+      await assert.rejects(connection.syncConnection(), { code })
+      assert.deepEqual(connection.error, { code, message, retryable: false })
+    }
+  } finally {
+    window.ucli.syncServerConnection = previousSync
+  }
+})

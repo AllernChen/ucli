@@ -8,6 +8,8 @@ const PUBLIC_ERROR_MESSAGES = Object.freeze({
   link_expired: '连接链接已过期，请获取新的链接',
   link_revoked: '连接链接已撤销，请获取新的链接',
   link_consumed: '连接链接已使用，请获取新的链接',
+  invalid_grant: '服务端授权无效，请重新连接',
+  invalid_device: '设备注册无效，请重新连接',
   grant_disabled: '服务端授权已停用',
   grant_expired: '服务端授权已到期',
   grant_deleted: '服务端授权已删除，请重新连接',

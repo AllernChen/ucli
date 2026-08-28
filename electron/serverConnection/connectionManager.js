@@ -282,7 +282,7 @@ export class ConnectionManager {
     try { await this.bootstrapWithAccessToken({ connection, connectionEpoch }) }
     catch (error) {
       if (!this.isCurrentConnection(connection, connectionEpoch)) return
-      await this.handleLifecycleError(error)
+      await this.handleLifecycleError(error, { connection, connectionEpoch })
     }
   }
 
@@ -379,7 +379,7 @@ export class ConnectionManager {
       if (!this.isCurrentConnection(connection, connectionEpoch) && this.persistencePending?.connection === connection) {
         this.persistencePending = null
       }
-      if (error?.code !== 'STALE_CONNECTION_OPERATION') await this.handleLifecycleError(error)
+      if (error?.code !== 'STALE_CONNECTION_OPERATION') await this.handleLifecycleError(error, { connection, connectionEpoch })
       throw operationError(error)
     }
   }
@@ -401,7 +401,7 @@ export class ConnectionManager {
         return value
       } catch (error) {
         if (!this.isCurrentConnection(connection, connectionEpoch)) return null
-        await this.handleLifecycleError(error)
+        await this.handleLifecycleError(error, { connection, connectionEpoch })
         throw operationError(error)
       }
     })().finally(() => {
@@ -512,21 +512,23 @@ export class ConnectionManager {
     return true
   }
 
-  async handleLifecycleError(error) {
+  async handleLifecycleError(error, { connection = this.current, connectionEpoch = this.connectionEpoch } = {}) {
+    if (connection && !this.isCurrentConnection(connection, connectionEpoch)) return false
     const code = error?.code
     if (['invalid_grant', 'grant_deleted', 'invalid_device'].includes(code)) {
+      const terminalConnection = this.persistedConnectionIdentity(connection)
       const previousRuntimeIdentity = this.invalidateRuntimeConnection()
       if (previousRuntimeIdentity) await this.revokeRevision(previousRuntimeIdentity)
       try {
-        await this.runCredentialMutation(() => this.credentials.disconnect())
+        await this.disconnectTerminalConnection(terminalConnection)
       } catch (disconnectError) {
         if (disconnectError?.code === 'PERSISTENCE_PENDING') {
-          this.pendingDisconnect = true
+          this.pendingDisconnect = { kind: 'terminal', connection: terminalConnection }
           this.scheduleRetry()
         }
         throw disconnectError
       }
-      return
+      return true
     }
     const disabledStatus = {
       grant_disabled: 'disabled', grant_expired: 'expired', account_inactive: 'account_inactive', organization_inactive: 'org_inactive'
@@ -537,19 +539,21 @@ export class ConnectionManager {
       this.bootstrapCache = null
       this.setRuntimeStatus(disabledStatus, code)
       this.scheduleRetry(15 * 60_000)
-      return
+      return true
     }
-    if (code === 'PERSISTENCE_PENDING') return
+    if (code === 'PERSISTENCE_PENDING') return true
     this.setRuntimeStatus('unreachable', null)
     if (error?.retryable) this.scheduleRetry()
+    return true
   }
 
   async handleServerLifecycleError(error, identity) {
     const code = error?.code
+    const connection = this.current
+    const connectionEpoch = this.connectionEpoch
     if (!['invalid_grant', 'invalid_device', 'grant_disabled', 'grant_expired', 'grant_deleted', 'account_inactive', 'organization_inactive'].includes(code) ||
       !this.matchesServerIdentity(identity)) return false
-    await this.handleLifecycleError({ code })
-    return true
+    return this.handleLifecycleError({ code }, { connection, connectionEpoch })
   }
 
   setRuntimeStatus(status, reason) {
@@ -642,6 +646,44 @@ export class ConnectionManager {
       identity.organizationId === connection.organizationId)
   }
 
+  matchesPersistedConnection(connection, expected) {
+    return Boolean(connection && expected &&
+      connection.id === expected.id &&
+      connection.connectionRevision === expected.connectionRevision &&
+      connection.serverOrigin === expected.serverOrigin &&
+      connection.organizationId === expected.organizationId)
+  }
+
+  persistedConnectionIdentity(connection) {
+    if (!connection) return null
+    return Object.freeze({
+      id: connection.id,
+      connectionRevision: connection.connectionRevision,
+      serverOrigin: connection.serverOrigin,
+      organizationId: connection.organizationId
+    })
+  }
+
+  async disconnectTerminalConnection(connection, { retryPersistence = false } = {}) {
+    return this.runCredentialMutation(async () => {
+      if (retryPersistence && this.credentials.isPersistencePending?.()) {
+        await (this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.())
+      }
+      const persisted = this.credentials.readCurrent?.()
+      if (!this.matchesPersistedConnection(persisted, connection)) return false
+      if (typeof this.credentials.disconnectCurrent === 'function') {
+        return this.credentials.disconnectCurrent({
+          connectionId: connection.id,
+          connectionRevision: connection.connectionRevision,
+          serverOrigin: connection.serverOrigin,
+          organizationId: connection.organizationId
+        })
+      }
+      await this.credentials.disconnect()
+      return true
+    })
+  }
+
   cancel(attemptId) {
     if (this.committingAttempts.has(attemptId)) return false
     const cancelled = this.attempts.cancel(attemptId)
@@ -674,6 +716,11 @@ export class ConnectionManager {
     if (this.pendingDisconnect) {
       try {
         const pendingDisconnect = this.pendingDisconnect
+        if (pendingDisconnect.kind === 'terminal') {
+          await this.disconnectTerminalConnection(pendingDisconnect.connection, { retryPersistence: true })
+          if (this.pendingDisconnect === pendingDisconnect) this.pendingDisconnect = null
+          return this.getState()
+        }
         await this.runCredentialMutation(async () => {
           if (this.credentials.isPersistencePending?.()) {
             await (this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.())
@@ -781,12 +828,17 @@ export class ConnectionManager {
       this.refreshFlight?.promise, this.bootstrapFlight?.promise, this.credentialMutation
     ].filter(Boolean))
     if (this.pendingDisconnect) {
-      await this.runCredentialMutation(async () => {
-        if (this.credentials.isPersistencePending?.()) {
-          await (this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.())
-        }
-        await this.credentials.disconnect()
-      }).catch(() => {})
+      const pendingDisconnect = this.pendingDisconnect
+      if (pendingDisconnect.kind === 'terminal') {
+        await this.disconnectTerminalConnection(pendingDisconnect.connection, { retryPersistence: true }).catch(() => {})
+      } else {
+        await this.runCredentialMutation(async () => {
+          if (this.credentials.isPersistencePending?.()) {
+            await (this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.())
+          }
+          await this.credentials.disconnect()
+        }).catch(() => {})
+      }
     } else if (this.persistencePending) {
       await this.runCredentialMutation(() => this.credentials.retryPendingPersistence?.() || this.credentials.retryPendingRefreshPersistence?.()).catch(() => {})
     }

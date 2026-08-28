@@ -193,6 +193,63 @@ test('candidate remains runtime-invisible until ciphertext flushes and promotion
   })
 })
 
+test('identity-bound disconnect preserves a replacement current connection and removes only its matching current', async () => {
+  await withStore(async ({ db }) => {
+    const ids = ['550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440001']
+    const store = new ServerCredentialStore({ db, safeStorage, now: () => 100, uuid: () => ids.shift() })
+    const first = await store.stageCandidate(credentials({ refreshToken: 'first-token' }))
+    const old = await store.promoteCandidate(first.id)
+    assert.equal(await store.disconnectCurrent({
+      connectionId: old.id, connectionRevision: old.connectionRevision + 1,
+      serverOrigin: old.serverOrigin, organizationId: old.organizationId
+    }), false)
+    assert.equal(store.readCurrent().id, old.id)
+    const nextCandidate = await store.stageCandidate(credentials({ refreshToken: 'replacement-token' }))
+    const replacement = await store.promoteCandidate(nextCandidate.id)
+
+    assert.equal(await store.disconnectCurrent({
+      connectionId: old.id, connectionRevision: old.connectionRevision,
+      serverOrigin: old.serverOrigin, organizationId: old.organizationId
+    }), false)
+    assert.equal(store.readCurrent().id, replacement.id)
+    assert.equal(await store.disconnectCurrent({
+      connectionId: replacement.id, connectionRevision: replacement.connectionRevision,
+      serverOrigin: replacement.serverOrigin, organizationId: replacement.organizationId
+    }), true)
+    assert.equal(store.readCurrent(), null)
+  })
+})
+
+test('identity-bound current deletion retains a concurrent candidate connection', async () => {
+  await withStore(async ({ db }) => {
+    const ids = ['550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440001']
+    const store = new ServerCredentialStore({ db, safeStorage, now: () => 100, uuid: () => ids.shift() })
+    const current = await store.stageCandidate(credentials({ refreshToken: 'current-token' }))
+    const promoted = await store.promoteCandidate(current.id)
+    const candidate = await store.stageCandidate(credentials({ refreshToken: 'candidate-token' }))
+    db.replaceServerModelProfiles({ connectionRevision: promoted.connectionRevision, profiles: [{
+      profileId: 'server-profile', serverOrigin: promoted.serverOrigin, organizationId: promoted.organizationId,
+      organizationName: promoted.organizationName, modelId: 'model-1', adapterId: 'codex', displayName: 'Model One',
+      contextSize: 1000, availabilityStatus: 'available', codexFileSha256: 'file-hash'
+    }] })
+    db.replaceServerSkillVersions({ connectionRevision: promoted.connectionRevision, versions: [{
+      versionId: 'version-1', serverOrigin: promoted.serverOrigin, organizationId: promoted.organizationId,
+      slug: 'server-skill', version: '1.0.0', name: 'Server skill', description: 'From server', sha256: 'a'.repeat(64),
+      sizeBytes: 1, publishedAt: '2026-08-27T00:00:00.000Z', createdAt: '2026-08-27T00:00:00.000Z',
+      downloadUrl: 'https://server.example.test/api/v1/skills/version-1/download', lifecycleStatus: 'ACTIVE'
+    }] })
+
+    assert.equal(await store.disconnectCurrent({
+      connectionId: promoted.id, connectionRevision: promoted.connectionRevision,
+      serverOrigin: promoted.serverOrigin, organizationId: promoted.organizationId
+    }), true)
+    assert.equal(store.readCurrent(), null)
+    assert.equal(db.getServerConnection('candidate').id, candidate.id)
+    assert.deepEqual(db.listServerModelProfiles(), [])
+    assert.deepEqual(db.listServerSkillVersions(), [])
+  })
+})
+
 test('refresh rotation never restores the old token when the new ciphertext cannot flush', async () => {
   await withStore(async ({ db }) => {
     const store = new ServerCredentialStore({ db, safeStorage, now: () => 100, uuid: () => '550e8400-e29b-41d4-a716-446655440000' })
