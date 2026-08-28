@@ -228,6 +228,54 @@ test('a replacement session bearer supersedes every prior bearer for that sessio
   assert.equal(upstreamCalls, 1)
 })
 
+test('forwards stable model 503s once without refresh, disconnect, or credential mutation', async t => {
+  const manager = createManager()
+  let disconnectCalls = 0
+  let credentialMutationCalls = 0
+  manager.disconnect = async () => { disconnectCalls += 1 }
+  manager.clearCredentials = async () => { credentialMutationCalls += 1 }
+  const bodies = [
+    { code: 'model_protocol_unavailable', message: 'The model does not support the requested protocol', retryable: false },
+    { code: 'model_channel_unavailable', message: 'No model channel is currently available', retryable: true },
+    { code: 'upstream_unavailable', message: 'No upstream channel succeeded', retryable: true }
+  ]
+  let requestNumber = 0
+  const proxy = await startedProxy({
+    connectionManager: manager,
+    fetchImpl: async () => {
+      const source = bodies[requestNumber++]
+      const requestId = `proxy-request-${requestNumber}`
+      return new Response(JSON.stringify({ statusCode: 503, ...source, requestId }), {
+        status: 503,
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+          'x-ucli-request-id': requestId
+        }
+      })
+    }
+  })
+  t.after(() => proxy.shutdown())
+  const session = proxy.createSession({ sessionId: 'session-503', ...identity })
+  const headers = { authorization: `Bearer ${session.bearer}`, 'content-type': 'application/json' }
+
+  for (const [index, path] of ['/v1/responses', '/v1/chat/completions', '/anthropic/v1/messages'].entries()) {
+    const expected = JSON.stringify({ statusCode: 503, ...bodies[index], requestId: `proxy-request-${index + 1}` })
+    const result = await fetch(`${session.baseUrl}${path}`, { method: 'POST', headers, body: '{}', duplex: 'half' })
+    assert.equal(result.status, 503)
+    assert.equal(result.headers.get('cache-control'), 'no-store')
+    assert.equal(result.headers.get('x-ucli-request-id'), `proxy-request-${index + 1}`)
+    assert.equal(await result.text(), expected)
+  }
+
+  assert.equal(requestNumber, 3)
+  assert.equal(manager.calls.accessToken.length, 3)
+  assert.equal(manager.calls.accessToken.some(call => call?.minValidityMs === Number.MAX_SAFE_INTEGER), false)
+  assert.equal(disconnectCalls, 0)
+  assert.equal(credentialMutationCalls, 0)
+  assert.deepEqual(manager.getRuntimeConnectionIdentity(), identity)
+})
+
 test('does not replay POST 401s, refreshes GET models once, and blocks every redirect', async t => {
   const manager = createManager()
   const calls = []
