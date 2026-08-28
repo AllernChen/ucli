@@ -192,6 +192,12 @@ test('adapter rejects invalid ZIP response metadata and integrity while cleaning
       code: 'SERVER_SKILL_DOWNLOAD_INVALID'
     },
     {
+      name: 'mismatched well-formed SHA header',
+      body: archiveBytes,
+      headers: { 'content-type': 'application/zip', 'x-ucli-sha256': 'b'.repeat(64) },
+      code: 'SERVER_SKILL_INTEGRITY_INVALID'
+    },
+    {
       name: 'archive SHA',
       body: alteredBytes,
       headers: { 'content-type': 'application/zip', 'x-ucli-sha256': expectedSha },

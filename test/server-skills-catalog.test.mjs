@@ -78,6 +78,7 @@ test('catalog rejects non-monotonic rows, duplicate IDs, and a repeated full pag
   ]
 
   for (const scenario of cases) {
+    const root = mkdtempSync(join(tmpdir(), 'ucli-server-catalog-invalid-'))
     let calls = 0
     const db = {
       versions: [{ versionId: 'previous' }],
@@ -92,7 +93,7 @@ test('catalog rejects non-monotonic rows, duplicate IDs, and a repeated full pag
       getAccessToken: async () => 'token'
     }
     const adapter = createSkillsCatalogAdapter({
-      connectionManager, db, stagingRoot: '.ucli-test-staging', sourceLoader: {}, skillsService: {},
+      connectionManager, db, stagingRoot: join(root, 'staging'), sourceLoader: {}, skillsService: {},
       fetchImpl: async url => {
         if (url.endsWith('/revocations')) assert.fail(`${scenario.name} reached revocations`)
         return new Response(JSON.stringify(scenario.pages[calls++]), { headers: { 'content-type': 'application/json' } })
@@ -104,6 +105,7 @@ test('catalog rejects non-monotonic rows, duplicate IDs, and a repeated full pag
       if (scenario.name === 'repeated full page and cursor') assert.equal(calls, 2)
     } finally {
       await adapter.shutdown()
+      rmSync(root, { recursive: true, force: true })
     }
   }
 })
