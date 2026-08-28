@@ -427,3 +427,5 @@ Authorization: Bearer <accessToken>
 2026-08-28 的前两次真实内网 smoke 分别在 Refresh 缺少 `Cache-Control: no-store` 和 Bootstrap 模型 `contextSize` 无效时按合同 fail closed。第三次 smoke 是历史证据：它在模型流之前的阶段通过，但随后因旧的“可见即可路由”假设在模型流阶段停止；它不构成当前部署的基线或接受证据。
 
 已部署的协议能力合同取代旧的可见性/可路由性假设：真实 smoke 必须以显式协议选取模型、确认 Bootstrap 与 Gateway 双目录一致，再验证最小模型流、Skills 哈希和清理。该 smoke 仍需一次新的授权以及已确认的新服务端提交和运行时摘要；在这些条件满足前不得接受 0.12.0。
+
+真实 smoke 的失败阶段只允许使用统一词汇：`protocol-validation`、`link-validation`、`temporary-root`、`preview`、`redeem-first`、`redeem-idempotent`、`refresh-forced`、`bootstrap`、`local-proxy`、`gateway-models`、`model-directory`、`model-stream`、`skills-catalog`、`skills-download` 和 `cleanup`。首次 Redeem、幂等 Redeem、强制 Refresh 与 Bootstrap 是不同阶段；成功记录必须在 cleanup 后附带固定六字段模型响应诊断，而不是响应正文或完整 headers。

@@ -13,7 +13,7 @@ import {
   parseGatewayRouteFailure,
   selectModelForProtocol
 } from '../electron/serverConnection/contracts.js'
-import { modelStreamRequest, smokeFailure } from './helpers/serverIntegrationSmoke.mjs'
+import { modelStreamRequest, smokeFailure, smokeSuccessEvidence } from './helpers/serverIntegrationSmoke.mjs'
 
 const smokeEnabled = process.env.UCLI_SERVER_SMOKE === '1'
 
@@ -106,15 +106,15 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
       deviceName: 'UCLI 0.12 smoke device'
     })
 
-    failedStage = 'link-preview'
+    failedStage = 'preview'
     const attempt = await manager.submitLink(`${origin}/connect#link=${linkSecret}`)
     assert.equal(attempt.preview.link.status, 'AVAILABLE', 'the test link must be available')
     assert.equal(attempt.preview.authorization.status, 'AVAILABLE', 'the test authorization must be available')
     // This is the explicit test confirmation gate; no Redeem occurs before both statuses are verified.
-    failedStage = 'link-confirmation'
+    failedStage = 'redeem-first'
     await manager.confirm(attempt.attemptId)
 
-    failedStage = 'redeem'
+    failedStage = 'redeem-idempotent'
     const installation = await credentials.getOrCreateInstallation({ deviceName: 'UCLI 0.12 smoke device' })
     const retry = await client.redeem({
       serverOrigin: origin,
@@ -134,8 +134,9 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
     manager.current = updated
     manager.installAccessToken(retry.accessToken, retry.expiresIn)
 
-    failedStage = 'bootstrap'
+    failedStage = 'refresh-forced'
     await manager.getAccessToken({ minValidityMs: Number.MAX_SAFE_INTEGER })
+    failedStage = 'bootstrap'
     const bootstrap = await manager.getBootstrap({ force: true })
     evidence.bootstrapModelCount = bootstrap.models.length
     evidence.invalidContextSizeCount = bootstrap.models.filter(model => !Number.isSafeInteger(model.contextSize) || model.contextSize <= 0).length
@@ -254,21 +255,11 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
       throw smokeFailure({ primaryError, cleanupErrors, diagnostic: failureDiagnostic })
     }
     if (!primaryError && cleanupErrors.length === 0) {
-      t.diagnostic(JSON.stringify({
-        selectedModelId: evidence.selectedModelId,
-        selectedProtocol: evidence.selectedProtocol,
-        bootstrapModelCount: evidence.bootstrapModelCount,
-        invalidContextSizeCount: evidence.invalidContextSizeCount,
-        authorizationExpiresAt: evidence.authorizationExpiresAt,
-        serverTimePresent: evidence.serverTimePresent,
-        streamReceivedNonEmptyData: evidence.streamReceivedNonEmptyData,
-        skillsCatalog: evidence.skillsCatalog,
-        skillDownloadHash: evidence.skillDownloadHash,
-        skillInstalledOrExecuted: false,
-        tempDatabaseRemoved: evidence.tempDatabaseRemoved,
-        environmentVariablesRemoved: evidence.environmentVariablesRemoved,
-        smokeDirectoriesRemoved: evidence.smokeDirectoriesRemoved
-      }))
+      t.diagnostic(JSON.stringify(smokeSuccessEvidence({
+        evidence,
+        diagnostic: failureDiagnostic,
+        cleanupComplete: true
+      })))
     }
   }
 })

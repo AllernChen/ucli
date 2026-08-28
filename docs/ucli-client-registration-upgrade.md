@@ -547,7 +547,7 @@ IPC 错误只包含稳定错误码、用户信息和可重试标记，不包含 
 
 ## 22. 0.12.0 本地合同与真实冒烟执行
 
-Tasks 1–5 后，本地四文件客户端/服务端合同门为 48/48。它覆盖三种公开协议、固定端点、双目录协议一致性、投影规则、稳定 503 解析、凭证保留和本地能力保留；真实 smoke 仍默认跳过。
+Tasks 1–5 后，本地四文件客户端/服务端合同门为 48/48。它只覆盖三种公开协议、固定端点、双目录协议一致性和稳定 503 解析；模型投影、透明代理、凭证/本地能力保留和非 live smoke 请求由独立的九套实现测试门覆盖。真实 smoke 仍默认跳过。
 
 真实 smoke 只能在已确认的新服务端提交与运行时摘要、并取得新的单次授权后执行。操作者仅可经安全的一次性输入通道提供必要的 origin 和链接秘密；文档、命令历史、日志、验收记录和报告不得写入真实 URL、token、请求/响应体、完整响应头、身份信息或堆栈。执行时必须显式设置 `UCLI_SERVER_SMOKE_PROTOCOL=openai_responses`，并在受控环境中启用 smoke。
 
@@ -559,12 +559,19 @@ Tasks 1–5 后，本地四文件客户端/服务端合同门为 48/48。它覆�
 success:
   status: PASS
   protocol: openai_responses
-  stages: [preview, redeem, refresh, bootstrap, gateway-models, model-stream, skills-catalog, skills-download, cleanup]
+  stages: [protocol-validation, link-validation, temporary-root, preview, redeem-first, redeem-idempotent, refresh-forced, bootstrap, local-proxy, gateway-models, model-directory, model-stream, skills-catalog, skills-download, cleanup]
   evidence:
     bootstrapGatewayProtocolConsistency: true
     streamReceivedNonEmptyData: true
     skillDownloadHash: true
     temporaryMaterialRemoved: true
+    modelResponseDiagnostic:
+      httpStatus: <status-or-not-received>
+      contentType: <media-type-or-not-received>
+      cacheControl: <cache-control-or-not-received>
+      stableCode: <model_protocol_unavailable|model_channel_unavailable|upstream_unavailable|not-received>
+      requestId: <opaque-request-id-or-not-received>
+      retryable: <true|false|null>
 failure:
   status: FAIL
   protocol: openai_responses
@@ -578,6 +585,8 @@ failure:
     retryable: <true|false|null>
   cleanup: <pass|fail>
 ```
+
+唯一允许的 smoke 阶段词汇是：`protocol-validation`、`link-validation`、`temporary-root`、`preview`、`redeem-first`、`redeem-idempotent`、`refresh-forced`、`bootstrap`、`local-proxy`、`gateway-models`、`model-directory`、`model-stream`、`skills-catalog`、`skills-download` 和 `cleanup`。其中首次 Redeem、同 installationId 的幂等 Redeem、强制 Refresh 与 Bootstrap 必须分别记录；成功证据只能在全部 cleanup 完成后发布，并且模型响应诊断固定为上述六个字段。
 
 ## 23. 工作树验证状态（2026-08-29）
 

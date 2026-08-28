@@ -8,7 +8,8 @@
 
 | 项目 | 当前证据 / 状态 |
 | --- | --- |
-| 本地协议合同 | PASS：Tasks 1–5 后四文件客户端/服务端合同门 48/48 通过。它覆盖 `openai_responses`、`openai_chat`、`anthropic_messages`，固定端点、Bootstrap/Gateway 双目录协议一致性、无 `models[0]` 推断、Codex/Claude 投影、Chat-only 无托管档案、稳定 503/no-store/request ID/retryable，以及凭证和本地能力保留。 |
+| 本地协议合同 | PASS：Tasks 1–5 后四文件客户端/服务端合同门 48/48 通过。该门只覆盖固定 fixtures 的协议/目录与稳定 503 合同：`openai_responses`、`openai_chat`、`anthropic_messages`、固定端点、Bootstrap/Gateway 双目录协议一致性、无 `models[0]` 推断，以及 `no-store`/request ID/retryable。Codex/Claude 投影、Chat-only 无托管档案、透明 503 代理、凭证/本地能力保留和非 live smoke 请求由下列更广的九套实现门单独验证。 |
+| 本地实现门 | PASS：声明的九套实现测试覆盖模型投影、透明 503 代理、凭证和本地能力保留、协议专属 smoke 请求与默认跳过的真实 smoke；它不是四文件 48-test 合同门的一部分。 |
 | 本地回滚兼容性 | 已做静态命名空间证明：当前版本的 `ucli-server-*` 文件不属于旧 `ucli-<32hex>` 所有权规则；这不是 0.11.6 二进制降级实证。 |
 | Task 10 Windows 产物 | 2026-08-28 12:52（Asia/Shanghai）从运行时代码提交 `d35b9bd` 构建的 Windows x64 产物：Setup `UCLI-Setup-0.12.0-x64.exe`（134,216,065 bytes，SHA-256 `163BF3D15066AAA66C6DBC8B2D867C92631C9ADDEAEC839ABC4722CCF5446B23`），Portable `UCLI-Portable-0.12.0-x64.exe`（133,961,257 bytes，SHA-256 `04A7E6B3965B81303EE4C20BF752E75756B60C39C57E618111D65867533B29F6`）；`latest.yml` 与 blockmap 均由同一次 `npm run dist:win` 生成，`npm run verify:release` 已通过。其后的紧邻提交仅修改此证据文档；该文档不在 `electron-builder.yml` 的打包输入中。 |
 | Windows 原生人工检查 | 待完成：安装版 URL scheme、cold start、第二实例、升级、条件卸载，以及 portable 不接管协议。 |

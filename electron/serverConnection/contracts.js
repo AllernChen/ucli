@@ -51,12 +51,13 @@ function responseHeader(headers, name) {
 }
 
 export function gatewayResponseMetadata({ status, headers } = {}) {
+  const requestId = responseHeader(headers, 'x-ucli-request-id')
   return {
     httpStatus: Number.isSafeInteger(status) ? status : 'not-received',
     contentType: responseHeader(headers, 'content-type') || 'not-received',
     cacheControl: responseHeader(headers, 'cache-control') || 'not-received',
     stableCode: 'not-received',
-    requestId: responseHeader(headers, 'x-ucli-request-id') || 'not-received',
+    requestId: requestId || 'not-received',
     retryable: null
   }
 }
@@ -90,16 +91,30 @@ export function parseGatewayRouteFailure(value = {}) {
   try {
     const { status, headers, body } = value && typeof value === 'object' ? value : {}
     diagnostic = gatewayResponseMetadata({ status, headers })
+    const requestIdHeader = responseHeader(headers, 'x-ucli-request-id')
     if (status !== 503 || !hasJsonContentType(diagnostic.contentType) ||
       !hasNoStoreDirective(diagnostic.cacheControl) || !body || typeof body !== 'object' || Array.isArray(body) ||
-      body.statusCode !== 503 || typeof body.requestId !== 'string' || !body.requestId ||
-      diagnostic.requestId === 'not-received' || body.requestId !== diagnostic.requestId ||
-      typeof body.code !== 'string' || !Object.hasOwn(GATEWAY_ROUTE_ERRORS, body.code)) {
+      typeof requestIdHeader !== 'string' || !requestIdHeader) {
       return invalid()
     }
-    const routeError = GATEWAY_ROUTE_ERRORS[body.code]
-    if (body.message !== routeError.message || body.retryable !== routeError.retryable) return invalid()
-    return { ...diagnostic, stableCode: body.code, requestId: body.requestId, retryable: routeError.retryable }
+    const stableBody = {
+      statusCode: body.statusCode,
+      requestId: body.requestId,
+      code: body.code,
+      message: body.message,
+      retryable: body.retryable
+    }
+    if (stableBody.statusCode !== 503 || typeof stableBody.requestId !== 'string' || !stableBody.requestId ||
+      stableBody.requestId !== requestIdHeader || typeof stableBody.code !== 'string' ||
+      !Object.hasOwn(GATEWAY_ROUTE_ERRORS, stableBody.code)) return invalid()
+    const routeError = GATEWAY_ROUTE_ERRORS[stableBody.code]
+    if (stableBody.message !== routeError.message || stableBody.retryable !== routeError.retryable) return invalid()
+    return {
+      ...diagnostic,
+      stableCode: stableBody.code,
+      requestId: stableBody.requestId,
+      retryable: routeError.retryable
+    }
   } catch (error) {
     if (didThrowOwnError && error === ownError) throw error
     return invalid()
@@ -116,9 +131,13 @@ function requiredString(value) {
   return value
 }
 
+function isKnownUniqueProtocolSet(value) {
+  return Array.isArray(value) && value.length > 0 && new Set(value).size === value.length &&
+    value.every(protocol => typeof protocol === 'string' && PUBLIC_MODEL_PROTOCOL_SET.has(protocol))
+}
+
 function parseModelProtocols(value) {
-  if (!Array.isArray(value) || value.length === 0 ||
-    value.some(protocol => typeof protocol !== 'string' || !PUBLIC_MODEL_PROTOCOL_SET.has(protocol))) {
+  if (!isKnownUniqueProtocolSet(value)) {
     throw responseError()
   }
   return [...value]
@@ -290,7 +309,9 @@ export function localGatewayPathForProtocol(protocol) {
 }
 
 function sameProtocolSet(left, right) {
-  return left.length === right.length && left.every(protocol => right.includes(protocol))
+  if (!isKnownUniqueProtocolSet(left) || !isKnownUniqueProtocolSet(right)) return false
+  const rightSet = new Set(right)
+  return left.length === right.length && left.every(protocol => rightSet.has(protocol))
 }
 
 export function assertGatewayModelProtocolConsistency({ bootstrapModels, gatewayModels, modelId, protocol } = {}) {

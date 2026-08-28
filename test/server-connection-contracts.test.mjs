@@ -80,6 +80,19 @@ test('Bootstrap and Gateway model directories require known non-empty protocols'
       data: [{ ...gateway.data[0], protocols }]
     }), { code: 'SERVER_RESPONSE_INVALID' })
   }
+  for (const protocols of [
+    ['openai_responses', 'openai_responses'],
+    ['openai_chat', 'openai_chat']
+  ]) {
+    assert.throws(() => parseBootstrapResponse({
+      ...bootstrap,
+      models: [{ ...bootstrap.models[0], protocols }]
+    }, { serverOrigin }), { code: 'SERVER_RESPONSE_INVALID' })
+    assert.throws(() => parseGatewayModelsResponse({
+      ...gateway,
+      data: [{ ...gateway.data[0], protocols }]
+    }), { code: 'SERVER_RESPONSE_INVALID' })
+  }
 })
 
 test('model selection and directory agreement never fall back to the first model', () => {
@@ -100,6 +113,17 @@ test('model selection and directory agreement never fall back to the first model
     modelId: 'fixture-model',
     protocol: 'openai_responses'
   }), { code: 'SERVER_RESPONSE_INVALID' })
+  for (const directory of ['bootstrapModels', 'gatewayModels']) {
+    const inconsistent = { bootstrapModels, gatewayModels }
+    inconsistent[directory] = inconsistent[directory].map(model => model.id === 'fixture-model'
+      ? { ...model, protocols: ['openai_responses', 'openai_responses', 'anthropic_messages'] }
+      : model)
+    assert.throws(() => assertGatewayModelProtocolConsistency({
+      ...inconsistent,
+      modelId: 'fixture-model',
+      protocol: 'openai_responses'
+    }), { code: 'SERVER_RESPONSE_INVALID' })
+  }
 })
 
 test('Gateway response metadata contains only allowlisted response fields', () => {
@@ -272,6 +296,67 @@ test('Gateway route failures fail closed when body getters throw nullish values'
       retryable: null
     })
   }
+})
+
+test('Gateway route failures snapshot every stable body field before validation', () => {
+  const body = fixture('error-model-protocol-unavailable.json')
+  let codeReads = 0
+  let requestIdReads = 0
+  Object.defineProperties(body, {
+    code: {
+      get() {
+        codeReads += 1
+        return codeReads === 1 ? 'model_protocol_unavailable' : 'untrusted-later-code'
+      }
+    },
+    requestId: {
+      get() {
+        requestIdReads += 1
+        return requestIdReads === 1 ? 'fixture-request-protocol' : 'untrusted-later-request-id'
+      }
+    }
+  })
+
+  const diagnostic = parseGatewayRouteFailure({
+    status: 503,
+    headers: new Headers({
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-ucli-request-id': 'fixture-request-protocol'
+    }),
+    body
+  })
+
+  assert.equal(codeReads, 1)
+  assert.equal(requestIdReads, 1)
+  assert.deepEqual(diagnostic, {
+    httpStatus: 503,
+    contentType: 'application/json; charset=utf-8',
+    cacheControl: 'no-store',
+    stableCode: 'model_protocol_unavailable',
+    requestId: 'fixture-request-protocol',
+    retryable: false
+  })
+})
+
+test('Gateway route failures accept the literal request ID not-received', () => {
+  const body = { ...fixture('error-model-protocol-unavailable.json'), requestId: 'not-received' }
+  assert.deepEqual(parseGatewayRouteFailure({
+    status: 503,
+    headers: new Headers({
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-ucli-request-id': 'not-received'
+    }),
+    body
+  }), {
+    httpStatus: 503,
+    contentType: 'application/json; charset=utf-8',
+    cacheControl: 'no-store',
+    stableCode: 'model_protocol_unavailable',
+    requestId: 'not-received',
+    retryable: false
+  })
 })
 
 test('response parsers return known protocol fields and ignore unknown fields', () => {

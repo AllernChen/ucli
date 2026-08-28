@@ -240,9 +240,11 @@ test('forwards stable model 503s once without refresh, disconnect, or credential
     '{\n  "requestId": "proxy-request-3",\n  "message": "No upstream channel succeeded",\n  "code": "upstream_unavailable",\n  "retryable": true,\n  "statusCode": 503\n}'
   ]
   let requestNumber = 0
+  const upstreamRequests = []
   const proxy = await startedProxy({
     connectionManager: manager,
-    fetchImpl: async () => {
+    fetchImpl: async (url, options) => {
+      upstreamRequests.push({ url: String(url), method: options.method })
       const source = bodies[requestNumber++]
       const requestId = `proxy-request-${requestNumber}`
       return new Response(source, {
@@ -269,6 +271,11 @@ test('forwards stable model 503s once without refresh, disconnect, or credential
   }
 
   assert.equal(requestNumber, 3)
+  assert.deepEqual(upstreamRequests, [
+    { url: 'https://gateway.example.test/gateway/v1/responses', method: 'POST' },
+    { url: 'https://gateway.example.test/gateway/v1/chat/completions', method: 'POST' },
+    { url: 'https://gateway.example.test/gateway/anthropic/v1/messages', method: 'POST' }
+  ])
   assert.equal(manager.calls.accessToken.length, 3)
   assert.equal(manager.calls.accessToken.some(call => call?.minValidityMs === Number.MAX_SAFE_INTEGER), false)
   assert.equal(disconnectCalls, 0)
