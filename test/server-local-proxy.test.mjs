@@ -235,9 +235,9 @@ test('forwards stable model 503s once without refresh, disconnect, or credential
   manager.disconnect = async () => { disconnectCalls += 1 }
   manager.clearCredentials = async () => { credentialMutationCalls += 1 }
   const bodies = [
-    { code: 'model_protocol_unavailable', message: 'The model does not support the requested protocol', retryable: false },
-    { code: 'model_channel_unavailable', message: 'No model channel is currently available', retryable: true },
-    { code: 'upstream_unavailable', message: 'No upstream channel succeeded', retryable: true }
+    '{\n  "requestId": "proxy-request-1",\n  "message": "The model does not support the requested protocol",\n  "code": "model_protocol_unavailable",\n  "retryable": false,\n  "statusCode": 503\n}',
+    '{\n  "requestId": "proxy-request-2",\n  "message": "No model channel is currently available",\n  "code": "model_channel_unavailable",\n  "retryable": true,\n  "statusCode": 503\n}',
+    '{\n  "requestId": "proxy-request-3",\n  "message": "No upstream channel succeeded",\n  "code": "upstream_unavailable",\n  "retryable": true,\n  "statusCode": 503\n}'
   ]
   let requestNumber = 0
   const proxy = await startedProxy({
@@ -245,7 +245,7 @@ test('forwards stable model 503s once without refresh, disconnect, or credential
     fetchImpl: async () => {
       const source = bodies[requestNumber++]
       const requestId = `proxy-request-${requestNumber}`
-      return new Response(JSON.stringify({ statusCode: 503, ...source, requestId }), {
+      return new Response(source, {
         status: 503,
         headers: {
           'content-type': 'application/json',
@@ -260,7 +260,7 @@ test('forwards stable model 503s once without refresh, disconnect, or credential
   const headers = { authorization: `Bearer ${session.bearer}`, 'content-type': 'application/json' }
 
   for (const [index, path] of ['/v1/responses', '/v1/chat/completions', '/anthropic/v1/messages'].entries()) {
-    const expected = JSON.stringify({ statusCode: 503, ...bodies[index], requestId: `proxy-request-${index + 1}` })
+    const expected = bodies[index]
     const result = await fetch(`${session.baseUrl}${path}`, { method: 'POST', headers, body: '{}', duplex: 'half' })
     assert.equal(result.status, 503)
     assert.equal(result.headers.get('cache-control'), 'no-store')
