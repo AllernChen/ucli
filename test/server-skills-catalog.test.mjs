@@ -49,6 +49,65 @@ test('sync requests the catalog without a cursor, then advances from the final c
   assert.equal(requests.every(({ options }) => options.redirect === 'manual' && options.headers.Authorization === 'Bearer access-token'), true)
 })
 
+test('catalog rejects non-monotonic rows, duplicate IDs, and a repeated full page before publication', async () => {
+  const makeItem = (id, createdAt) => ({
+    id, version: '1.0.0', sha256: 'a'.repeat(64), sizeBytes: 1,
+    publishedAt: createdAt, createdAt,
+    skill: { slug: id, name: 'Example', description: 'Example skill' },
+    downloadUrl: `https://server.example.test/api/v1/skills/${id}/download`
+  })
+  const fullPage = Array.from({ length: 100 }, (_value, index) => makeItem(
+    `version-${index}`, new Date(Date.UTC(2026, 7, 27, 0, 0, index)).toISOString()
+  ))
+  const cases = [
+    {
+      name: 'non-monotonic createdAt',
+      pages: [[
+        makeItem('version-2', '2026-08-27T00:00:02.000Z'),
+        makeItem('version-1', '2026-08-27T00:00:01.000Z')
+      ]]
+    },
+    {
+      name: 'duplicate version ID',
+      pages: [[
+        makeItem('version-1', '2026-08-27T00:00:01.000Z'),
+        makeItem('version-1', '2026-08-27T00:00:02.000Z')
+      ]]
+    },
+    { name: 'repeated full page and cursor', pages: [fullPage, fullPage] }
+  ]
+
+  for (const scenario of cases) {
+    let calls = 0
+    const db = {
+      versions: [{ versionId: 'previous' }],
+      transaction: async work => work(),
+      replaceServerSkillVersions: ({ versions }) => { db.versions = versions },
+      listServerSkillVersions: () => db.versions
+    }
+    const connectionManager = {
+      getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: 1 }),
+      getState: () => ({ serverOrigin: 'https://server.example.test', organization: { id: 'org-1' } }),
+      getBootstrap: async () => ({ organization: { id: 'org-1' }, skillsCatalogUrl: 'https://server.example.test/api/v1/skills/catalog' }),
+      getAccessToken: async () => 'token'
+    }
+    const adapter = createSkillsCatalogAdapter({
+      connectionManager, db, stagingRoot: '.ucli-test-staging', sourceLoader: {}, skillsService: {},
+      fetchImpl: async url => {
+        if (url.endsWith('/revocations')) assert.fail(`${scenario.name} reached revocations`)
+        return new Response(JSON.stringify(scenario.pages[calls++]), { headers: { 'content-type': 'application/json' } })
+      }
+    })
+    try {
+      await assert.rejects(adapter.sync(), error => error.code === 'SERVER_SKILL_RESPONSE_INVALID')
+      assert.deepEqual(db.versions, [{ versionId: 'previous' }])
+      if (scenario.name === 'repeated full page and cursor') assert.equal(calls, 2)
+    } finally {
+      await adapter.shutdown()
+    }
+  }
+})
+
 test('shutdown aborts a hanging catalog body before it can publish', async () => {
   let aborts = 0
   const connectionManager = {

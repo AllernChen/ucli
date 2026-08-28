@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { lstat, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -27,6 +28,7 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
   let proxy
   let catalog
   let primaryError = null
+  let verifiedDownloads = 0
   const credentialCiphertexts = new Map()
 
   try {
@@ -113,16 +115,32 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
     assert.equal(stream.ok, true, 'gateway model stream failed')
     assert.ok((await stream.arrayBuffer()).byteLength > 0, 'gateway model stream was empty')
 
+    // The smoke verifies the live catalog/download/hash boundary only. This
+    // seam receives the adapter's verified archive but deliberately performs
+    // no Skills installation or mutation.
+    const verifyDownloadedArchive = async ({ archivePath, archiveIdentity, source, targets, guard }) => {
+      guard()
+      const [archive, stat] = await Promise.all([readFile(archivePath), lstat(archivePath)])
+      assert.equal(stat.isFile(), true, 'adapter did not provide a regular archive')
+      assert.equal(stat.size, archiveIdentity.size, 'adapter archive identity size mismatch')
+      assert.equal(stat.ino, archiveIdentity.ino, 'adapter archive identity inode mismatch')
+      assert.equal(stat.dev, archiveIdentity.dev, 'adapter archive identity device mismatch')
+      assert.equal(createHash('sha256').update(archive).digest('hex'), source.sha256, 'adapter archive hash mismatch')
+      assert.deepEqual(targets, { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
+      verifiedDownloads += 1
+      return { verified: true }
+    }
     catalog = createSkillsCatalogAdapter({
       connectionManager: manager,
       db,
       stagingRoot: join(root, 'server-skills'),
-      sourceLoader: {},
-      skillsService: { installVerifiedServerArchive: async () => ({ installed: true }) }
+      sourceLoader: Object.freeze({}),
+      skillsService: { installVerifiedServerArchive: verifyDownloadedArchive }
     })
     const versions = await catalog.sync()
     assert.ok(versions.length > 0, 'Skills catalog returned no versions for smoke verification')
-    await catalog.install(versions[0].versionId, { targetAdapterIds: [], scopeType: 'user', projectPath: '' })
+    await catalog.install(versions[0].versionId, { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
+    assert.equal(verifiedDownloads, 1, 'Skills download verification did not run')
   } catch (error) {
     primaryError = error
     throw error

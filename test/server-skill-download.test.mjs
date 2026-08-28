@@ -167,6 +167,88 @@ test('verified server archive installs with sanitized provenance and removes sta
   }
 })
 
+test('adapter rejects invalid ZIP response metadata and integrity while cleaning staging', async () => {
+  const archiveBytes = archive()
+  const expectedSha = createHash('sha256').update(archiveBytes).digest('hex')
+  const alteredBytes = Buffer.from(archiveBytes)
+  alteredBytes[0] ^= 0xff
+  const cases = [
+    {
+      name: 'content type',
+      body: archiveBytes,
+      headers: { 'content-type': 'text/plain', 'x-ucli-sha256': expectedSha },
+      code: 'SERVER_SKILL_DOWNLOAD_INVALID'
+    },
+    {
+      name: 'content length',
+      body: archiveBytes,
+      headers: { 'content-type': 'application/zip', 'content-length': String(archiveBytes.length + 1), 'x-ucli-sha256': expectedSha },
+      code: 'SERVER_SKILL_DOWNLOAD_INVALID'
+    },
+    {
+      name: 'SHA header',
+      body: archiveBytes,
+      headers: { 'content-type': 'application/zip', 'x-ucli-sha256': 'invalid' },
+      code: 'SERVER_SKILL_DOWNLOAD_INVALID'
+    },
+    {
+      name: 'archive SHA',
+      body: alteredBytes,
+      headers: { 'content-type': 'application/zip', 'x-ucli-sha256': expectedSha },
+      code: 'SERVER_SKILL_INTEGRITY_INVALID'
+    },
+    {
+      name: 'archive size',
+      body: archiveBytes.subarray(0, -1),
+      headers: { 'content-type': 'application/zip', 'x-ucli-sha256': expectedSha },
+      code: 'SERVER_SKILL_INTEGRITY_INVALID'
+    }
+  ]
+
+  for (const scenario of cases) {
+    const root = mkdtempSync(join(tmpdir(), 'ucli-server-skill-integrity-'))
+    const stagingRoot = join(root, 'staging')
+    const catalogItem = {
+      id: 'version-1', version: '1.0.0', sha256: expectedSha, sizeBytes: archiveBytes.length,
+      publishedAt: '2026-08-27T00:00:00.000Z', createdAt: '2026-08-27T00:00:00.000Z',
+      skill: { slug: 'example', name: 'Example', description: 'Example skill' },
+      downloadUrl: 'https://server.example.test/api/v1/skills/version-1/download'
+    }
+    const connectionManager = {
+      getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: 1 }),
+      getState: () => ({ serverOrigin: 'https://server.example.test', organization: { id: 'org-1' } }),
+      getBootstrap: async () => ({ organization: { id: 'org-1' }, skillsCatalogUrl: 'https://server.example.test/api/v1/skills/catalog' }),
+      getAccessToken: async () => 'token'
+    }
+    const db = {
+      transaction: async work => work(),
+      replaceServerSkillVersions: ({ versions }) => { db.versions = versions },
+      listServerSkillVersions: () => db.versions || []
+    }
+    let serviceCalls = 0
+    const adapter = createSkillsCatalogAdapter({
+      connectionManager, db, stagingRoot, sourceLoader: {},
+      skillsService: { installVerifiedServerArchive: async () => { serviceCalls += 1 } },
+      fetchImpl: async url => url.endsWith('/catalog') ? new Response(JSON.stringify([catalogItem]))
+        : url.endsWith('/revocations') ? new Response(JSON.stringify([]))
+          : new Response(scenario.body, { headers: scenario.headers })
+    })
+    try {
+      await adapter.sync()
+      await assert.rejects(adapter.install('version-1', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' }),
+        error => error.code === scenario.code, scenario.name)
+      assert.equal(serviceCalls, 0, `${scenario.name} reached the Skills installer`)
+      const staged = existsSync(stagingRoot)
+        ? readdirSync(stagingRoot, { recursive: true }).filter(entry => String(entry).endsWith('.zip'))
+        : []
+      assert.deepEqual(staged, [], `${scenario.name} left staged ZIPs`)
+    } finally {
+      await adapter.shutdown()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+})
+
 test('catalog rejects query-bearing download URLs before any archive request', async () => {
   const connectionManager = {
     getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: 1 }),
