@@ -9,9 +9,35 @@ const DOWNLOAD_TIMEOUT_MS = 120_000
 const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 const MAX_STAGING_BYTES = 100 * 1024 * 1024
 const SHA256 = /^[a-f0-9]{64}$/i
+const MAX_ERROR_BYTES = 16 * 1024
+const LIFECYCLE_ERROR_CODES = new Set([
+  'invalid_grant', 'invalid_device', 'grant_disabled', 'grant_expired',
+  'grant_deleted', 'account_inactive', 'organization_inactive'
+])
 
 function adapterError(code, message = 'Server Skill operation failed') {
   return Object.assign(new Error(message), { code })
+}
+
+function hasJsonContentType(response) {
+  return /^application\/json(?:;|$)/i.test(response.headers.get('content-type') || '')
+}
+
+async function readBoundedJson(response) {
+  if (!hasJsonContentType(response) || !response.body) throw adapterError('SERVER_SKILL_RESPONSE_INVALID')
+  const contentLength = response.headers.get('content-length')
+  if (contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_ERROR_BYTES)) {
+    throw adapterError('SERVER_SKILL_RESPONSE_INVALID')
+  }
+  const chunks = []
+  let size = 0
+  for await (const chunk of response.body) {
+    const bytes = Buffer.from(chunk)
+    size += bytes.length
+    if (size > MAX_ERROR_BYTES) throw adapterError('SERVER_SKILL_RESPONSE_INVALID')
+    chunks.push(bytes)
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw adapterError('SERVER_SKILL_RESPONSE_INVALID') }
 }
 
 function strictUrl(value, origin, pathname, { cursor = null } = {}) {
@@ -128,6 +154,15 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
       })
       assertOpen(); assertCurrent(identity)
       if (response.status >= 300 && response.status < 400) throw adapterError('SERVER_SKILL_REDIRECT_REJECTED')
+      if (response.status === 401) {
+        const body = await readBoundedJson(response)
+        const code = body && typeof body === 'object' && !Array.isArray(body) ? body.code : null
+        if (!LIFECYCLE_ERROR_CODES.has(code)) throw adapterError('SERVER_SKILL_RESPONSE_INVALID')
+        const applied = await connectionManager.handleServerLifecycleError?.({ code }, identity)
+        if (applied !== true) throw adapterError('SERVER_SKILL_STALE')
+        assertOpen()
+        throw adapterError(code)
+      }
       if (!response.ok) throw adapterError('SERVER_SKILL_FETCH_FAILED')
       release = () => {
         clearTimeout(timeout)
@@ -135,7 +170,7 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
       }
       return keepOpen ? { response, release } : response
     } catch (error) {
-      if (error?.code?.startsWith('SERVER_SKILL_')) throw error
+      if (error?.code?.startsWith('SERVER_SKILL_') || LIFECYCLE_ERROR_CODES.has(error?.code) || error?.code === 'PERSISTENCE_PENDING') throw error
       if (controller.signal.aborted) throw adapterError(closing ? 'SERVER_SKILL_SHUTDOWN' : 'SERVER_SKILL_TIMEOUT')
       throw adapterError('SERVER_SKILL_FETCH_FAILED')
     } finally {
@@ -150,6 +185,7 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
   const readJson = async (url, identity) => {
     const transfer = await request(url, identity, CONTROL_TIMEOUT_MS, { keepOpen: true })
     try {
+      if (!hasJsonContentType(transfer.response)) throw adapterError('SERVER_SKILL_RESPONSE_INVALID')
       const value = await transfer.response.json()
       assertOpen(); assertCurrent(identity)
       return value

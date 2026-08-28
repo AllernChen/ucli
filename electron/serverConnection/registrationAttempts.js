@@ -50,6 +50,15 @@ export class RegistrationAttemptStore {
     return publicAttempt(this.attempts.get(attemptId))
   }
 
+  getPendingPublic() {
+    this.sweep()
+    let pending = null
+    for (const attempt of this.attempts.values()) {
+      if (attempt.preview !== null && attempt.phase !== 'redeeming') pending = attempt
+    }
+    return publicAttempt(pending)
+  }
+
   getSecret(attemptId) {
     this.sweep()
     return this.attempts.get(attemptId)?.linkSecret ?? null

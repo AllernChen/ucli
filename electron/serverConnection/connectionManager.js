@@ -174,6 +174,10 @@ export class ConnectionManager {
     return this.attempts.getPublic(attemptId)
   }
 
+  getPendingAttempt() {
+    return this.attempts.getPendingPublic?.() || null
+  }
+
   confirm(attemptId) {
     this.assertNotShuttingDown()
     const existing = this.redeemFlights.get(attemptId)
@@ -540,6 +544,14 @@ export class ConnectionManager {
     if (error?.retryable) this.scheduleRetry()
   }
 
+  async handleServerLifecycleError(error, identity) {
+    const code = error?.code
+    if (!['invalid_grant', 'invalid_device', 'grant_disabled', 'grant_expired', 'grant_deleted', 'account_inactive', 'organization_inactive'].includes(code) ||
+      !this.matchesServerIdentity(identity)) return false
+    await this.handleLifecycleError({ code })
+    return true
+  }
+
   setRuntimeStatus(status, reason) {
     if (this.status === status && this.reason === reason) return
     this.status = status
@@ -619,6 +631,15 @@ export class ConnectionManager {
 
   lifecycleKey(connection, connectionEpoch) {
     return connection ? `${connection.id}:${connection.connectionRevision}:${connectionEpoch}` : `none:${connectionEpoch}`
+  }
+
+  matchesServerIdentity(identity) {
+    const connection = this.current
+    return Boolean(connection && identity &&
+      identity.connectionId === connection.id &&
+      identity.connectionRevision === connection.connectionRevision &&
+      identity.serverOrigin === connection.serverOrigin &&
+      identity.organizationId === connection.organizationId)
   }
 
   cancel(attemptId) {

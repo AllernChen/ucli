@@ -78,6 +78,7 @@ export const useServerConnectionStore = defineStore('server-connection', {
     _unsubscribeRegistration: null,
     _lifecycle: 0,
     _attemptRequest: 0,
+    _registrationGeneration: 0,
     _catalogRequest: 0,
     _connectionIdentity: null
   }),
@@ -128,12 +129,19 @@ export const useServerConnectionStore = defineStore('server-connection', {
             if (this._lifecycle === lifecycle) this.handleState(state, lifecycle)
           })
           this._unsubscribeRegistration = api.onRegistrationRequested(({ attemptId }) => {
-            if (this._lifecycle === lifecycle && typeof attemptId === 'string') void this.loadAttempt(attemptId, lifecycle).catch(() => {})
+            if (this._lifecycle === lifecycle && typeof attemptId === 'string') {
+              this._registrationGeneration += 1
+              void this.loadAttempt(attemptId, lifecycle).catch(() => {})
+            }
           })
-          const state = await api.getState()
+          const pendingBaseline = this._registrationGeneration
+          const [state, pendingAttempt] = await Promise.all([api.getState(), api.getPendingAttempt()])
           if (this._lifecycle !== lifecycle) return this
           this.applyState(state)
           this.initialized = true
+          if (typeof pendingAttempt?.attemptId === 'string' && this._registrationGeneration === pendingBaseline) {
+            await this.loadAttempt(pendingAttempt.attemptId, lifecycle)
+          }
           if (this._connectionIdentity) {
             try { await this.loadCachedSkills(lifecycle, this._connectionIdentity) } catch { /* catalog availability does not end core subscriptions */ }
           }

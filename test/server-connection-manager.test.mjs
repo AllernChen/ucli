@@ -151,6 +151,18 @@ test('terminal lifecycle errors clear credentials while disabled metadata is ret
   assert.equal(disabled.manager.getState().serverOrigin, current.serverOrigin)
 })
 
+test('a server lifecycle error cannot mutate a replacement connection with a different full identity', async () => {
+  const { manager } = createManager()
+  const applied = await manager.handleServerLifecycleError({ code: 'grant_deleted' }, {
+    connectionId: current.id, connectionRevision: current.connectionRevision,
+    serverOrigin: current.serverOrigin, organizationId: 'other-organization'
+  })
+
+  assert.equal(applied, false)
+  assert.equal(manager.getState().status, 'connected')
+  assert.equal(manager.getState().connection.id, current.id)
+})
+
 test('a stale refresh completion after disconnect cannot alter the disconnected state', async () => {
   const refresh = deferred()
   const { manager } = createManager({ client: { refresh: async () => refresh.promise } })

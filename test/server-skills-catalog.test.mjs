@@ -6,6 +6,8 @@ import test from 'node:test'
 
 import { createSkillsCatalogAdapter } from '../electron/serverConnection/skillsCatalogAdapter.js'
 import { openDb } from '../electron/persistence/db.js'
+import { ConnectionManager } from '../electron/serverConnection/connectionManager.js'
+import { RegistrationAttemptStore } from '../electron/serverConnection/registrationAttempts.js'
 
 test('sync requests the catalog without a cursor, then advances from the final createdAt value', async () => {
   const requests = []
@@ -47,6 +49,147 @@ test('sync requests the catalog without a cursor, then advances from the final c
     'https://server.example.test/api/v1/skills/revocations'
   ])
   assert.equal(requests.every(({ options }) => options.redirect === 'manual' && options.headers.Authorization === 'Bearer access-token'), true)
+})
+
+test('catalog and revocations require JSON MIME and route every lifecycle 401 through the identity-fenced manager', async () => {
+  const item = {
+    id: 'version-1', version: '1.0.0', sha256: 'a'.repeat(64), sizeBytes: 1,
+    publishedAt: '2026-08-27T00:00:00.000Z', createdAt: '2026-08-27T00:00:00.000Z',
+    skill: { slug: 'example', name: 'Example', description: 'Example skill' },
+    downloadUrl: 'https://server.example.test/api/v1/skills/version-1/download'
+  }
+  const lifecycleCodes = ['invalid_grant', 'invalid_device', 'grant_disabled', 'grant_expired', 'grant_deleted', 'account_inactive', 'organization_inactive']
+  for (const endpoint of ['catalog', 'revocations']) {
+    for (const code of lifecycleCodes) {
+      const root = mkdtempSync(join(tmpdir(), 'ucli-server-control-401-'))
+      const handled = []
+      const connectionManager = {
+        getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: 1 }),
+        getState: () => ({ serverOrigin: 'https://server.example.test', organization: { id: 'org-1' } }),
+        getBootstrap: async () => ({ organization: { id: 'org-1' }, skillsCatalogUrl: 'https://server.example.test/api/v1/skills/catalog' }),
+        getAccessToken: async () => 'token',
+        handleServerLifecycleError: async (error, identity) => { handled.push({ code: error.code, identity }); return true }
+      }
+      const adapter = createSkillsCatalogAdapter({
+        connectionManager, stagingRoot: join(root, 'staging'), sourceLoader: {}, skillsService: {},
+        db: { transaction: async work => work(), replaceServerSkillVersions() {}, listServerSkillVersions: () => [] },
+        fetchImpl: async url => {
+          const unauthorized = url.endsWith(`/${endpoint}`)
+          return unauthorized
+            ? new Response(JSON.stringify({ code, message: 'opaque server detail' }), { status: 401, headers: { 'content-type': 'application/json; charset=utf-8' } })
+            : new Response(JSON.stringify([item]), { headers: { 'content-type': 'application/json' } })
+        }
+      })
+      try {
+        await assert.rejects(adapter.sync(), error => error.code === code)
+        assert.deepEqual(handled, [{ code, identity: {
+          connectionId: 'connection-1', connectionRevision: 1, serverOrigin: 'https://server.example.test', organizationId: 'org-1'
+        } }])
+      } finally {
+        await adapter.shutdown()
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  }
+
+  for (const endpoint of ['catalog', 'revocations']) {
+    const root = mkdtempSync(join(tmpdir(), 'ucli-server-control-mime-'))
+    const connectionManager = {
+      getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: 1 }),
+      getState: () => ({ serverOrigin: 'https://server.example.test', organization: { id: 'org-1' } }),
+      getBootstrap: async () => ({ organization: { id: 'org-1' }, skillsCatalogUrl: 'https://server.example.test/api/v1/skills/catalog' }),
+      getAccessToken: async () => 'token'
+    }
+    const adapter = createSkillsCatalogAdapter({
+      connectionManager, stagingRoot: join(root, 'staging'), sourceLoader: {}, skillsService: {},
+      db: { transaction: async work => work(), replaceServerSkillVersions() {}, listServerSkillVersions: () => [] },
+      fetchImpl: async url => url.endsWith(`/${endpoint}`)
+        ? new Response(JSON.stringify(endpoint === 'catalog' ? [item] : []), { headers: { 'content-type': 'text/plain' } })
+        : new Response(JSON.stringify([item]), { headers: { 'content-type': 'application/json' } })
+    })
+    try {
+      await assert.rejects(adapter.sync(), { code: 'SERVER_SKILL_RESPONSE_INVALID' })
+    } finally {
+      await adapter.shutdown()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+})
+
+test('a catalog terminal 401 keeps its stable code after the real manager invalidates the matching connection', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-real-terminal-'))
+  let disconnects = 0
+  const current = {
+    id: 'connection-1', serverOrigin: 'https://server.example.test', organizationId: 'org-1', organizationName: 'Example',
+    accountId: 'account-1', accountDisplayName: 'Ada', connectionRevision: 1, authorizationExpiresAt: null, serverTime: '2026-08-27T00:00:00.000Z'
+  }
+  const manager = new ConnectionManager({
+    attempts: new RegistrationAttemptStore(), platform: 'windows', deviceName: 'Workstation',
+    client: {
+      preview: async () => ({}), redeem: async () => ({}),
+      bootstrap: async () => ({
+        organization: { id: 'org-1' }, skillsCatalogUrl: 'https://server.example.test/api/v1/skills/catalog',
+        authorization: { expiresAt: null, serverTime: '2026-08-27T00:00:00.000Z' }
+      })
+    },
+    credentials: { readCurrent: () => current, disconnect: async () => { disconnects += 1 } }
+  })
+  manager.installAccessToken('test-access-token', 900)
+  const adapter = createSkillsCatalogAdapter({
+    connectionManager: manager, stagingRoot: join(root, 'staging'), sourceLoader: {}, skillsService: {},
+    db: { transaction: async work => work(), replaceServerSkillVersions() {}, listServerSkillVersions: () => [] },
+    fetchImpl: async () => new Response(JSON.stringify({ code: 'grant_deleted', message: 'opaque server detail' }), {
+      status: 401, headers: { 'content-type': 'application/json' }
+    })
+  })
+  try {
+    await assert.rejects(adapter.sync(), { code: 'grant_deleted' })
+    assert.equal(disconnects, 1)
+    assert.equal(manager.getState().status, 'disconnected')
+  } finally {
+    await adapter.shutdown()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('control-plane 401 bodies must be bounded JSON and never expose server details', async () => {
+  const item = {
+    id: 'version-1', version: '1.0.0', sha256: 'a'.repeat(64), sizeBytes: 1,
+    publishedAt: '2026-08-27T00:00:00.000Z', createdAt: '2026-08-27T00:00:00.000Z',
+    skill: { slug: 'example', name: 'Example', description: 'Example skill' },
+    downloadUrl: 'https://server.example.test/api/v1/skills/version-1/download'
+  }
+  for (const endpoint of ['catalog', 'revocations']) {
+    for (const malformed of ['text/plain', 'oversized']) {
+      const root = mkdtempSync(join(tmpdir(), 'ucli-server-control-error-body-'))
+      let handled = 0
+      const adapter = createSkillsCatalogAdapter({
+        stagingRoot: join(root, 'staging'), sourceLoader: {}, skillsService: {},
+        db: { transaction: async work => work(), replaceServerSkillVersions() {}, listServerSkillVersions: () => [] },
+        connectionManager: {
+          getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: 1 }),
+          getState: () => ({ serverOrigin: 'https://server.example.test', organization: { id: 'org-1' } }),
+          getBootstrap: async () => ({ organization: { id: 'org-1' }, skillsCatalogUrl: 'https://server.example.test/api/v1/skills/catalog' }),
+          getAccessToken: async () => 'token',
+          handleServerLifecycleError: async () => { handled += 1; return true }
+        },
+        fetchImpl: async url => {
+          if (!url.endsWith(`/${endpoint}`)) return new Response(JSON.stringify([item]), { headers: { 'content-type': 'application/json' } })
+          const headers = malformed === 'text/plain'
+            ? { 'content-type': 'text/plain' }
+            : { 'content-type': 'application/json', 'content-length': String(16 * 1024 + 1) }
+          return new Response('opaque-server-detail', { status: 401, headers })
+        }
+      })
+      try {
+        await assert.rejects(adapter.sync(), error => error.code === 'SERVER_SKILL_RESPONSE_INVALID' && !error.message.includes('opaque-server-detail'))
+        assert.equal(handled, 0)
+      } finally {
+        await adapter.shutdown()
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  }
 })
 
 test('catalog rejects non-monotonic rows, duplicate IDs, and a repeated full page before publication', async () => {
@@ -160,7 +303,7 @@ test('stale catalog publication restores the prior durable catalog after flush',
   }
   const adapter = createSkillsCatalogAdapter({
     connectionManager, db, stagingRoot: '.ucli-test-staging', sourceLoader: {}, skillsService: {},
-    fetchImpl: async url => new Response(JSON.stringify(url.endsWith('/revocations') ? [] : [item]))
+    fetchImpl: async url => new Response(JSON.stringify(url.endsWith('/revocations') ? [] : [item]), { headers: { 'content-type': 'application/json' } })
   })
   await assert.rejects(adapter.sync(), error => error.code === 'SERVER_SKILL_STALE')
   assert.deepEqual(db.versions, previous)
@@ -193,7 +336,7 @@ test('catalog compensation reports persistence pending when its durable restore 
   }
   const adapter = createSkillsCatalogAdapter({
     connectionManager, db, stagingRoot: '.ucli-test-staging', sourceLoader: {}, skillsService: {},
-    fetchImpl: async url => new Response(JSON.stringify(url.endsWith('/revocations') ? [] : [item]))
+    fetchImpl: async url => new Response(JSON.stringify(url.endsWith('/revocations') ? [] : [item]), { headers: { 'content-type': 'application/json' } })
   })
   await assert.rejects(adapter.sync(), error => error.code === 'SERVER_SKILL_PERSISTENCE_PENDING')
   assert.deepEqual(db.versions, previous)
@@ -235,7 +378,7 @@ test('stale catalog compensation restores the prior catalog after reopening the 
   }
   const adapter = createSkillsCatalogAdapter({
     connectionManager, db: wrappedDb, stagingRoot: join(root, 'staging'), sourceLoader: {}, skillsService: {},
-    fetchImpl: async url => new Response(JSON.stringify(url.endsWith('/revocations') ? [] : [item]))
+    fetchImpl: async url => new Response(JSON.stringify(url.endsWith('/revocations') ? [] : [item]), { headers: { 'content-type': 'application/json' } })
   })
   try {
     await assert.rejects(adapter.sync(), error => error.code === 'SERVER_SKILL_STALE')

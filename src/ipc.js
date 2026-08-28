@@ -137,6 +137,7 @@ export const ipc = {
   serverConnection: {
     submitLink: (input) => u.submitServerConnectionLink(input),
     getAttempt: (attemptId) => u.getServerConnectionAttempt(attemptId),
+    getPendingAttempt: () => u.getPendingServerConnectionAttempt(),
     confirm: (attemptId) => u.confirmServerConnection(attemptId),
     retryRedeem: (attemptId) => u.retryServerConnectionRedeem(attemptId),
     cancel: (attemptId) => u.cancelServerConnectionAttempt(attemptId),

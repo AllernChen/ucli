@@ -28,7 +28,7 @@ function deferred() {
   return { promise, resolve, reject }
 }
 
-function setup({ client = {}, credentials = {}, skillsCatalog = null } = {}) {
+function setup({ client = {}, credentials = {}, skillsCatalog = null, serverModelProjection = null } = {}) {
   const handlers = new Map()
   const events = []
   const current = {
@@ -51,10 +51,23 @@ function setup({ client = {}, credentials = {}, skillsCatalog = null } = {}) {
   })
   registerServerConnectionIpc({
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) }, manager,
-    skillsCatalog, send: (channel, payload) => events.push({ channel, payload })
+    skillsCatalog, serverModelProjection, send: (channel, payload) => events.push({ channel, payload })
   })
   return { handlers, manager, current, events }
 }
+
+test('IPC replays a preview completed before renderer registration and reads projection models', async () => {
+  const projected = [{ id: 'server:codex:model-1', adapterId: 'codex', sourceKind: 'server', canStart: true }]
+  const { handlers, events } = setup({ serverModelProjection: { listProfiles: () => projected } })
+  const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
+
+  assert.equal(events.filter(event => event.channel === 'server-connection:registration-requested').length, 1)
+  const replayed = await handlers.get('server-connection:get-pending-attempt')({})
+  assert.equal(replayed.attemptId, attempt.attemptId)
+  assert.equal(JSON.stringify(replayed).includes('opaque-secret'), false)
+  assert.deepEqual(await handlers.get('server-connection:list-models')({}), projected)
+  await assert.rejects(handlers.get('server-connection:get-pending-attempt')({}, 'extra'), { code: 'INVALID_SERVER_CONNECTION_IPC' })
+})
 
 test('server Skills IPC exposes only catalog-backed list, sync, install and update actions', async () => {
   const calls = []

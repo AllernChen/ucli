@@ -71,7 +71,7 @@ function exact(args, count) {
   if (args.length !== count) throw invalidIpc()
 }
 
-export function registerServerConnectionIpc({ ipcMain, manager, skillsCatalog = null, send = () => {} } = {}) {
+export function registerServerConnectionIpc({ ipcMain, manager, skillsCatalog = null, serverModelProjection = null, send = () => {} } = {}) {
   if (!ipcMain?.handle || !manager) throw new TypeError('IPC dependencies are required')
   ipcMain.handle('server-connection:submit-link', invoke((_event, ...args) => {
     exact(args, 1)
@@ -80,6 +80,10 @@ export function registerServerConnectionIpc({ ipcMain, manager, skillsCatalog = 
   ipcMain.handle('server-connection:get-attempt', invoke((_event, ...args) => {
     exact(args, 1)
     return manager.getAttempt(attemptId(args[0]))
+  }))
+  ipcMain.handle('server-connection:get-pending-attempt', invoke((_event, ...args) => {
+    exact(args, 0)
+    return manager.getPendingAttempt()
   }))
   for (const [channel, method] of [
     ['server-connection:confirm', 'confirm'],
@@ -95,14 +99,17 @@ export function registerServerConnectionIpc({ ipcMain, manager, skillsCatalog = 
     ['server-connection:get-state', 'getState'],
     ['server-connection:retry', 'retry'],
     ['server-connection:sync', 'sync'],
-    ['server-connection:disconnect', 'disconnect'],
-    ['server-connection:list-models', 'listModels']
+    ['server-connection:disconnect', 'disconnect']
   ]) {
     ipcMain.handle(channel, invoke((_event, ...args) => {
       exact(args, 0)
       return manager[method]()
     }))
   }
+  ipcMain.handle('server-connection:list-models', invoke((_event, ...args) => {
+    exact(args, 0)
+    return serverModelProjection?.listProfiles?.() || []
+  }))
   ipcMain.handle('server-connection:list-skills', invoke((_event, ...args) => {
     exact(args, 0)
     return skillsCatalog?.list() || []

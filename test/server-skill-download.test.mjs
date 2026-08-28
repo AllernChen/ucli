@@ -125,8 +125,8 @@ test('verified server archive installs with sanitized provenance and removes sta
     connectionManager, db, sourceLoader, skillsService, stagingRoot,
     fetchImpl: async (url, options) => {
       requests.push({ url, options })
-      if (url.endsWith('/catalog')) return new Response(JSON.stringify([catalogItem]), { status: 200 })
-      if (url.endsWith('/revocations')) return new Response(JSON.stringify([]), { status: 200 })
+      if (url.endsWith('/catalog')) return new Response(JSON.stringify([catalogItem]), { status: 200, headers: { 'content-type': 'application/json' } })
+      if (url.endsWith('/revocations')) return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })
       return new Response(archiveBytes, { status: 200, headers: {
         'content-type': 'application/zip', 'content-length': String(archiveBytes.length), 'x-ucli-sha256': sha256
       } })
@@ -235,8 +235,8 @@ test('adapter rejects invalid ZIP response metadata and integrity while cleaning
     const adapter = createSkillsCatalogAdapter({
       connectionManager, db, stagingRoot, sourceLoader: {},
       skillsService: { installVerifiedServerArchive: async () => { serviceCalls += 1 } },
-      fetchImpl: async url => url.endsWith('/catalog') ? new Response(JSON.stringify([catalogItem]))
-        : url.endsWith('/revocations') ? new Response(JSON.stringify([]))
+      fetchImpl: async url => url.endsWith('/catalog') ? new Response(JSON.stringify([catalogItem]), { headers: { 'content-type': 'application/json' } })
+        : url.endsWith('/revocations') ? new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } })
           : new Response(scenario.body, { headers: scenario.headers })
     })
     try {
@@ -248,6 +248,53 @@ test('adapter rejects invalid ZIP response metadata and integrity while cleaning
         ? readdirSync(stagingRoot, { recursive: true }).filter(entry => String(entry).endsWith('.zip'))
         : []
       assert.deepEqual(staged, [], `${scenario.name} left staged ZIPs`)
+    } finally {
+      await adapter.shutdown()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+})
+
+test('download routes every JSON lifecycle 401 through the current connection manager before ZIP validation', async () => {
+  const bytes = archive()
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  const item = {
+    id: 'version-1', version: '1.0.0', sha256, sizeBytes: bytes.length,
+    publishedAt: '2026-08-27T00:00:00.000Z', createdAt: '2026-08-27T00:00:00.000Z',
+    skill: { slug: 'example', name: 'Example', description: 'Example skill' },
+    downloadUrl: 'https://server.example.test/api/v1/skills/version-1/download'
+  }
+  const lifecycleCodes = ['invalid_grant', 'invalid_device', 'grant_disabled', 'grant_expired', 'grant_deleted', 'account_inactive', 'organization_inactive']
+  for (const code of lifecycleCodes) {
+    const root = mkdtempSync(join(tmpdir(), 'ucli-server-download-401-'))
+    const handled = []
+    const db = {
+      transaction: async work => work(),
+      replaceServerSkillVersions: ({ versions }) => { db.versions = versions },
+      listServerSkillVersions: () => db.versions || []
+    }
+    const connectionManager = {
+      getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: 1 }),
+      getState: () => ({ serverOrigin: 'https://server.example.test', organization: { id: 'org-1' } }),
+      getBootstrap: async () => ({ organization: { id: 'org-1' }, skillsCatalogUrl: 'https://server.example.test/api/v1/skills/catalog' }),
+      getAccessToken: async () => 'token',
+      handleServerLifecycleError: async (error, identity) => { handled.push({ code: error.code, identity }); return true }
+    }
+    const adapter = createSkillsCatalogAdapter({
+      connectionManager, db, stagingRoot: join(root, 'staging'), sourceLoader: {},
+      skillsService: { installVerifiedServerArchive: async () => assert.fail('must not install after lifecycle 401') },
+      fetchImpl: async url => url.endsWith('/catalog')
+        ? new Response(JSON.stringify([item]), { headers: { 'content-type': 'application/json' } })
+        : url.endsWith('/revocations')
+          ? new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } })
+          : new Response(JSON.stringify({ code, message: 'opaque server detail' }), { status: 401, headers: { 'content-type': 'application/json' } })
+    })
+    try {
+      await adapter.sync()
+      await assert.rejects(adapter.install('version-1', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' }), error => error.code === code)
+      assert.deepEqual(handled, [{ code, identity: {
+        connectionId: 'connection-1', connectionRevision: 1, serverOrigin: 'https://server.example.test', organizationId: 'org-1'
+      } }])
     } finally {
       await adapter.shutdown()
       rmSync(root, { recursive: true, force: true })
@@ -270,7 +317,7 @@ test('catalog rejects query-bearing download URLs before any archive request', a
       publishedAt: '2026-08-27T00:00:00.000Z', createdAt: '2026-08-27T00:00:00.000Z',
       skill: { slug: 'example', name: 'Example', description: 'Example skill' },
       downloadUrl: 'https://server.example.test/api/v1/skills/version-1/download?secret=no'
-    }]), { status: 200 })
+    }]), { status: 200, headers: { 'content-type': 'application/json' } })
   })
   await assert.rejects(adapter.sync(), error => error.code === 'SERVER_RESPONSE_INVALID')
   await adapter.shutdown()
@@ -301,8 +348,8 @@ test('stale connection identity reaches the internal install guard before a serv
   const adapter = createSkillsCatalogAdapter({
     connectionManager, db, stagingRoot: join(root, 'staging'), sourceLoader: {},
     skillsService: { installVerifiedServerArchive: async payload => { revision = 2; payload.guard(); committed = true } },
-    fetchImpl: async url => url.endsWith('/catalog') ? new Response(JSON.stringify([item]))
-      : url.endsWith('/revocations') ? new Response(JSON.stringify([]))
+    fetchImpl: async url => url.endsWith('/catalog') ? new Response(JSON.stringify([item]), { headers: { 'content-type': 'application/json' } })
+      : url.endsWith('/revocations') ? new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } })
         : new Response(bytes, { headers: { 'content-type': 'application/zip', 'x-ucli-sha256': sha256 } })
   })
   try {
@@ -344,8 +391,8 @@ test('substituted private staging root is rejected before a download request wri
       swapped = symlinkOrSkip(t, external, privateRoot, process.platform === 'win32' ? 'junction' : 'dir')
     },
     fetchImpl: async url => {
-      if (url.endsWith('/catalog')) return new Response(JSON.stringify([item]))
-      if (url.endsWith('/revocations')) return new Response(JSON.stringify([]))
+      if (url.endsWith('/catalog')) return new Response(JSON.stringify([item]), { headers: { 'content-type': 'application/json' } })
+      if (url.endsWith('/revocations')) return new Response(JSON.stringify([]), { headers: { 'content-type': 'application/json' } })
       requests += 1
       return new Response(bytes, { headers: { 'content-type': 'application/zip', 'x-ucli-sha256': sha256 } })
     }

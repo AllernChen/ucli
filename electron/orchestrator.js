@@ -3415,7 +3415,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     })
     if (skillsService) registerSkillsIpc({ ipcMain, service: skillsService })
     if (serverConnectionManager) {
-      registerServerConnectionIpc({ ipcMain, manager: serverConnectionManager, skillsCatalog: serverSkillsCatalog, send })
+      registerServerConnectionIpc({ ipcMain, manager: serverConnectionManager, skillsCatalog: serverSkillsCatalog, serverModelProjection, send })
     }
     if (storageService) registerStorageIpc({ ipcMain, service: storageService })
     registerSummaryIpc({

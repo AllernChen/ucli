@@ -40,6 +40,22 @@ test('registration attempts expose a renderer-safe DTO without the link secret',
   assert.equal(JSON.stringify(store.getPublic(created.attemptId)).includes(secret), false)
 })
 
+test('latest pending attempt replays only a previewed public DTO', () => {
+  const store = new RegistrationAttemptStore({ now: () => 100 })
+  const first = store.create({ serverOrigin: origin, linkSecret: secret })
+  const second = store.create({ serverOrigin: origin, linkSecret: secret })
+
+  assert.equal(store.getPendingPublic(), null)
+  store.markPreview(first.attemptId, { link: { status: 'AVAILABLE' } })
+  assert.equal(store.getPendingPublic().attemptId, first.attemptId)
+  store.markPreview(second.attemptId, { link: { status: 'AVAILABLE' } })
+  const pending = store.getPendingPublic()
+  assert.equal(pending.attemptId, second.attemptId)
+  assert.equal(JSON.stringify(pending).includes(secret), false)
+  store.cancel(second.attemptId)
+  assert.equal(store.getPendingPublic().attemptId, first.attemptId)
+})
+
 test('registration attempts automatically remove the secret at fifteen minutes without a later store operation', () => {
   const timers = timerHarness()
   const store = new RegistrationAttemptStore({ now: () => 0, ...timers })

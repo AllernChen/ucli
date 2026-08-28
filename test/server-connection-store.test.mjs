@@ -46,6 +46,7 @@ globalThis.window = {
     onServerConnectionRegistrationRequested(listener) { registrationListener = listener; return () => { unsubscribed += 1 } },
     async getServerConnectionState() { return initialState },
     async submitServerConnectionLink() { return { attemptId: 'attempt-1' } },
+    async getPendingServerConnectionAttempt() { return null },
     async getServerConnectionAttempt() {
       return {
         attemptId: 'attempt-1', serverOrigin: 'https://server.example.test',
@@ -101,6 +102,75 @@ test('initializes subscriptions before its snapshot and ignores stale state', as
   assert.equal(connection.status, 'unreachable')
   connection.dispose()
   assert.equal(unsubscribed, 2)
+})
+
+test('initialization replays a Preview completed before renderer subscription', async () => {
+  const connection = store()
+  window.ucli.getPendingServerConnectionAttempt = async () => ({
+    attemptId: 'attempt-cold-start', serverOrigin: 'https://server.example.test', preview: {
+      link: { status: 'AVAILABLE' }, authorization: { status: 'AVAILABLE' }
+    }
+  })
+  window.ucli.getServerConnectionAttempt = async id => ({
+    attemptId: id, serverOrigin: 'https://server.example.test', preview: {
+      link: { status: 'AVAILABLE' }, authorization: { status: 'AVAILABLE' }
+    }
+  })
+
+  await connection.initialize()
+
+  assert.equal(connection.attempt?.attemptId, 'attempt-cold-start')
+  assert.equal(connection.canConfirm, true)
+})
+
+test('a registration event during pending-attempt snapshot wins over the older replay', async () => {
+  const connection = store()
+  const pending = deferred()
+  const previousPending = window.ucli.getPendingServerConnectionAttempt
+  const previousState = window.ucli.getServerConnectionState
+  const previousAttempt = window.ucli.getServerConnectionAttempt
+  window.ucli.getPendingServerConnectionAttempt = async () => pending.promise
+  window.ucli.getServerConnectionState = async () => initialState
+  window.ucli.getServerConnectionAttempt = async id => ({ attemptId: id, preview: {} })
+  try {
+    const initializing = connection.initialize()
+    registrationListener({ attemptId: 'attempt-newer' })
+    await new Promise(resolve => setImmediate(resolve))
+    pending.resolve({ attemptId: 'attempt-older', preview: {} })
+    await initializing
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.equal(connection.attempt?.attemptId, 'attempt-newer')
+  } finally {
+    window.ucli.getPendingServerConnectionAttempt = previousPending
+    window.ucli.getServerConnectionState = previousState
+    window.ucli.getServerConnectionAttempt = previousAttempt
+  }
+})
+
+test('reinitialization still replays a pending attempt after an earlier registration event', async () => {
+  const connection = store()
+  const previousPending = window.ucli.getPendingServerConnectionAttempt
+  const previousState = window.ucli.getServerConnectionState
+  const previousAttempt = window.ucli.getServerConnectionAttempt
+  window.ucli.getServerConnectionState = async () => initialState
+  window.ucli.getPendingServerConnectionAttempt = async () => null
+  window.ucli.getServerConnectionAttempt = async id => ({ attemptId: id, preview: {} })
+  try {
+    await connection.initialize()
+    registrationListener({ attemptId: 'attempt-earlier' })
+    await new Promise(resolve => setImmediate(resolve))
+    connection.dispose()
+    window.ucli.getPendingServerConnectionAttempt = async () => ({ attemptId: 'attempt-replayed', preview: {} })
+
+    await connection.initialize()
+
+    assert.equal(connection.attempt?.attemptId, 'attempt-replayed')
+  } finally {
+    window.ucli.getPendingServerConnectionAttempt = previousPending
+    window.ucli.getServerConnectionState = previousState
+    window.ucli.getServerConnectionAttempt = previousAttempt
+  }
 })
 
 test('loads registration attempts by id without retaining submitted input and cancels them', async () => {

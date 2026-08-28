@@ -221,6 +221,7 @@ const api = {
   // ---- server connection ----
   submitServerConnectionLink: (input) => ipcRenderer.invoke('server-connection:submit-link', input),
   getServerConnectionAttempt: (attemptId) => ipcRenderer.invoke('server-connection:get-attempt', attemptId),
+  getPendingServerConnectionAttempt: () => ipcRenderer.invoke('server-connection:get-pending-attempt'),
   confirmServerConnection: (attemptId) => ipcRenderer.invoke('server-connection:confirm', attemptId),
   retryServerConnectionRedeem: (attemptId) => ipcRenderer.invoke('server-connection:retry-redeem', attemptId),
   cancelServerConnectionAttempt: (attemptId) => ipcRenderer.invoke('server-connection:cancel', attemptId),
