@@ -12,10 +12,10 @@
 
 | 能力 | 地址 |
 | --- | --- |
-| 控制面/API | `http://10.44.100.100` |
-| 模型网关基址 | `http://10.44.100.100/gateway` |
+| 控制面/API | `https://ucli.example.invalid` |
+| 模型网关基址 | `https://ucli.example.invalid/gateway` |
 
-HTTP 是本次可信公司内网的既定配置。客户端不得把该信任假设扩展到公网或其他不可信网络。
+本文使用不可路由的 HTTPS 文档域，不记录部署 origin；实际部署的传输安全配置必须在发布前确认，客户端不得把任何内网信任假设扩展到公网或其他不可信网络。
 
 0.12.0 只实现本文的 `#link=` 协议，不兼容旧邀请、设备码、`#token=` 或 query 传递秘密。
 
@@ -50,7 +50,7 @@ link secret 不得进入 DOM 隐藏字段、URL query、请求路径、数据库
 ```json
 {
   "id": "grant-uuid",
-  "connectionUrl": "http://10.44.100.100/connect#link=one-time-link-secret",
+  "connectionUrl": "https://ucli.example.invalid/connect#link=<secret>",
   "expiresAt": null
 }
 ```
@@ -68,7 +68,7 @@ URL 默认有效 7 天，也可设置为其他未来时间或永久。设备授�
 浏览器连接 URL：
 
 ```text
-http://10.44.100.100/connect#link=<secret>
+https://ucli.example.invalid/connect#link=<secret>
 ```
 
 浏览器只解析 fragment 中唯一的 `link` 键，读取后立即通过 `history.replaceState` 清除 fragment。
@@ -76,7 +76,7 @@ http://10.44.100.100/connect#link=<secret>
 确认后，页面使用规范化 origin 唤起：
 
 ```text
-ucli://connect?server=http%3A%2F%2F10.44.100.100#link=<secret>
+ucli://connect?server=https%3A%2F%2Fucli.example.invalid#link=<secret>
 ```
 
 客户端支持三个入口：浏览器唤起、设置页粘贴完整浏览器 URL、设置页粘贴完整 `ucli://` URL。三个入口必须汇合到同一注册流程。
@@ -257,7 +257,7 @@ Authorization: Bearer <accessToken>
     "timezone": "Asia/Shanghai"
   },
   "gateway": {
-    "baseUrl": "http://10.44.100.100/gateway"
+    "baseUrl": "https://ucli.example.invalid/gateway"
   },
   "models": [
     {
@@ -267,7 +267,7 @@ Authorization: Bearer <accessToken>
       "protocols": ["openai_responses"]
     }
   ],
-  "skillsCatalogUrl": "http://10.44.100.100/api/v1/skills/catalog",
+  "skillsCatalogUrl": "https://ucli.example.invalid/api/v1/skills/catalog",
   "authorization": {
     "expiresAt": null,
     "serverTime": "2026-08-27T04:00:00.000Z"

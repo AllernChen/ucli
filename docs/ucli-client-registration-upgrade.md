@@ -14,7 +14,7 @@
 
 - 客户端目标版本固定为 `0.12.0`。
 - 服务端基线为 UCLI Server `0.3.0`，提交 `4f71d6efdfe2504b8f72da53e1647c226bb8ff1f`。
-- 当前控制面为 `http://10.44.100.100`，模型网关基址为 `http://10.44.100.100/gateway`。
+- 当前控制面文档域为 `https://ucli.example.invalid`，模型网关基址为 `https://ucli.example.invalid/gateway`。
 - 只实现 `#link=`，拒绝旧 `#token=`、设备码和 query 传密。
 - 只维护一个当前服务端连接；服务端失败不得影响本地能力。
 - link secret、access token 和本机代理 bearer 不得持久化。
@@ -112,13 +112,13 @@ Connection Manager ───── Credential Store
 浏览器 URL：
 
 ```text
-http://10.44.100.100/connect#link=<secret>
+https://ucli.example.invalid/connect#link=<secret>
 ```
 
 自定义协议 URL：
 
 ```text
-ucli://connect?server=http%3A%2F%2F10.44.100.100#link=<secret>
+ucli://connect?server=https%3A%2F%2Fucli.example.invalid#link=<secret>
 ```
 
 `parseConnectionInput(input)` 输出 `{ serverOrigin, linkSecret }`。link secret 保持原始大小写和字节语义，不做二次解码或派生。
