@@ -13,7 +13,7 @@
 | Task 10 Windows 产物 | 2026-08-28 12:52（Asia/Shanghai）从运行时代码提交 `d35b9bd` 构建的 Windows x64 产物：Setup `UCLI-Setup-0.12.0-x64.exe`（134,216,065 bytes，SHA-256 `163BF3D15066AAA66C6DBC8B2D867C92631C9ADDEAEC839ABC4722CCF5446B23`），Portable `UCLI-Portable-0.12.0-x64.exe`（133,961,257 bytes，SHA-256 `04A7E6B3965B81303EE4C20BF752E75756B60C39C57E618111D65867533B29F6`）；`latest.yml` 与 blockmap 均由同一次 `npm run dist:win` 生成，`npm run verify:release` 已通过。其后的紧邻提交仅修改此证据文档；该文档不在 `electron-builder.yml` 的打包输入中。 |
 | Windows 原生人工检查 | 待完成：安装版 URL scheme、cold start、第二实例、升级、条件卸载，以及 portable 不接管协议。 |
 | macOS / Linux | 待完成：原生 macOS DMG/ZIP 验证；Linux 打包验证。未以静态检查替代。 |
-| 真实内网冒烟 | 待完成：须取得新的一次性测试授权后，显式启用隔离 smoke，覆盖注册、刷新、模型和 Skills 下载。 |
+| 真实内网冒烟 | 阻断（2026-08-28 14:04，Asia/Shanghai）：Preview、首次 Redeem、同一 installationId 幂等 Redeem 已通过；强制 Refresh 因部署实例的 `POST /api/v1/auth/token/refresh` 缺少合同要求的 `Cache-Control: no-store` 而 fail closed。Bootstrap、模型和 Skills 下载未执行。单次链接已消费，临时数据库、凭证环境变量和 smoke 目录已清理；服务端补齐响应头并重新部署后，须使用新链接重跑。 |
 | 真实降级 | 待完成：用真实 0.11.6 二进制验证其忽略 `server_*` 表和 `ucli-server-*` 文件。 |
 
 ### 0.12.0 数据与紧急关闭
@@ -21,7 +21,7 @@
 - [x] 服务端能力没有自动默认模型或自动安装 Skills；独立模式、已有本地会话、Profiles、Skills 和数据保持可用。
 - [x] 紧急关闭只移除服务端入口/能力，不删除本地会话、Profiles、Skills 或数据。
 - [ ] 在隔离安装中手工确认断网、5xx、disabled/expired/account/org inactive 状态不影响本地能力。
-- [ ] 在新授权的真实内网中完成注册、Refresh、`/gateway/v1/models`、最小模型流和 Skills 下载哈希检查；不要记录链接、token、header 或响应正文。
+- [ ] 服务端为 `POST /api/v1/auth/token/refresh` 的成功和错误响应补齐 `Cache-Control: no-store`，重新部署后使用新授权完成 Refresh、`/gateway/v1/models`、最小模型流和 Skills 下载哈希检查；不要记录链接、token、header 或响应正文。
 
 ## 0. 验收记录
 

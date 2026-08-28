@@ -417,4 +417,6 @@ Authorization: Bearer <accessToken>
 
 ## 17. 工作树验证状态（2026-08-28）
 
-此副本同步自用户提供的协议；它记录的是合同而不是已完成发布。当前工作树的固定 fixtures 覆盖 Preview、Redeem、Refresh、Bootstrap、Skills、稳定错误和合成 SSE，并对未知字段/枚举、日期、必填字段、URL、内容类型和 `no-store` 作本地 fail-closed 检查。真实内网注册、刷新、模型调用和 Skill 下载仍须使用新的单次授权显式执行；本次没有运行该步骤。
+此副本同步自用户提供的协议；它记录的是合同而不是已完成发布。当前工作树的固定 fixtures 覆盖 Preview、Redeem、Refresh、Bootstrap、Skills、稳定错误和合成 SSE，并对未知字段/枚举、日期、必填字段、URL、内容类型和 `no-store` 作本地 fail-closed 检查。
+
+2026-08-28 的真实内网 smoke 已通过 Preview、首次 Redeem 和同一 installationId 的幂等 Redeem，但在强制 Refresh 时按合同 fail closed：部署实例的 `POST /api/v1/auth/token/refresh` 响应缺少本协议第 3 节要求的 `Cache-Control: no-store`。因此 Bootstrap、模型调用和 Skill 下载未继续执行；本次单次链接已消费，临时数据库、凭证环境变量和 smoke 目录已清理。服务端补齐响应头并重新部署后，须使用新的单次授权重新运行完整 smoke。

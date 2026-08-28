@@ -542,4 +542,6 @@ IPC 错误只包含稳定错误码、用户信息和可重试标记，不包含 
 
 ## 22. 工作树验证状态（2026-08-28）
 
-此副本同步自用户提供的实施方案。当前工作树已加入固定合约门和默认跳过的真实 smoke 测试；固定 fixtures 可在本地验证，但真实内网注册、刷新、模型和 Skill 下载尚未执行，仍需新的单次授权。Windows 产物存在于 Task 10 的 post-HEAD 构建证据中；原生 macOS、Linux、URL-scheme/portable 人工检查和真实 0.11.6 二进制降级仍为发布阻断项。紧急关闭仅移除服务端入口/能力，不迁移或删除本地模型、Skills、会话或数据。
+此副本同步自用户提供的实施方案。当前工作树已加入固定合约门和默认跳过的真实 smoke 测试。2026-08-28 的真实内网运行已通过 Preview、首次 Redeem 和同一 installationId 的幂等 Redeem；强制 Refresh 因部署实例的 `POST /api/v1/auth/token/refresh` 未返回 `Cache-Control: no-store` 而按合同 fail closed，Bootstrap、模型和 Skill 下载未执行。本次单次链接已消费，临时数据库、凭证环境变量和 smoke 目录已清理。服务端补齐响应头并重新部署后，须使用新的单次授权重跑完整 smoke。
+
+Windows 产物存在于 Task 10 的 post-HEAD 构建证据中；真实完整内网 smoke、原生 macOS、Linux、URL-scheme/portable 人工检查和真实 0.11.6 二进制降级仍为发布阻断项。紧急关闭仅移除服务端入口/能力，不迁移或删除本地模型、Skills、会话或数据。
