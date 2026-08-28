@@ -24,3 +24,10 @@ export function modelStreamRequest(protocol, modelId) {
     body: { model: modelId, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }], stream: true }
   }
 }
+
+export function smokeFailure({ primaryError = null, cleanupErrors = [], diagnostic } = {}) {
+  return Object.assign(new Error('Server smoke failed'), {
+    failedStage: cleanupErrors.length > 0 ? 'cleanup' : primaryError?.failedStage,
+    diagnostic
+  })
+}

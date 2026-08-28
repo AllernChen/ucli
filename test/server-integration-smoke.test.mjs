@@ -13,7 +13,7 @@ import {
   parseGatewayRouteFailure,
   selectModelForProtocol
 } from '../electron/serverConnection/contracts.js'
-import { modelStreamRequest } from './helpers/serverIntegrationSmoke.mjs'
+import { modelStreamRequest, smokeFailure } from './helpers/serverIntegrationSmoke.mjs'
 
 const smokeEnabled = process.env.UCLI_SERVER_SMOKE === '1'
 
@@ -224,10 +224,7 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
     assert.equal(verifiedDownloads, 1, 'Skills download verification did not run')
   } catch (error) {
     evidence.failedStage = failedStage
-    primaryError = Object.assign(new Error('Server smoke failed'), {
-      failedStage,
-      diagnostic: failureDiagnostic
-    })
+    primaryError = smokeFailure({ primaryError: { failedStage }, diagnostic: failureDiagnostic })
     throw primaryError
   } finally {
     const cleanupErrors = []
@@ -253,11 +250,8 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
         evidence.smokeDirectoriesRemoved = true
       } catch (error) { cleanupErrors.push(error) }
     }
-    if (cleanupErrors.length && !primaryError) {
-      throw Object.assign(new Error('Server smoke failed'), {
-        failedStage: 'cleanup',
-        diagnostic: failureDiagnostic
-      })
+    if (cleanupErrors.length) {
+      throw smokeFailure({ primaryError, cleanupErrors, diagnostic: failureDiagnostic })
     }
     if (!primaryError && cleanupErrors.length === 0) {
       t.diagnostic(JSON.stringify({
