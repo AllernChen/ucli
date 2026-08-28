@@ -1,7 +1,7 @@
 {
   "organization": { "id": "organization-fixture-001", "name": "Fixture Organization", "timezone": "Asia/Shanghai" },
   "gateway": { "baseUrl": "http://server.fixture.test/gateway" },
-  "models": [{ "id": "fixture-model", "displayName": "Fixture Model", "contextSize": 128000 }],
+  "models": [{ "id": "fixture-model", "displayName": "Fixture Model", "contextSize": 128000, "protocols": ["openai_responses", "anthropic_messages"] }],
   "skillsCatalogUrl": "http://server.fixture.test/api/v1/skills/catalog",
   "authorization": { "expiresAt": null, "serverTime": "2026-08-27T04:00:00.000Z" }
 }

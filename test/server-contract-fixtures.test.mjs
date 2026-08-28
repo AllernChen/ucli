@@ -5,10 +5,12 @@ import test from 'node:test'
 import {
   SERVER_ERROR_CODES,
   parseBootstrapResponse,
+  parseGatewayModelsResponse,
   parsePreviewResponse,
   parseRedeemResponse,
   parseRefreshResponse,
   parseSkillsCatalogPage,
+  selectModelForProtocol,
   sanitiseServerError
 } from '../electron/serverConnection/contracts.js'
 import { createDeviceGrantClient } from '../electron/serverConnection/deviceGrantClient.js'
@@ -36,6 +38,28 @@ test('official server connection fixtures parse through the production contract 
   assert.equal(parseBootstrapResponse(fixture('bootstrap-success.json'), { serverOrigin }).gateway.baseUrl, `${serverOrigin}/gateway`)
   assert.equal(parseSkillsCatalogPage(fixture('skills-catalog-page.json'), { serverOrigin })[0].downloadUrl,
     `${serverOrigin}/api/v1/skills/skill-version-fixture-001/download`)
+})
+
+test('model directory fixtures select models for every supported protocol', () => {
+  const gatewayModels = parseGatewayModelsResponse(fixture('gateway-models-success.json')).data
+  assert.equal(selectModelForProtocol(gatewayModels, 'openai_responses').id, 'fixture-model')
+  assert.equal(selectModelForProtocol(gatewayModels, 'openai_chat').id, 'fixture-chat-model')
+  assert.equal(selectModelForProtocol(gatewayModels, 'anthropic_messages').id, 'fixture-model')
+})
+
+test('model directory fixtures reject missing, empty, and unsupported protocol arrays', () => {
+  const bootstrap = fixture('bootstrap-success.json')
+  const gateway = fixture('gateway-models-success.json')
+  for (const protocols of [undefined, [], ['gemini'], ['openai_chat', 'future_protocol']]) {
+    assert.throws(() => parseBootstrapResponse({
+      ...bootstrap,
+      models: [{ ...bootstrap.models[0], protocols }]
+    }, { serverOrigin }), { code: 'SERVER_RESPONSE_INVALID' })
+    assert.throws(() => parseGatewayModelsResponse({
+      ...gateway,
+      data: [{ ...gateway.data[0], protocols }]
+    }), { code: 'SERVER_RESPONSE_INVALID' })
+  }
 })
 
 test('contract parsers ignore ordinary unknown fields but reject malformed protocol fields', () => {

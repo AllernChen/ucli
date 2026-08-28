@@ -6,12 +6,18 @@ import {
   AUTHORIZATION_STATUSES,
   CONNECTION_STATUSES,
   LINK_STATUSES,
+  MODEL_PROTOCOL_LOCAL_PATHS,
+  PUBLIC_MODEL_PROTOCOLS,
   SERVER_ERROR_CODES,
+  assertGatewayModelProtocolConsistency,
+  localGatewayPathForProtocol,
   parseBootstrapResponse,
+  parseGatewayModelsResponse,
   parsePreviewResponse,
   parseRedeemResponse,
   parseRefreshResponse,
   parseSkillsCatalogPage,
+  selectModelForProtocol,
   sanitiseServerError
 } from '../electron/serverConnection/contracts.js'
 
@@ -30,6 +36,66 @@ test('wire status constants expose the protocol values used by later consumers',
     'invalid_device', 'invalid_grant', 'grant_disabled', 'grant_expired',
     'grant_deleted', 'account_inactive', 'organization_inactive'
   ])
+})
+
+test('model protocols are explicit and map to fixed local Gateway paths', () => {
+  assert.deepEqual(PUBLIC_MODEL_PROTOCOLS, [
+    'openai_responses', 'openai_chat', 'anthropic_messages'
+  ])
+  assert.deepEqual(MODEL_PROTOCOL_LOCAL_PATHS, {
+    openai_responses: '/v1/responses',
+    openai_chat: '/v1/chat/completions',
+    anthropic_messages: '/anthropic/v1/messages'
+  })
+  assert.equal(localGatewayPathForProtocol('openai_chat'), '/v1/chat/completions')
+  assert.throws(() => localGatewayPathForProtocol('gemini'), { code: 'SERVER_RESPONSE_INVALID' })
+})
+
+test('Bootstrap and Gateway model directories require known non-empty protocols', () => {
+  const bootstrap = fixture('bootstrap-success.json')
+  const gateway = fixture('gateway-models-success.json')
+  assert.deepEqual(
+    parseBootstrapResponse(bootstrap, { serverOrigin }).models[0].protocols,
+    ['openai_responses', 'anthropic_messages']
+  )
+  assert.deepEqual(parseGatewayModelsResponse(gateway).data[1], {
+    id: 'fixture-chat-model',
+    object: 'model',
+    ownedBy: 'ucli',
+    displayName: 'Fixture Chat Model',
+    contextSize: 64000,
+    protocols: ['openai_chat']
+  })
+  for (const protocols of [undefined, [], ['gemini'], ['openai_chat', 'future_protocol']]) {
+    assert.throws(() => parseBootstrapResponse({
+      ...bootstrap,
+      models: [{ ...bootstrap.models[0], protocols }]
+    }, { serverOrigin }), { code: 'SERVER_RESPONSE_INVALID' })
+    assert.throws(() => parseGatewayModelsResponse({
+      ...gateway,
+      data: [{ ...gateway.data[0], protocols }]
+    }), { code: 'SERVER_RESPONSE_INVALID' })
+  }
+})
+
+test('model selection and directory agreement never fall back to the first model', () => {
+  const bootstrapModels = parseBootstrapResponse(fixture('bootstrap-success.json'), { serverOrigin }).models
+  const gatewayModels = parseGatewayModelsResponse(fixture('gateway-models-success.json')).data
+  assert.equal(selectModelForProtocol(gatewayModels, 'openai_chat').id, 'fixture-chat-model')
+  assert.equal(selectModelForProtocol(gatewayModels, 'openai_responses').id, 'fixture-model')
+  assert.equal(selectModelForProtocol([{ ...gatewayModels[0], protocols: ['openai_chat'] }], 'openai_responses'), null)
+  assert.equal(assertGatewayModelProtocolConsistency({
+    bootstrapModels,
+    gatewayModels,
+    modelId: 'fixture-model',
+    protocol: 'openai_responses'
+  }).id, 'fixture-model')
+  assert.throws(() => assertGatewayModelProtocolConsistency({
+    bootstrapModels,
+    gatewayModels: [{ ...gatewayModels[0], protocols: ['openai_responses'] }],
+    modelId: 'fixture-model',
+    protocol: 'openai_responses'
+  }), { code: 'SERVER_RESPONSE_INVALID' })
 })
 
 test('response parsers return known protocol fields and ignore unknown fields', () => {

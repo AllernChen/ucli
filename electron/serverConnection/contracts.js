@@ -11,6 +11,14 @@ export const SERVER_ERROR_CODES = Object.freeze([
   'invalid_device', 'invalid_grant', 'grant_disabled', 'grant_expired',
   'grant_deleted', 'account_inactive', 'organization_inactive'
 ])
+export const PUBLIC_MODEL_PROTOCOLS = Object.freeze([
+  'openai_responses', 'openai_chat', 'anthropic_messages'
+])
+export const MODEL_PROTOCOL_LOCAL_PATHS = Object.freeze({
+  openai_responses: '/v1/responses',
+  openai_chat: '/v1/chat/completions',
+  anthropic_messages: '/anthropic/v1/messages'
+})
 
 // Keep the protocol target decoupled from package metadata until the release bump.
 export const TARGET_CLIENT_VERSION = '0.12.0'
@@ -18,6 +26,7 @@ export const TARGET_CLIENT_VERSION = '0.12.0'
 const LINK_STATUS_SET = new Set(LINK_STATUSES)
 const AUTHORIZATION_STATUS_SET = new Set(AUTHORIZATION_STATUSES)
 const SERVER_ERROR_CODE_SET = new Set(SERVER_ERROR_CODES)
+const PUBLIC_MODEL_PROTOCOL_SET = new Set(PUBLIC_MODEL_PROTOCOLS)
 const ISO_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i
 
@@ -33,6 +42,29 @@ function object(value) {
 function requiredString(value) {
   if (typeof value !== 'string' || !value) throw responseError()
   return value
+}
+
+function parseModelProtocols(value) {
+  if (!Array.isArray(value) || value.length === 0 ||
+    value.some(protocol => typeof protocol !== 'string' || !PUBLIC_MODEL_PROTOCOL_SET.has(protocol))) {
+    throw responseError()
+  }
+  return [...value]
+}
+
+function parseGatewayModel(value) {
+  value = object(value)
+  if (value.object !== 'model' || !Number.isSafeInteger(value.context_size) || value.context_size <= 0) {
+    throw responseError()
+  }
+  return {
+    id: requiredString(value.id),
+    object: 'model',
+    ownedBy: requiredString(value.owned_by),
+    displayName: requiredString(value.display_name),
+    contextSize: value.context_size,
+    protocols: parseModelProtocols(value.protocols)
+  }
 }
 
 function validCalendarDate(year, month, day) {
@@ -159,12 +191,46 @@ export function parseBootstrapResponse(value, { serverOrigin } = {}) {
       return {
         id: requiredString(model.id),
         displayName: requiredString(model.displayName),
-        contextSize: model.contextSize
+        contextSize: model.contextSize,
+        protocols: parseModelProtocols(model.protocols)
       }
     }),
     skillsCatalogUrl: parseFixedSameOriginUrl(value.skillsCatalogUrl, serverOrigin, '/api/v1/skills/catalog'),
     authorization: parseAuthorization(value.authorization)
   }
+}
+
+export function parseGatewayModelsResponse(value) {
+  value = object(value)
+  if (value.object !== 'list' || !Array.isArray(value.data)) throw responseError()
+  return { object: 'list', data: value.data.map(parseGatewayModel) }
+}
+
+export function selectModelForProtocol(models, protocol) {
+  if (!Array.isArray(models) || !PUBLIC_MODEL_PROTOCOL_SET.has(protocol)) throw responseError()
+  return models.find(model => Array.isArray(model?.protocols) && model.protocols.includes(protocol)) || null
+}
+
+export function localGatewayPathForProtocol(protocol) {
+  const path = MODEL_PROTOCOL_LOCAL_PATHS[protocol]
+  if (!path) throw responseError()
+  return path
+}
+
+function sameProtocolSet(left, right) {
+  return left.length === right.length && left.every(protocol => right.includes(protocol))
+}
+
+export function assertGatewayModelProtocolConsistency({ bootstrapModels, gatewayModels, modelId, protocol } = {}) {
+  if (!PUBLIC_MODEL_PROTOCOL_SET.has(protocol)) throw responseError()
+  const bootstrapModel = bootstrapModels?.find(model => model.id === modelId)
+  const gatewayModel = gatewayModels?.find(model => model.id === modelId)
+  if (!bootstrapModel || !gatewayModel ||
+    !bootstrapModel.protocols.includes(protocol) || !gatewayModel.protocols.includes(protocol) ||
+    !sameProtocolSet(bootstrapModel.protocols, gatewayModel.protocols)) {
+    throw responseError()
+  }
+  return gatewayModel
 }
 
 export function parseSkillsCatalogPage(value, { serverOrigin } = {}) {

@@ -1,0 +1,21 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "fixture-model",
+      "object": "model",
+      "owned_by": "ucli",
+      "display_name": "Fixture Model",
+      "context_size": 128000,
+      "protocols": ["anthropic_messages", "openai_responses"]
+    },
+    {
+      "id": "fixture-chat-model",
+      "object": "model",
+      "owned_by": "ucli",
+      "display_name": "Fixture Chat Model",
+      "context_size": 64000,
+      "protocols": ["openai_chat"]
+    }
+  ]
+}
