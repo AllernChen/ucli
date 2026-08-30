@@ -141,7 +141,7 @@ test('primary smoke failures expose only an allowlisted stage and diagnostic env
   assert.deepEqual(Object.keys(error).sort(), ['diagnostic', 'failedStage'])
 })
 
-test('entering the Skills catalog stage discards the prior model response diagnostic', () => {
+test('entering the Skills catalog stage resets failure diagnostics without discarding model response evidence', () => {
   const modelResponseDiagnostic = {
     httpStatus: 200,
     contentType: 'text/event-stream; charset=utf-8',
@@ -151,15 +151,19 @@ test('entering the Skills catalog stage discards the prior model response diagno
     retryable: null
   }
 
-  assert.deepEqual(enterSmokeStage('skills-catalog', modelResponseDiagnostic), {
+  assert.deepEqual(enterSmokeStage('skills-catalog', {
+    failureDiagnostic: modelResponseDiagnostic,
+    modelResponseDiagnostic
+  }), {
     failedStage: 'skills-catalog',
-    diagnostic: {
+    failureDiagnostic: {
       httpStatus: 'not-received',
       contentType: 'not-received',
       cacheControl: 'not-received',
       stableCode: 'not-received',
       requestId: 'not-received',
       retryable: null
-    }
+    },
+    modelResponseDiagnostic
   })
 })

@@ -62,11 +62,12 @@ export function smokeFailure({ primaryError = null, cleanupErrors = [], diagnost
   })
 }
 
-export function enterSmokeStage(stage, priorDiagnostic) {
+export function enterSmokeStage(stage, { failureDiagnostic, modelResponseDiagnostic } = {}) {
   const failedStage = smokeStage(stage)
   return {
     failedStage,
-    diagnostic: smokeDiagnostic(failedStage === 'skills-catalog' ? undefined : priorDiagnostic)
+    failureDiagnostic: smokeDiagnostic(failedStage === 'skills-catalog' ? undefined : failureDiagnostic),
+    modelResponseDiagnostic: smokeDiagnostic(modelResponseDiagnostic)
   }
 }
 

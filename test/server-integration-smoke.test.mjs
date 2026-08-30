@@ -41,6 +41,7 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
   let primaryError = null
   let failedStage = 'protocol-validation'
   let failureDiagnostic = gatewayResponseMetadata()
+  let modelResponseDiagnostic = gatewayResponseMetadata()
   let verifiedDownloads = 0
   const credentialCiphertexts = new Map()
   const evidence = {
@@ -173,6 +174,7 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
     })
     let diagnostic = gatewayResponseMetadata(stream)
     failureDiagnostic = diagnostic
+    modelResponseDiagnostic = diagnostic
     evidence.streamStatus = stream.status
     if (!stream.ok) {
       let body = null
@@ -185,6 +187,7 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
         }
       }
       failureDiagnostic = diagnostic
+      modelResponseDiagnostic = diagnostic
       throw Object.assign(new Error('Gateway model stream failed'), {
         code: 'SMOKE_MODEL_STREAM_FAILED',
         diagnostic
@@ -210,9 +213,13 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
       evidence.skillDownloadHash = true
       return { verified: true }
     }
-    const skillsCatalogStage = enterSmokeStage('skills-catalog', failureDiagnostic)
+    const skillsCatalogStage = enterSmokeStage('skills-catalog', {
+      failureDiagnostic,
+      modelResponseDiagnostic
+    })
     failedStage = skillsCatalogStage.failedStage
-    failureDiagnostic = skillsCatalogStage.diagnostic
+    failureDiagnostic = skillsCatalogStage.failureDiagnostic
+    modelResponseDiagnostic = skillsCatalogStage.modelResponseDiagnostic
     catalog = createSkillsCatalogAdapter({
       connectionManager: manager,
       db,
@@ -260,7 +267,7 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
     if (!primaryError && cleanupErrors.length === 0) {
       t.diagnostic(JSON.stringify(smokeSuccessEvidence({
         evidence,
-        diagnostic: failureDiagnostic,
+        diagnostic: modelResponseDiagnostic,
         cleanupComplete: true
       })))
     }
