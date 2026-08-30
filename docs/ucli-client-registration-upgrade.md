@@ -594,32 +594,46 @@ failure:
 
 第三次 smoke 仍仅是历史证据，不能作为新部署基线。它使用旧的“可见即可路由”假设并在模型流阶段停止；它之后的协议能力合同要求显式协议、双目录一致性和稳定 503 处理。新的真实 smoke 必须使用新的单次授权，并在已确认的新服务端提交与运行时摘要上完成模型流、Skills 哈希和清理，才可进入发布接受判断。
 
-Windows 产物存在于 Task 10 的 post-HEAD 构建证据中；真实完整内网 smoke、原生 macOS、Linux、URL-scheme/portable 人工检查和真实 0.11.6 二进制降级仍为发布阻断项。紧急关闭仅移除服务端入口/能力，不迁移或删除本地模型、Skills、会话或数据。
+Windows 产物存在于 Task 10 的 post-HEAD 构建证据中；真实完整内网 smoke 已按第 24 节通过，原生 macOS、Linux、URL-scheme/portable 人工检查和真实 0.11.6 二进制降级仍为发布阻断项。紧急关闭仅移除服务端入口/能力，不迁移或删除本地模型、Skills、会话或数据。
 
-## 24. 真实协议 smoke 失败证据（2026-08-30）
+## 24. 最终真实协议 smoke 证据（2026-08-30）
 
-客户端运行时代码 `a6aa5e1` 在已确认的服务端提交与 runtime 上显式选择 `openai_responses` 执行一次。Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录和非空模型流均已越过；模型响应为 HTTP 200、SSE 与 `no-store`。运行随后在 `skills-catalog` 严格拒绝 string `sizeBytes`，Skills 下载未运行。Skills 适配器没有提供该失败的安全 HTTP 诊断，因此失败 YAML 的六字段全部为 `not-received`/`null`，不得沿用模型流诊断。授权已经消费，不得重跑；环境变量与临时 smoke 目录已清理。不得把本次结果标记为协议成功或发布接受。更早的 Preview 连通性失败仅为环境诊断，不替代本次证据。
+客户端 `9b7b17c` 在已确认的新服务端提交与 runtime 上使用全新授权，仅执行一次显式 `openai_responses` smoke。Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录、非空模型流、Skills 目录、ZIP 大小/SHA-256 和 cleanup 全部通过；Skill 未安装或执行。更早一次功能链路 PASS 因成功模型响应诊断丢失不能作为最终验收，本节仅以 16:10:42 的新授权记录为准。
 
 ```yaml
-timestamp: 2026-08-30T10:35:43+08:00
+timestamp: 2026-08-30T16:10:42+08:00
 clientVersion: 0.12.0
-clientCommit: a6aa5e1
-serverCommit: 1cdea4826758f37f799088e575af5c261659c6e9
-serverRuntimeImage: sha256:238f10bf0bea06c5fa4722c10d1b70fd39da3bd8550d4e4433c5abeb00da1a80
+clientCommit: 9b7b17c2d0dba3edcd75a7f78e365ccb40108a65
+serverCommit: a675de6fb2fad74c41553653c998b2a29fce183f
+serverRuntimeImage: sha256:e4a8f48841434df722bd361c2d2c65fd74674e10db8aef2413191700d63ee2f9
 localContractGate: 48 passed / 0 failed / 0 skipped
-selectedModelId: not-recorded
-selectedProtocol: openai_responses
-failedStage: skills-catalog
-httpStatus: not-received
-contentType: not-received
-cacheControl: not-received
-stableCode: not-received
-requestId: not-received
-retryable: null
-streamReceivedNonEmptyData: true
-authorizationExpiresAt: not-recorded
-serverTimePresent: not-recorded
-skillsCatalog: FAIL
-skillDownloadHash: NOT_RUN
+liveSmoke: 1 passed / 0 failed / 0 skipped
+preview: PASS
+redeem: PASS
+idempotentRedeem: PASS
+refresh: PASS
+bootstrap: PASS
+models: PASS
+modelStream: PASS
+skillsCatalog: PASS
+skillDownloadHash: PASS
 cleanup: PASS
+selectedModelId: deepseek-v4-flash
+selectedProtocol: openai_responses
+failedStage: none
+httpStatus: 200
+contentType: text/event-stream; charset=utf-8
+cacheControl: no-store
+stableCode: not-received
+requestId: 2382f083-5b3e-44ce-9e42-672e638ed905
+retryable: null
+bootstrapModelCount: 3
+invalidContextSizeCount: 0
+streamReceivedNonEmptyData: true
+authorizationExpiresAt: null
+serverTimePresent: true
+skillInstalledOrExecuted: false
+tempDatabaseRemoved: true
+environmentVariablesRemoved: true
+smokeDirectoriesRemoved: true
 ```

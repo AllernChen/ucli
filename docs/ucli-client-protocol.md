@@ -359,32 +359,46 @@ Codex 仅投影 `openai_responses`；Claude 仅投影 `anthropic_messages`；仅
 
 流式请求沿用 OpenAI/Anthropic 的取消与错误处理。单个上游模型失败不得映射为设备授权失效。
 
-### 12.1 真实协议 smoke 证据（2026-08-30）
+### 12.1 最终真实协议 smoke 证据（2026-08-30）
 
-最新记录来自一次显式 `openai_responses` 执行。Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录和非空模型流均已越过；模型响应为 HTTP 200、SSE 与 `no-store`。运行随后在 `skills-catalog` 严格拒绝 string `sizeBytes`，Skills 下载未运行。Skills 适配器没有提供该失败的安全 HTTP 诊断，因此失败 YAML 的六字段全部为 `not-received`/`null`，不得沿用模型流诊断。授权已经消费，不得重跑；客户端环境变量和临时 smoke 目录均已清理，发布验收保持阻断。更早的 Preview 连通性失败仅为环境诊断，不替代本次证据。
+最终记录来自修复成功证据诊断后创建的全新授权，并且仅执行一次显式 `openai_responses` smoke。Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录、非空模型流、Skills 目录、ZIP 大小/SHA-256 和 cleanup 全部通过；Skill 未安装或执行。更早一次功能链路 PASS 因成功模型响应诊断丢失不能作为最终验收，本节仅以 16:10:42 的新授权记录为准。
 
 ```yaml
-timestamp: 2026-08-30T10:35:43+08:00
+timestamp: 2026-08-30T16:10:42+08:00
 clientVersion: 0.12.0
-clientCommit: a6aa5e1
-serverCommit: 1cdea4826758f37f799088e575af5c261659c6e9
-serverRuntimeImage: sha256:238f10bf0bea06c5fa4722c10d1b70fd39da3bd8550d4e4433c5abeb00da1a80
+clientCommit: 9b7b17c2d0dba3edcd75a7f78e365ccb40108a65
+serverCommit: a675de6fb2fad74c41553653c998b2a29fce183f
+serverRuntimeImage: sha256:e4a8f48841434df722bd361c2d2c65fd74674e10db8aef2413191700d63ee2f9
 localContractGate: 48 passed / 0 failed / 0 skipped
-selectedModelId: not-recorded
-selectedProtocol: openai_responses
-failedStage: skills-catalog
-httpStatus: not-received
-contentType: not-received
-cacheControl: not-received
-stableCode: not-received
-requestId: not-received
-retryable: null
-streamReceivedNonEmptyData: true
-authorizationExpiresAt: not-recorded
-serverTimePresent: not-recorded
-skillsCatalog: FAIL
-skillDownloadHash: NOT_RUN
+liveSmoke: 1 passed / 0 failed / 0 skipped
+preview: PASS
+redeem: PASS
+idempotentRedeem: PASS
+refresh: PASS
+bootstrap: PASS
+models: PASS
+modelStream: PASS
+skillsCatalog: PASS
+skillDownloadHash: PASS
 cleanup: PASS
+selectedModelId: deepseek-v4-flash
+selectedProtocol: openai_responses
+failedStage: none
+httpStatus: 200
+contentType: text/event-stream; charset=utf-8
+cacheControl: no-store
+stableCode: not-received
+requestId: 2382f083-5b3e-44ce-9e42-672e638ed905
+retryable: null
+bootstrapModelCount: 3
+invalidContextSizeCount: 0
+streamReceivedNonEmptyData: true
+authorizationExpiresAt: null
+serverTimePresent: true
+skillInstalledOrExecuted: false
+tempDatabaseRemoved: true
+environmentVariablesRemoved: true
+smokeDirectoriesRemoved: true
 ```
 
 ## 13. 客户端本机代理边界

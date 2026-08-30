@@ -14,7 +14,7 @@
 | Task 10 Windows 产物 | 2026-08-29 03:56（Asia/Shanghai）从模型协议运行时代码提交 `a6aa5e1` 构建的 Windows x64 产物：Setup `UCLI-Setup-0.12.0-x64.exe`（134,216,191 bytes，SHA-256 `FCEB8C56C6EC2FDE45EFA1B2CB18BCC4E4CCC2E51C14BDF92EECBB9C4018FCF3`），Portable `UCLI-Portable-0.12.0-x64.exe`（133,961,402 bytes，SHA-256 `A092FDF8CB64C3FC2B01B906FE119CB90C2870749507108E532D1B17F06E79E2`）；`latest.yml` 与 blockmap 均由同一次 `npm run dist:win` 生成，`npm run verify:release` 已通过。其后的证据文档提交不属于 `electron-builder.yml` 的打包输入。 |
 | Windows 原生人工检查 | 待完成：安装版 URL scheme、cold start、第二实例、升级、条件卸载，以及 portable 不接管协议。 |
 | macOS / Linux | 待完成：原生 macOS DMG/ZIP 验证；Linux 打包验证。未以静态检查替代。 |
-| 真实协议 smoke | FAIL（Skills 目录）：2026-08-30 10:35:43（Asia/Shanghai）在客户端运行时代码 `a6aa5e1`、服务端 `1cdea4826758f37f799088e575af5c261659c6e9`、runtime `sha256:238f10bf0bea06c5fa4722c10d1b70fd39da3bd8550d4e4433c5abeb00da1a80` 上以 `openai_responses` 执行一次；Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录和非空模型流均已越过，模型响应为 HTTP 200、SSE、`no-store`，随后在 `skills-catalog` 严格拒绝 string `sizeBytes`。Skills 适配器未提供该失败的安全 HTTP 诊断，因此六字段记录为 `not-received`/`null`，不得沿用模型流诊断。授权已消费，不得重跑；Skills 下载未运行，环境变量及临时 smoke 目录已清理，发布仍不接受。10:14 的 Preview 连通性失败保留为更早的环境诊断，不替代本次较新证据。 |
+| 真实协议 smoke | PASS：2026-08-30 16:10:42（Asia/Shanghai）在客户端 `9b7b17c`、服务端 `a675de6fb2fad74c41553653c998b2a29fce183f`、runtime `sha256:e4a8f48841434df722bd361c2d2c65fd74674e10db8aef2413191700d63ee2f9` 上以全新授权仅执行一次；Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录、显式 `openai_responses` 非空模型流、Skills 目录、ZIP 大小/SHA-256 和 cleanup 全部通过，Skill 未安装或执行。更早一次功能 PASS 因成功诊断丢失不能作为最终验收；本行以修复后的新授权证据为准。 |
 | 真实降级 | 待完成：用真实 0.11.6 二进制验证其忽略 `server_*` 表和 `ucli-server-*` 文件。 |
 
 ### 0.12.0 数据与紧急关闭
@@ -22,7 +22,7 @@
 - [x] 服务端能力没有自动默认模型或自动安装 Skills；独立模式、已有本地会话、Profiles、Skills 和数据保持可用。
 - [x] 紧急关闭只移除服务端入口/能力，不删除本地会话、Profiles、Skills 或数据。
 - [ ] 在隔离安装中手工确认断网、5xx、disabled/expired/account/org inactive 状态不影响本地能力。
-- [ ] 新部署的真实 smoke 完成模型流、Skills 下载哈希和清理前，0.12.0 不得标记为接受。验收仅保留协议、阶段、allowlisted 稳定诊断和清理结果；不得记录链接、URL、token、请求/响应体、完整 headers、身份信息或堆栈。
+- [x] 新部署的真实 smoke 已完成模型流、Skills 下载哈希和清理。验收仅保留协议、阶段、allowlisted 稳定诊断和清理结果；未记录链接、URL、token、请求/响应体、完整 headers、身份信息或堆栈。
 
 ## 0. 验收记录
 
