@@ -8,6 +8,7 @@ test('parseConnectionInput accepts the two documented connection URL forms witho
   for (const [input, serverOrigin] of [
     [`http://10.44.100.100/connect#link=${secret}`, 'http://10.44.100.100'],
     [`ucli://connect?server=http%3A%2F%2F10.44.100.100#link=${secret}`, 'http://10.44.100.100'],
+    [`ucli://connect/?server=http%3A%2F%2F10.44.100.100#link=${secret}`, 'http://10.44.100.100'],
     [`https://server.fixture.test/connect#link=${secret}`, 'https://server.fixture.test']
   ]) {
     assert.deepEqual(parseConnectionInput(input), {
