@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { copyFile, mkdtemp, mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -12,6 +13,9 @@ const execFileAsync = promisify(execFile)
 const isWindows = process.platform === 'win32'
 const powershell = isWindows
   ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  : ''
+const powershell32 = isWindows
+  ? join(process.env.SystemRoot || 'C:\\Windows', 'SysWOW64', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   : ''
 const processScript = fileURLToPath(new URL('../build/installer-process.ps1', import.meta.url))
 
@@ -52,9 +56,9 @@ async function stopWithInstallerScript(targetPath, legacy = false) {
   await execFileAsync(powershell, installerScriptArgs('Stop', targetPath, legacy), { windowsHide: true })
 }
 
-async function findWithInstallerScript(targetPath) {
+async function findWithInstallerScript(targetPath, shellPath = powershell) {
   try {
-    await execFileAsync(powershell, installerScriptArgs('Find', targetPath), { windowsHide: true })
+    await execFileAsync(shellPath, installerScriptArgs('Find', targetPath), { windowsHide: true })
     return true
   } catch (error) {
     if (error?.code === 1) return false
@@ -98,6 +102,16 @@ test('installer process find detects the executable at the selected install path
   assert.equal(await findWithInstallerScript(target.executable), true)
 })
 
+test('32-bit installer PowerShell detects the 64-bit executable path', {
+  skip: !isWindows || process.arch !== 'x64' || !existsSync(powershell32)
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-installer-wow64-find-'))
+  const target = await startFixture(join(root, 'installed'))
+  t.after(() => cleanupFixtures([target], root))
+
+  assert.equal(await findWithInstallerScript(target.executable, powershell32), true)
+})
+
 test('installer process find ignores a same-name portable executable at another path', { skip: !isWindows }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'ucli-installer-find-portable-'))
   const targetExecutable = await createFixtureExecutable(join(root, 'installed'))
@@ -116,4 +130,28 @@ test('legacy upgrade stops every same-name process before invoking the old unins
 
   await stopWithInstallerScript(target.executable, true)
   await Promise.all([waitForExit(target.child), waitForExit(portable.child)])
+})
+
+test('legacy upgrade drains a replacement process spawned during shutdown', { skip: !isWindows }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'ucli-legacy-replacement-'))
+  const target = await startFixture(join(root, 'installed'))
+  const fixtures = [target]
+  t.after(() => cleanupFixtures(fixtures, root))
+
+  const replacementStarted = new Promise((resolve, reject) => {
+    target.child.once('exit', () => {
+      const child = spawn(target.executable, ['-e', 'setInterval(() => {}, 1000)'], {
+        stdio: 'ignore',
+        windowsHide: true
+      })
+      const replacement = { child, executable: target.executable }
+      fixtures.push(replacement)
+      child.once('spawn', () => resolve(replacement))
+      child.once('error', reject)
+    })
+  })
+
+  await stopWithInstallerScript(target.executable, true)
+  const replacement = await replacementStarted
+  await waitForExit(replacement.child)
 })

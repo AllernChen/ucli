@@ -11,15 +11,16 @@ param(
 )
 
 $targetFullPath = [IO.Path]::GetFullPath($TargetPath)
-$processName = [IO.Path]::GetFileNameWithoutExtension($targetFullPath)
+$processFileName = [IO.Path]::GetFileName($targetFullPath)
+$escapedProcessFileName = $processFileName.Replace("'", "''")
 
 function Get-UcliInstallerProcess {
-  $processes = @(Get-Process -Name $processName -ErrorAction SilentlyContinue)
+  $processes = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = '$escapedProcessFileName'" -ErrorAction SilentlyContinue)
   if ($Legacy) { return $processes }
 
   return @($processes | Where-Object {
     try {
-      $_.Path -and [IO.Path]::GetFullPath($_.Path) -ieq $targetFullPath
+      $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $targetFullPath
     } catch {
       $false
     }
@@ -32,10 +33,27 @@ if ($Action -eq 'Find') {
   exit 1
 }
 
-foreach ($process in $matches) {
-  Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+$stopDeadline = [DateTime]::UtcNow.AddSeconds(10)
+$emptySince = $null
+
+# Electron can replace a child process while the original process set is stopping.
+# Require a stable empty window before the legacy uninstaller can remove files.
+while ([DateTime]::UtcNow -lt $stopDeadline) {
+  $matches = @(Get-UcliInstallerProcess)
+  if ($matches.Count -eq 0) {
+    if ($null -eq $emptySince) {
+      $emptySince = [DateTime]::UtcNow
+    } elseif (([DateTime]::UtcNow - $emptySince).TotalMilliseconds -ge 1000) {
+      exit 0
+    }
+  } else {
+    $emptySince = $null
+    foreach ($process in $matches) {
+      Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  Start-Sleep -Milliseconds 100
 }
 
-Start-Sleep -Milliseconds 300
-if (@(Get-UcliInstallerProcess).Count -eq 0) { exit 0 }
 exit 2

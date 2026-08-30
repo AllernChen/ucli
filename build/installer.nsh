@@ -114,6 +114,46 @@ FunctionEnd
   File /oname=$PLUGINSDIR\${UCLI_PROCESS_SCRIPT} "${BUILD_RESOURCES_DIR}\installer-process.ps1"
 !macroend
 
+!macro stopUcliBeforeInstall
+  !insertmacro stageUcliProcessScript
+  StrCpy $R0 `$INSTDIR\${PRODUCT_FILENAME}.exe`
+  StrCpy $R3 ""
+  ${if} ${FileExists} "$INSTDIR\Uninstall ${PRODUCT_NAME}.exe"
+  ${andIfNot} ${FileExists} "$INSTDIR\${UCLI_PROCESS_MARKER}"
+    StrCpy $R3 "-Legacy"
+  ${endIf}
+
+  stopUcliBeforeInstallRetry:
+  DetailPrint `Closing running "${PRODUCT_NAME}" from "$R0" before uninstalling the old version...`
+  nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\${UCLI_PROCESS_SCRIPT}" -Action Stop -TargetPath "$R0" $R3`
+  Pop $R1
+  Pop $R2
+  ${if} $R1 != 0
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(appCannotBeClosed)" /SD IDCANCEL IDRETRY stopUcliBeforeInstallRetry
+    Quit
+  ${endIf}
+!macroend
+
+!ifndef BUILD_UNINSTALLER
+!macro customHeader
+Function UcliStopBeforeInstall
+  Call instFilesPre
+  !insertmacro stopUcliBeforeInstall
+FunctionEnd
+!macroend
+
+!macro customPageAfterChangeDir
+  !undef MUI_PAGE_CUSTOMFUNCTION_PRE
+  !define MUI_PAGE_CUSTOMFUNCTION_PRE UcliStopBeforeInstall
+!macroend
+
+!macro customInit
+  ${If} ${Silent}
+    !insertmacro stopUcliBeforeInstall
+  ${EndIf}
+!macroend
+!endif
+
 !macro customCheckAppRunning
   !insertmacro stageUcliProcessScript
   StrCpy $R0 `$INSTDIR\${APP_EXECUTABLE_FILENAME}`
