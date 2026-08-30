@@ -361,28 +361,28 @@ Codex 仅投影 `openai_responses`；Claude 仅投影 `anthropic_messages`；仅
 
 ### 12.1 真实协议 smoke 证据（2026-08-30）
 
-以下记录来自一次显式 `openai_responses` 执行。失败发生在 Preview 收到 HTTP 响应之前，未进入 Redeem；因此没有选择模型，也没有运行 Bootstrap、Gateway 模型流或 Skills。无凭证连通性检查同样无法连接目标服务端 80 端口。客户端环境变量和临时 smoke 目录均已清理，发布验收保持阻断。
+最新记录来自一次显式 `openai_responses` 执行。Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录和非空模型流均已越过；模型响应为 HTTP 200、SSE 与 `no-store`。运行随后在 `skills-catalog` 失败，Skills 下载未运行。授权已经消费，不得重跑；客户端环境变量和临时 smoke 目录均已清理，发布验收保持阻断。更早的 Preview 连通性失败仅为环境诊断，不替代本次证据。
 
 ```yaml
-timestamp: 2026-08-30T10:14:46+08:00
+timestamp: 2026-08-30T10:35:43+08:00
 clientVersion: 0.12.0
 clientCommit: a6aa5e1
 serverCommit: 1cdea4826758f37f799088e575af5c261659c6e9
 serverRuntimeImage: sha256:238f10bf0bea06c5fa4722c10d1b70fd39da3bd8550d4e4433c5abeb00da1a80
 localContractGate: 48 passed / 0 failed / 0 skipped
-selectedModelId: not-selected
+selectedModelId: not-recorded
 selectedProtocol: openai_responses
-failedStage: preview
-httpStatus: not-received
-contentType: not-received
-cacheControl: not-received
+failedStage: skills-catalog
+httpStatus: 200
+contentType: text/event-stream; charset=utf-8
+cacheControl: no-store
 stableCode: not-received
-requestId: not-received
+requestId: c346795b-d08e-498a-8235-6b39fb277521
 retryable: null
-streamReceivedNonEmptyData: false
+streamReceivedNonEmptyData: true
 authorizationExpiresAt: not-recorded
-serverTimePresent: false
-skillsCatalog: NOT_RUN
+serverTimePresent: not-recorded
+skillsCatalog: FAIL
 skillDownloadHash: NOT_RUN
 cleanup: PASS
 ```
