@@ -62,6 +62,14 @@ export function smokeFailure({ primaryError = null, cleanupErrors = [], diagnost
   })
 }
 
+export function enterSmokeStage(stage, priorDiagnostic) {
+  const failedStage = smokeStage(stage)
+  return {
+    failedStage,
+    diagnostic: smokeDiagnostic(failedStage === 'skills-catalog' ? undefined : priorDiagnostic)
+  }
+}
+
 export function smokeSuccessEvidence({ evidence, diagnostic, cleanupComplete = false } = {}) {
   if (!cleanupComplete) {
     throw Object.assign(new Error('Smoke cleanup is incomplete'), { code: 'SMOKE_CLEANUP_INCOMPLETE' })

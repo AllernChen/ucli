@@ -598,7 +598,7 @@ Windows 产物存在于 Task 10 的 post-HEAD 构建证据中；真实完整内�
 
 ## 24. 真实协议 smoke 失败证据（2026-08-30）
 
-客户端运行时代码 `a6aa5e1` 在已确认的服务端提交与 runtime 上显式选择 `openai_responses` 执行一次。Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录和非空模型流均已越过；模型响应为 HTTP 200、SSE 与 `no-store`。运行随后在 `skills-catalog` 失败，Skills 下载未运行。授权已经消费，不得重跑；环境变量与临时 smoke 目录已清理。不得把本次结果标记为协议成功或发布接受。更早的 Preview 连通性失败仅为环境诊断，不替代本次证据。
+客户端运行时代码 `a6aa5e1` 在已确认的服务端提交与 runtime 上显式选择 `openai_responses` 执行一次。Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录和非空模型流均已越过；模型响应为 HTTP 200、SSE 与 `no-store`。运行随后在 `skills-catalog` 严格拒绝 string `sizeBytes`，Skills 下载未运行。Skills 适配器没有提供该失败的安全 HTTP 诊断，因此失败 YAML 的六字段全部为 `not-received`/`null`，不得沿用模型流诊断。授权已经消费，不得重跑；环境变量与临时 smoke 目录已清理。不得把本次结果标记为协议成功或发布接受。更早的 Preview 连通性失败仅为环境诊断，不替代本次证据。
 
 ```yaml
 timestamp: 2026-08-30T10:35:43+08:00
@@ -610,11 +610,11 @@ localContractGate: 48 passed / 0 failed / 0 skipped
 selectedModelId: not-recorded
 selectedProtocol: openai_responses
 failedStage: skills-catalog
-httpStatus: 200
-contentType: text/event-stream; charset=utf-8
-cacheControl: no-store
+httpStatus: not-received
+contentType: not-received
+cacheControl: not-received
 stableCode: not-received
-requestId: c346795b-d08e-498a-8235-6b39fb277521
+requestId: not-received
 retryable: null
 streamReceivedNonEmptyData: true
 authorizationExpiresAt: not-recorded

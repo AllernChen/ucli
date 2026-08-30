@@ -13,7 +13,7 @@ import {
   parseGatewayRouteFailure,
   selectModelForProtocol
 } from '../electron/serverConnection/contracts.js'
-import { modelStreamRequest, smokeFailure, smokeSuccessEvidence } from './helpers/serverIntegrationSmoke.mjs'
+import { enterSmokeStage, modelStreamRequest, smokeFailure, smokeSuccessEvidence } from './helpers/serverIntegrationSmoke.mjs'
 
 const smokeEnabled = process.env.UCLI_SERVER_SMOKE === '1'
 
@@ -210,7 +210,9 @@ test('runs the authorised Device Grant Link v1 smoke flow', { skip: !smokeEnable
       evidence.skillDownloadHash = true
       return { verified: true }
     }
-    failedStage = 'skills-catalog'
+    const skillsCatalogStage = enterSmokeStage('skills-catalog', failureDiagnostic)
+    failedStage = skillsCatalogStage.failedStage
+    failureDiagnostic = skillsCatalogStage.diagnostic
     catalog = createSkillsCatalogAdapter({
       connectionManager: manager,
       db,

@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   SMOKE_STAGES,
+  enterSmokeStage,
   modelStreamRequest,
   smokeFailure,
   smokeSuccessEvidence
@@ -138,4 +139,27 @@ test('primary smoke failures expose only an allowlisted stage and diagnostic env
     retryable: true
   })
   assert.deepEqual(Object.keys(error).sort(), ['diagnostic', 'failedStage'])
+})
+
+test('entering the Skills catalog stage discards the prior model response diagnostic', () => {
+  const modelResponseDiagnostic = {
+    httpStatus: 200,
+    contentType: 'text/event-stream; charset=utf-8',
+    cacheControl: 'no-store',
+    stableCode: 'not-received',
+    requestId: 'model-stream-request-id',
+    retryable: null
+  }
+
+  assert.deepEqual(enterSmokeStage('skills-catalog', modelResponseDiagnostic), {
+    failedStage: 'skills-catalog',
+    diagnostic: {
+      httpStatus: 'not-received',
+      contentType: 'not-received',
+      cacheControl: 'not-received',
+      stableCode: 'not-received',
+      requestId: 'not-received',
+      retryable: null
+    }
+  })
 })
