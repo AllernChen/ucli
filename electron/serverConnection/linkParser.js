@@ -29,7 +29,8 @@ function parsePureServerOrigin(value) {
 }
 
 function parseCustomProtocol(url) {
-  if (url.protocol !== 'ucli:' || url.host !== 'connect' || url.username || url.password || url.pathname || !url.search) {
+  if (url.protocol !== 'ucli:' || url.host !== 'connect' || url.username || url.password ||
+    !['', '/'].includes(url.pathname) || !url.search) {
     throw linkError()
   }
   const query = url.search.slice(1)
