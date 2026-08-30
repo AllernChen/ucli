@@ -8,6 +8,7 @@
 
 | 项目 | 当前证据 / 状态 |
 | --- | --- |
+| 正式服务端基线 | PASS：UCLI Server `0.3.1`，发布提交 `1cd51df59d06ae0e8ab9c60cb6fea9e0d9f6a0c5`，当前生产运行时镜像 `sha256:daedf2b364c94aa6a1b1cfc6ed6f91350f98ac248f0a79767e87271c25e28c9b`，2026-08-30 已验证部署。下方真实 smoke 行保留其实际运行时证据，不改写为后续发布镜像。 |
 | 本地协议合同 | PASS：Tasks 1–5 后四文件客户端/服务端合同门 48/48 通过。该门只覆盖固定 fixtures 的协议/目录与稳定 503 合同：`openai_responses`、`openai_chat`、`anthropic_messages`、固定端点、Bootstrap/Gateway 双目录协议一致性、无 `models[0]` 推断，以及 `no-store`/request ID/retryable。Codex/Claude 投影、Chat-only 无托管档案、透明 503 代理、凭证/本地能力保留和非 live smoke 请求由下列更广的九套实现门单独验证。 |
 | 本地实现门 | PASS：声明的九套实现测试覆盖模型投影、透明 503 代理、凭证和本地能力保留、协议专属 smoke 请求与默认跳过的真实 smoke；它不是四文件 48-test 合同门的一部分。 |
 | 本地回滚兼容性 | 已做静态命名空间证明：当前版本的 `ucli-server-*` 文件不属于旧 `ucli-<32hex>` 所有权规则；这不是 0.11.6 二进制降级实证。 |

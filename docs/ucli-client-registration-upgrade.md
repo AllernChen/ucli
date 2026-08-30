@@ -13,7 +13,7 @@
 ## 全局约束
 
 - 客户端目标版本固定为 `0.12.0`。
-- 服务端基线为 UCLI Server `0.3.0`，提交 `4f71d6efdfe2504b8f72da53e1647c226bb8ff1f`。
+- 服务端正式发布基线为 UCLI Server `0.3.1`，提交 `1cd51df59d06ae0e8ab9c60cb6fea9e0d9f6a0c5`，生产运行时镜像为 `sha256:daedf2b364c94aa6a1b1cfc6ed6f91350f98ac248f0a79767e87271c25e28c9b`。
 - 当前控制面文档域为 `https://ucli.example.invalid`，模型网关基址为 `https://ucli.example.invalid/gateway`。
 - 只实现 `#link=`，拒绝旧 `#token=`、设备码和 query 传密。
 - 只维护一个当前服务端连接；服务端失败不得影响本地能力。
@@ -31,9 +31,10 @@
 | 客户端实施仓库 | `F:\projects\ucli` |
 | 客户端当前版本 | `0.11.6` |
 | 目标版本 | `0.12.0` |
-| 服务端版本 | UCLI Server `0.3.0` + 设备授权链接扩展 |
-| 服务端合并提交 | `4f71d6efdfe2504b8f72da53e1647c226bb8ff1f` |
-| 部署验证日期 | 2026-08-27 |
+| 服务端版本 | UCLI Server `0.3.1` |
+| 服务端合并提交 | `1cd51df59d06ae0e8ab9c60cb6fea9e0d9f6a0c5` |
+| 服务端生产运行时镜像 | `sha256:daedf2b364c94aa6a1b1cfc6ed6f91350f98ac248f0a79767e87271c25e28c9b` |
+| 部署验证日期 | 2026-08-30 |
 | 网络边界 | 公司可信内网，当前明确使用 HTTP |
 
 服务端 Device Grant Link、Bootstrap、Gateway 和 Skills 已部署。客户端开发可以使用 mock fixtures，但最终结论必须来自目标内网真实联调。
@@ -599,6 +600,8 @@ Windows 产物存在于 Task 10 的 post-HEAD 构建证据中；真实完整内�
 ## 24. 最终真实协议 smoke 证据（2026-08-30）
 
 客户端 `9b7b17c` 在已确认的新服务端提交与 runtime 上使用全新授权，仅执行一次显式 `openai_responses` smoke。Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录、非空模型流、Skills 目录、ZIP 大小/SHA-256 和 cleanup 全部通过；Skill 未安装或执行。更早一次功能链路 PASS 因成功模型响应诊断丢失不能作为最终验收，本节仅以 16:10:42 的新授权记录为准。
+
+下列 smoke 保留其实际运行时证据，不改写为后续发布镜像。该服务端提交的运行时代码已纳入正式的 UCLI Server 0.3.1 发布；正式发布及当前生产基线见第 1 节。
 
 ```yaml
 timestamp: 2026-08-30T16:10:42+08:00

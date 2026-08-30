@@ -1,8 +1,8 @@
 # UCLI 0.12.0 客户端—服务端协议
 
 协议版本：Device Grant Link v1
-服务端基线：UCLI Server `0.3.0`，提交 `4f71d6efdfe2504b8f72da53e1647c226bb8ff1f`
-部署验证日期：2026-08-27
+服务端正式发布基线：UCLI Server `0.3.1`，提交 `1cd51df59d06ae0e8ab9c60cb6fea9e0d9f6a0c5`，生产运行时镜像 `sha256:daedf2b364c94aa6a1b1cfc6ed6f91350f98ac248f0a79767e87271c25e28c9b`
+部署验证日期：2026-08-30
 
 ## 1. 范围与环境
 
@@ -363,6 +363,8 @@ Codex 仅投影 `openai_responses`；Claude 仅投影 `anthropic_messages`；仅
 
 最终记录来自修复成功证据诊断后创建的全新授权，并且仅执行一次显式 `openai_responses` smoke。Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录、非空模型流、Skills 目录、ZIP 大小/SHA-256 和 cleanup 全部通过；Skill 未安装或执行。更早一次功能链路 PASS 因成功模型响应诊断丢失不能作为最终验收，本节仅以 16:10:42 的新授权记录为准。
 
+下列 smoke 保留其实际运行时证据，不改写为后续发布镜像。该服务端提交的运行时代码已纳入正式的 UCLI Server 0.3.1 发布；正式发布及当前生产基线见本文顶部。
+
 ```yaml
 timestamp: 2026-08-30T16:10:42+08:00
 clientVersion: 0.12.0
@@ -460,7 +462,7 @@ Authorization: Bearer <accessToken>
 
 客户端必须忽略未知响应字段，并在必填字段缺失、类型错误、非法日期、未知枚举或不安全 URL 时 fail closed。
 
-服务端 `0.3.0` 已部署完成。客户端 0.12.0 发布前必须在可访问目标内网的环境完成至少一次真实设备注册、刷新、模型调用和 Skill 下载。
+服务端 `0.3.1` 已正式发布并部署完成。客户端 0.12.0 发布前必须在可访问目标内网的环境完成至少一次真实设备注册、刷新、模型调用和 Skill 下载。
 
 ## 17. 工作树验证状态（2026-08-29）
 
