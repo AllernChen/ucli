@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, screen, ipcMain } from 'electron'
+import { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, screen, ipcMain, powerMonitor } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
@@ -19,6 +19,7 @@ import { safeStartupFailure, startMainWindowLifecycle } from './startupLifecycle
 import { resolveUcliStorageRoots } from './storage/storageCatalog.js'
 import { runScheduledStorageCleanupSync } from './storage/startupCleanup.js'
 import { runPrimaryInstanceGate } from './primaryInstanceGate.js'
+import { createDeepLinkReceiver } from './serverConnection/deepLink.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -45,6 +46,12 @@ let isQuitting = false
 let quitReady = false
 let shutdownPromise = null
 let updateService = null
+const deepLinks = createDeepLinkReceiver({
+  acceptConnection: async (connection) => {
+    const attempt = await orchestrator?.submitServerConnection(connection)
+    if (attempt) openServerConnectionSettings()
+  }
+})
 
 function showMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return
@@ -53,12 +60,35 @@ function showMainWindow() {
   mainWindow.focus()
 }
 
-runPrimaryInstanceGate({
+function openServerConnectionSettings() {
+  showMainWindow()
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const hash = '/settings?section=server'
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    mainWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#${hash}`)
+  } else {
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash })
+  }
+}
+
+if (process.platform === 'darwin') {
+  app.on('open-url', (event, url) => {
+    event.preventDefault()
+    deepLinks.acceptOpenUrl(url)
+  })
+}
+
+const isPrimaryInstance = runPrimaryInstanceGate({
   acquireLock: () => app.requestSingleInstanceLock(),
   quit: () => app.quit(),
   bootstrap: bootstrapPrimaryInstance,
-  onSecondInstance: () => app.on('second-instance', () => showMainWindow())
+  onSecondInstance: (handler) => app.on('second-instance', (_event, argv, workingDirectory) => {
+    showMainWindow()
+    handler({ argv, workingDirectory })
+  }),
+  handleSecondInstance: ({ argv }) => deepLinks.acceptArgv(argv)
 })
+if (isPrimaryInstance) deepLinks.acceptArgv(process.argv)
 
 function bootstrapPrimaryInstance() {
 // Chromium writes cache data under sessionData. On Windows the default
@@ -283,6 +313,7 @@ app.whenReady().then(async () => {
   registerUpdateIpc()
   updateService.start()
   orchestrator.setMainWindow(mainWindow)
+  await deepLinks.setReady()
   const recoveryInfo = orchestrator.getPersistenceRecovery()
   if (recoveryInfo) {
     const recoveryDialog = describeDatabaseRecovery(recoveryInfo)
@@ -295,6 +326,13 @@ app.whenReady().then(async () => {
       createWindow()
       orchestrator.setMainWindow(mainWindow)
     } else showMainWindow()
+    orchestrator?.recoverServerConnection()?.catch(() => {})
+  })
+  app.on('browser-window-focus', () => {
+    orchestrator?.recoverServerConnection()?.catch(() => {})
+  })
+  powerMonitor.on('resume', () => {
+    orchestrator?.recoverServerConnection()?.catch(() => {})
   })
 }).catch((error) => {
   const failure = safeStartupFailure('application', error)

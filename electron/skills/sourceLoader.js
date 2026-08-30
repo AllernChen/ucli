@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { dirname, extname, relative, resolve } from 'node:path'
 import AdmZip from 'adm-zip'
 
@@ -11,6 +12,8 @@ import { isPrivateNetworkHostname } from '../../src/gitRemotePolicy.js'
 function sourceError(message, code = 'SKILL_SOURCE_INVALID') {
   return Object.assign(new Error(message), { code })
 }
+
+const MAX_SERVER_ARCHIVE_BYTES = 50 * 1024 * 1024
 
 function defaultRunGit(args) {
   try {
@@ -240,9 +243,32 @@ export function createSkillSourceLoader({ stagingRoot, runGit = defaultRunGit, c
   }
 
   return {
-    async withPrepared(source, work) {
+    async withPrepared(source, work, { guard = null } = {}) {
+      guard?.()
       const prepared = await prepare(source)
-      try { return await work(prepared) } finally { prepared.cleanup() }
+      try { guard?.(); return await work(prepared) } finally { prepared.cleanup() }
+    },
+    async withVerifiedArchive({ path, identity, sha256 = null, guard = null } = {}, work) {
+      guard?.()
+      const before = lstatSync(path)
+      if (!before.isFile() || before.isSymbolicLink() ||
+        before.size > MAX_SERVER_ARCHIVE_BYTES ||
+        (identity && (before.size !== identity.size || before.ino !== identity.ino || before.dev !== identity.dev))) {
+        throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
+      }
+      const archive = readFileSync(path)
+      if (sha256 && createHash('sha256').update(archive).digest('hex') !== sha256) {
+        throw sourceError('Verified server archive changed before preparation', 'SKILL_SOURCE_INVALID')
+      }
+      guard?.()
+      const extracted = extractZipSource(archive, root)
+      const prepared = {
+        workingDirectory: extracted.workingDirectory,
+        source: { type: 'zip', locator: path, ref: '', subdir: '' },
+        resolvedRevision: null,
+        cleanup() { rmSync(extracted.destination, { recursive: true, force: true }) }
+      }
+      try { guard?.(); return await work(prepared) } finally { prepared.cleanup() }
     },
     async withPreparedMany(sources, work) {
       if (!Array.isArray(sources) || !sources.length || sources.length > 200) {

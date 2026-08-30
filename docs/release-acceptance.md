@@ -2,6 +2,29 @@
 
 本清单用于 UCLI Windows x64 发布前和 GitHub Release 发布后的人工验收。自动化 `npm run verify:release` 只验证构建产物和更新元数据的一致性；以下交互行为必须在实际 Windows 环境中验证。
 
+## 0. 0.12.0 服务端接入发布矩阵
+
+本节记录 Task 11 的本地合同门与待完成的外部发布门。固定 fixtures、静态安装器检查和本机构建都不能替代原生平台、真实服务或旧二进制验证。
+
+| 项目 | 当前证据 / 状态 |
+| --- | --- |
+| 正式服务端基线 | PASS：UCLI Server `0.3.1`，发布提交 `1cd51df59d06ae0e8ab9c60cb6fea9e0d9f6a0c5`，当前生产运行时镜像 `sha256:daedf2b364c94aa6a1b1cfc6ed6f91350f98ac248f0a79767e87271c25e28c9b`，2026-08-30 已验证部署。下方真实 smoke 行保留其实际运行时证据，不改写为后续发布镜像。 |
+| 本地协议合同 | PASS：Tasks 1–5 后四文件客户端/服务端合同门 48/48 通过。该门只覆盖固定 fixtures 的协议/目录与稳定 503 合同：`openai_responses`、`openai_chat`、`anthropic_messages`、固定端点、Bootstrap/Gateway 双目录协议一致性、无 `models[0]` 推断，以及 `no-store`/request ID/retryable。Codex/Claude 投影、Chat-only 无托管档案、透明 503 代理、凭证/本地能力保留和非 live smoke 请求由下列更广的九套实现门单独验证。 |
+| 本地实现门 | PASS：声明的九套实现测试覆盖模型投影、透明 503 代理、凭证和本地能力保留、协议专属 smoke 请求与默认跳过的真实 smoke；它不是四文件 48-test 合同门的一部分。 |
+| 本地回滚兼容性 | 已做静态命名空间证明：当前版本的 `ucli-server-*` 文件不属于旧 `ucli-<32hex>` 所有权规则；这不是 0.11.6 二进制降级实证。 |
+| Task 10 Windows 产物 | 2026-08-29 03:56（Asia/Shanghai）从模型协议运行时代码提交 `a6aa5e1` 构建的 Windows x64 产物：Setup `UCLI-Setup-0.12.0-x64.exe`（134,216,191 bytes，SHA-256 `FCEB8C56C6EC2FDE45EFA1B2CB18BCC4E4CCC2E51C14BDF92EECBB9C4018FCF3`），Portable `UCLI-Portable-0.12.0-x64.exe`（133,961,402 bytes，SHA-256 `A092FDF8CB64C3FC2B01B906FE119CB90C2870749507108E532D1B17F06E79E2`）；`latest.yml` 与 blockmap 均由同一次 `npm run dist:win` 生成，`npm run verify:release` 已通过。其后的证据文档提交不属于 `electron-builder.yml` 的打包输入。 |
+| Windows 原生人工检查 | 待完成：安装版 URL scheme、cold start、第二实例、升级、条件卸载，以及 portable 不接管协议。 |
+| macOS / Linux | 待完成：原生 macOS DMG/ZIP 验证；Linux 打包验证。未以静态检查替代。 |
+| 真实协议 smoke | PASS：2026-08-30 16:10:42（Asia/Shanghai）在客户端 `9b7b17c`、服务端 `a675de6fb2fad74c41553653c998b2a29fce183f`、runtime `sha256:e4a8f48841434df722bd361c2d2c65fd74674e10db8aef2413191700d63ee2f9` 上以全新授权仅执行一次；Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录、显式 `openai_responses` 非空模型流、Skills 目录、ZIP 大小/SHA-256 和 cleanup 全部通过，Skill 未安装或执行。更早一次功能 PASS 因成功诊断丢失不能作为最终验收；本行以修复后的新授权证据为准。 |
+| 真实降级 | 待完成：用真实 0.11.6 二进制验证其忽略 `server_*` 表和 `ucli-server-*` 文件。 |
+
+### 0.12.0 数据与紧急关闭
+
+- [x] 服务端能力没有自动默认模型或自动安装 Skills；独立模式、已有本地会话、Profiles、Skills 和数据保持可用。
+- [x] 紧急关闭只移除服务端入口/能力，不删除本地会话、Profiles、Skills 或数据。
+- [ ] 在隔离安装中手工确认断网、5xx、disabled/expired/account/org inactive 状态不影响本地能力。
+- [x] 新部署的真实 smoke 已完成模型流、Skills 下载哈希和清理。验收仅保留协议、阶段、allowlisted 稳定诊断和清理结果；未记录链接、URL、token、请求/响应体、完整 headers、身份信息或堆栈。
+
 ## 0. 验收记录
 
 | 字段 | 填写内容 |

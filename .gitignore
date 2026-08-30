@@ -9,6 +9,7 @@ dist-packager/
 .vite/
 stats-diag.json
 .scratch/
+.worktrees/
 data/*.zip
 scripts/ucli-db-diagnosis-*.txt
 resources/deepseek-harness/*.tgz

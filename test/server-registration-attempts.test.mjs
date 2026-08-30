@@ -1,0 +1,130 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { RegistrationAttemptStore } from '../electron/serverConnection/registrationAttempts.js'
+
+const origin = 'http://10.44.100.100'
+const secret = 'one-time-link-secret'
+
+function timerHarness() {
+  const timers = []
+  return {
+    timers,
+    setTimeoutFn(callback, delay) {
+      const timer = {
+        callback,
+        delay,
+        cleared: false,
+        unrefed: false,
+        unref() { this.unrefed = true }
+      }
+      timers.push(timer)
+      return timer
+    },
+    clearTimeoutFn(timer) {
+      timer.cleared = true
+    }
+  }
+}
+
+test('registration attempts expose a renderer-safe DTO without the link secret', () => {
+  const store = new RegistrationAttemptStore({ now: () => 100 })
+
+  const created = store.create({ serverOrigin: origin, linkSecret: secret })
+
+  assert.match(created.attemptId, /^[0-9a-f-]{36}$/i)
+  assert.equal(created.serverOrigin, origin)
+  assert.equal(created.preview, null)
+  assert.equal(store.getSecret(created.attemptId), secret)
+  assert.equal(JSON.stringify(created).includes(secret), false)
+  assert.equal(JSON.stringify(store.getPublic(created.attemptId)).includes(secret), false)
+})
+
+test('latest pending attempt replays only a previewed public DTO', () => {
+  const store = new RegistrationAttemptStore({ now: () => 100 })
+  const first = store.create({ serverOrigin: origin, linkSecret: secret })
+  const second = store.create({ serverOrigin: origin, linkSecret: secret })
+
+  assert.equal(store.getPendingPublic(), null)
+  store.markPreview(first.attemptId, { link: { status: 'AVAILABLE' } })
+  assert.equal(store.getPendingPublic().attemptId, first.attemptId)
+  store.markPreview(second.attemptId, { link: { status: 'AVAILABLE' } })
+  const pending = store.getPendingPublic()
+  assert.equal(pending.attemptId, second.attemptId)
+  assert.equal(JSON.stringify(pending).includes(secret), false)
+  store.cancel(second.attemptId)
+  assert.equal(store.getPendingPublic().attemptId, first.attemptId)
+})
+
+test('registration attempts automatically remove the secret at fifteen minutes without a later store operation', () => {
+  const timers = timerHarness()
+  const store = new RegistrationAttemptStore({ now: () => 0, ...timers })
+  const { attemptId } = store.create({ serverOrigin: origin, linkSecret: secret })
+  const storedAttempt = store.attempts.get(attemptId)
+
+  assert.equal(timers.timers.length, 1)
+  assert.equal(timers.timers[0].delay, 15 * 60_000)
+  assert.equal(timers.timers[0].unrefed, true)
+  timers.timers[0].callback()
+
+  assert.equal(timers.timers[0].cleared, true)
+  assert.equal(storedAttempt.linkSecret, null)
+  assert.equal(store.attempts.has(attemptId), false)
+})
+
+test('registration attempts allow only one redeem to begin at a time', () => {
+  const store = new RegistrationAttemptStore()
+  const { attemptId } = store.create({ serverOrigin: origin, linkSecret: secret })
+
+  assert.equal(store.beginRedeem(attemptId), true)
+  assert.equal(store.beginRedeem(attemptId), false)
+})
+
+test('registration attempts recover only the ambiguous redeem for the same attempt within ten minutes', () => {
+  let clock = 0
+  const store = new RegistrationAttemptStore({ now: () => clock })
+  const { attemptId } = store.create({ serverOrigin: origin, linkSecret: secret })
+  assert.equal(store.beginRedeem(attemptId), true)
+  assert.equal(store.markRedeemAmbiguous(attemptId), true)
+
+  clock = 10 * 60_000 - 1
+  assert.equal(store.beginRedeem(attemptId), true)
+  assert.equal(store.beginRedeem('other-attempt'), false)
+})
+
+test('registration attempts discard an ambiguous redeem after its ten-minute recovery window', () => {
+  let clock = 0
+  const store = new RegistrationAttemptStore({ now: () => clock })
+  const { attemptId } = store.create({ serverOrigin: origin, linkSecret: secret })
+  assert.equal(store.beginRedeem(attemptId), true)
+  assert.equal(store.markRedeemAmbiguous(attemptId), true)
+
+  clock = 10 * 60_000
+  assert.equal(store.beginRedeem(attemptId), false)
+  assert.equal(store.getSecret(attemptId), null)
+})
+
+test('registration attempts do not chain a second ambiguous redeem recovery', () => {
+  const store = new RegistrationAttemptStore()
+  const { attemptId } = store.create({ serverOrigin: origin, linkSecret: secret })
+  assert.equal(store.beginRedeem(attemptId), true)
+  assert.equal(store.markRedeemAmbiguous(attemptId), true)
+  assert.equal(store.beginRedeem(attemptId), true)
+
+  assert.equal(store.markRedeemAmbiguous(attemptId), false)
+  assert.equal(store.getSecret(attemptId), null)
+})
+
+test('finishing or cancelling an attempt removes its in-memory secret', () => {
+  const timers = timerHarness()
+  const store = new RegistrationAttemptStore(timers)
+  const finished = store.create({ serverOrigin: origin, linkSecret: secret }).attemptId
+  const cancelled = store.create({ serverOrigin: origin, linkSecret: secret }).attemptId
+
+  assert.equal(store.finish(finished), true)
+  assert.equal(store.cancel(cancelled), true)
+  assert.equal(store.getSecret(finished), null)
+  assert.equal(store.getSecret(cancelled), null)
+  assert.equal(timers.timers[0].cleared, true)
+  assert.equal(timers.timers[1].cleared, true)
+})

@@ -51,7 +51,8 @@ export function createProfileService({
   listFiles = (directory) => readdirSync(directory),
   uuid = randomUUID,
   now = Date.now,
-  flush = () => db.flush()
+  flush = () => db.flush(),
+  serverModelProjection = null
 }) {
   let lastReconcileAt = null
   async function persistOrThrow() {
@@ -67,6 +68,22 @@ export function createProfileService({
     const adapter = adapterRegistry.get(adapterId)
     if (!adapter) throw serviceError('Profile adapter is unavailable', 'PROFILE_ADAPTER_UNAVAILABLE')
     return adapter
+  }
+
+  function serverProfile(profileId) {
+    return serverModelProjection?.listProfiles?.().find(profile => profile.id === profileId) || null
+  }
+
+  function assertWritableProfile(profileId) {
+    if (serverProfile(profileId)) {
+      throw serviceError('Organization-provided AI CLI profiles are read-only', 'PROFILE_READ_ONLY')
+    }
+  }
+
+  function allProfiles({ adapterId } = {}) {
+    const userProfiles = db.listAiCliProfiles({ adapterId })
+    const serverProfiles = serverModelProjection?.listProfiles?.() || []
+    return [...userProfiles, ...serverProfiles.filter(profile => !adapterId || profile.adapterId === adapterId)]
   }
 
   function fileStateFor(profile, codexHome) {
@@ -125,6 +142,15 @@ export function createProfileService({
   }
 
   function rendererProfile(profile) {
+    if (profile.sourceKind === 'server') {
+      return {
+        ...profile,
+        isAppDefault: db.listAiCliProfileBindings({ profileId: profile.id })
+          .some(binding => binding.scopeType === 'app'),
+        isProjectDefault: db.listAiCliProfileBindings({ profileId: profile.id })
+          .some(binding => binding.scopeType === 'project')
+      }
+    }
     const adapter = adapterFor(profile.adapterId)
     const state = runtimeStateFor(profile)
     const config = adapter.sanitiseConfig(profile.config)
@@ -143,6 +169,7 @@ export function createProfileService({
   }
 
   async function updateInternal(profileId, patch, reason) {
+    assertWritableProfile(profileId)
     const current = db.getAiCliProfile(profileId)
     if (!current) throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
     const adapter = adapterFor(current.adapterId)
@@ -205,7 +232,7 @@ export function createProfileService({
         adapterId,
         mode: adapterRegistry.has(adapterId) ? 'profiles' : 'system',
         profileCount: adapterRegistry.has(adapterId)
-          ? db.listAiCliProfiles({ adapterId }).length
+          ? allProfiles({ adapterId }).length
           : 0,
         projectBinding: adapterRegistry.has(adapterId) && cwd
           ? db.getAiCliProfileBinding('project', projectScopeKey(cwd), adapterId)?.profileId || null
@@ -214,7 +241,7 @@ export function createProfileService({
     },
 
     listProfiles({ adapterId = 'codex' } = {}) {
-      return db.listAiCliProfiles({ adapterId }).map(rendererProfile)
+      return allProfiles({ adapterId }).map(rendererProfile)
     },
 
     async createProfile(input) {
@@ -258,6 +285,7 @@ export function createProfileService({
     },
 
     async replaceProfileSecret(profileId, secret) {
+      assertWritableProfile(profileId)
       const profile = db.getAiCliProfile(profileId)
       if (!profile) throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
       if (profile.kind !== 'managed') throw serviceError('Reference profile cannot store a secret', 'INVALID_PROFILE')
@@ -270,6 +298,7 @@ export function createProfileService({
     },
 
     async deleteProfileSecret(profileId) {
+      assertWritableProfile(profileId)
       const profile = db.getAiCliProfile(profileId)
       if (!profile) throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
       await db.transaction(async () => {
@@ -281,6 +310,7 @@ export function createProfileService({
     },
 
     async deleteProfile(profileId) {
+      assertWritableProfile(profileId)
       const profile = db.getAiCliProfile(profileId)
       if (!profile) return false
       const usage = db.getAiCliProfileUsage(profileId)
@@ -311,7 +341,7 @@ export function createProfileService({
       }
       const key = scopeType === 'app' ? '*' : projectScopeKey(scopeKey)
       if (profileId) {
-        const profile = db.getAiCliProfile(profileId)
+        const profile = db.getAiCliProfile(profileId) || serverProfile(profileId)
         if (!profile || profile.adapterId !== adapterId) {
           throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
         }
@@ -328,10 +358,12 @@ export function createProfileService({
     },
 
     listRevisions(profileId) {
+      assertWritableProfile(profileId)
       return db.listAiCliProfileRevisions(profileId)
     },
 
     async rollbackProfile(profileId, revisionId) {
+      assertWritableProfile(profileId)
       const revision = db.getAiCliProfileRevision(revisionId)
       if (!revision || revision.profileId !== profileId) {
         throw serviceError('Profile revision was not found', 'PROFILE_REVISION_NOT_FOUND')
@@ -342,16 +374,19 @@ export function createProfileService({
     resolveSessionProfile(options) {
       return resolveProfileSelection({
         ...options,
-        profiles: db.listAiCliProfiles({ adapterId: options.adapterId }),
+        profiles: allProfiles({ adapterId: options.adapterId }),
         bindings: db.listAiCliProfileBindings({ adapterId: options.adapterId })
       })
     },
 
     getClaudeProfileLaunchStamp(profileId) {
       if (!profileId) return { profileId: null, runtimeRevision: null }
-      const profile = db.getAiCliProfile(profileId)
+      const profile = db.getAiCliProfile(profileId) || serverProfile(profileId)
       if (!profile || profile.adapterId !== 'claude') {
         return { profileId, runtimeRevision: null }
+      }
+      if (profile.sourceKind === 'server') {
+        return { profileId, runtimeRevision: `${profile.connectionRevision}:${profile.id}` }
       }
       return {
         profileId,
@@ -360,6 +395,10 @@ export function createProfileService({
     },
 
     resolveLaunchProfile({ profileId, session = {}, baseEnv = process.env }) {
+      const projected = serverProfile(profileId)
+      if (projected) {
+        return serverModelProjection.prepareRuntime({ profileId, sessionId: session.id })
+      }
       const profile = db.getAiCliProfile(profileId)
       if (!profile) throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
       let secret = null
@@ -388,8 +427,12 @@ export function createProfileService({
       }
     },
 
-    resolveCodexLaunchProfile(profileId) {
-      return service.resolveLaunchProfile({ profileId })
+    releaseRuntime(sessionId) {
+      return serverModelProjection?.releaseRuntime?.(sessionId) || false
+    },
+
+    resolveCodexLaunchProfile(profileId, session = {}) {
+      return service.resolveLaunchProfile({ profileId, session })
     },
 
     resolveCodexProfileRuntime(profileId) {
@@ -397,6 +440,17 @@ export function createProfileService({
     },
 
     resolveProfileRuntime(profileId) {
+      const projected = serverProfile(profileId)
+      if (projected) {
+        return {
+          profileId: projected.id,
+          nativeProfileName: projected.nativeProfileName,
+          providerId: projected.providerId,
+          status: projected.status,
+          canStart: projected.canStart,
+          runtimeRevision: `${projected.connectionRevision}:${projected.id}`
+        }
+      }
       const profile = db.getAiCliProfile(profileId)
       if (!profile) {
         return {
@@ -410,6 +464,7 @@ export function createProfileService({
     },
 
     async repairProfile(profileId) {
+      assertWritableProfile(profileId)
       const profile = db.getAiCliProfile(profileId)
       if (!profile) throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
       if (!profile.nativeProfileName) return rendererProfile(profile)
@@ -511,7 +566,7 @@ export function createProfileService({
     },
 
     getDiagnosticSummary() {
-      const visible = db.listAiCliProfiles().map(rendererProfile)
+      const visible = allProfiles().map(rendererProfile)
       const claudeProfiles = visible.filter((profile) => profile.adapterId === 'claude')
       let codexHomeWritable = false
       try {

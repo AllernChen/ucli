@@ -10,7 +10,7 @@ import {
 
 const sectionIds = [
   'general', 'gateway', 'cli', 'summaries', 'storage',
-  'shortcuts', 'updates', 'support', 'about'
+  'shortcuts', 'updates', 'server', 'support', 'about'
 ]
 
 test('settings sections expose the fixed navigation contract and reject invalid query values', () => {
@@ -55,4 +55,15 @@ test('section deep links preserve unrelated queries and scrolling replaces histo
   assert.match(source, /scrollIntoView\(\{\s*block:\s*'start'\s*\}\)/)
   assert.match(source, /new IntersectionObserver/)
   assert.doesNotMatch(source, /router\.push\(\{[\s\S]{0,180}query:\s*\{[\s\S]{0,80}section/)
+})
+
+test('the server section is mounted exactly once and accepts only its section id', () => {
+  const source = readFileSync(new URL('../src/views/Settings.vue', import.meta.url), 'utf8')
+  const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
+  assert.equal((source.match(/id="settings-section-server"/g) || []).length, 1)
+  assert.match(source, /<ServerConnectionPanel\b/)
+  assert.doesNotMatch(source, /<RegistrationConfirmDialog\b/)
+  assert.match(appSource, /<RegistrationConfirmDialog\b/)
+  assert.equal(normalizeSettingsSection('server'), 'server')
+  assert.equal(normalizeSettingsSection('server?link=synthetic'), 'general')
 })

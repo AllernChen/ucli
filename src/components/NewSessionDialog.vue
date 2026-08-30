@@ -73,7 +73,7 @@
           <a-select-option value="system">跟随当前</a-select-option>
           <a-select-opt-group label="具体档案">
             <a-select-option v-for="profile in profilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
-              {{ profile.name }}{{ profile.canStart ? '' : '（当前不可用）' }}
+              {{ profile.name }}{{ profile.sourceKind === 'server' ? '（组织提供）' : '' }}{{ profile.canStart ? '' : '（当前不可用）' }}
             </a-select-option>
           </a-select-opt-group>
         </a-select>
@@ -85,7 +85,7 @@
           <a-select-option value="system">跟随当前</a-select-option>
           <a-select-opt-group label="具体档案">
             <a-select-option v-for="profile in profilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
-              {{ profile.name }}{{ profile.canStart ? '' : '（当前不可用）' }}
+              {{ profile.name }}{{ profile.sourceKind === 'server' ? '（组织提供）' : '' }}{{ profile.canStart ? '' : '（当前不可用）' }}
             </a-select-option>
           </a-select-opt-group>
         </a-select>

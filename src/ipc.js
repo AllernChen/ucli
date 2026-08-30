@@ -133,6 +133,26 @@ export const ipc = {
   resyncGatewaySession: (sessionId) => u.resyncGatewaySession(sessionId),
   onGatewayState: (handler) => u.onGatewayState(handler),
   onCodexRuntime: (handler) => u.onCodexRuntime(handler),
+  // server connection
+  serverConnection: {
+    submitLink: (input) => u.submitServerConnectionLink(input),
+    getAttempt: (attemptId) => u.getServerConnectionAttempt(attemptId),
+    getPendingAttempt: () => u.getPendingServerConnectionAttempt(),
+    confirm: (attemptId) => u.confirmServerConnection(attemptId),
+    retryRedeem: (attemptId) => u.retryServerConnectionRedeem(attemptId),
+    cancel: (attemptId) => u.cancelServerConnectionAttempt(attemptId),
+    getState: () => u.getServerConnectionState(),
+    retry: () => u.retryServerConnection(),
+    sync: () => u.syncServerConnection(),
+    disconnect: () => u.disconnectServerConnection(),
+    listModels: () => u.listServerConnectionModels(),
+    listSkills: () => u.listServerConnectionSkills(),
+    syncSkills: () => u.syncServerConnectionSkills(),
+    installSkill: (versionId, targets) => u.installServerConnectionSkill(versionId, targets),
+    updateSkill: (versionId, targets) => u.updateServerConnectionSkill(versionId, targets),
+    onStateChanged: (handler) => u.onServerConnectionState(handler),
+    onRegistrationRequested: (handler) => u.onServerConnectionRegistrationRequested(handler)
+  },
   // workbench
   getWorkbench: () => u.getWorkbench(),
   saveWorkbench: (state) => u.saveWorkbench(state),

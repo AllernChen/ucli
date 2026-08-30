@@ -6,6 +6,7 @@ import {
   claudeInheritedAuthPresentation,
   profileRuntimeNotice
 } from '../src/profilePresentation.js'
+import { readFileSync } from 'node:fs'
 
 test('Claude connection modes have clear non-technical labels and credential expectations', () => {
   assert.deepEqual(claudeConnectionModePresentation('subscription'), {
@@ -35,4 +36,10 @@ test('Claude inherited auth presentation exposes only the authentication kind', 
 test('profile runtime notice explains model substitution and pending restart', () => {
   assert.equal(profileRuntimeNotice({ profileWarning: 'model_substituted' }), '实际模型已被 Claude 组织策略替换')
   assert.equal(profileRuntimeNotice({ restartRequired: true }), '档案将在重启会话后生效')
+})
+
+test('server profiles omit local-management controls', () => {
+  const page = readFileSync(new URL('../src/views/ProfileCenter.vue', import.meta.url), 'utf8')
+  assert.match(page, /v-if="!isReadOnlyProfile\(profile\)"/)
+  assert.match(page, /组织提供/)
 })

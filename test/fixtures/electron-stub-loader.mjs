@@ -2,6 +2,7 @@ const electronStub = `
 export const app = {
   getPath: () => process.env.UCLI_TEST_USER_DATA,
   getAppPath: () => process.cwd(),
+  getName: () => 'UCLI Test',
   isPackaged: false,
   getVersion: () => 'test'
 }

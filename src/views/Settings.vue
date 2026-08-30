@@ -250,6 +250,10 @@
         <SoftwareUpdatePanel />
       </section>
 
+      <section id="settings-section-server" class="settings-section">
+        <ServerConnectionPanel />
+      </section>
+
       <section id="settings-section-support" class="settings-section">
     <a-card title="支持诊断" class="settings-card">
       <div class="diagnostics-toolbar">
@@ -296,6 +300,7 @@ import StorageManagementPanel from '../components/settings/StorageManagementPane
 import SummaryCacheSettings from '../components/settings/SummaryCacheSettings.vue'
 import SettingsSectionNav from '../components/settings/SettingsSectionNav.vue'
 import SoftwareUpdatePanel from '../components/settings/SoftwareUpdatePanel.vue'
+import ServerConnectionPanel from '../components/settings/ServerConnectionPanel.vue'
 import { getAllBindings, getBinding, formatKeys, eventToKeys } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { presentDshManagement } from '../dshManagementPresentation.js'

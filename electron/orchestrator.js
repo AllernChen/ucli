@@ -99,6 +99,15 @@ import {
   updateSummarySettings
 } from './summaries/summaryScheduler.js'
 import { registerGatewayIpc } from './gateway/ipc.js'
+import { ServerCredentialStore } from './serverConnection/credentialStore.js'
+import { RegistrationAttemptStore } from './serverConnection/registrationAttempts.js'
+import { createDeviceGrantClient } from './serverConnection/deviceGrantClient.js'
+import { ConnectionManager } from './serverConnection/connectionManager.js'
+import { ExpiryReminder } from './serverConnection/expiryReminder.js'
+import { createLocalGatewayProxy } from './serverConnection/localGatewayProxy.js'
+import { createServerModelProjection } from './serverConnection/modelProjection.js'
+import { createSkillsCatalogAdapter } from './serverConnection/skillsCatalogAdapter.js'
+import { registerServerConnectionIpc } from './serverConnection/ipc.js'
 import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
 import { scanStorageCategories } from './storage/storageScanner.js'
 import { createStorageManagementService } from './storage/storageManagementService.js'
@@ -838,6 +847,10 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   }
   const gatewaySignals = new SessionSignalBus()
   let gatewayManager = null
+  let serverConnectionManager = null
+  let localGatewayProxy = null
+  let serverModelProjection = null
+  let serverSkillsCatalog = null
   const approvalNotifications = new Map()
   const completionNotifications = new Set()
   const diagnostics = createDiagnosticsService({
@@ -1014,7 +1027,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         const profileFingerprint = `sha256:${createHash('sha256').update(JSON.stringify({
           executorId: options.executorId || null,
           profileId: options.profileId || null,
-          runtimeRevision: profile?.updatedAt || profile?.runtimeRevision || null
+          runtimeRevision: profile?.updatedAt || profile?.runtimeRevision || profile?.connectionRevision || null
         })).digest('hex')}`
         return createSummaryPipeline({
           runner,
@@ -1188,7 +1201,12 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     }
   }
 
-  function prepareCodexSessionRuntime(session, { imported = false, explicitProfileId, forceSystem = false } = {}) {
+  function prepareCodexSessionRuntime(session, {
+    imported = false,
+    explicitProfileId,
+    forceSystem = false,
+    deferServerRuntime = false
+  } = {}) {
     const selection = forceSystem
       ? { profileId: null, canStart: true, selectionSource: 'system' }
       : profileService?.resolveSessionProfile({
@@ -1201,7 +1219,20 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       throw new Error('The selected Codex profile is no longer available. Choose another profile before starting.')
     }
     if (selection?.profileId) {
-      const launch = profileService.resolveCodexLaunchProfile(selection.profileId)
+      const profile = profileService.listProfiles({ adapterId: 'codex' })
+        .find(candidate => candidate.id === selection.profileId)
+      const launch = deferServerRuntime && profile?.sourceKind === 'server'
+        ? {
+            artifact: {
+              nativeProfileName: profile.nativeProfileName,
+              model: profile.model,
+              providerId: profile.providerId
+            },
+            env: {},
+            status: 'ready',
+            runtimeRevision: `${profile.connectionRevision}:${profile.id}`
+          }
+        : profileService.resolveCodexLaunchProfile(selection.profileId, session)
       return {
         session: {
           ...session,
@@ -1236,7 +1267,12 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     }
   }
 
-  function prepareClaudeSessionRuntime(session, { imported = false, explicitProfileId, forceSystem = false } = {}) {
+  function prepareClaudeSessionRuntime(session, {
+    imported = false,
+    explicitProfileId,
+    forceSystem = false,
+    deferServerRuntime = false
+  } = {}) {
     const selection = forceSystem
       ? { profileId: null, canStart: true, selectionSource: 'system' }
       : profileService?.resolveSessionProfile({
@@ -1245,12 +1281,24 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           imported,
           explicitProfileId: explicitProfileId || session.profileId || null
         })
+    const profile = selection?.profileId
+      ? profileService.listProfiles({ adapterId: 'claude' }).find(candidate => candidate.id === selection.profileId)
+      : null
     const launch = selection?.profileId
-      ? profileService.resolveLaunchProfile({
-          profileId: selection.profileId,
-          session,
-          baseEnv: process.env
-        })
+      ? deferServerRuntime && profile?.sourceKind === 'server'
+        ? {
+            args: profile.model ? ['--model', profile.model] : [],
+            env: {},
+            settingSources: ['project', 'local'],
+            artifact: { model: profile.model, connectionMode: 'bearer' },
+            status: 'ready',
+            runtimeRevision: `${profile.connectionRevision}:${profile.id}`
+          }
+        : profileService.resolveLaunchProfile({
+            profileId: selection.profileId,
+            session,
+            baseEnv: process.env
+          })
       : null
     return prepareClaudeProfileSession({ session, selection, launch })
   }
@@ -1340,12 +1388,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     try {
       const prepared = input.executorId === 'codex'
         ? prepareCodexSessionRuntime(preview, {
-            explicitProfileId: input.profileId || null,
-            forceSystem: !input.profileId
+          explicitProfileId: input.profileId || null,
+            forceSystem: !input.profileId,
+            deferServerRuntime: true
           })
         : prepareClaudeSessionRuntime(preview, {
-            explicitProfileId: input.profileId || null,
-            forceSystem: !input.profileId
+          explicitProfileId: input.profileId || null,
+            forceSystem: !input.profileId,
+            deferServerRuntime: true
           })
       if (input.executorId === 'codex') assertCodexSessionCanStart(prepared.session)
       const model = prepared.session.model || null
@@ -1550,6 +1600,17 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       db.saveSettings(settings)
     }
 
+    serverModelProjection = createServerModelProjection({
+      db,
+      proxy: {
+        createSession: connection => localGatewayProxy?.createSession(connection),
+        revokeSession: sessionId => localGatewayProxy?.revokeSession(sessionId)
+      },
+      codexProfileFiles,
+      resolveCodexHome: getCodexHome,
+      getRuntimeConnectionIdentity: () => serverConnectionManager?.getRuntimeConnectionIdentity() || null,
+      flush: () => db.flush()
+    })
     profileService = createProfileService({
       db,
       secretStore: new ProfileSecretStore({ db, safeStorage }),
@@ -1557,19 +1618,92 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       readCodexRuntime: () => readCodexRuntimeSnapshot(getCodexHome()),
       readClaudeRuntime: () => readClaudeRuntimeSnapshot({ env: process.env }),
       fileOps: codexProfileFiles,
-      flush: () => db.flush()
+      flush: () => db.flush(),
+      serverModelProjection
+    })
+    const skillsSourceLoader = createSkillSourceLoader({
+      stagingRoot: join(app.getPath('userData'), 'skills', '.source-staging')
     })
     skillsService = createSkillsService({
       db,
       userDataPath: app.getPath('userData'),
-      sourceLoader: createSkillSourceLoader({
-        stagingRoot: join(app.getPath('userData'), 'skills', '.source-staging')
-      }),
+      sourceLoader: skillsSourceLoader,
       flush: () => db.flush(),
       listSessions,
       restartSession: restartSessionForSkills,
       discoverUCodeSkills: listUCodeSkills
     })
+    const showAuthorizationReminder = ({ thresholdDays, authorizationExpiresAt }) => {
+      try {
+        const label = thresholdDays === 0 ? 'today' : `${thresholdDays} days`
+        new Notification({ title: 'UCLI server authorization', body: `Server authorization expires ${label} (${authorizationExpiresAt})` }).show()
+      } catch { /* notifications are advisory and must not affect connection state */ }
+    }
+    serverConnectionManager = new ConnectionManager({
+      attempts: new RegistrationAttemptStore(),
+      credentials: new ServerCredentialStore({ db, safeStorage }),
+      client: createDeviceGrantClient(),
+      platform: ({ win32: 'windows', darwin: 'macos', linux: 'linux' })[process.platform],
+      deviceName: app.getName(),
+      reminder: new ExpiryReminder({ notify: showAuthorizationReminder }),
+      revokeRuntimeRevision: identity => localGatewayProxy?.revokeConnection(identity)
+    })
+    try {
+      localGatewayProxy = createLocalGatewayProxy({
+        connectionManager: serverConnectionManager,
+        logger: entry => log('Server gateway proxy:', entry)
+      })
+      await localGatewayProxy.start()
+    } catch {
+      localGatewayProxy = null
+      log('Server gateway proxy unavailable')
+    }
+    serverSkillsCatalog = createSkillsCatalogAdapter({
+      connectionManager: serverConnectionManager,
+      db,
+      fetchImpl: globalThis.fetch,
+      stagingRoot: join(app.getPath('userData'), 'server-skills', '.staging'),
+      sourceLoader: skillsSourceLoader,
+      skillsService
+    })
+    let projectionSync = Promise.resolve()
+    const syncServerModelProjection = (state = serverConnectionManager.getState()) => {
+      projectionSync = projectionSync.then(async () => {
+        const identity = serverConnectionManager?.getRuntimeConnectionIdentity()
+        if (!identity || !['connected', 'expiring'].includes(state.status)) {
+          const status = state.status === 'disabled' ? 'disabled'
+            : state.status === 'expired' ? 'expired'
+              : state.reason === 'grant_deleted' ? 'deleted'
+                : 'unreachable'
+          await serverModelProjection.clearOnlineState(state.connection?.connectionRevision, status)
+          return
+        }
+        try {
+          const bootstrap = await serverConnectionManager.getBootstrap()
+          const current = serverConnectionManager.getRuntimeConnectionIdentity()
+          if (!current || current.connectionId !== identity.connectionId || current.connectionRevision !== identity.connectionRevision) {
+            await serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
+            return
+          }
+          await serverModelProjection.reconcile({
+            serverOrigin: state.serverOrigin,
+            organization: bootstrap.organization,
+            models: bootstrap.models,
+            connectionRevision: identity.connectionRevision
+          })
+        } catch {
+          await serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
+        }
+      }).catch(() => {})
+      return projectionSync
+    }
+    serverConnectionManager.subscribe(state => {
+      void syncServerModelProjection(state)
+      if (['connected', 'expiring'].includes(state.status)) void serverSkillsCatalog?.sync().catch(() => {})
+    })
+    void serverConnectionManager.start()
+    void syncServerModelProjection()
+    void serverSkillsCatalog.sync().catch(() => {})
     try {
       await profileService.reconcileCodexProfiles()
     } catch (error) {
@@ -1930,6 +2064,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   }
 
   async function rejectInteractiveProfileConstruction(adapter, sessionId, error) {
+    serverModelProjection?.releaseRuntime(sessionId)
     try {
       await adapter.dispose?.()
     } catch (cleanupError) {
@@ -1988,6 +2123,32 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           ? { settingSources: [...pinnedProfile.profileLaunch.settingSources] }
           : {})
       }
+      const profile = profileService.listProfiles({ adapterId })
+        .find(candidate => candidate.id === session.profileId)
+      if (profile?.sourceKind === 'server') {
+        try {
+          const launch = profileService.resolveLaunchProfile({
+            profileId: profile.id,
+            session,
+            baseEnv: process.env
+          })
+          assertInteractiveProfileSnapshotCurrent(pinnedProfile)
+          if (adapterId === 'codex') {
+            profileEnvironment = { ...launch.env }
+          } else {
+            profileLaunch = {
+              args: [...launch.args],
+              env: { ...launch.env },
+              ...(Array.isArray(launch.settingSources)
+                ? { settingSources: [...launch.settingSources] }
+                : {})
+            }
+          }
+        } catch (error) {
+          serverModelProjection?.releaseRuntime(sessionId)
+          throw Object.assign(error, { code: error?.code || 'SUMMARY_PROFILE_UNAVAILABLE' })
+        }
+      }
     } else if (adapterId === 'codex') {
       const prepared = prepareCodexSessionRuntime(session, {
         imported: Boolean(session.cliSessionId),
@@ -2006,33 +2167,36 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       session = prepared.session
       profileLaunch = prepared.profileLaunch
     }
-    engine.setSession(sessionId, { tier, rulesetId, ruleset: rulesets[rulesetId] })
-    const adapter = descriptor.create({
-      session,
-      engine,
-      settings: {
-        hookRunnerPath,
-        hookPort: null,
-        ruleset: rulesets[rulesetId],
-        codexHome: adapterId === 'codex' ? getCodexHome() : null,
-        profileEnvironment,
-        profileLaunch,
-        profileManager: adapterId === 'deepseek-harness' ? getDshProfileManager() : null,
-        initialStats: {
-          tokens: { input: 0, output: 0 },
-          turns: 0,
-          completedTurns: 0
-        }
-      }
-    })
+    let adapter
     try {
+      engine.setSession(sessionId, { tier, rulesetId, ruleset: rulesets[rulesetId] })
+      adapter = descriptor.create({
+        session,
+        engine,
+        settings: {
+          hookRunnerPath,
+          hookPort: null,
+          ruleset: rulesets[rulesetId],
+          codexHome: adapterId === 'codex' ? getCodexHome() : null,
+          profileEnvironment,
+          profileLaunch,
+          profileManager: adapterId === 'deepseek-harness' ? getDshProfileManager() : null,
+          initialStats: {
+            tokens: { input: 0, output: 0 },
+            turns: 0,
+            completedTurns: 0
+          }
+        }
+      })
+
+      try {
       assertInteractiveProfileSnapshotCurrent(pinnedProfile)
-    } catch (error) {
-      return rejectInteractiveProfileConstruction(adapter, sessionId, error)
-    }
-    const pinnedProfileReadiness = interactiveProfileReadiness(pinnedProfile)
-    const costAvailable = descriptor.costAvailable !== false
-    const entry = {
+      } catch (error) {
+        return rejectInteractiveProfileConstruction(adapter, sessionId, error)
+      }
+      const pinnedProfileReadiness = interactiveProfileReadiness(pinnedProfile)
+      const costAvailable = descriptor.costAvailable !== false
+      const entry = {
       adapter, session,
       surfaceState: adapterConfig.surfacePreference === 'web'
         ? normalizeDshWebSurfaceState({ status: 'starting', url: null, errorCode: null })
@@ -2089,6 +2253,22 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       ),
       capabilities: normalizeAdapterCapabilities(entry.session.capabilities),
       surfaceState: entry.surfaceState || null
+    }
+    } catch (error) {
+      serverModelProjection?.releaseRuntime(sessionId)
+      try {
+        const disposal = adapter?.dispose?.()
+        if (disposal && typeof disposal.then === 'function') {
+          void disposal.catch((cleanupError) => log('session-construction-cleanup-failed',
+            safeSummaryErrorCode(cleanupError?.code, 'DSH_CLEANUP_FAILED')))
+        }
+      } catch (cleanupError) {
+        log('session-construction-cleanup-failed',
+          safeSummaryErrorCode(cleanupError?.code, 'DSH_CLEANUP_FAILED'))
+      }
+      if (sessions.has(sessionId)) sessions.delete(sessionId)
+      engine.removeSession(sessionId)
+      throw error
     }
   }
 
@@ -2694,10 +2874,12 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     if (entry.adapter) throw new Error('session already running')
     const descriptor = adapters.get(entry.session.adapterId)
     if (!descriptor) throw new Error('unknown adapter: ' + entry.session.adapterId)
-    engine.setSession(sessionId, { tier: entry.session.tier, rulesetId: entry.session.rulesetId, ruleset: rulesets[entry.session.rulesetId] })
-    let profileEnvironment = {}
-    let profileLaunch = null
-    if (entry.session.adapterId === 'codex') {
+    let adapter = null
+    try {
+      engine.setSession(sessionId, { tier: entry.session.tier, rulesetId: entry.session.rulesetId, ruleset: rulesets[entry.session.rulesetId] })
+      let profileEnvironment = {}
+      let profileLaunch = null
+      if (entry.session.adapterId === 'codex') {
       if (entry.session.profileId) {
         const prepared = prepareCodexSessionRuntime(entry.session, {
           imported: Boolean(entry.session.cliSessionId),
@@ -2723,7 +2905,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         })
         scheduleFlush()
       }
-    } else if (entry.session.adapterId === 'claude') {
+      } else if (entry.session.adapterId === 'claude') {
       const prepared = prepareClaudeSessionRuntime(entry.session, {
         imported: Boolean(entry.session.cliSessionId),
         explicitProfileId: entry.session.profileId || null,
@@ -2739,82 +2921,86 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         })
         scheduleFlush()
       }
-    }
-    const adapter = descriptor.create({
-      session: entry.session,
-      engine,
-      settings: {
-        hookRunnerPath,
-        hookPort: null,
-        ruleset: rulesets[entry.session.rulesetId],
-        codexHome: entry.session.adapterId === 'codex' ? getCodexHome() : null,
-        profileEnvironment,
-        profileLaunch,
-        profileManager: entry.session.adapterId === 'deepseek-harness'
-          ? getDshProfileManager()
-          : null,
-        initialStats: {
-          tokens: { ...entry.stats.tokens },
-          turns: entry.stats.turns,
-          completedTurns: entry.stats.turns
-        }
       }
-    })
-    entry.adapter = adapter
-    entry.status = 'starting'
-    entry._claudeProfileLaunchStamp = entry.session.adapterId === 'claude'
+      adapter = descriptor.create({
+        session: entry.session,
+        engine,
+        settings: {
+          hookRunnerPath,
+          hookPort: null,
+          ruleset: rulesets[entry.session.rulesetId],
+          codexHome: entry.session.adapterId === 'codex' ? getCodexHome() : null,
+          profileEnvironment,
+          profileLaunch,
+          profileManager: entry.session.adapterId === 'deepseek-harness'
+            ? getDshProfileManager()
+            : null,
+          initialStats: {
+            tokens: { ...entry.stats.tokens },
+            turns: entry.stats.turns,
+            completedTurns: entry.stats.turns
+          }
+        }
+      })
+      entry.adapter = adapter
+      entry.status = 'starting'
+      entry._claudeProfileLaunchStamp = entry.session.adapterId === 'claude'
       ? claudeProfileLaunchStamp(entry.session)
       : null
-    entry._dirtyStats = null
-    entry._lastCumTokens = null
-    entry._lastCompletedTurns = entry.session.adapterId === 'deepseek-harness'
+      entry._dirtyStats = null
+      entry._lastCumTokens = null
+      entry._lastCompletedTurns = entry.session.adapterId === 'deepseek-harness'
       ? entry.stats.turns
       : entry.session.cliSessionId ? null : 0
-    entry._lastNotification = null
-    entry._gatewayTurnActive = false
-    adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
-    wireAdapterGateway(sessionId, adapter)
-    adapter.hookPort = hookPort
-    if (entry.session.adapterId === 'claude') {
-      armClaudeSessionLaunch(entry)
-    }
-    let started
-    try {
-      started = await adapter.start()
+      entry._lastNotification = null
+      entry._gatewayTurnActive = false
+      adapter.on('event', (evt) => handleAdapterEvent(sessionId, evt))
+      wireAdapterGateway(sessionId, adapter)
+      adapter.hookPort = hookPort
+      if (entry.session.adapterId === 'claude') {
+        armClaudeSessionLaunch(entry)
+      }
+      const started = await adapter.start()
+      if (started === false) {
+        serverModelProjection?.releaseRuntime(sessionId)
+        entry.status = 'error'
+        entry.adapter = null
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
+        return false
+      }
+      if (['codex', 'claude'].includes(entry.session.adapterId)) {
+        if (entry.session.adapterId === 'codex') {
+          entry.session.activeProfileId = entry.session.profileId || null
+          entry.session.pendingProfileId = null
+          entry.session.pendingProfileRuntimeRevision = null
+          entry.session.restartRequired = false
+        }
+        publishProfileRuntime(sessionId, entry.session)
+      }
+      const db = getDb()
+      if (db) { db.updateSession(sessionId, { status: 'idle' }); scheduleFlush() }
+      send('session:event', { sessionId, type: 'ready', status: entry.status })
+      await gatewayManager?.resyncSession(sessionId)
     } catch (error) {
-      let disposed = false
+      serverModelProjection?.releaseRuntime(sessionId)
+      if (adapter) {
+        try {
+          await adapter.dispose()
+        } catch (cleanupError) {
+          error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
+        }
+      }
+      if (entry.adapter === adapter) entry.adapter = null
+      entry.status = 'error'
       try {
-        await adapter.dispose()
-        disposed = true
+        const db = getDb()
+        if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
       } catch (cleanupError) {
         error.cleanupCode ||= cleanupError?.code || 'DSH_CLEANUP_FAILED'
       }
-      if (disposed) entry.adapter = null
-      entry.status = 'error'
-      const db = getDb()
-      if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
       throw error
     }
-    if (started === false) {
-      entry.status = 'error'
-      entry.adapter = null
-      const db = getDb()
-      if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
-      return false
-    }
-    if (['codex', 'claude'].includes(entry.session.adapterId)) {
-      if (entry.session.adapterId === 'codex') {
-        entry.session.activeProfileId = entry.session.profileId || null
-        entry.session.pendingProfileId = null
-        entry.session.pendingProfileRuntimeRevision = null
-        entry.session.restartRequired = false
-      }
-      publishProfileRuntime(sessionId, entry.session)
-    }
-    const db = getDb()
-    if (db) { db.updateSession(sessionId, { status: 'idle' }); scheduleFlush() }
-    send('session:event', { sessionId, type: 'ready', status: entry.status })
-    await gatewayManager?.resyncSession(sessionId)
   }
 
   async function restartSessionForSkills(sessionId) {
@@ -3104,6 +3290,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         started = await e.adapter.start()
       } catch (error) {
         clearInteractiveProfileCapability(e)
+        serverModelProjection?.releaseRuntime(sessionId)
         let disposed = false
         try {
           await e.adapter.dispose()
@@ -3120,6 +3307,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         throw error
       }
       if (started === false) {
+        serverModelProjection?.releaseRuntime(sessionId)
         e.status = 'error'
         const db = getDb()
         if (db) { db.updateSession(sessionId, { status: 'error' }); scheduleFlush() }
@@ -3146,6 +3334,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     const e = sessions.get(sessionId)
     if (e) {
       clearInteractiveProfileCapability(e)
+      serverModelProjection?.releaseRuntime(sessionId)
       engine.removeSession(sessionId)
       const cleanup = e.adapter?.dispose()
       gatewaySignals.publish({
@@ -3189,6 +3378,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     const e = sessions.get(sessionId)
     if (e) {
       clearInteractiveProfileCapability(e)
+      serverModelProjection?.releaseRuntime(sessionId)
       engine.removeSession(sessionId)
       gatewaySignals.publish({
         type: 'session_stopped',
@@ -3224,6 +3414,9 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       getClaudeRuntime: () => readClaudeRuntimeSnapshot({ env: process.env })
     })
     if (skillsService) registerSkillsIpc({ ipcMain, service: skillsService })
+    if (serverConnectionManager) {
+      registerServerConnectionIpc({ ipcMain, manager: serverConnectionManager, skillsCatalog: serverSkillsCatalog, serverModelProjection, send })
+    }
     if (storageService) registerStorageIpc({ ipcMain, service: storageService })
     registerSummaryIpc({
       ipcMain,
@@ -3758,8 +3951,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       for (const notification of completionNotifications) notification.close()
       completionNotifications.clear()
       await gatewayManager?.shutdown()
+      await serverSkillsCatalog?.shutdown()
+      serverSkillsCatalog = null
+      await localGatewayProxy?.shutdown()
+      localGatewayProxy = null
+      await serverConnectionManager?.shutdown()
       const db = getDb()
       for (const [id, entry] of sessions) {
+        serverModelProjection?.releaseRuntime(id)
         clearInteractiveProfileCapability(entry)
         engine.removeSession(id)
         if (entry.adapter) {
@@ -3800,6 +3999,12 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     initPersistence,
     startGateway,
     shutdown,
-    getPersistenceRecovery: () => persistenceRecovery
+    getPersistenceRecovery: () => persistenceRecovery,
+    recoverServerConnection: () => serverConnectionManager?.retry(),
+    createServerGatewaySession: connection => localGatewayProxy?.createSession(connection),
+    revokeServerGatewaySession: sessionId => localGatewayProxy?.revokeSession(sessionId),
+    submitServerConnection: connection => serverConnectionManager?.submitParsedConnection(connection) || Promise.reject(
+      Object.assign(new Error('Server connection is unavailable'), { code: 'SERVER_CONNECTION_UNAVAILABLE' })
+    )
   }
 }

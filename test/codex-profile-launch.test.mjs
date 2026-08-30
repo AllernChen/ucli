@@ -87,3 +87,19 @@ test('Codex environment rejects malformed profile secret variable names', () => 
 
   assert.equal(Object.keys(env).some((key) => key.startsWith('UCLI_CODEX_PROFILE_')), false)
 })
+
+test('Codex server profiles allow only the isolated native name and session bearer environment key', () => {
+  assert.equal(buildCodexArgs({
+    profileId: '0123456789abcdef0123456789abcdef',
+    nativeProfileName: 'ucli-server-0123456789abcdef0123456789abcdef'
+  }).includes('ucli-server-0123456789abcdef0123456789abcdef'), true)
+  const env = buildCodexEnvironment({
+    id: 'session-server',
+    profileEnvironment: {
+      UCLI_SERVER_PROFILE_0123456789ABCDEF0123456789ABCDEF: 'session-bearer',
+      UCLI_SERVER_PROFILE_bad: 'must-not-pass'
+    }
+  }, { baseEnv: {} })
+  assert.equal(env.UCLI_SERVER_PROFILE_0123456789ABCDEF0123456789ABCDEF, 'session-bearer')
+  assert.equal(env.UCLI_SERVER_PROFILE_bad, undefined)
+})

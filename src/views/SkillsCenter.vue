@@ -33,6 +33,54 @@
       </div>
     </a-card>
 
+    <a-card v-if="serverConnection.status !== 'disconnected'" title="组织 Skills" class="skills-project-card server-skills-catalog" :bordered="false">
+      <template #extra>
+        <a-button size="small" :loading="serverConnection.busy" @click="syncOrganizationSkills">同步组织目录</a-button>
+      </template>
+      <a-empty v-if="!serverConnection.skills.length" description="当前没有可用的组织 Skills" />
+      <a-list v-else :data-source="serverConnection.skills" item-layout="horizontal">
+        <template #renderItem="{ item }">
+          <a-list-item>
+            <template #actions>
+              <a-button
+                size="small"
+                type="primary"
+                :disabled="item.lifecycleStatus === 'REVOKED' || serverConnection.busy || !canUseServerSkillTargets"
+                @click="installOrganizationSkill(item)"
+              >安装</a-button>
+              <a-button
+                size="small"
+                :disabled="item.lifecycleStatus === 'REVOKED' || serverConnection.busy || !canUseServerSkillTargets"
+                @click="updateOrganizationSkill(item)"
+              >更新</a-button>
+            </template>
+            <a-list-item-meta :title="item.name || item.skill?.name || item.slug || item.id">
+              <template #description>
+                <a-space wrap>
+                  <a-tag color="blue">组织提供</a-tag>
+                  <span>{{ item.organizationName || serverConnection.organization?.name || '组织' }}</span>
+                  <span>版本：{{ item.version || '未知' }}</span>
+                  <a-tag>{{ item.lifecycleStatus || 'AVAILABLE' }}</a-tag>
+                </a-space>
+                <a-alert v-if="item.lifecycleStatus === 'REVOKED'" type="error" show-icon message="REVOKED：已撤销，不能安装或更新；已安装副本仍保留，请尽快处理风险。" />
+                <a-alert v-else-if="item.lifecycleStatus === 'DEPRECATED'" type="warning" show-icon message="DEPRECATED：仍可按目录可用性继续使用、安装或更新，请计划迁移。" />
+              </template>
+            </a-list-item-meta>
+          </a-list-item>
+        </template>
+      </a-list>
+      <div class="skills-muted">选择目标 AI CLI 后再安装；断开连接只会移除在线目录，已安装副本仍在普通列表中显示。</div>
+      <a-select v-model:value="serverSkillTargets.targetAdapterIds" mode="multiple" :options="targetOptions" style="width: 100%; margin-top: 8px" />
+      <a-radio-group v-model:value="serverSkillTargets.scopeType" style="margin-top: 8px">
+        <a-radio value="user">用户级</a-radio>
+        <a-radio value="project">项目级</a-radio>
+      </a-radio-group>
+      <a-space v-if="serverSkillTargets.scopeType === 'project'" style="margin-top: 8px">
+        <a-input v-model:value="serverSkillTargets.projectPath" placeholder="选择项目目录" readonly />
+        <a-button @click="chooseServerSkillProject">选择项目</a-button>
+      </a-space>
+    </a-card>
+
     <a-row :gutter="12">
       <a-col v-for="metric in metrics" :key="metric.label" :xs="12" :lg="6">
         <a-card class="skills-metric" :bordered="false">
@@ -301,9 +349,13 @@
             <div v-for="pkg in entry.packages" :key="pkg.id" class="skill-package-action-row">
               <div class="skill-meta-row">
                 <a-tag>{{ skillSourceLabel(pkg) }}</a-tag>
+                <a-tag v-if="pkg.server" color="blue">组织提供</a-tag>
                 <span v-if="pkg.sourceRef">{{ pkg.sourceRefType }} · {{ pkg.sourceRef }}</span>
                 <span v-if="pkg.resolvedRevision" class="skills-mono">{{ pkg.resolvedRevision.slice(0, 8) }}</span>
               </div>
+              <a-alert v-if="pkg.server?.warning === 'unavailable'" type="warning" show-icon message="组织目录当前不可用；已安装副本仍可继续使用。" />
+              <a-alert v-else-if="pkg.server?.warning === 'revoked'" type="error" show-icon message="此组织 Skill 已 REVOKED；已安装副本保留，但请尽快处理风险。" />
+              <a-alert v-else-if="pkg.server?.warning === 'deprecated'" type="warning" show-icon message="此组织 Skill 已 DEPRECATED；请计划迁移。" />
               <a-space>
                 <a-dropdown v-if="entry.packages.length > 1 && packageApplyTargets(pkg, entry).length">
                   <a-button size="small">应用到 CLI</a-button>
@@ -575,8 +627,10 @@ import {
   skillStatusPresentation
 } from '../skillsPresentation.js'
 import { useSkillsStore } from '../stores/skills.js'
+import { useServerConnectionStore } from '../stores/serverConnection.js'
 
 const skills = useSkillsStore()
+const serverConnection = useServerConnectionStore()
 const projectPath = ref('')
 const search = ref('')
 const cliFilter = ref('all')
@@ -598,6 +652,9 @@ const installDraft = reactive({
   sourceType: 'local', localPath: '', gitUrl: '', refType: 'default', ref: '', subdir: '',
   targets: ['claude', 'codex', 'opencode', 'ucode', 'deepseek-harness'], scopeType: 'user', projectPath: ''
 })
+const serverSkillTargets = reactive({ targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
+const canUseServerSkillTargets = computed(() => serverSkillTargets.targetAdapterIds.length > 0 &&
+  (serverSkillTargets.scopeType === 'user' || Boolean(serverSkillTargets.projectPath.trim())))
 
 const catalog = computed(() => aggregateSkillCatalog({
   packages: skills.packages,
@@ -773,6 +830,35 @@ async function openSourceProject(sourceProject) {
 }
 
 async function reload() { await skills.load(projectPath.value) }
+async function syncOrganizationSkills() {
+  try {
+    await serverConnection.syncSkills()
+    await skills.load(projectPath.value)
+  } catch { message.error(serverConnection.error?.message || '无法同步组织 Skills') }
+}
+async function chooseServerSkillProject() {
+  const selected = await ipc.pickDirectory()
+  if (selected) serverSkillTargets.projectPath = selected
+}
+function organizationSkillTargets() {
+  return {
+    targetAdapterIds: [...serverSkillTargets.targetAdapterIds],
+    scopeType: serverSkillTargets.scopeType,
+    projectPath: serverSkillTargets.scopeType === 'project' ? serverSkillTargets.projectPath : ''
+  }
+}
+async function installOrganizationSkill(item) {
+  try {
+    await serverConnection.installSkill(item.versionId, organizationSkillTargets())
+    await skills.load(projectPath.value)
+  } catch { message.error(serverConnection.error?.message || '组织 Skill 安装失败') }
+}
+async function updateOrganizationSkill(item) {
+  try {
+    await serverConnection.updateSkill(item.versionId, organizationSkillTargets())
+    await skills.load(projectPath.value)
+  } catch { message.error(serverConnection.error?.message || '组织 Skill 更新失败') }
+}
 async function chooseProject() {
   const selected = await ipc.pickDirectory()
   if (!selected) return

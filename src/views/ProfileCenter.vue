@@ -148,7 +148,7 @@
                 <a-tag :color="statusView(profile).color">{{ statusView(profile).label }}</a-tag>
               </div>
             </template>
-            <template #extra>
+            <template #extra v-if="!isReadOnlyProfile(profile)">
               <a-dropdown>
                 <a-button type="text">更多</a-button>
                 <template #overlay>
@@ -165,9 +165,10 @@
 
             <div class="profile-card-body">
               <div class="profile-kind">{{ profileKindLabel(profile) }}</div>
+              <div v-if="profileOriginLabel(profile)"><span>来源</span><strong>{{ profileOriginLabel(profile) }}</strong></div>
               <div><span>服务</span><strong>{{ profileServiceLabel(profile) }}</strong></div>
               <div><span>模型</span><strong>{{ profile.model || '跟随 Provider' }}</strong></div>
-              <div v-if="profile.connectionMode !== 'subscription' && (profile.kind === 'managed' || profile.adapterId === 'claude')"><span>密钥</span><strong>{{ profileSecretLabel(profile) }}</strong></div>
+              <div v-if="!isReadOnlyProfile(profile) && profile.connectionMode !== 'subscription' && (profile.kind === 'managed' || profile.adapterId === 'claude')"><span>密钥</span><strong>{{ profileSecretLabel(profile) }}</strong></div>
               <div v-if="profile.adapterId === 'codex'"><span>推理强度</span><strong>{{ profile.reasoningEffort || '默认' }}</strong></div>
             </div>
 
@@ -183,7 +184,7 @@
             />
 
             <div class="profile-card-actions">
-              <a-button size="small" @click="openEdit(profile)">编辑</a-button>
+              <a-button v-if="!isReadOnlyProfile(profile)" size="small" @click="openEdit(profile)">编辑</a-button>
               <a-button size="small" @click="toggleAppDefault(profile)">
                 {{ profile.isAppDefault ? '取消应用默认' : '设为应用默认' }}
               </a-button>
@@ -191,12 +192,12 @@
                 {{ profile.isProjectDefault ? '取消项目默认' : '设为项目默认' }}
               </a-button>
               <a-button
-                v-if="profile.adapterId === 'codex' && ['drifted', 'missing_file'].includes(profile.status)"
+                v-if="!isReadOnlyProfile(profile) && profile.adapterId === 'codex' && ['drifted', 'missing_file'].includes(profile.status)"
                 size="small"
                 danger
                 @click="confirmRepair(profile)"
               >{{ profile.status === 'missing_file' ? '重新生成' : '用 UCLI 版本覆盖' }}</a-button>
-              <a-button size="small" @click="openRevisions(profile)">版本记录</a-button>
+              <a-button v-if="!isReadOnlyProfile(profile)" size="small" @click="openRevisions(profile)">版本记录</a-button>
             </div>
           </a-card>
         </div>
@@ -250,6 +251,7 @@ import {
   claudeInheritedAuthPresentation,
   profileBadges,
   profileEndpointLabel,
+  profileOriginLabel,
   profileSecretLabel,
   profileStatusPresentation
 } from '../profilePresentation.js'
@@ -311,7 +313,10 @@ const runtimePath = computed(() => selectedCli.value === 'claude'
   : (profiles.codexRuntime?.configPath || selectedEntry.value.path || '配置路径未知'))
 
 const statusView = (profile) => profileStatusPresentation(profile.status)
-const profileKindLabel = (profile) => profile.adapterId === 'claude'
+const isReadOnlyProfile = (profile) => profile.sourceKind === 'server' || profile.readOnly === true
+const profileKindLabel = (profile) => profile.sourceKind === 'server'
+  ? '组织提供'
+  : profile.adapterId === 'claude'
   ? claudeConnectionModePresentation(profile.connectionMode).label
   : (profile.kind === 'managed' ? 'UCLI 托管' : '引用现有 Provider')
 const profileServiceLabel = (profile) => {
@@ -480,12 +485,14 @@ function openCreate() {
 }
 
 function openEdit(profile) {
+  if (isReadOnlyProfile(profile)) return
   editorMode.value = 'edit'
   editorSeed.value = profile
   editorOpen.value = true
 }
 
 function openCopy(profile) {
+  if (isReadOnlyProfile(profile)) return
   editorMode.value = 'copy'
   editorSeed.value = { ...profile, name: `${profile.name} 副本`, hasSecret: false }
   editorOpen.value = true
@@ -525,6 +532,7 @@ async function toggleProjectDefault(profile) {
 }
 
 function confirmRepair(profile) {
+  if (isReadOnlyProfile(profile)) return
   Modal.confirm({
     title: profile.status === 'missing_file' ? '重新生成档案文件？' : '用 UCLI 版本覆盖外部修改？',
     content: `目标：${profiles.codexRuntime?.configPath || 'Codex 配置目录'} 下的 UCLI 管理文件。继续后将更新文件指纹；不会改写 config.toml。`,
@@ -538,6 +546,7 @@ function confirmRepair(profile) {
 }
 
 function confirmDelete(profile) {
+  if (isReadOnlyProfile(profile)) return
   Modal.confirm({
     title: `删除“${profile.name}”？`,
     content: '已被默认设置或会话使用的档案不能删除。API Key 将从系统加密存储中一并移除。',
@@ -547,6 +556,7 @@ function confirmDelete(profile) {
 }
 
 async function openRevisions(profile) {
+  if (isReadOnlyProfile(profile)) return
   activeProfile.value = profile
   await profiles.loadRevisions(profile.id)
   revisionOpen.value = true

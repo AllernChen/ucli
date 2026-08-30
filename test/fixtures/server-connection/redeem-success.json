@@ -1,0 +1,8 @@
+{
+  "accessToken": "fixture-access-token",
+  "refreshToken": "fixture-refresh-token",
+  "expiresIn": 900,
+  "account": { "id": "account-fixture-001", "displayName": "Fixture Member" },
+  "organization": { "id": "organization-fixture-001", "name": "Fixture Organization" },
+  "authorization": { "expiresAt": null, "serverTime": "2026-08-27T04:00:00.000Z" }
+}

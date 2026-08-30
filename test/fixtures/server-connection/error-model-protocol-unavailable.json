@@ -1,0 +1,7 @@
+{
+  "statusCode": 503,
+  "code": "model_protocol_unavailable",
+  "message": "The model does not support the requested protocol",
+  "requestId": "fixture-request-protocol",
+  "retryable": false
+}

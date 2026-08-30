@@ -218,6 +218,33 @@ const api = {
     return () => ipcRenderer.removeListener('codex:runtime', wrapped)
   },
 
+  // ---- server connection ----
+  submitServerConnectionLink: (input) => ipcRenderer.invoke('server-connection:submit-link', input),
+  getServerConnectionAttempt: (attemptId) => ipcRenderer.invoke('server-connection:get-attempt', attemptId),
+  getPendingServerConnectionAttempt: () => ipcRenderer.invoke('server-connection:get-pending-attempt'),
+  confirmServerConnection: (attemptId) => ipcRenderer.invoke('server-connection:confirm', attemptId),
+  retryServerConnectionRedeem: (attemptId) => ipcRenderer.invoke('server-connection:retry-redeem', attemptId),
+  cancelServerConnectionAttempt: (attemptId) => ipcRenderer.invoke('server-connection:cancel', attemptId),
+  getServerConnectionState: () => ipcRenderer.invoke('server-connection:get-state'),
+  retryServerConnection: () => ipcRenderer.invoke('server-connection:retry'),
+  syncServerConnection: () => ipcRenderer.invoke('server-connection:sync'),
+  disconnectServerConnection: () => ipcRenderer.invoke('server-connection:disconnect'),
+  listServerConnectionModels: () => ipcRenderer.invoke('server-connection:list-models'),
+  listServerConnectionSkills: () => ipcRenderer.invoke('server-connection:list-skills'),
+  syncServerConnectionSkills: () => ipcRenderer.invoke('server-connection:sync-skills'),
+  installServerConnectionSkill: (versionId, targets) => ipcRenderer.invoke('server-connection:install-skill', versionId, targets),
+  updateServerConnectionSkill: (versionId, targets) => ipcRenderer.invoke('server-connection:update-skill', versionId, targets),
+  onServerConnectionState: (handler) => {
+    const wrapped = (_event, payload) => handler(payload)
+    ipcRenderer.on('server-connection:state', wrapped)
+    return () => ipcRenderer.removeListener('server-connection:state', wrapped)
+  },
+  onServerConnectionRegistrationRequested: (handler) => {
+    const wrapped = (_event, payload) => handler(payload)
+    ipcRenderer.on('server-connection:registration-requested', wrapped)
+    return () => ipcRenderer.removeListener('server-connection:registration-requested', wrapped)
+  },
+
   // ---- workbench ----
   getWorkbench: () => ipcRenderer.invoke('workbench:get'),
   saveWorkbench: (state) => ipcRenderer.invoke('workbench:save', state),

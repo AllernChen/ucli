@@ -1,0 +1,6 @@
+{
+  "accessToken": "fixture-next-access-token",
+  "refreshToken": "fixture-next-refresh-token",
+  "expiresIn": 900,
+  "authorization": { "expiresAt": null, "serverTime": "2026-08-27T04:00:00.000Z" }
+}

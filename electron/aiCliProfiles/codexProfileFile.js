@@ -18,6 +18,9 @@ import { isSafeNativeProfileName, normaliseProfileDraft } from './contracts.js'
 const PROFILE_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const OWNED_FILE_PATTERN = /^(ucli-[a-f0-9]{32})\.config\.toml$/
 const MARKER_PATTERN = /^# ucli-profile-id: ([a-f0-9-]+)$/
+const SERVER_PROFILE_ID_PATTERN = /^[a-f0-9]{32}$/
+const SERVER_OWNED_FILE_PATTERN = /^(ucli-server-[a-f0-9]{32})\.config\.toml$/
+const SERVER_MARKER_PATTERN = /^# ucli-server-profile-id: ([a-f0-9]{32})$/
 const MAX_PROFILE_FILE_BYTES = 1024 * 1024
 
 function fileError(message, code) {
@@ -87,6 +90,22 @@ export function codexNativeProfileName(profileId) {
   return `ucli-${assertProfileId(profileId).replaceAll('-', '')}`
 }
 
+function assertServerProfileId(profileId) {
+  const value = String(profileId || '').toLowerCase()
+  if (!SERVER_PROFILE_ID_PATTERN.test(value)) {
+    throw fileError('Server profile id is invalid', 'INVALID_PROFILE_ID')
+  }
+  return value
+}
+
+export function serverCodexNativeProfileName(profileId) {
+  return `ucli-server-${assertServerProfileId(profileId)}`
+}
+
+export function serverCodexProfileSecretEnvName(profileId) {
+  return `UCLI_SERVER_PROFILE_${assertServerProfileId(profileId).toUpperCase()}`
+}
+
 export function resolveCodexProfilePath(codexHome, nativeProfileName) {
   if (!isSafeNativeProfileName(nativeProfileName)) {
     throw fileError('Native profile name is invalid', 'INVALID_NATIVE_PROFILE_NAME')
@@ -97,6 +116,93 @@ export function resolveCodexProfilePath(codexHome, nativeProfileName) {
     throw fileError('Codex profile path escapes its configuration directory', 'INVALID_NATIVE_PROFILE_NAME')
   }
   return path
+}
+
+export function resolveServerCodexProfilePath(codexHome, nativeProfileName) {
+  if (typeof nativeProfileName !== 'string' || !SERVER_OWNED_FILE_PATTERN.test(`${nativeProfileName}.config.toml`)) {
+    throw fileError('Server native profile name is invalid', 'INVALID_NATIVE_PROFILE_NAME')
+  }
+  const root = resolve(String(codexHome || ''))
+  const path = resolve(root, `${nativeProfileName}.config.toml`)
+  if (path === root || !path.startsWith(`${root}${process.platform === 'win32' ? '\\' : '/'}`)) {
+    throw fileError('Codex profile path escapes its configuration directory', 'INVALID_NATIVE_PROFILE_NAME')
+  }
+  return path
+}
+
+export function renderServerCodexProfileFile({ id, name, model, contextWindow }, {
+  baseUrl,
+  envKey = serverCodexProfileSecretEnvName(id)
+} = {}) {
+  const profileId = assertServerProfileId(id)
+  const baseUrlResult = new URL(String(baseUrl || ''))
+  if (baseUrlResult.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(baseUrlResult.hostname)) {
+    throw fileError('Server Codex profile requires a loopback base URL', 'INVALID_BASE_URL')
+  }
+  const safeModel = String(model || '').trim()
+  const safeName = String(name || '').trim()
+  if (!safeModel || !safeName || !Number.isSafeInteger(contextWindow) || contextWindow <= 0 ||
+    !/^UCLI_SERVER_[A-Z0-9_]+$/.test(envKey)) {
+    throw fileError('Server Codex profile is invalid', 'INVALID_PROFILE')
+  }
+  const providerId = `ucli_server_${profileId.slice(0, 12)}`
+  return `# ucli-server-profile-id: ${profileId}\n${stringifyCodexProfileConfig({
+    model: safeModel,
+    model_context_window: contextWindow,
+    model_provider: providerId,
+    model_providers: {
+      [providerId]: {
+        name: safeName,
+        base_url: baseUrlResult.origin,
+        env_key: envKey,
+        wire_api: 'responses',
+        requires_openai_auth: false
+      }
+    }
+  })}`
+}
+
+export function inspectServerCodexProfileFile(path) {
+  if (!SERVER_OWNED_FILE_PATTERN.test(basename(path))) {
+    throw fileError('Codex server profile file is not in the UCLI namespace', 'PROFILE_FILE_NOT_OWNED')
+  }
+  assertRegularOwnedTarget(path)
+  const content = readFileSync(path)
+  const text = content.toString('utf8').replace(/\r\n/g, '\n')
+  const marker = text.split('\n', 1)[0].match(SERVER_MARKER_PATTERN)
+  if (!marker) throw fileError('Codex server profile ownership marker is missing', 'PROFILE_FILE_NOT_OWNED')
+  const profileId = assertServerProfileId(marker[1])
+  if (basename(path) !== `${serverCodexNativeProfileName(profileId)}.config.toml`) {
+    throw fileError('Codex server profile ownership marker does not match its file', 'PROFILE_FILE_NOT_OWNED')
+  }
+  try {
+    return { profileId, sha256: sha256(content), config: sanitiseInspectedConfig(parse(text.slice(text.indexOf('\n') + 1))) }
+  } catch (error) {
+    if (error?.code) throw error
+    throw fileError('Codex server profile file is invalid', 'PROFILE_FILE_INVALID')
+  }
+}
+
+export function writeServerCodexProfileFileAtomic({ codexHome, profile, baseUrl, envKey }) {
+  const nativeProfileName = serverCodexNativeProfileName(profile?.id)
+  const path = resolveServerCodexProfilePath(codexHome, nativeProfileName)
+  if (existsSync(path)) inspectServerCodexProfileFile(path)
+  const data = Buffer.from(renderServerCodexProfileFile(profile, { baseUrl, envKey }), 'utf8')
+  const tempPath = `${path}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`
+  let handle = null
+  try {
+    handle = openSync(tempPath, 'wx')
+    let offset = 0
+    while (offset < data.length) offset += writeSync(handle, data, offset, data.length - offset)
+    fsyncSync(handle)
+    closeSync(handle)
+    handle = null
+    renameSync(tempPath, path)
+  } finally {
+    if (handle !== null) try { closeSync(handle) } catch { /* best effort */ }
+    try { if (existsSync(tempPath)) unlinkSync(tempPath) } catch { /* best effort */ }
+  }
+  return { path, sha256: sha256(data) }
 }
 
 export function renderCodexProfileFile(profile) {

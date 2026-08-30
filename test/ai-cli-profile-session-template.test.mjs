@@ -22,3 +22,10 @@ test('running profile switches require an explicit restart decision and cancella
   assert.match(source, /applyProfileSwitch\(true\)/)
   assert.match(source, /sessions\.setProfile/)
 })
+
+test('unavailable server profiles are disabled without rewriting their explicit ids to system auth', () => {
+  const source = readFileSync(new URL('../src/components/NewSessionDialog.vue', import.meta.url), 'utf8')
+  assert.match(source, /profile\.sourceKind === 'server'/)
+  assert.match(source, /profile\.canStart/)
+  assert.match(source, /return profile\?\.adapterId === adapterId \? \{ profileId \} : \{\}/)
+})
