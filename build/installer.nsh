@@ -42,7 +42,6 @@ Function un.UcliProtocolCommandPath
     StrCmp $R3 "\" 0 unUcliProtocolCommandPathInvalid
 
   unUcliProtocolCommandPathCanonical:
-    GetFullPathName $R1 "$R1"
     Push $R1
     Return
 
@@ -84,7 +83,6 @@ Function un.UcliProtocolIconPath
     StrCmp $R3 "\" 0 unUcliProtocolIconPathInvalid
 
   unUcliProtocolIconPathCanonical:
-    GetFullPathName $R1 "$R1"
     Push $R1
     Return
 
@@ -95,7 +93,7 @@ FunctionEnd
 Function un.UcliProtocolPathsMatch
   Pop $R1
   Pop $R0
-  System::Call 'kernel32::lstrcmpi(t r0, t r1) i.r2'
+  System::Call 'kernel32::lstrcmpi(t R0, t R1) i.R2'
   StrCmp $R2 0 unUcliProtocolPathsMatchYes unUcliProtocolPathsMatchNo
 
   unUcliProtocolPathsMatchYes:
@@ -209,7 +207,6 @@ FunctionEnd
   StrCpy $0 $R0
   StrCpy $1 $R1
   StrCpy $2 "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
-  GetFullPathName $2 "$2"
 
   Push $0
   Call un.UcliProtocolCommandPath
