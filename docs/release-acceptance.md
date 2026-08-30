@@ -11,10 +11,10 @@
 | 本地协议合同 | PASS：Tasks 1–5 后四文件客户端/服务端合同门 48/48 通过。该门只覆盖固定 fixtures 的协议/目录与稳定 503 合同：`openai_responses`、`openai_chat`、`anthropic_messages`、固定端点、Bootstrap/Gateway 双目录协议一致性、无 `models[0]` 推断，以及 `no-store`/request ID/retryable。Codex/Claude 投影、Chat-only 无托管档案、透明 503 代理、凭证/本地能力保留和非 live smoke 请求由下列更广的九套实现门单独验证。 |
 | 本地实现门 | PASS：声明的九套实现测试覆盖模型投影、透明 503 代理、凭证和本地能力保留、协议专属 smoke 请求与默认跳过的真实 smoke；它不是四文件 48-test 合同门的一部分。 |
 | 本地回滚兼容性 | 已做静态命名空间证明：当前版本的 `ucli-server-*` 文件不属于旧 `ucli-<32hex>` 所有权规则；这不是 0.11.6 二进制降级实证。 |
-| Task 10 Windows 产物 | 2026-08-28 12:52（Asia/Shanghai）从运行时代码提交 `d35b9bd` 构建的 Windows x64 产物：Setup `UCLI-Setup-0.12.0-x64.exe`（134,216,065 bytes，SHA-256 `163BF3D15066AAA66C6DBC8B2D867C92631C9ADDEAEC839ABC4722CCF5446B23`），Portable `UCLI-Portable-0.12.0-x64.exe`（133,961,257 bytes，SHA-256 `04A7E6B3965B81303EE4C20BF752E75756B60C39C57E618111D65867533B29F6`）；`latest.yml` 与 blockmap 均由同一次 `npm run dist:win` 生成，`npm run verify:release` 已通过。其后的紧邻提交仅修改此证据文档；该文档不在 `electron-builder.yml` 的打包输入中。 |
+| Task 10 Windows 产物 | 2026-08-29 03:56（Asia/Shanghai）从模型协议运行时代码提交 `a6aa5e1` 构建的 Windows x64 产物：Setup `UCLI-Setup-0.12.0-x64.exe`（134,216,191 bytes，SHA-256 `FCEB8C56C6EC2FDE45EFA1B2CB18BCC4E4CCC2E51C14BDF92EECBB9C4018FCF3`），Portable `UCLI-Portable-0.12.0-x64.exe`（133,961,402 bytes，SHA-256 `A092FDF8CB64C3FC2B01B906FE119CB90C2870749507108E532D1B17F06E79E2`）；`latest.yml` 与 blockmap 均由同一次 `npm run dist:win` 生成，`npm run verify:release` 已通过。其后的证据文档提交不属于 `electron-builder.yml` 的打包输入。 |
 | Windows 原生人工检查 | 待完成：安装版 URL scheme、cold start、第二实例、升级、条件卸载，以及 portable 不接管协议。 |
 | macOS / Linux | 待完成：原生 macOS DMG/ZIP 验证；Linux 打包验证。未以静态检查替代。 |
-| 真实协议 smoke | PENDING：须先确认新的服务端提交和运行时摘要，并取得新的单次授权；以显式协议执行，确认 Bootstrap/Gateway 双目录一致，再完成模型流、Skills 下载哈希和清理。2026-08-28 的第三次 smoke 仅为历史证据，不是新部署的基线或接受证据；不得重用其授权。 |
+| 真实协议 smoke | FAIL（环境阻断）：2026-08-30 10:14:46（Asia/Shanghai）在客户端 `a6aa5e1`、服务端 `1cdea4826758f37f799088e575af5c261659c6e9`、runtime `sha256:238f10bf0bea06c5fa4722c10d1b70fd39da3bd8550d4e4433c5abeb00da1a80` 上以 `openai_responses` 执行一次；`preview` 未收到 HTTP 响应，未进入 Redeem，模型与 Skills 阶段未运行，环境变量及临时 smoke 目录已清理。本机到目标服务端 80 端口的无凭证 TCP 检查同样超时；发布仍不接受。 |
 | 真实降级 | 待完成：用真实 0.11.6 二进制验证其忽略 `server_*` 表和 `ucli-server-*` 文件。 |
 
 ### 0.12.0 数据与紧急关闭

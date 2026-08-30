@@ -595,3 +595,31 @@ failure:
 第三次 smoke 仍仅是历史证据，不能作为新部署基线。它使用旧的“可见即可路由”假设并在模型流阶段停止；它之后的协议能力合同要求显式协议、双目录一致性和稳定 503 处理。新的真实 smoke 必须使用新的单次授权，并在已确认的新服务端提交与运行时摘要上完成模型流、Skills 哈希和清理，才可进入发布接受判断。
 
 Windows 产物存在于 Task 10 的 post-HEAD 构建证据中；真实完整内网 smoke、原生 macOS、Linux、URL-scheme/portable 人工检查和真实 0.11.6 二进制降级仍为发布阻断项。紧急关闭仅移除服务端入口/能力，不迁移或删除本地模型、Skills、会话或数据。
+
+## 24. 真实协议 smoke 失败证据（2026-08-30）
+
+客户端 `a6aa5e1` 在已确认的服务端提交与 runtime 上显式选择 `openai_responses` 执行一次。Preview 未收到 HTTP 响应；无凭证 TCP 检查也无法连接目标服务端 80 端口。运行未进入 Redeem，Bootstrap、Gateway、模型流和 Skills 均未运行；环境变量与临时 smoke 目录已清理。不得把本次结果标记为协议成功或发布接受。
+
+```yaml
+timestamp: 2026-08-30T10:14:46+08:00
+clientVersion: 0.12.0
+clientCommit: a6aa5e1
+serverCommit: 1cdea4826758f37f799088e575af5c261659c6e9
+serverRuntimeImage: sha256:238f10bf0bea06c5fa4722c10d1b70fd39da3bd8550d4e4433c5abeb00da1a80
+localContractGate: 48 passed / 0 failed / 0 skipped
+selectedModelId: not-selected
+selectedProtocol: openai_responses
+failedStage: preview
+httpStatus: not-received
+contentType: not-received
+cacheControl: not-received
+stableCode: not-received
+requestId: not-received
+retryable: null
+streamReceivedNonEmptyData: false
+authorizationExpiresAt: not-recorded
+serverTimePresent: false
+skillsCatalog: NOT_RUN
+skillDownloadHash: NOT_RUN
+cleanup: PASS
+```

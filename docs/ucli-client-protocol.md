@@ -359,6 +359,34 @@ Codex 仅投影 `openai_responses`；Claude 仅投影 `anthropic_messages`；仅
 
 流式请求沿用 OpenAI/Anthropic 的取消与错误处理。单个上游模型失败不得映射为设备授权失效。
 
+### 12.1 真实协议 smoke 证据（2026-08-30）
+
+以下记录来自一次显式 `openai_responses` 执行。失败发生在 Preview 收到 HTTP 响应之前，未进入 Redeem；因此没有选择模型，也没有运行 Bootstrap、Gateway 模型流或 Skills。无凭证连通性检查同样无法连接目标服务端 80 端口。客户端环境变量和临时 smoke 目录均已清理，发布验收保持阻断。
+
+```yaml
+timestamp: 2026-08-30T10:14:46+08:00
+clientVersion: 0.12.0
+clientCommit: a6aa5e1
+serverCommit: 1cdea4826758f37f799088e575af5c261659c6e9
+serverRuntimeImage: sha256:238f10bf0bea06c5fa4722c10d1b70fd39da3bd8550d4e4433c5abeb00da1a80
+localContractGate: 48 passed / 0 failed / 0 skipped
+selectedModelId: not-selected
+selectedProtocol: openai_responses
+failedStage: preview
+httpStatus: not-received
+contentType: not-received
+cacheControl: not-received
+stableCode: not-received
+requestId: not-received
+retryable: null
+streamReceivedNonEmptyData: false
+authorizationExpiresAt: not-recorded
+serverTimePresent: false
+skillsCatalog: NOT_RUN
+skillDownloadHash: NOT_RUN
+cleanup: PASS
+```
+
 ## 13. 客户端本机代理边界
 
 CLI 子进程不直接持有服务端 access token。Electron 主进程只在 `127.0.0.1` 随机端口提供代理，并向每个 CLI 会话签发内存 bearer。
