@@ -3193,6 +3193,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             nativeProfileName: state.nativeProfileName || null,
             model: profile.sourceKind === 'server' ? resolvedSelection.model : profile.model,
             profileSourceKind: profile.sourceKind || null,
+            actualModel: null,
+            profileWarning: null,
             provider: state.providerId || profile.providerId,
             sourceProvider: null,
             providerPolicy: null,

@@ -4,7 +4,9 @@ import { register } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { EventEmitter } from 'node:events'
 
+import { codexDescriptor } from '../electron/adapters/codexAdapter.js'
 import { getDb, openDb } from '../electron/persistence/db.js'
 
 register('./fixtures/electron-stub-loader.mjs', import.meta.url)
@@ -131,5 +133,31 @@ test('a system profile selection rejects a model before session or database muta
     assert.equal(writes, 0)
     assert.deepEqual((await handlers.get('session:list')({}))[0], before)
     assert.deepEqual(events.filter(({ channel }) => channel === 'session:event'), [])
+  })
+})
+
+test('a successful Codex system transition clears a reported model alias', async t => {
+  await withPersistedSession(t, async ({ handlers }) => {
+    const originalCreate = codexDescriptor.create
+    let adapter
+    codexDescriptor.create = () => {
+      adapter = new EventEmitter()
+      adapter.dispose = async () => {}
+      return adapter
+    }
+    try {
+      const created = handlers.get('session:create')({}, {
+        adapterId: 'codex', cwd: 'F:\\projects\\demo', tier: 'safety-rules'
+      })
+      adapter.emit('event', { type: 'profile-model', actualModel: 'reported-alias' })
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal((await handlers.get('session:list')({})).find(({ id }) => id === created.sessionId).actualModel, 'reported-alias')
+      handlers.get('session:set-profile')({}, created.sessionId, { profileId: null, model: null })
+      const session = (await handlers.get('session:list')({})).find(({ id }) => id === created.sessionId)
+      assert.equal(session.actualModel, null)
+      assert.equal(session.profileWarning, null)
+    } finally {
+      codexDescriptor.create = originalCreate
+    }
   })
 })
