@@ -1258,6 +1258,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       return {
         session: {
           ...session,
+          actualModel: null,
+          profileWarning: null,
           profileId: selection.profileId,
           nativeProfileName: launch.artifact.nativeProfileName,
           model: launch.artifact.model,
@@ -1281,6 +1283,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     return {
       session: applyCodexProviderPolicy({
         ...session,
+        actualModel: null,
+        profileWarning: null,
         profileId: null,
         nativeProfileName: null,
         profileStatus: null,
