@@ -259,6 +259,13 @@ export class CodexAdapter extends BaseAdapter {
     this._lastLineageScanAt = 0
     this._sessionResolver = settings.codexSessionResolver || resolveCodexTranscriptSessionInHome
     this._sessionLister = settings.codexSessionLister || listCodexTranscriptSessionsInHome
+    try {
+      this._startupSessionIds = new Set(
+        this._sessionLister(this.codexHome, this.session.cwd).map((item) => item.sessionId)
+      )
+    } catch {
+      this._startupSessionIds = null
+    }
     this._terminalInputLine = ''
     this._nativeResumeCapture = null
     this._osc9Pending = ''
@@ -351,6 +358,7 @@ export class CodexAdapter extends BaseAdapter {
   }
 
   _findLatestTranscript() {
+    if (!this._startupSessionIds) return null
     const sessionsDir = join(this.codexHome, 'sessions')
     if (!existsSync(sessionsDir)) return null
     const normCwd = (this.session.cwd || '').replace(/\\/g, '/').toLowerCase()
@@ -374,7 +382,10 @@ export class CodexAdapter extends BaseAdapter {
             try {
               const meta = readCodexSessionMetadataFromFile(full)
               const metaCwd = (meta?.cwd || '').replace(/\\/g, '/').toLowerCase()
-              if (meta && !meta.isSubagent && metaCwd === normCwd) {
+              if (
+                meta && !meta.isSubagent && metaCwd === normCwd &&
+                !this._startupSessionIds.has(meta.sessionId)
+              ) {
                 newest = full
                 newestMtime = stat.mtimeMs
               }
