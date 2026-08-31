@@ -72,6 +72,55 @@ test('profile IPC validates identifiers and whitelists renderer input', async ()
     name: 'Renamed', path: 'C:\\forged\\profile.toml'
   })
   assert.deepEqual(calls[1], ['update', 'profile-1', { name: 'Renamed' }])
+
+  await handlers.get('ai-cli-profiles:set-binding')({}, {
+    scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: 'service-profile', model: 'responses'
+  })
+  assert.deepEqual(calls[2], ['binding', {
+    scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: 'service-profile', model: 'responses'
+  }])
+  await handlers.get('ai-cli-profiles:set-binding')({}, {
+    scopeType: 'project', scopeKey: 'F:\\projects\\demo', adapterId: 'codex', profileId: 'profile-1'
+  })
+  assert.deepEqual(calls[3], ['binding', {
+    scopeType: 'project', scopeKey: 'F:\\projects\\demo', adapterId: 'codex', profileId: 'profile-1', model: null
+  }])
+  await assert.rejects(
+    handlers.get('ai-cli-profiles:set-binding')({}, {
+      scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: 'service-profile', model: '', revision: 'forged'
+    }),
+    { code: 'INVALID_PROFILE_IPC' }
+  )
+})
+
+test('profile IPC serializes server profiles through an explicit redaction DTO', async () => {
+  const serviceProfile = {
+    id: 'service-profile', sourceKind: 'server', readOnly: true,
+    serverOrigin: 'https://server.example.com',
+    organization: { id: 'org-1', name: 'Engineering' },
+    availabilityStatus: 'ready', supportedAdapterIds: ['codex', 'claude'],
+    connectionRevision: 'connection-secret', artifactDigest: 'digest-secret',
+    config: { token: 'config-secret' }, headers: { Authorization: 'Bearer header-secret' },
+    models: [{
+      id: 'responses', displayName: 'Responses', contextSize: 128000,
+      protocols: ['openai_responses'], availabilityStatus: 'ready',
+      artifactId: 'artifact-secret', codexFileSha256: 'hash-secret', token: 'model-secret'
+    }]
+  }
+  const { handlers } = register({ listProfiles: () => [serviceProfile] })
+
+  const state = await handlers.get('ai-cli-profiles:get-state')({}, {})
+  assert.deepEqual(state.profiles, [{
+    id: 'service-profile', source: 'server', readOnly: true,
+    serverOrigin: 'https://server.example.com',
+    organization: { id: 'org-1', name: 'Engineering' },
+    availabilityStatus: 'ready', supportedAdapterIds: ['codex', 'claude'],
+    models: [{
+      id: 'responses', displayName: 'Responses', contextSize: 128000,
+      protocols: ['openai_responses'], availabilityStatus: 'ready'
+    }]
+  }])
+  assert.equal(/connection-secret|digest-secret|config-secret|header-secret|artifact-secret|hash-secret|model-secret/.test(JSON.stringify(state)), false)
 })
 
 test('profile IPC returns only sanitized state, profiles, and revisions', async () => {

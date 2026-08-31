@@ -3,6 +3,8 @@ import { sanitiseProfileError, validateProfileBaseUrl } from './contracts.js'
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/
 const ADAPTER_IDS = new Set(['codex', 'claude', 'opencode', 'ucode'])
 const PROFILE_STATUSES = new Set(['ready', 'missing_file', 'drifted', 'missing_provider', 'secret_unavailable', 'missing_profile'])
+const SERVER_AVAILABILITY_STATUSES = new Set(['ready', 'unreachable', 'disabled', 'expired', 'deleted'])
+const SERVER_MODEL_PROTOCOLS = new Set(['openai_responses', 'openai_chat', 'anthropic_messages'])
 const PROFILE_FIELDS = [
   'adapterId', 'name', 'kind', 'providerId', 'baseUrl', 'model',
   'reasoningEffort', 'contextWindow', 'secret'
@@ -73,6 +75,37 @@ function safeClaudeConfig(config = {}) {
 }
 
 function safeProfile(profile = {}) {
+  if (profile.sourceKind === 'server') {
+    return {
+      id: typeof profile.id === 'string' ? profile.id : null,
+      source: 'server',
+      readOnly: true,
+      serverOrigin: typeof profile.serverOrigin === 'string' ? profile.serverOrigin : null,
+      organization: {
+        id: typeof profile.organization?.id === 'string' ? profile.organization.id : null,
+        name: typeof profile.organization?.name === 'string' ? profile.organization.name : ''
+      },
+      availabilityStatus: SERVER_AVAILABILITY_STATUSES.has(profile.availabilityStatus)
+        ? profile.availabilityStatus
+        : 'unreachable',
+      supportedAdapterIds: Array.isArray(profile.supportedAdapterIds)
+        ? profile.supportedAdapterIds.filter((adapterId) => ADAPTER_IDS.has(adapterId))
+        : [],
+      models: Array.isArray(profile.models)
+        ? profile.models.map((model) => ({
+            id: typeof model?.id === 'string' ? model.id : null,
+            displayName: typeof model?.displayName === 'string' ? model.displayName : '',
+            contextSize: Number.isSafeInteger(model?.contextSize) ? model.contextSize : null,
+            protocols: Array.isArray(model?.protocols)
+              ? model.protocols.filter((protocol) => SERVER_MODEL_PROTOCOLS.has(protocol))
+              : [],
+            availabilityStatus: SERVER_AVAILABILITY_STATUSES.has(model?.availabilityStatus)
+              ? model.availabilityStatus
+              : 'unreachable'
+          }))
+        : []
+    }
+  }
   const result = {
     id: typeof profile.id === 'string' ? profile.id : null,
     adapterId: typeof profile.adapterId === 'string' ? profile.adapterId : null,
@@ -188,15 +221,18 @@ export function registerAiCliProfileIpc({
       .filter((item) => item.mode === 'profiles')
       .map((item) => item.adapterId)
     const projectBindings = new Map(cliConfiguration.map((item) => [item.adapterId, item.projectBinding]))
+    const profilesById = new Map()
+    for (const adapterId of profileAdapters) {
+      for (const profile of service.listProfiles({ adapterId })) {
+        if (!profilesById.has(profile.id)) profilesById.set(profile.id, profile)
+      }
+    }
     return {
       cliConfiguration,
       cliInventory: cliInventory.map(safeInventory),
-      profiles: profileAdapters.flatMap((adapterId) => service.listProfiles({ adapterId }))
-        .map(safeProfile)
-        .map((profile) => ({
-          ...profile,
-          isProjectDefault: profile.id === projectBindings.get(profile.adapterId)
-        })),
+      profiles: [...profilesById.values()].map(safeProfile).map((profile) => profile.source === 'server'
+        ? profile
+        : { ...profile, isProjectDefault: profile.id === projectBindings.get(profile.adapterId) }),
       codexRuntime: safeRuntime(getCodexRuntime()),
       claudeRuntime: safeClaudeRuntime(getClaudeRuntime())
     }
@@ -218,6 +254,8 @@ export function registerAiCliProfileIpc({
   ))
   ipcMain.handle('ai-cli-profiles:set-binding', (_event, binding) => safeCall(() => {
     const value = requireObject(binding, 'binding')
+    const allowed = new Set(['scopeType', 'scopeKey', 'adapterId', 'profileId', 'model'])
+    if (Object.keys(value).some((key) => !allowed.has(key))) throw ipcError('binding contains an unknown field')
     if (!['app', 'project'].includes(value.scopeType)) throw ipcError('scopeType is invalid')
     if (value.scopeType === 'project' && (typeof value.scopeKey !== 'string' || !value.scopeKey || value.scopeKey.length > 4096 || value.scopeKey.includes('\0'))) {
       throw ipcError('scopeKey is invalid')
@@ -226,7 +264,12 @@ export function registerAiCliProfileIpc({
       scopeType: value.scopeType,
       scopeKey: value.scopeType === 'app' ? '*' : value.scopeKey,
       adapterId: requireAdapterId(value.adapterId),
-      profileId: value.profileId === null ? null : requireId(value.profileId, 'profileId')
+      profileId: value.profileId === null ? null : requireId(value.profileId, 'profileId'),
+      model: value.model === undefined || value.model === null
+        ? null
+        : typeof value.model === 'string' && value.model.trim()
+          ? value.model
+          : (() => { throw ipcError('model is invalid') })()
     })
   }))
   ipcMain.handle('ai-cli-profiles:list-revisions', (_event, profileId) => safeCall(() =>

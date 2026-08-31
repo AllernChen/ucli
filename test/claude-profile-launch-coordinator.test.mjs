@@ -14,6 +14,7 @@ function entryWith(stamp) {
       session: {
         adapterId: 'claude',
         profileId: stamp.profileId,
+        model: stamp.model,
         profileRuntimeRevision: stamp.runtimeRevision
       },
       adapter: {
@@ -76,4 +77,21 @@ test('Claude launch coordinator recompiles exactly once when profile or revision
   assert.deepEqual(calls[0].settingSources, ['project', 'local'])
   assert.deepEqual(entry._claudeProfileLaunchStamp, claudeProfileLaunchStamp(entry.session))
   assert.equal(entry.session.activeProfileId, 'profile-2')
+})
+
+test('Claude launch coordinator recompiles when only the selected model changes', () => {
+  const { entry, calls } = entryWith({ profileId: 'service-profile', model: 'sonnet', runtimeRevision: 'revision-1' })
+  const refreshed = armClaudeProfileLaunch({
+    entry,
+    desiredStamp: { profileId: 'service-profile', model: 'haiku', runtimeRevision: 'revision-1' },
+    prepareRuntime() {
+      return {
+        session: { ...entry.session, model: 'haiku', profileRuntimeRevision: 'revision-1' },
+        profileLaunch: { args: ['--model', 'haiku'], env: {}, settingSources: ['project', 'local'] }
+      }
+    }
+  })
+
+  assert.equal(refreshed, true)
+  assert.deepEqual(calls[0].args, ['--model', 'haiku'])
 })

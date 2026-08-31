@@ -1205,6 +1205,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   function prepareCodexSessionRuntime(session, {
     imported = false,
     explicitProfileId,
+    explicitModel,
     forceSystem = false,
     deferServerRuntime = false
   } = {}) {
@@ -1214,7 +1215,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           adapterId: 'codex',
           cwd: session.cwd,
           imported,
-          explicitProfileId: explicitProfileId || session.profileId || null
+          explicitProfileId: explicitProfileId || session.profileId || null,
+          explicitModel: explicitModel ?? ((explicitProfileId || session.profileId) ? session.model : null)
         })
     if (selection?.canStart === false) {
       throw new Error('The selected Codex profile is no longer available. Choose another profile before starting.')
@@ -1226,14 +1228,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         ? {
             artifact: {
               nativeProfileName: profile.nativeProfileName,
-              model: profile.model,
+              model: selection.model,
               providerId: profile.providerId
             },
             env: {},
             status: 'ready',
-            runtimeRevision: `${profile.connectionRevision}:${profile.id}`
+            runtimeRevision: `${profile.connectionRevision}:${profile.id}:${selection.model || ''}`
           }
-        : profileService.resolveCodexLaunchProfile(selection.profileId, session)
+        : profileService.resolveCodexLaunchProfile(selection.profileId, selection.model, session)
       return {
         session: {
           ...session,
@@ -1271,6 +1273,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   function prepareClaudeSessionRuntime(session, {
     imported = false,
     explicitProfileId,
+    explicitModel,
     forceSystem = false,
     deferServerRuntime = false
   } = {}) {
@@ -1280,7 +1283,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           adapterId: 'claude',
           cwd: session.cwd,
           imported,
-          explicitProfileId: explicitProfileId || session.profileId || null
+          explicitProfileId: explicitProfileId || session.profileId || null,
+          explicitModel: explicitModel ?? ((explicitProfileId || session.profileId) ? session.model : null)
         })
     const profile = selection?.profileId
       ? profileService.listProfiles({ adapterId: 'claude' }).find(candidate => candidate.id === selection.profileId)
@@ -1288,16 +1292,18 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     const launch = selection?.profileId
       ? deferServerRuntime && profile?.sourceKind === 'server'
         ? {
-            args: profile.model ? ['--model', profile.model] : [],
+            args: selection.model ? ['--model', selection.model] : [],
             env: {},
             settingSources: ['project', 'local'],
-            artifact: { model: profile.model, connectionMode: 'bearer' },
+            artifact: { model: selection.model, connectionMode: 'bearer' },
             status: 'ready',
-            runtimeRevision: `${profile.connectionRevision}:${profile.id}`
+            runtimeRevision: `${profile.connectionRevision}:${profile.id}:${selection.model || ''}`
           }
         : profileService.resolveLaunchProfile({
             profileId: selection.profileId,
             adapterId: 'claude',
+            model: selection.model,
+            sessionId: session.id,
             session,
             baseEnv: process.env
           })
@@ -1431,13 +1437,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       entry.status = 'launching'
       return false
     }
-    const desiredStamp = profileService.getClaudeProfileLaunchStamp(entry.session.profileId || null)
+    const desiredStamp = profileService.getClaudeProfileLaunchStamp(entry.session.profileId || null, entry.session.model || null)
     return armClaudeProfileLaunch({
       entry,
       desiredStamp,
       prepareRuntime: () => prepareClaudeSessionRuntime(entry.session, {
         imported: Boolean(entry.session.cliSessionId),
         explicitProfileId: entry.session.profileId || null,
+        explicitModel: entry.session.model || null,
         forceSystem: !entry.session.profileId
       })
     })
@@ -2141,6 +2148,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           const launch = profileService.resolveLaunchProfile({
             profileId: profile.id,
             adapterId,
+            model: session.model || null,
+            sessionId,
             session,
             baseEnv: process.env
           })

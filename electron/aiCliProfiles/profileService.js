@@ -336,26 +336,49 @@ export function createProfileService({
       return true
     },
 
-    async setBinding({ scopeType, scopeKey, adapterId, profileId }) {
+    async setBinding({ scopeType, scopeKey, adapterId, profileId, model = null }) {
       if (!['app', 'project'].includes(scopeType)) {
         throw serviceError('Profile scope is invalid', 'INVALID_PROFILE_SCOPE')
       }
       const key = scopeType === 'app' ? '*' : projectScopeKey(scopeKey)
       if (profileId) {
         const profile = db.getAiCliProfile(profileId) || serverProfile(profileId)
-        if (!profile || profile.adapterId !== adapterId) {
+        if (!profile || (profile.sourceKind !== 'server' && profile.adapterId !== adapterId)) {
           throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
         }
+        if (profile.sourceKind === 'server') {
+          const selection = resolveProfileSelection({
+            adapterId,
+            explicitProfileId: profileId,
+            explicitModel: model,
+            profiles: [profile]
+          })
+          if (!selection.canStart) {
+            const code = selection.status === 'model-required'
+              ? 'PROFILE_MODEL_REQUIRED'
+              : selection.status === 'protocol-unavailable'
+                ? 'PROFILE_MODEL_PROTOCOL_UNAVAILABLE'
+                : 'PROFILE_MODEL_UNAVAILABLE'
+            throw serviceError('Service profile model is unavailable', code)
+          }
+        } else if (model !== null) {
+          throw serviceError('Local profile bindings cannot select a model', 'INVALID_PROFILE_BINDING')
+        }
+      } else if (model !== null) {
+        throw serviceError('A model requires a profile binding', 'INVALID_PROFILE_BINDING')
       }
       db.upsertAiCliProfileBinding({
         scopeType,
         scopeKey: key,
         adapterId,
         profileId: profileId || null,
+        modelId: model,
         updatedAt: now()
       })
       await persistOrThrow()
-      return db.getAiCliProfileBinding(scopeType, key, adapterId)
+      const binding = db.getAiCliProfileBinding(scopeType, key, adapterId)
+      const { modelId, ...safeBinding } = binding || {}
+      return { ...safeBinding, model: modelId || null }
     },
 
     listRevisions(profileId) {
@@ -372,39 +395,41 @@ export function createProfileService({
       return updateInternal(profileId, revision.config, 'rollback')
     },
 
-    resolveSessionProfile(options) {
+    resolveSessionProfile(options = {}) {
       return resolveProfileSelection({
         ...options,
+        cwd: options.projectKey ?? options.cwd,
         profiles: allProfiles({ adapterId: options.adapterId }),
         bindings: db.listAiCliProfileBindings({ adapterId: options.adapterId })
       })
     },
 
-    getClaudeProfileLaunchStamp(profileId) {
-      if (!profileId) return { profileId: null, runtimeRevision: null }
+    getClaudeProfileLaunchStamp(profileId, model = null) {
+      if (!profileId) return { profileId: null, model: null, runtimeRevision: null }
       const profile = db.getAiCliProfile(profileId) || serverProfile(profileId)
       if (!profile || (profile.sourceKind === 'server'
         ? !profile.supportedAdapterIds?.includes('claude')
         : profile.adapterId !== 'claude')) {
-        return { profileId, runtimeRevision: null }
+        return { profileId, model: null, runtimeRevision: null }
       }
       if (profile.sourceKind === 'server') {
-        return { profileId, runtimeRevision: `${profile.connectionRevision}:${profile.id}` }
+        return { profileId, model: typeof model === 'string' && model ? model : null, runtimeRevision: `${profile.connectionRevision}:${profile.id}:${model || ''}` }
       }
       return {
         profileId,
+        model: null,
         runtimeRevision: profile.updatedAt || null
       }
     },
 
-    resolveLaunchProfile({ profileId, adapterId, session = {}, baseEnv = process.env }) {
+    resolveLaunchProfile({ sessionId, adapterId, profileId, model = null, session = {}, baseEnv = process.env }) {
       const projected = serverProfile(profileId)
       if (projected) {
         return serverModelProjection.prepareRuntime({
           serviceProfileId: profileId,
-          modelId: session.model,
+          modelId: model,
           adapterId,
-          sessionId: session.id
+          sessionId: sessionId || session.id
         })
       }
       const profile = db.getAiCliProfile(profileId)
@@ -439,8 +464,8 @@ export function createProfileService({
       return serverModelProjection?.releaseRuntime?.(sessionId) || false
     },
 
-    resolveCodexLaunchProfile(profileId, session = {}) {
-      return service.resolveLaunchProfile({ profileId, adapterId: 'codex', session })
+    resolveCodexLaunchProfile(profileId, model, session = {}) {
+      return service.resolveLaunchProfile({ profileId, model, adapterId: 'codex', sessionId: session.id, session })
     },
 
     resolveCodexProfileRuntime(profileId) {

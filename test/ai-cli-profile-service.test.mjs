@@ -71,7 +71,8 @@ async function harness(options = {}) {
     fileOps: options.fileOps || codexProfileFiles,
     uuid: () => IDS[idIndex++],
     now: () => 100 + idIndex,
-    flush: options.flush || (() => db.flush())
+    flush: options.flush || (() => db.flush()),
+    serverModelProjection: options.serverModelProjection || null
   })
   return {
     root,
@@ -87,6 +88,59 @@ async function harness(options = {}) {
     }
   }
 }
+
+test('service binds and launches the exact selected server model without profile-only fallback', async () => {
+  const prepareCalls = []
+  const serverProfile = {
+    id: 'service-profile', sourceKind: 'server', supportedAdapterIds: ['codex', 'claude'],
+    models: [
+      { id: 'responses', protocols: ['openai_responses'], availabilityStatus: 'ready' },
+      { id: 'claude', protocols: ['anthropic_messages'], availabilityStatus: 'ready' }
+    ]
+  }
+  const context = await harness({
+    serverModelProjection: {
+      listProfiles: () => [serverProfile],
+      prepareRuntime(options) {
+        prepareCalls.push(options)
+        return { args: ['--model', options.modelId], env: {}, status: 'ready', runtimeRevision: 'revision-1' }
+      }
+    }
+  })
+  try {
+    const binding = await context.service.setBinding({
+      scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: serverProfile.id, model: 'responses'
+    })
+    assert.deepEqual(binding, {
+      scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: serverProfile.id,
+      model: 'responses', updatedAt: 100
+    })
+    assert.equal(context.db.getAiCliProfileBinding('app', '*', 'codex').modelId, 'responses')
+    assert.deepEqual(context.service.resolveSessionProfile({
+      adapterId: 'codex', cwd: 'F:\\projects\\demo'
+    }).model, 'responses')
+
+    const launch = context.service.resolveLaunchProfile({
+      sessionId: 'session-1', adapterId: 'codex', profileId: serverProfile.id, model: 'responses'
+    })
+    assert.equal(launch.args.at(-1), 'responses')
+    assert.deepEqual(prepareCalls, [{
+      serviceProfileId: serverProfile.id, modelId: 'responses', adapterId: 'codex', sessionId: 'session-1'
+    }])
+
+    await assert.rejects(
+      context.service.setBinding({ scopeType: 'project', scopeKey: 'F:\\projects\\demo', adapterId: 'codex', profileId: serverProfile.id, model: null }),
+      { code: 'PROFILE_MODEL_REQUIRED' }
+    )
+    const local = await context.service.createProfile(managedDraft())
+    await assert.rejects(
+      context.service.setBinding({ scopeType: 'project', scopeKey: 'F:\\projects\\local', adapterId: 'codex', profileId: local.id, model: 'responses' })
+    )
+    assert.equal(context.db.getAiCliProfileBinding('project', 'f:\\projects\\local', 'codex'), null)
+  } finally {
+    context.close()
+  }
+})
 
 test('createProfile rolls back database and secret rows when file projection fails', async () => {
   const context = await harness({

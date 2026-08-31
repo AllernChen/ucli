@@ -31,6 +31,7 @@ function sameIdentity(left, right) {
 function serviceProfileDto(profile, models, online) {
   const durableStatus = SERVER_STATUSES.has(profile.availabilityStatus) ? profile.availabilityStatus : 'unreachable'
   const status = durableStatus === 'ready' && !online ? 'unreachable' : durableStatus
+  const modelAvailabilityById = new Map(models.map((model) => [model.modelId, model.availabilityStatus]))
   const catalog = buildServiceProfileCatalog({
     serverOrigin: profile.serverOrigin,
     organization: { id: profile.organizationId, name: profile.organizationName },
@@ -44,6 +45,9 @@ function serviceProfileDto(profile, models, online) {
   })
   return {
     id: catalog.profile.id,
+    serverOrigin: catalog.profile.serverOrigin,
+    organization: { ...catalog.profile.organization },
+    availabilityStatus: durableStatus,
     name: profile.organizationName,
     kind: 'managed',
     sourceKind: 'server',
@@ -56,6 +60,7 @@ function serviceProfileDto(profile, models, online) {
       displayName: model.displayName,
       contextSize: model.contextSize,
       protocols: [...model.protocols],
+      availabilityStatus: modelAvailabilityById.get(model.id) || 'unreachable',
       artifactId: model.artifactId
     })),
     serverStatus: status,

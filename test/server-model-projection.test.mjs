@@ -129,6 +129,9 @@ test('synchronizes models into one cross-adapter service profile DTO', async () 
     { id: 'claude', protocols: ['anthropic_messages'] }
   ])
   assert.equal(profiles[0].id, 'http://server.example.test::org-1')
+  assert.deepEqual(profiles[0].organization, { id: 'org-1', name: 'Engineering' })
+  assert.equal(profiles[0].serverOrigin, 'http://server.example.test')
+  assert.deepEqual(profiles[0].models.map((model) => model.availabilityStatus), ['ready', 'ready', 'ready'])
   assert.equal(profiles[0].canStart, true)
 })
 
@@ -312,10 +315,12 @@ test('profile service forwards the persisted session model and explicit adapter 
     flush: () => true
   })
 
-  service.resolveCodexLaunchProfile(serviceProfile.id, { id: 'codex-session', model: 'responses' })
+  service.resolveCodexLaunchProfile(serviceProfile.id, 'responses', { id: 'codex-session', model: 'responses' })
   service.resolveLaunchProfile({
     profileId: serviceProfile.id,
     adapterId: 'claude',
+    model: 'claude',
+    sessionId: 'claude-session',
     session: { id: 'claude-session', model: 'claude' }
   })
   assert.deepEqual(calls, [

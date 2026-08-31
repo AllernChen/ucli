@@ -1,12 +1,14 @@
 export function claudeProfileLaunchStamp(session = {}) {
   return {
     profileId: session.profileId || null,
+    model: session.model || null,
     runtimeRevision: session.profileRuntimeRevision || null
   }
 }
 
 function sameStamp(left = {}, right = {}) {
   return (left.profileId || null) === (right.profileId || null) &&
+    (left.model || null) === (right.model || null) &&
     (left.runtimeRevision || null) === (right.runtimeRevision || null)
 }
 
