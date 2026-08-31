@@ -201,12 +201,77 @@ test('confirms only dual-available previews with one concurrent IPC call and ref
   await assert.rejects(connection.confirmAttempt(), { code: 'REGISTRATION_NOT_CONFIRMABLE' })
 })
 
-test('retains only stable public errors and refreshes catalog actions', async () => {
+test('confirmation remains successful when model catalog synchronization fails', async () => {
+  const connection = store()
+  await connection.loadAttempt('attempt-1')
+  const previousModels = window.ucli.listServerConnectionModels
+  const previousSkills = window.ucli.syncServerConnectionSkills
+  window.ucli.listServerConnectionModels = async () => {
+    throw Object.assign(new Error('synthetic-secret model response'), { code: 'synthetic-model-error', retryable: true })
+  }
+  window.ucli.syncServerConnectionSkills = async () => [{ id: 'version-1', lifecycleStatus: 'AVAILABLE' }]
+
+  try {
+    const state = await connection.confirmAttempt()
+
+    assert.equal(state, initialState)
+    assert.equal(connection.status, 'connected')
+    assert.equal(connection.connectionError, null)
+    assert.deepEqual(connection.modelCatalogError, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
+    assert.equal(connection.skillsCatalogError, null)
+    assert.equal(JSON.stringify(connection.modelCatalogError).includes('synthetic-secret'), false)
+  } finally {
+    window.ucli.listServerConnectionModels = previousModels
+    window.ucli.syncServerConnectionSkills = previousSkills
+  }
+})
+
+test('redeem remains successful when Skills catalog synchronization fails', async () => {
+  const connection = store()
+  await connection.loadAttempt('attempt-1')
+  const previousModels = window.ucli.listServerConnectionModels
+  const previousSkills = window.ucli.syncServerConnectionSkills
+  window.ucli.listServerConnectionModels = async () => [{ id: 'server-profile', sourceKind: 'server' }]
+  window.ucli.syncServerConnectionSkills = async () => {
+    throw Object.assign(new Error('synthetic-secret Skills response'), { code: 'synthetic-skills-error', retryable: true })
+  }
+
+  try {
+    const state = await connection.retryRedeem()
+
+    assert.equal(state, initialState)
+    assert.equal(connection.status, 'connected')
+    assert.equal(connection.connectionError, null)
+    assert.equal(connection.modelCatalogError, null)
+    assert.deepEqual(connection.skillsCatalogError, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
+    assert.equal(JSON.stringify(connection.skillsCatalogError).includes('synthetic-secret'), false)
+  } finally {
+    window.ucli.listServerConnectionModels = previousModels
+    window.ucli.syncServerConnectionSkills = previousSkills
+  }
+})
+
+test('catalog actions clear only their own error domain', async () => {
+  const connection = store()
+  const connectionError = { code: 'NETWORK_UNREACHABLE', message: '服务端连接暂时不可用，请稍后重试', retryable: true }
+  const skillsCatalogError = { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: false }
+  connection.connectionError = connectionError
+  connection.modelCatalogError = { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true }
+  connection.skillsCatalogError = skillsCatalogError
+
+  await connection.syncModels()
+
+  assert.deepEqual(connection.connectionError, connectionError)
+  assert.equal(connection.modelCatalogError, null)
+  assert.deepEqual(connection.skillsCatalogError, skillsCatalogError)
+})
+
+test('retains only stable public connection errors and refreshes catalog actions', async () => {
   const connection = store()
   window.ucli.syncServerConnection = async () => { throw Object.assign(new Error('synthetic-secret response'), { code: 'NETWORK_UNREACHABLE', retryable: true, stack: 'sensitive' }) }
   await assert.rejects(connection.syncConnection())
-  assert.deepEqual(connection.error, { code: 'NETWORK_UNREACHABLE', message: '服务端连接暂时不可用，请稍后重试', retryable: true })
-  assert.equal(JSON.stringify(connection.error).includes('synthetic-secret'), false)
+  assert.deepEqual(connection.connectionError, { code: 'NETWORK_UNREACHABLE', message: '服务端连接暂时不可用，请稍后重试', retryable: true })
+  assert.equal(JSON.stringify(connection.connectionError).includes('synthetic-secret'), false)
   await connection.syncSkills()
   await connection.installSkill('version-1', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
   await connection.updateSkill('version-1', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
@@ -433,7 +498,7 @@ test('unknown server errors never retain attacker-controlled codes or text', asy
   const connection = store()
   window.ucli.syncServerConnection = async () => { throw Object.assign(new Error('synthetic-secret'), { code: 'synthetic-secret-code', retryable: true }) }
   await assert.rejects(connection.syncConnection())
-  assert.deepEqual(connection.error, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
+  assert.deepEqual(connection.connectionError, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
 })
 
 test('stable terminal grant errors retain reauthorization guidance', async () => {
@@ -446,7 +511,7 @@ test('stable terminal grant errors retain reauthorization guidance', async () =>
     ]) {
       window.ucli.syncServerConnection = async () => { throw Object.assign(new Error('opaque server detail'), { code }) }
       await assert.rejects(connection.syncConnection(), { code })
-      assert.deepEqual(connection.error, { code, message, retryable: false })
+      assert.deepEqual(connection.connectionError, { code, message, retryable: false })
     }
   } finally {
     window.ucli.syncServerConnection = previousSync

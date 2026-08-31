@@ -5,14 +5,25 @@ import { parse as parseSfc } from '@vue/compiler-sfc'
 
 const panel = readFileSync(new URL('../src/components/settings/ServerConnectionPanel.vue', import.meta.url), 'utf8')
 const dialog = readFileSync(new URL('../src/components/serverConnection/RegistrationConfirmDialog.vue', import.meta.url), 'utf8')
+const skillsCenter = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
 
 test('server connection settings components compile and cover public lifecycle states', () => {
   assert.deepEqual(parseSfc(panel, { filename: 'ServerConnectionPanel.vue' }).errors, [])
   assert.deepEqual(parseSfc(dialog, { filename: 'RegistrationConfirmDialog.vue' }).errors, [])
+  assert.deepEqual(parseSfc(skillsCenter, { filename: 'SkillsCenter.vue' }).errors, [])
   for (const status of ['disconnected', 'connecting', 'connected', 'unreachable', 'PERSISTENCE_PENDING', 'expiring', 'disabled', 'expired', 'deleted', 'account_inactive', 'org_inactive']) {
     assert.match(panel, new RegExp(status))
   }
   for (const label of ['授权到期', '最近同步', '粘贴连接', '便携版']) assert.match(panel, new RegExp(label))
+})
+
+test('connection and catalog errors are rendered by their owning surfaces', () => {
+  assert.match(panel, /connection\.connectionError/)
+  assert.match(panel, /connection\.modelCatalogError/)
+  assert.match(panel, /connection\.skillsCatalogError/)
+  assert.doesNotMatch(panel, /connection\.error/)
+  assert.match(skillsCenter, /serverConnection\.skillsCatalogError/)
+  assert.doesNotMatch(skillsCenter, /serverConnection\.error/)
 })
 
 test('registration dialog renders independent link and authorization status and cancels on close', () => {

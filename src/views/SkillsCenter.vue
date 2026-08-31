@@ -37,6 +37,14 @@
       <template #extra>
         <a-button size="small" :loading="serverConnection.busy" @click="syncOrganizationSkills">同步组织目录</a-button>
       </template>
+      <a-alert
+        v-if="serverConnection.skillsCatalogError"
+        type="warning"
+        show-icon
+        closable
+        :message="serverConnection.skillsCatalogError.message"
+        @close="serverConnection.skillsCatalogError = null"
+      />
       <a-empty v-if="!serverConnection.skills.length" description="当前没有可用的组织 Skills" />
       <a-list v-else :data-source="serverConnection.skills" item-layout="horizontal">
         <template #renderItem="{ item }">
@@ -834,7 +842,7 @@ async function syncOrganizationSkills() {
   try {
     await serverConnection.syncSkills()
     await skills.load(projectPath.value)
-  } catch { message.error(serverConnection.error?.message || '无法同步组织 Skills') }
+  } catch { message.error(serverConnection.skillsCatalogError?.message || '无法同步组织 Skills') }
 }
 async function chooseServerSkillProject() {
   const selected = await ipc.pickDirectory()
@@ -851,13 +859,13 @@ async function installOrganizationSkill(item) {
   try {
     await serverConnection.installSkill(item.versionId, organizationSkillTargets())
     await skills.load(projectPath.value)
-  } catch { message.error(serverConnection.error?.message || '组织 Skill 安装失败') }
+  } catch { message.error(serverConnection.skillsCatalogError?.message || '组织 Skill 安装失败') }
 }
 async function updateOrganizationSkill(item) {
   try {
     await serverConnection.updateSkill(item.versionId, organizationSkillTargets())
     await skills.load(projectPath.value)
-  } catch { message.error(serverConnection.error?.message || '组织 Skill 更新失败') }
+  } catch { message.error(serverConnection.skillsCatalogError?.message || '组织 Skill 更新失败') }
 }
 async function chooseProject() {
   const selected = await ipc.pickDirectory()
