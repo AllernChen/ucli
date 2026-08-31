@@ -1,4 +1,60 @@
+import {
+  compatibleModelsForAdapter,
+  validateServiceProfileSelection
+} from './serviceProfileSelection.js'
+
 const PROFILE_ADAPTERS = new Set(['codex', 'claude'])
+
+export function isServiceProfile(profile) {
+  return profile?.source === 'server' || profile?.sourceKind === 'server'
+}
+
+export function isReadyServiceProfileForAdapter(profile, adapterId) {
+  return isServiceProfile(profile) && profile.availabilityStatus === 'ready' &&
+    compatibleModelsForAdapter(profile, adapterId).some(model => model?.availabilityStatus === 'ready')
+}
+
+export function sessionProfileDraftFor(session = {}) {
+  return {
+    profileId: session.profileId || 'system',
+    model: session.profileId ? (session.model || null) : null
+  }
+}
+
+export function importedSessionModelForSelection({
+  selection,
+  discoveredModel,
+  explicitModel
+} = {}) {
+  if (selection === 'history' || selection === 'system') return discoveredModel
+  return explicitModel !== undefined ? explicitModel : discoveredModel
+}
+
+export function deriveServiceProfileSessionState({
+  profile = null,
+  adapterId,
+  profileId = null,
+  model = null,
+  historical = false
+} = {}) {
+  const selection = validateServiceProfileSelection({ profile, adapterId, modelId: model })
+  const profileAvailable = !profile?.availabilityStatus || profile.availabilityStatus === 'ready'
+  const canStart = selection.valid && profileAvailable
+  return {
+    profileId,
+    model,
+    canStart,
+    reason: canStart ? null : (selection.valid ? 'model-unavailable' : selection.reason),
+    ...(historical ? {
+      historicalModel: {
+        id: model,
+        displayName: model,
+        historical: true,
+        availabilityStatus: 'removed'
+      }
+    } : {})
+  }
+}
 
 export function deriveSessionConfigState(session = {}) {
   const profileCapable = PROFILE_ADAPTERS.has(session.adapterId)

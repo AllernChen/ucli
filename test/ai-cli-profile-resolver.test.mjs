@@ -34,7 +34,7 @@ test('new session profile priority is explicit then project then app then system
     },
     {
       input: { cwd: 'F:\\projects\\other', bindings: [] },
-      expected: [null, 'system']
+      expected: [null, 'none']
     }
   ]
 
@@ -52,6 +52,71 @@ test('new session profile priority is explicit then project then app then system
   }
 })
 
+test('service profile selection keeps the exact model through explicit, project, and app precedence', () => {
+  const serviceProfiles = [
+    {
+      id: 'service-profile', sourceKind: 'server', supportedAdapterIds: ['codex', 'claude'],
+      models: [
+        { id: 'explicit-responses', protocols: ['openai_responses'], availabilityStatus: 'ready' },
+        { id: 'project-responses', protocols: ['openai_responses'], availabilityStatus: 'ready' },
+        { id: 'app-responses', protocols: ['openai_responses'], availabilityStatus: 'ready' }
+      ]
+    }
+  ]
+  const serviceBindings = [
+    { scopeType: 'project', scopeKey: 'F:\\projects\\demo', adapterId: 'codex', profileId: 'service-profile', modelId: 'project-responses' },
+    { scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: 'service-profile', modelId: 'app-responses' }
+  ]
+  const cases = [
+    { input: { explicitProfileId: 'service-profile', explicitModel: 'explicit-responses', cwd: 'F:\\projects\\demo' }, expected: ['explicit', 'explicit-responses'] },
+    { input: { cwd: 'F:\\projects\\demo' }, expected: ['project', 'project-responses'] },
+    { input: { cwd: 'F:\\projects\\other' }, expected: ['app', 'app-responses'] },
+    { input: { cwd: 'F:\\projects\\other', bindings: [] }, expected: ['none', null] }
+  ]
+
+  for (const entry of cases) {
+    const result = resolveSessionProfile({
+      adapterId: 'codex', profiles: serviceProfiles, bindings: serviceBindings, ...entry.input
+    })
+    assert.equal(result.selectionSource, entry.expected[0])
+    assert.equal(result.model, entry.expected[1])
+    assert.equal(result.status, 'ready')
+    assert.equal(result.canStart, true)
+  }
+})
+
+test('service profile selection fails closed for missing, unavailable, and protocol-incompatible models', () => {
+  const profile = {
+    id: 'service-profile', sourceKind: 'server', supportedAdapterIds: ['codex', 'claude'],
+    models: [
+      { id: 'responses', protocols: ['openai_responses'], availabilityStatus: 'ready' },
+      { id: 'disabled', protocols: ['openai_responses'], availabilityStatus: 'disabled' }
+    ]
+  }
+  const select = (adapterId, explicitModel) => resolveSessionProfile({
+    adapterId, explicitProfileId: profile.id, explicitModel, profiles: [profile]
+  })
+
+  assert.deepEqual(select('codex', null), {
+    profileId: 'service-profile', model: null, profile,
+    selectionSource: 'explicit', status: 'model-required', canStart: false
+  })
+  assert.equal(select('codex', 'missing').status, 'model-unavailable')
+  assert.equal(select('codex', 'disabled').status, 'model-unavailable')
+  assert.equal(select('claude', 'responses').status, 'protocol-unavailable')
+})
+
+test('local profile bindings continue to resolve with a null model', () => {
+  const profile = { id: 'local-profile', adapterId: 'codex', status: 'ready', canStart: true }
+  assert.deepEqual(resolveSessionProfile({
+    adapterId: 'codex', cwd: 'F:\\projects\\demo', profiles: [profile],
+    bindings: [{ scopeType: 'project', scopeKey: 'F:\\projects\\demo', adapterId: 'codex', profileId: profile.id, modelId: null }]
+  }), {
+    profileId: profile.id, model: null, profile,
+    selectionSource: 'project', status: 'ready', canStart: true
+  })
+})
+
 test('imported sessions keep their source provider unless a profile is explicit', () => {
   assert.deepEqual(resolveSessionProfile({
     adapterId: 'codex',
@@ -63,6 +128,7 @@ test('imported sessions keep their source provider unless a profile is explicit'
     profileId: null,
     profile: null,
     selectionSource: 'history',
+    model: null,
     status: null,
     canStart: true
   })
@@ -88,6 +154,7 @@ test('missing selected profile blocks launch with a stable status', () => {
     bindings
   }), {
     profileId: 'profile-project',
+    model: null,
     profile: null,
     selectionSource: 'project',
     status: 'missing_profile',

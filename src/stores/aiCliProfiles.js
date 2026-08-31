@@ -18,6 +18,8 @@ export const useAiCliProfilesStore = defineStore('ai-cli-profiles', {
   getters: {
     profileById: (state) => (profileId) =>
       state.profiles.find((profile) => profile.id === profileId) || null,
+    localProfiles: (state) => state.profiles.filter((profile) => profile.source !== 'server'),
+    serviceProfiles: (state) => state.profiles.filter((profile) => profile.source === 'server'),
     cliById: (state) => (adapterId) => {
       const inventory = state.cliInventory.find((item) => item.id === adapterId) || {}
       const configuration = state.cliConfiguration.find((item) => item.adapterId === adapterId) || {}

@@ -33,7 +33,7 @@
                 <div>
                   <span class="sess-item-name">{{ s.name || s.sessionId?.slice(0, 12) }}</span>
                   <a-tag v-if="s.imported" color="default">已添加</a-tag>
-                  <span class="sess-item-meta" v-if="s.model">{{ s.model }}</span>
+                  <span class="sess-item-meta" v-if="s.model">{{ s.model }}（历史模型）</span>
                   <span class="sess-item-meta provider-change" v-if="s.providerChanged">provider: {{ s.sourceProvider }} → {{ s.resumeProvider }}</span>
                   <span class="sess-item-meta" v-else-if="s.sourceProvider">provider: {{ s.sourceProvider }}</span>
                   <span class="sess-item-meta" v-if="s.turns">{{ s.turns }} 轮</span>
@@ -67,27 +67,53 @@
       <div class="section-title">{{ adapterName(adapterId) }} 配置档案</div>
       <div class="profile-choice-row">
         <span>新建 {{ adapterName(adapterId) }}</span>
-        <a-select v-model:value="form.profileSelections[adapterId]" style="width: 280px">
+        <a-select v-model:value="form.profileSelections[adapterId]" style="width: 280px" @change="clearModelSelection(adapterId, false)">
           <a-select-option value="inherit">按项目默认</a-select-option>
           <a-select-option :value="defaultProfile(adapterId, 'app') ? `profile:${defaultProfile(adapterId, 'app').id}` : 'app-unavailable'" :disabled="!defaultProfile(adapterId, 'app')">按应用默认</a-select-option>
           <a-select-option value="system">跟随当前</a-select-option>
-          <a-select-opt-group label="具体档案">
-            <a-select-option v-for="profile in profilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
-              {{ profile.name }}{{ profile.sourceKind === 'server' ? '（组织提供）' : '' }}{{ profile.canStart ? '' : '（当前不可用）' }}
+          <a-select-opt-group label="服务档案（具体档案）">
+            <a-select-option v-for="profile in serverProfilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!canSelectProfile(profile, adapterId)">
+              {{ profileLabel(profile) }}{{ profile.canStart === false ? '（当前不可用）' : '' }}
+            </a-select-option>
+          </a-select-opt-group>
+          <a-select-opt-group label="本地档案">
+            <a-select-option v-for="profile in localProfilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!canSelectProfile(profile, adapterId)">
+              {{ profileLabel(profile) }}{{ profile.canStart === false ? '（当前不可用）' : '' }}
             </a-select-option>
           </a-select-opt-group>
         </a-select>
       </div>
+      <div v-if="selectedServiceProfile(adapterId, false)" class="profile-choice-row">
+        <span>服务模型</span>
+        <a-select v-model:value="form.modelSelections[adapterId]" style="width: 280px" placeholder="请选择兼容模型">
+          <a-select-option v-for="model in compatibleModels(adapterId, false)" :key="model.id" :value="model.id" :disabled="model.availabilityStatus !== 'ready'">
+            {{ serviceModelLabel(model) }}
+          </a-select-option>
+        </a-select>
+      </div>
       <div class="profile-choice-row">
         <span>导入 {{ adapterName(adapterId) }}</span>
-        <a-select v-model:value="importProfileSelections[adapterId]" style="width: 280px">
-          <a-select-option value="history">保持历史连接</a-select-option>
+        <a-select v-model:value="importProfileSelections[adapterId]" style="width: 280px" @change="clearModelSelection(adapterId, true)">
+          <a-select-option value="history">保持历史连接（保留历史选择）</a-select-option>
           <a-select-option value="system">跟随当前</a-select-option>
-          <a-select-opt-group label="具体档案">
-            <a-select-option v-for="profile in profilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
-              {{ profile.name }}{{ profile.sourceKind === 'server' ? '（组织提供）' : '' }}{{ profile.canStart ? '' : '（当前不可用）' }}
+          <a-select-opt-group label="服务档案">
+            <a-select-option v-for="profile in serverProfilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!canSelectProfile(profile, adapterId)">
+              {{ profileLabel(profile) }}{{ profile.canStart === false ? '（当前不可用）' : '' }}
             </a-select-option>
           </a-select-opt-group>
+          <a-select-opt-group label="本地档案">
+            <a-select-option v-for="profile in localProfilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!canSelectProfile(profile, adapterId)">
+              {{ profileLabel(profile) }}{{ profile.canStart === false ? '（当前不可用）' : '' }}
+            </a-select-option>
+          </a-select-opt-group>
+        </a-select>
+      </div>
+      <div v-if="selectedServiceProfile(adapterId, true)" class="profile-choice-row">
+        <span>服务模型</span>
+        <a-select v-model:value="importModelSelections[adapterId]" style="width: 280px" placeholder="请选择兼容模型">
+          <a-select-option v-for="model in compatibleModels(adapterId, true)" :key="model.id" :value="model.id" :disabled="model.availabilityStatus !== 'ready'">
+            {{ serviceModelLabel(model) }}
+          </a-select-option>
         </a-select>
       </div>
       <div class="profile-choice-help">项目默认：{{ defaultProfile(adapterId, 'project')?.name || '未设置' }}；应用默认：{{ defaultProfile(adapterId, 'app')?.name || '未设置' }}</div>
@@ -135,6 +161,9 @@ import { useSessionsStore } from '../stores/sessions.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import { ipc } from '../ipc.js'
+import { compatibleModelsForAdapter, validateServiceProfileSelection } from '../serviceProfileSelection.js'
+import { importedSessionModelForSelection, isServiceProfile } from '../sessionConfigPresentation.js'
+import { serviceModelLabel } from '../profilePresentation.js'
 
 const props = defineProps({
   initialCwd: { type: String, default: '' },
@@ -159,11 +188,13 @@ const dshMigrationOpen = ref(false)
 
 const form = ref({
   adapterId: 'claude', cwd: '', name: '', model: undefined, tier: 'safety-rules',
-  profileSelections: { codex: 'inherit', claude: 'inherit' }
+  profileSelections: { codex: 'inherit', claude: 'inherit' },
+  modelSelections: { codex: null, claude: null }
 })
 const discovered = ref({ claude: [], codex: [], opencode: [], ucode: [] })
 const selectedSessions = ref({})
 const importProfileSelections = ref({ codex: 'history', claude: 'history' })
+const importModelSelections = ref({ codex: null, claude: null })
 
 const hasAnySessions = computed(() =>
   discoverableAdapters.value.some((a) => (discovered.value[a.id] || []).length > 0)
@@ -197,7 +228,12 @@ const cliGroups = computed(() => {
   }
   return groups
 })
-const profilesForAdapter = (adapterId) => aiProfiles.profiles.filter((profile) => profile.adapterId === adapterId)
+const profilesForAdapter = (adapterId) => aiProfiles.profiles.filter((profile) =>
+  profile.adapterId === adapterId || isServiceProfile(profile)
+)
+const localProfilesForAdapter = (adapterId) => profilesForAdapter(adapterId)
+  .filter((profile) => !isServiceProfile(profile))
+const serverProfilesForAdapter = (adapterId) => profilesForAdapter(adapterId).filter(isServiceProfile)
 const profileCapableAdapter = (adapterId) => ['codex', 'claude'].includes(adapterId)
 const profileAdapterIds = ['codex', 'claude']
 const visibleProfileAdapterIds = computed(() =>
@@ -209,7 +245,7 @@ const adapterName = (adapterId) => sessions.adapters.find((adapter) => adapter.i
 const dshAdapter = computed(() => sessions.adapters.find(
   adapter => adapter.id === 'deepseek-harness'
 ) || null)
-const defaultProfile = (adapterId, scope) => profilesForAdapter(adapterId)
+const defaultProfile = (adapterId, scope) => localProfilesForAdapter(adapterId)
   .find((profile) => scope === 'project' ? profile.isProjectDefault : profile.isAppDefault) || null
 
 onMounted(async () => {
@@ -235,7 +271,9 @@ watch(open, (val) => {
   if (!val) return
   selectedSessions.value = {}
   form.value.profileSelections = { codex: 'inherit', claude: 'inherit' }
+  form.value.modelSelections = { codex: null, claude: null }
   importProfileSelections.value = { codex: 'history', claude: 'history' }
+  importModelSelections.value = { codex: null, claude: null }
   form.value.name = ''
   discovered.value = { claude: [], codex: [], opencode: [], ucode: [] }
   if (dshMigrationOpen.value) {
@@ -317,17 +355,73 @@ async function discover(cwd) {
   }
 }
 
-function profileConfigForSelection(imported, adapterId) {
+function profileLabel(profile) {
+  return isServiceProfile(profile) ? (profile.organization?.name || profile.id) : profile.name
+}
+
+function selectionValue(imported, adapterId) {
   const selection = imported
     ? importProfileSelections.value[adapterId]
     : form.value.profileSelections[adapterId]
+  return typeof selection === 'string' ? selection : 'inherit'
+}
+
+function selectedServiceProfile(adapterId, imported) {
+  const selection = selectionValue(imported, adapterId)
+  if (!selection.startsWith('profile:')) return null
+  const profile = aiProfiles.profileById(selection.slice('profile:'.length))
+  return isServiceProfile(profile) ? profile : null
+}
+
+function compatibleModels(adapterId, imported) {
+  return compatibleModelsForAdapter(selectedServiceProfile(adapterId, imported), adapterId)
+}
+
+function canSelectProfile(profile, adapterId) {
+  return isServiceProfile(profile)
+    ? profile.availabilityStatus === 'ready' && compatibleModelsForAdapter(profile, adapterId).length > 0
+    : profile.canStart !== false
+}
+
+function clearModelSelection(adapterId, imported) {
+  if (imported) importModelSelections.value[adapterId] = null
+  else form.value.modelSelections[adapterId] = null
+}
+
+function selectedModelId(imported, adapterId) {
+  return imported ? importModelSelections.value[adapterId] : form.value.modelSelections[adapterId]
+}
+
+function profileConfigForSelection(imported, adapterId) {
+  const selection = selectionValue(imported, adapterId)
   if (selection === 'system') return { profileSelection: 'system' }
   if (typeof selection === 'string' && selection.startsWith('profile:')) {
     const profileId = selection.slice('profile:'.length)
     const profile = aiProfiles.profileById(profileId)
-    return profile?.adapterId === adapterId ? { profileId } : {}
+    if (isServiceProfile(profile)) {
+      const modelId = selectedModelId(imported, adapterId)
+      const validation = validateServiceProfileSelection({ profile, adapterId, modelId })
+      return validation.valid ? { profileId, model: modelId } : { error: validation.reason }
+    }
+    return profile?.adapterId === adapterId ? { profileId, model: null } : {}
   }
   return {}
+}
+
+function profileSelectionError(config) {
+  return ({
+    'model-required': '请选择兼容模型',
+    'model-unavailable': '所选模型当前不可用',
+    'protocol-unavailable': '所选模型与当前 CLI 不兼容'
+  })[config?.error] || null
+}
+
+function validateRequestedServiceModels(imported) {
+  for (const adapterId of profileAdapterIds) {
+    const error = profileSelectionError(profileConfigForSelection(imported, adapterId))
+    if (error) return error
+  }
+  return null
 }
 
 function fmtTime(ts) {
@@ -338,6 +432,8 @@ function fmtTime(ts) {
 
 async function importSelected() {
   if (!totalSelected.value || !form.value.cwd) { message.warning('请选择工作目录和会话'); return }
+  const selectionError = validateRequestedServiceModels(true)
+  if (selectionError) { message.warning(selectionError); return }
   creating.value = true
   let lastId = null, count = 0
   try {
@@ -358,6 +454,12 @@ async function importSelected() {
           const profileConfig = profileConfigForSelection(true, group.id)
           if (profileConfig.profileId) config.profileId = profileConfig.profileId
           if (profileConfig.profileSelection) config.profileSelection = profileConfig.profileSelection
+          const importedModel = importedSessionModelForSelection({
+            selection: selectionValue(true, group.id),
+            discoveredModel: cs?.model,
+            explicitModel: profileConfig.model
+          })
+          if (importedModel !== undefined) config.model = importedModel
         }
         if (cs?.name) config.name = cs.name
         if (cs?.startedAt) config.startedAt = cs.startedAt
@@ -377,6 +479,10 @@ async function importSelected() {
 
 async function newSession(adapter) {
   if (!form.value.cwd) { message.warning('请先选择工作目录'); return }
+  const selectionError = profileCapableAdapter(adapter.id)
+    ? profileSelectionError(profileConfigForSelection(false, adapter.id))
+    : null
+  if (selectionError) { message.warning(selectionError); return }
   creating.value = true
   try {
     const config = {
@@ -391,6 +497,7 @@ async function newSession(adapter) {
       const profileConfig = profileConfigForSelection(false, adapter.id)
       if (profileConfig.profileId) config.profileId = profileConfig.profileId
       if (profileConfig.profileSelection) config.profileSelection = profileConfig.profileSelection
+      if (profileConfig.model !== undefined) config.model = profileConfig.model
     }
     if (adapter.id === 'deepseek-harness') {
       form.value.adapterId = adapter.id

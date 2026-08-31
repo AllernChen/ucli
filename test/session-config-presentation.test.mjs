@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { deriveSessionConfigState } from '../src/sessionConfigPresentation.js'
+import {
+  deriveServiceProfileSessionState,
+  deriveSessionConfigState,
+  importedSessionModelForSelection
+} from '../src/sessionConfigPresentation.js'
 
 test('active unmanaged Codex sessions expose direct Provider controls', () => {
   assert.deepEqual(deriveSessionConfigState({
@@ -67,4 +71,69 @@ test('profile and Provider warnings produce stable attention messages', () => {
     deriveSessionConfigState({ adapterId: 'codex', status: 'idle', providerWarning: 'source_provider_unavailable' }).attentionText,
     'Provider 配置需要处理'
   )
+})
+
+test('service profile session state fails closed for missing and removed models', () => {
+  const profile = {
+    id: 'http://server.test::org-1',
+    source: 'server',
+    models: [{
+      id: 'responses',
+      displayName: 'Responses',
+      protocols: ['openai_responses'],
+      availabilityStatus: 'ready'
+    }]
+  }
+
+  assert.deepEqual(deriveServiceProfileSessionState({
+    profile, adapterId: 'codex', profileId: profile.id, model: null
+  }), { profileId: profile.id, model: null, canStart: false, reason: 'model-required' })
+  assert.deepEqual(deriveServiceProfileSessionState({
+    profile, adapterId: 'codex', profileId: profile.id, model: 'removed'
+  }), { profileId: profile.id, model: 'removed', canStart: false, reason: 'model-unavailable' })
+  assert.deepEqual(deriveServiceProfileSessionState({
+    profile, adapterId: 'codex', profileId: profile.id, model: 'responses'
+  }), { profileId: profile.id, model: 'responses', canStart: true, reason: null })
+})
+
+test('service profile session state keeps an absent imported model visible as historical', () => {
+  const state = deriveServiceProfileSessionState({
+    profile: {
+      id: 'http://server.test::org-1',
+      source: 'server',
+      models: []
+    },
+    adapterId: 'codex',
+    profileId: 'http://server.test::org-1',
+    model: 'removed',
+    historical: true
+  })
+
+  assert.deepEqual(state.historicalModel, {
+    id: 'removed',
+    displayName: 'removed',
+    historical: true,
+    availabilityStatus: 'removed'
+  })
+})
+
+test('initial and secondary imports retain discovered models for history and system selections', () => {
+  for (const selection of ['history', 'system']) {
+    assert.equal(importedSessionModelForSelection({
+      selection,
+      discoveredModel: 'historical-model',
+      explicitModel: 'catalog-default'
+    }), 'historical-model')
+  }
+
+  assert.equal(importedSessionModelForSelection({
+    selection: 'profile:server',
+    discoveredModel: 'historical-model',
+    explicitModel: 'selected-server-model'
+  }), 'selected-server-model')
+  assert.equal(importedSessionModelForSelection({
+    selection: 'profile:local',
+    discoveredModel: 'historical-model',
+    explicitModel: null
+  }), null)
 })

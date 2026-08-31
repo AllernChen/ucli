@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import { registerAiCliProfileIpc } from '../electron/aiCliProfiles/ipc.js'
+import { stableServiceProfileId } from '../electron/serverConnection/serviceProfileCatalog.js'
 
 function register(serviceOverrides = {}) {
   const handlers = new Map()
@@ -15,6 +16,7 @@ function register(serviceOverrides = {}) {
   const service = {
     listCliConfigurationState: () => [{ adapterId: 'codex', mode: 'profiles', profileCount: 1 }],
     listProfiles: () => [profile],
+    listServiceProfiles: () => [],
     createProfile: async (draft) => { calls.push(['create', draft]); return profile },
     updateProfile: async (...args) => { calls.push(['update', ...args]); return profile },
     replaceProfileSecret: async (...args) => { calls.push(['secret', ...args]); return profile },
@@ -72,6 +74,113 @@ test('profile IPC validates identifiers and whitelists renderer input', async ()
     name: 'Renamed', path: 'C:\\forged\\profile.toml'
   })
   assert.deepEqual(calls[1], ['update', 'profile-1', { name: 'Renamed' }])
+
+  await handlers.get('ai-cli-profiles:set-binding')({}, {
+    scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: 'service-profile', model: 'responses'
+  })
+  assert.deepEqual(calls[2], ['binding', {
+    scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: 'service-profile', model: 'responses'
+  }])
+  await handlers.get('ai-cli-profiles:set-binding')({}, {
+    scopeType: 'project', scopeKey: 'F:\\projects\\demo', adapterId: 'codex', profileId: 'profile-1'
+  })
+  assert.deepEqual(calls[3], ['binding', {
+    scopeType: 'project', scopeKey: 'F:\\projects\\demo', adapterId: 'codex', profileId: 'profile-1', model: null
+  }])
+  await assert.rejects(
+    handlers.get('ai-cli-profiles:set-binding')({}, {
+      scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: 'service-profile', model: '', revision: 'forged'
+    }),
+    { code: 'INVALID_PROFILE_IPC' }
+  )
+})
+
+test('profile IPC serializes server profiles through an explicit redaction DTO', async () => {
+  const serviceProfile = {
+    id: 'service-profile', sourceKind: 'server', readOnly: true,
+    serverOrigin: 'https://server.example.com',
+    organization: { id: 'org-1', name: 'Engineering' },
+    availabilityStatus: 'ready', status: 'unreachable', canStart: false, supportedAdapterIds: ['codex', 'claude'],
+    connectionRevision: 'connection-secret', artifactDigest: 'digest-secret',
+    config: { token: 'config-secret' }, headers: { Authorization: 'Bearer header-secret' },
+    models: [{
+      id: 'responses', displayName: 'Responses', contextSize: 128000,
+      protocols: ['openai_responses'], availabilityStatus: 'ready',
+      artifactId: 'artifact-secret', codexFileSha256: 'hash-secret', token: 'model-secret'
+    }]
+  }
+  const { handlers } = register({ listProfiles: () => [serviceProfile] })
+
+  const state = await handlers.get('ai-cli-profiles:get-state')({}, {})
+  assert.deepEqual(state.profiles, [{
+    id: 'service-profile', source: 'server', readOnly: true,
+    serverOrigin: 'https://server.example.com',
+    organization: { id: 'org-1', name: 'Engineering' },
+    availabilityStatus: 'ready', status: 'unreachable', canStart: false, supportedAdapterIds: ['codex', 'claude'],
+    models: [{
+      id: 'responses', displayName: 'Responses', contextSize: 128000,
+      protocols: ['openai_responses'], availabilityStatus: 'ready'
+    }]
+  }])
+  assert.equal(/connection-secret|digest-secret|config-secret|header-secret|artifact-secret|hash-secret|model-secret/.test(JSON.stringify(state)), false)
+})
+
+test('profile state includes a chat-only service profile exactly once without making it selectable', async () => {
+  const chatOnlyProfile = {
+    id: 'chat-only-service', sourceKind: 'server', readOnly: true,
+    serverOrigin: 'https://server.example.com',
+    organization: { id: 'org-1', name: 'Engineering' },
+    availabilityStatus: 'ready', status: 'unreachable', canStart: false, supportedAdapterIds: [],
+    models: [{
+      id: 'chat', displayName: 'Chat only', contextSize: 64000,
+      protocols: ['openai_chat'], availabilityStatus: 'ready'
+    }]
+  }
+  const { handlers } = register({
+    listCliConfigurationState: () => [
+      { adapterId: 'codex', mode: 'profiles', profileCount: 0 },
+      { adapterId: 'claude', mode: 'profiles', profileCount: 0 }
+    ],
+    listProfiles: () => [],
+    listServiceProfiles: () => [chatOnlyProfile]
+  })
+
+  const state = await handlers.get('ai-cli-profiles:get-state')({}, {})
+  assert.deepEqual(state.profiles, [{
+    id: 'chat-only-service', source: 'server', readOnly: true,
+    serverOrigin: 'https://server.example.com',
+    organization: { id: 'org-1', name: 'Engineering' },
+    availabilityStatus: 'ready', status: 'unreachable', canStart: false, supportedAdapterIds: [],
+    models: [{
+      id: 'chat', displayName: 'Chat only', contextSize: 64000,
+      protocols: ['openai_chat'], availabilityStatus: 'ready'
+    }]
+  }])
+})
+
+test('profile binding accepts canonical service IDs and rejects unsafe opaque IDs before delegation', async () => {
+  const { handlers, calls } = register()
+  const profileId = stableServiceProfileId({
+    serverOrigin: 'http://server.example.test:80/', organizationId: 'org-1'
+  })
+
+  await handlers.get('ai-cli-profiles:set-binding')({}, {
+    scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId, model: 'responses'
+  })
+  assert.deepEqual(calls, [['binding', {
+    scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId, model: 'responses'
+  }]])
+
+  for (const invalidProfileId of ['', 'server\0profile', 'server\u0001profile', 'a'.repeat(1025)]) {
+    const callsBefore = calls.length
+    await assert.rejects(
+      handlers.get('ai-cli-profiles:set-binding')({}, {
+        scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: invalidProfileId, model: 'responses'
+      }),
+      { code: 'INVALID_PROFILE_IPC' }
+    )
+    assert.equal(calls.length, callsBefore)
+  }
 })
 
 test('profile IPC returns only sanitized state, profiles, and revisions', async () => {

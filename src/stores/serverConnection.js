@@ -70,7 +70,9 @@ export const useServerConnectionStore = defineStore('server-connection', {
     pendingAttemptId: null,
     models: [],
     skills: [],
-    error: null,
+    connectionError: null,
+    modelCatalogError: null,
+    skillsCatalogError: null,
     busy: false,
     initialized: false,
     _initializePromise: null,
@@ -82,6 +84,8 @@ export const useServerConnectionStore = defineStore('server-connection', {
     _attemptRequest: 0,
     _registrationGeneration: 0,
     _catalogRequest: 0,
+    _modelRequest: 0,
+    _skillActionRequest: 0,
     _connectionIdentity: null
   }),
   getters: {
@@ -107,7 +111,11 @@ export const useServerConnectionStore = defineStore('server-connection', {
       const nextIdentity = catalogIdentity(this)
       if (nextIdentity !== this._connectionIdentity) {
         this._catalogRequest += 1
+        this._modelRequest += 1
+        this.models = []
         this.skills = []
+        this.modelCatalogError = null
+        this.skillsCatalogError = null
         this._connectionIdentity = nextIdentity
       }
       return true
@@ -116,7 +124,7 @@ export const useServerConnectionStore = defineStore('server-connection', {
       const previousIdentity = this._connectionIdentity
       const applied = this.applyState(value)
       if (applied && this._lifecycle === lifecycle && this._connectionIdentity && this._connectionIdentity !== previousIdentity) {
-        void this.loadCachedSkills(lifecycle, this._connectionIdentity).catch(() => {})
+        void Promise.allSettled([this.syncModels(), this.loadCachedSkills(lifecycle, this._connectionIdentity)])
       }
       return applied
     },
@@ -145,12 +153,12 @@ export const useServerConnectionStore = defineStore('server-connection', {
             await this.loadAttempt(pendingAttempt.attemptId, lifecycle)
           }
           if (this._connectionIdentity) {
-            try { await this.loadCachedSkills(lifecycle, this._connectionIdentity) } catch { /* catalog availability does not end core subscriptions */ }
+            await Promise.allSettled([this.syncModels(), this.loadCachedSkills(lifecycle, this._connectionIdentity)])
           }
           return this
         } catch (error) {
           if (this._lifecycle === lifecycle) {
-            this.error = publicError(error)
+            this.connectionError = publicError(error)
             this.unsubscribe()
           }
           throw error
@@ -185,42 +193,42 @@ export const useServerConnectionStore = defineStore('server-connection', {
       } catch (error) {
         if (this._lifecycle === expectedLifecycle && request === this._attemptRequest) {
           this.pendingAttemptId = null
-          this.error = publicError(error, '无法读取连接确认信息')
+          this.connectionError = publicError(error)
         }
         throw error
       }
     },
     async submitLink(input) {
       const lifecycle = this._lifecycle
-      this.error = null
+      this.connectionError = null
       try {
         const result = await ipc.serverConnection.submitLink(input)
         if (this._lifecycle !== lifecycle || typeof result?.attemptId !== 'string') return null
         return await this.loadAttempt(result.attemptId, lifecycle)
       } catch (error) {
-        this.error = publicError(error, '无法读取连接链接')
+        this.connectionError = publicError(error)
         throw error
       }
     },
     async confirmAttempt() {
       if (!this.canConfirm) {
         const error = Object.assign(new Error('Registration is not confirmable'), { code: 'REGISTRATION_NOT_CONFIRMABLE', retryable: false })
-        this.error = publicError(error)
+        this.connectionError = publicError(error)
         throw error
       }
       if (this._confirmPromise) return this._confirmPromise
       const attemptId = this.attempt.attemptId
       this._confirmPromise = (async () => {
         this.busy = true
-        this.error = null
+        this.connectionError = null
         try {
           const state = await ipc.serverConnection.confirm(attemptId)
           this.applyState(state)
           this.attempt = null
-          await Promise.all([this.syncConnection(), this.syncModels(), this.syncSkills()])
+          await Promise.allSettled([this.syncModels(), this.syncSkills()])
           return state
         } catch (error) {
-          this.error = publicError(error, '无法完成服务端连接')
+          this.connectionError = publicError(error)
           throw error
         } finally {
           this.busy = false
@@ -235,14 +243,15 @@ export const useServerConnectionStore = defineStore('server-connection', {
       const attemptId = this.attempt.attemptId
       this._redeemPromise = (async () => {
         this.busy = true
+        this.connectionError = null
         try {
           const state = await ipc.serverConnection.retryRedeem(attemptId)
           this.applyState(state)
           this.attempt = null
-          await Promise.all([this.syncConnection(), this.syncModels(), this.syncSkills()])
+          await Promise.allSettled([this.syncModels(), this.syncSkills()])
           return state
         } catch (error) {
-          this.error = publicError(error)
+          this.connectionError = publicError(error)
           throw error
         } finally {
           this.busy = false
@@ -260,13 +269,13 @@ export const useServerConnectionStore = defineStore('server-connection', {
     },
     async runConnectionAction(operation, fallback) {
       this.busy = true
-      this.error = null
+      this.connectionError = null
       try {
         const state = await operation()
         this.applyState(state)
         return state
       } catch (error) {
-        this.error = publicError(error, fallback)
+        this.connectionError = publicError(error, fallback)
         throw error
       } finally { this.busy = false }
     },
@@ -274,12 +283,21 @@ export const useServerConnectionStore = defineStore('server-connection', {
     syncConnection() { return this.runConnectionAction(() => ipc.serverConnection.sync(), '无法同步服务端连接') },
     disconnect() { return this.runConnectionAction(() => ipc.serverConnection.disconnect(), '无法断开服务端连接') },
     async syncModels() {
+      const lifecycle = this._lifecycle
+      const identity = this._connectionIdentity
+      const request = ++this._modelRequest
+      this.modelCatalogError = null
       try {
-        this.models = await ipc.serverConnection.listModels()
+        const models = await ipc.serverConnection.listModels()
         await useAiCliProfilesStore().load()
+        if (this._lifecycle === lifecycle && identity && identity === this._connectionIdentity && request === this._modelRequest) {
+          this.models = Array.isArray(models) ? models : []
+        }
         return this.models
       } catch (error) {
-        this.error = publicError(error, '无法读取组织模型')
+        if (this._lifecycle === lifecycle && identity && identity === this._connectionIdentity && request === this._modelRequest) {
+          this.modelCatalogError = publicError(error)
+        }
         throw error
       }
     },
@@ -287,6 +305,7 @@ export const useServerConnectionStore = defineStore('server-connection', {
       const lifecycle = this._lifecycle
       const identity = this._connectionIdentity
       const request = ++this._catalogRequest
+      this.skillsCatalogError = null
       try {
         const skills = await ipc.serverConnection.syncSkills()
         if (this._lifecycle === lifecycle && identity && identity === this._connectionIdentity && request === this._catalogRequest) {
@@ -294,13 +313,16 @@ export const useServerConnectionStore = defineStore('server-connection', {
         }
         return this.skills
       } catch (error) {
-        this.error = publicError(error, '无法同步组织 Skills')
+        if (this._lifecycle === lifecycle && identity === this._connectionIdentity && request === this._catalogRequest) {
+          this.skillsCatalogError = publicError(error)
+        }
         throw error
       }
     },
     async loadCachedSkills(expectedLifecycle = this._lifecycle, expectedIdentity = this._connectionIdentity) {
       if (!expectedIdentity) return []
       const request = ++this._catalogRequest
+      this.skillsCatalogError = null
       try {
         const skills = await ipc.serverConnection.listSkills()
         if (this._lifecycle === expectedLifecycle && expectedIdentity === this._connectionIdentity && request === this._catalogRequest) {
@@ -308,21 +330,49 @@ export const useServerConnectionStore = defineStore('server-connection', {
         }
         return this.skills
       } catch (error) {
-        if (this._lifecycle === expectedLifecycle && expectedIdentity === this._connectionIdentity && request === this._catalogRequest) this.error = publicError(error)
+        if (this._lifecycle === expectedLifecycle && expectedIdentity === this._connectionIdentity && request === this._catalogRequest) {
+          this.skillsCatalogError = publicError(error)
+        }
         throw error
       }
     },
     async installSkill(versionId, targets) {
       const target = validateSkillTargets(targets)
-      const result = await ipc.serverConnection.installSkill(versionId, target)
-      await this.syncSkills()
-      return result
+      const lifecycle = this._lifecycle
+      const identity = this._connectionIdentity
+      const actionRequest = ++this._skillActionRequest
+      const catalogRequest = this._catalogRequest
+      if (identity && identity === this._connectionIdentity) this.skillsCatalogError = null
+      try {
+        const result = await ipc.serverConnection.installSkill(versionId, target)
+        await this.syncSkills()
+        return result
+      } catch (error) {
+        if (this._lifecycle === lifecycle && identity && identity === this._connectionIdentity &&
+          actionRequest === this._skillActionRequest && catalogRequest === this._catalogRequest) {
+          this.skillsCatalogError = publicError(error)
+        }
+        throw error
+      }
     },
     async updateSkill(versionId, targets) {
       const target = validateSkillTargets(targets)
-      const result = await ipc.serverConnection.updateSkill(versionId, target)
-      await this.syncSkills()
-      return result
+      const lifecycle = this._lifecycle
+      const identity = this._connectionIdentity
+      const actionRequest = ++this._skillActionRequest
+      const catalogRequest = this._catalogRequest
+      if (identity && identity === this._connectionIdentity) this.skillsCatalogError = null
+      try {
+        const result = await ipc.serverConnection.updateSkill(versionId, target)
+        await this.syncSkills()
+        return result
+      } catch (error) {
+        if (this._lifecycle === lifecycle && identity && identity === this._connectionIdentity &&
+          actionRequest === this._skillActionRequest && catalogRequest === this._catalogRequest) {
+          this.skillsCatalogError = publicError(error)
+        }
+        throw error
+      }
     }
   }
 })

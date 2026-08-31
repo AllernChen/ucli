@@ -5,6 +5,7 @@ import {
   fsyncSync,
   lstatSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -203,6 +204,26 @@ export function writeServerCodexProfileFileAtomic({ codexHome, profile, baseUrl,
     try { if (existsSync(tempPath)) unlinkSync(tempPath) } catch { /* best effort */ }
   }
   return { path, sha256: sha256(data) }
+}
+
+export function cleanStaleServerCodexProfileFiles({ codexHome, validArtifactIds } = {}) {
+  const root = resolve(String(codexHome || ''))
+  const valid = validArtifactIds instanceof Set ? validArtifactIds : new Set(validArtifactIds || [])
+  let removed = 0
+  for (const name of readdirSync(root)) {
+    const match = name.match(SERVER_OWNED_FILE_PATTERN)
+    if (!match || valid.has(match[1].slice('ucli-server-'.length))) continue
+    const path = resolveServerCodexProfilePath(root, match[1])
+    try {
+      const inspected = inspectServerCodexProfileFile(path)
+      if (inspected.profileId !== match[1].slice('ucli-server-'.length)) continue
+      unlinkSync(path)
+      removed += 1
+    } catch {
+      // Leave unowned, malformed, or concurrently changed files untouched.
+    }
+  }
+  return removed
 }
 
 export function renderCodexProfileFile(profile) {

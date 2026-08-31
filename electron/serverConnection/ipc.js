@@ -1,4 +1,5 @@
 import { sanitiseServerError } from './contracts.js'
+import { safeProfile } from '../aiCliProfiles/ipc.js'
 
 const ATTEMPT_ID = /^[A-Za-z0-9_-]{1,200}$/
 const VERSION_ID = /^[A-Za-z0-9_-]{1,200}$/
@@ -71,7 +72,7 @@ function exact(args, count) {
   if (args.length !== count) throw invalidIpc()
 }
 
-export function registerServerConnectionIpc({ ipcMain, manager, skillsCatalog = null, serverModelProjection = null, send = () => {} } = {}) {
+export function registerServerConnectionIpc({ ipcMain, manager, skillsCatalog = null, serverModelProjection = null, syncModelProjection = null, send = () => {} } = {}) {
   if (!ipcMain?.handle || !manager) throw new TypeError('IPC dependencies are required')
   ipcMain.handle('server-connection:submit-link', invoke((_event, ...args) => {
     exact(args, 1)
@@ -106,9 +107,10 @@ export function registerServerConnectionIpc({ ipcMain, manager, skillsCatalog = 
       return manager[method]()
     }))
   }
-  ipcMain.handle('server-connection:list-models', invoke((_event, ...args) => {
+  ipcMain.handle('server-connection:list-models', invoke(async (_event, ...args) => {
     exact(args, 0)
-    return serverModelProjection?.listProfiles?.() || []
+    if (typeof syncModelProjection === 'function') await syncModelProjection()
+    return (serverModelProjection?.listProfiles?.() || []).map(safeProfile)
   }))
   ipcMain.handle('server-connection:list-skills', invoke((_event, ...args) => {
     exact(args, 0)
