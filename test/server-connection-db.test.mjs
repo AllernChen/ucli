@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { openDb } from '../electron/persistence/db.js'
+import { createServerModelProjection } from '../electron/serverConnection/modelProjection.js'
 import { stableServiceProfileId } from '../electron/serverConnection/serviceProfileCatalog.js'
 
 async function withDb(work) {
@@ -155,6 +156,54 @@ test('server projections replace by revision and disconnect cleanup preserves lo
     assert.equal(db.getSkillPackage('local-package').id, 'local-package')
     db.deleteSkillPackage('local-package')
     assert.equal(db.getServerSkillPackage('local-package'), null)
+  })
+})
+
+test('numeric runtime connection revisions launch a persisted normalized service model', async () => {
+  await withDb(async (db) => {
+    const serviceProfileId = stableServiceProfileId({
+      serverOrigin: 'https://server.example.test', organizationId: 'org-1'
+    })
+    const model = {
+      id: 'claude-model', displayName: 'Claude Model', contextSize: 200000,
+      protocols: ['anthropic_messages'], availabilityStatus: 'ready'
+    }
+    db.replaceServerServiceCatalog({
+      profile: {
+        id: serviceProfileId,
+        serverOrigin: 'https://server.example.test',
+        organization: { id: 'org-1', name: 'Engineering' },
+        connectionRevision: 7,
+        availabilityStatus: 'ready'
+      },
+      models: [model]
+    })
+    const revoked = []
+    const projection = createServerModelProjection({
+      db,
+      proxy: {
+        getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: 7 }),
+        createServerGatewaySession: () => ({ baseUrl: 'http://127.0.0.1:43210', bearer: 'session-bearer' }),
+        revokeServerGatewaySession: (sessionId) => revoked.push(sessionId)
+      },
+      flush: () => true
+    })
+
+    await projection.reconcileRuntimeAuthorities({
+      serviceProfileId,
+      connectionRevision: 7,
+      models: [model]
+    })
+    assert.equal(projection.listProfiles()[0].canStart, true)
+    assert.deepEqual(projection.prepareRuntime({
+      serviceProfileId, modelId: 'claude-model', adapterId: 'claude', sessionId: 'session-1'
+    }).args, ['--model', 'claude-model'])
+    await projection.reconcileRuntimeAuthorities({
+      serviceProfileId,
+      connectionRevision: 7,
+      models: [model]
+    })
+    assert.deepEqual(revoked, [])
   })
 })
 

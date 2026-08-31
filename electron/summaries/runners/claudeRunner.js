@@ -59,6 +59,7 @@ export function createClaudeRunner({
             }
             profileLaunch = profileService.resolveLaunchProfile({
               profileId: options.profileId,
+              adapterId: 'claude',
               session: { id: runtimeSessionId, model: options.model },
               baseEnv: isolatedBaseEnv
             })

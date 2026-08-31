@@ -11,9 +11,21 @@ function projectionError(code, message) {
   return Object.assign(new Error(message), { code })
 }
 
+function revisionKey(value) {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return null
+}
+
+function sameRevision(left, right) {
+  const leftKey = revisionKey(left)
+  const rightKey = revisionKey(right)
+  return leftKey !== null && leftKey === rightKey
+}
+
 function sameIdentity(left, right) {
   return Boolean(left && right && left.connectionId === right.connectionId &&
-    left.connectionRevision === right.connectionRevision)
+    sameRevision(left.connectionRevision, right.connectionRevision))
 }
 
 function serviceProfileDto(profile, models, online) {
@@ -86,7 +98,7 @@ export function createServerModelProjection({
 
   function currentIdentity(profile) {
     const identity = getRuntimeConnectionIdentity()
-    if (!identity || identity.connectionRevision !== profile.connectionRevision ||
+    if (!identity || !sameRevision(identity.connectionRevision, profile.connectionRevision) ||
       typeof identity.connectionId !== 'string' || !identity.connectionId) return null
     return identity
   }
@@ -161,7 +173,7 @@ export function createServerModelProjection({
       return
     }
     const profile = storedProfile(runtime.serviceProfileId)
-    if (!profile || profile.connectionRevision !== runtime.connectionRevision ||
+    if (!profile || !sameRevision(profile.connectionRevision, runtime.connectionRevision) ||
       profile.availabilityStatus !== 'ready' || !sameIdentity(identity, currentIdentity(profile))) {
       revoke(sessionId)
       return
@@ -180,7 +192,7 @@ export function createServerModelProjection({
 
     async reconcileRuntimeAuthorities({ serviceProfileId, connectionRevision, models } = {}) {
       const profile = storedProfile(serviceProfileId)
-      if (!profile || profile.connectionRevision !== connectionRevision || !Array.isArray(models)) {
+      if (!profile || !sameRevision(profile.connectionRevision, connectionRevision) || !Array.isArray(models)) {
         invalidateOnlineState()
         return this.listProfiles()
       }
@@ -196,7 +208,7 @@ export function createServerModelProjection({
         invalidateOnlineState()
         return this.listProfiles()
       }
-      if (!previousOnlineIdentity || previousOnlineIdentity.connectionRevision !== identity.connectionRevision) {
+      if (!previousOnlineIdentity || !sameRevision(previousOnlineIdentity.connectionRevision, identity.connectionRevision)) {
         for (const sessionId of [...sessions.keys()]) revoke(sessionId)
       } else {
         for (const [sessionId, runtime] of sessions) ensureCurrentAuthority(sessionId, runtime, catalog, identity)
@@ -263,7 +275,7 @@ export function createServerModelProjection({
             serviceProfileId,
             modelId: model.id,
             adapterId,
-            connectionRevision: profile.connectionRevision
+            connectionRevision: revisionKey(profile.connectionRevision)
           }))
           const nativeProfileName = codexProfileFiles.serverCodexNativeProfileName?.(artifactId) || `ucli-server-${artifactId}`
           return {
@@ -274,7 +286,7 @@ export function createServerModelProjection({
             configPath: written.path,
             modelId: model.id,
             status: 'ready',
-            runtimeRevision: `${profile.connectionRevision}:${serviceProfileId}:${model.id}:${adapterId}`
+            runtimeRevision: `${revisionKey(profile.connectionRevision)}:${serviceProfileId}:${model.id}:${adapterId}`
           }
         }
         if (adapterId !== 'claude' || SERVICE_ADAPTER_PROTOCOL[adapterId] !== 'anthropic_messages' ||
@@ -285,7 +297,7 @@ export function createServerModelProjection({
           serviceProfileId,
           modelId: model.id,
           adapterId,
-          connectionRevision: profile.connectionRevision
+          connectionRevision: revisionKey(profile.connectionRevision)
         }))
         return {
           args: ['--model', model.id],
@@ -298,7 +310,7 @@ export function createServerModelProjection({
           artifact: { model: model.id, connectionMode: 'bearer' },
           modelId: model.id,
           status: 'ready',
-          runtimeRevision: `${profile.connectionRevision}:${serviceProfileId}:${model.id}:${adapterId}`
+          runtimeRevision: `${revisionKey(profile.connectionRevision)}:${serviceProfileId}:${model.id}:${adapterId}`
         }
       } catch (error) {
         const revokeSession = proxy?.revokeSession || proxy?.revokeServerGatewaySession

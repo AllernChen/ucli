@@ -286,6 +286,7 @@ test('Claude runner uses a per-run runtime ID and releases the resolved profile 
     })
 
     assert.equal(profileCalls[0].profileId, 'profile-1')
+    assert.equal(profileCalls[0].adapterId, 'claude')
     assert.equal(profileCalls[0].session.id, 'summary-runtime-id-1')
     assert.equal(profileCalls[0].session.model, 'sonnet')
     assert.deepEqual(releasedRuntimeIds, ['summary-runtime-id-1'])
