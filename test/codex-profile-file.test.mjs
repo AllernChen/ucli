@@ -14,10 +14,14 @@ import test from 'node:test'
 
 import {
   codexNativeProfileName,
+  cleanStaleServerCodexProfileFiles,
   inspectCodexProfileFile,
   removeCodexProfileFile,
   renderCodexProfileFile,
   resolveCodexProfilePath,
+  resolveServerCodexProfilePath,
+  serverCodexNativeProfileName,
+  writeServerCodexProfileFileAtomic,
   writeCodexProfileFileAtomic
 } from '../electron/aiCliProfiles/codexProfileFile.js'
 
@@ -256,5 +260,34 @@ test('profile removal requires matching ownership and expected hash', () => {
       profile: managedProfile(),
       expectedSha256: created.sha256
     }), false)
+  })
+})
+
+test('stale server Codex cleanup removes only owned files absent from the artifact set', () => {
+  withCodexHome((codexHome) => {
+    const retainedId = '0123456789abcdef0123456789abcdef'
+    const staleId = 'fedcba9876543210fedcba9876543210'
+    const retained = writeServerCodexProfileFileAtomic({
+      codexHome,
+      profile: { id: retainedId, name: 'Retained', model: 'responses-a', contextWindow: 128000 },
+      baseUrl: 'http://127.0.0.1:43123'
+    })
+    const stale = writeServerCodexProfileFileAtomic({
+      codexHome,
+      profile: { id: staleId, name: 'Stale', model: 'responses-b', contextWindow: 128000 },
+      baseUrl: 'http://127.0.0.1:43123'
+    })
+    const malformed = resolveServerCodexProfilePath(codexHome, serverCodexNativeProfileName('11111111111111111111111111111111'))
+    writeFileSync(malformed, '# external file\n')
+    writeFileSync(join(codexHome, 'unrelated.config.toml'), '# preserve\n')
+
+    assert.equal(cleanStaleServerCodexProfileFiles({
+      codexHome,
+      validArtifactIds: new Set([retainedId])
+    }), 1)
+    assert.equal(existsSync(retained.path), true)
+    assert.equal(existsSync(stale.path), false)
+    assert.equal(existsSync(malformed), true)
+    assert.equal(existsSync(join(codexHome, 'unrelated.config.toml')), true)
   })
 })

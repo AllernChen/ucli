@@ -226,7 +226,13 @@ test('normalized service catalog survives reopen, replaces only its child models
     )
     assert.deepEqual(db.listServerServiceModels('https://second.example.test::org-2').map((row) => row.modelId), ['other'])
     db.updateServerServiceModelArtifact({ serviceProfileId, modelId: 'responses', codexFileSha256: 'artifact-hash' })
-    assert.equal(db.listServerServiceModels(serviceProfileId)[1].codexFileSha256, 'artifact-hash')
+    assert.deepEqual(db.listServerServiceModels(serviceProfileId).map(({ modelId, codexFileSha256 }) => ({
+      modelId,
+      codexFileSha256
+    })), [
+      { modelId: 'claude', codexFileSha256: null },
+      { modelId: 'responses', codexFileSha256: 'artifact-hash' }
+    ])
     db.clearServerConnections()
     assert.deepEqual(db.listServerServiceProfiles(), [])
     assert.deepEqual(db.listServerServiceModels(), [])

@@ -106,6 +106,7 @@ import { ConnectionManager } from './serverConnection/connectionManager.js'
 import { ExpiryReminder } from './serverConnection/expiryReminder.js'
 import { createLocalGatewayProxy } from './serverConnection/localGatewayProxy.js'
 import { createServerModelProjection } from './serverConnection/modelProjection.js'
+import { buildServiceProfileCatalog } from './serverConnection/serviceProfileCatalog.js'
 import { createSkillsCatalogAdapter } from './serverConnection/skillsCatalogAdapter.js'
 import { registerServerConnectionIpc } from './serverConnection/ipc.js'
 import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
@@ -1296,6 +1297,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           }
         : profileService.resolveLaunchProfile({
             profileId: selection.profileId,
+            adapterId: 'claude',
             session,
             baseEnv: process.env
           })
@@ -1685,11 +1687,20 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             await serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
             return
           }
-          await serverModelProjection.reconcile({
+          const catalog = buildServiceProfileCatalog({
             serverOrigin: state.serverOrigin,
             organization: bootstrap.organization,
             models: bootstrap.models,
             connectionRevision: identity.connectionRevision
+          })
+          db.replaceServerServiceCatalog({
+            profile: { ...catalog.profile, availabilityStatus: 'ready' },
+            models: catalog.models.map((model) => ({ ...model, availabilityStatus: 'ready' }))
+          })
+          await serverModelProjection.reconcileRuntimeAuthorities({
+            serviceProfileId: catalog.profile.id,
+            connectionRevision: identity.connectionRevision,
+            models: bootstrap.models
           })
         } catch {
           await serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
@@ -2129,6 +2140,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         try {
           const launch = profileService.resolveLaunchProfile({
             profileId: profile.id,
+            adapterId,
             session,
             baseEnv: process.env
           })

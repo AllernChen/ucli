@@ -83,7 +83,8 @@ export function createProfileService({
   function allProfiles({ adapterId } = {}) {
     const userProfiles = db.listAiCliProfiles({ adapterId })
     const serverProfiles = serverModelProjection?.listProfiles?.() || []
-    return [...userProfiles, ...serverProfiles.filter(profile => !adapterId || profile.adapterId === adapterId)]
+    return [...userProfiles, ...serverProfiles.filter((profile) => !adapterId ||
+      profile.supportedAdapterIds?.includes(adapterId))]
   }
 
   function fileStateFor(profile, codexHome) {
@@ -382,7 +383,9 @@ export function createProfileService({
     getClaudeProfileLaunchStamp(profileId) {
       if (!profileId) return { profileId: null, runtimeRevision: null }
       const profile = db.getAiCliProfile(profileId) || serverProfile(profileId)
-      if (!profile || profile.adapterId !== 'claude') {
+      if (!profile || (profile.sourceKind === 'server'
+        ? !profile.supportedAdapterIds?.includes('claude')
+        : profile.adapterId !== 'claude')) {
         return { profileId, runtimeRevision: null }
       }
       if (profile.sourceKind === 'server') {
@@ -394,10 +397,15 @@ export function createProfileService({
       }
     },
 
-    resolveLaunchProfile({ profileId, session = {}, baseEnv = process.env }) {
+    resolveLaunchProfile({ profileId, adapterId, session = {}, baseEnv = process.env }) {
       const projected = serverProfile(profileId)
       if (projected) {
-        return serverModelProjection.prepareRuntime({ profileId, sessionId: session.id })
+        return serverModelProjection.prepareRuntime({
+          serviceProfileId: profileId,
+          modelId: session.model,
+          adapterId,
+          sessionId: session.id
+        })
       }
       const profile = db.getAiCliProfile(profileId)
       if (!profile) throw serviceError('Profile was not found', 'PROFILE_NOT_FOUND')
@@ -432,7 +440,7 @@ export function createProfileService({
     },
 
     resolveCodexLaunchProfile(profileId, session = {}) {
-      return service.resolveLaunchProfile({ profileId, session })
+      return service.resolveLaunchProfile({ profileId, adapterId: 'codex', session })
     },
 
     resolveCodexProfileRuntime(profileId) {

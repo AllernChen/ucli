@@ -6,8 +6,8 @@ import test from 'node:test'
 
 import { createServerModelProjection } from '../electron/serverConnection/modelProjection.js'
 import * as codexProfileFiles from '../electron/aiCliProfiles/codexProfileFile.js'
+import { buildServiceProfileCatalog } from '../electron/serverConnection/serviceProfileCatalog.js'
 import { createProfileService } from '../electron/aiCliProfiles/profileService.js'
-import { sanitiseProfileError } from '../electron/aiCliProfiles/contracts.js'
 
 function deferred() {
   let resolve
@@ -17,444 +17,309 @@ function deferred() {
 }
 
 function harness({ flush = () => true, fileOps, resolveCodexHome } = {}) {
-  let stored = []
+  let profiles = []
+  let models = []
   let identity = { connectionId: 'connection-1', connectionRevision: 7 }
-  const calls = { create: [], revoke: [] }
+  const calls = { create: [], revoke: [], artifacts: [] }
+  const defaultFileOps = {
+    serverCodexNativeProfileName: (artifactId) => `ucli-server-${artifactId}`,
+    serverCodexProfileSecretEnvName: () => 'UCLI_SERVER_BEARER',
+    writeServerCodexProfileFileAtomic: ({ profile }) => ({
+      path: `C:\\codex\\ucli-server-${profile.id}.config.toml`,
+      sha256: 'a'.repeat(64)
+    })
+  }
+  const db = {
+      listServerServiceProfiles: () => profiles.map((profile) => ({ ...profile })),
+      listServerServiceModels: (serviceProfileId = null) => models
+        .filter((model) => serviceProfileId == null || model.serviceProfileId === serviceProfileId)
+        .map((model) => ({ ...model, protocols: [...model.protocols] })),
+      replaceServerServiceCatalog: ({ profile, models: nextModels }) => {
+        profiles = [...profiles.filter((candidate) => candidate.profileId !== profile.id), {
+          profileId: profile.id,
+          serverOrigin: profile.serverOrigin,
+          organizationId: profile.organization.id,
+          organizationName: profile.organization.name,
+          connectionRevision: profile.connectionRevision,
+          availabilityStatus: profile.availabilityStatus
+        }]
+        models = [
+          ...models.filter((candidate) => candidate.serviceProfileId !== profile.id),
+          ...nextModels.map((model, catalogOrder) => ({
+            serviceProfileId: profile.id,
+            serverOrigin: profile.serverOrigin,
+            organizationId: profile.organization.id,
+            organizationName: profile.organization.name,
+            connectionRevision: profile.connectionRevision,
+            modelId: model.id,
+            displayName: model.displayName,
+            contextSize: model.contextSize,
+            protocols: [...model.protocols],
+            availabilityStatus: model.availabilityStatus,
+            catalogOrder,
+            codexFileSha256: model.codexFileSha256 ?? null
+          }))
+        ]
+      },
+      updateServerServiceModelArtifact: ({ serviceProfileId, modelId, codexFileSha256 }) => {
+        calls.artifacts.push({ serviceProfileId, modelId, codexFileSha256 })
+        models = models.map((model) => model.serviceProfileId === serviceProfileId && model.modelId === modelId
+          ? { ...model, codexFileSha256 }
+          : model)
+        return true
+      }
+    }
   const projection = createServerModelProjection({
-    db: {
-      listServerModelProfiles: () => stored,
-      replaceServerModelProfiles: ({ profiles }) => { stored = profiles.map(profile => ({ ...profile })) }
-    },
+    db,
     proxy: {
       getRuntimeConnectionIdentity: () => identity,
-      createServerGatewaySession: connection => {
+      createServerGatewaySession: (connection) => {
         calls.create.push(connection)
         return { baseUrl: 'http://127.0.0.1:43210', bearer: 'session-bearer' }
       },
-      revokeServerGatewaySession: sessionId => calls.revoke.push(sessionId)
+      revokeServerGatewaySession: (sessionId) => calls.revoke.push(sessionId)
     },
-    codexProfileFiles: fileOps || {
-      renderServerCodexProfileFile: profile => `# ucli-server-profile-id: ${profile.id}\n`
-    },
-    resolveCodexHome,
+    codexProfileFiles: fileOps || defaultFileOps,
+    resolveCodexHome: resolveCodexHome || (() => 'C:\\codex'),
     flush
   })
   return {
     projection,
     calls,
+    async sync(input) {
+      const catalog = buildServiceProfileCatalog(input)
+      db.replaceServerServiceCatalog({
+        profile: { ...catalog.profile, availabilityStatus: 'ready' },
+        models: catalog.models.map((model) => ({ ...model, availabilityStatus: 'ready' }))
+      })
+      return projection.reconcileRuntimeAuthorities({
+        serviceProfileId: catalog.profile.id,
+        connectionRevision: input.connectionRevision,
+        models: input.models
+      })
+    },
     setIdentity(value) { identity = value },
-    get stored() { return stored }
+    get stored() { return { profiles, models } }
   }
 }
 
-test('projects every Bootstrap model into stable Codex Responses and Claude Bearer profiles', async () => {
-  const context = harness()
-  const input = {
+function catalog(models, connectionRevision = 7) {
+  return {
     serverOrigin: 'HTTP://server.example.test:80/',
     organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-    connectionRevision: 7
+    models,
+    connectionRevision
   }
+}
 
-  await context.projection.reconcile(input)
-  const first = context.projection.listProfiles()
-  await context.projection.reconcile({ ...input, serverOrigin: 'http://server.example.test' })
-  const second = context.projection.listProfiles()
-
-  assert.equal(first.length, 2)
-  assert.deepEqual([...first.map(profile => profile.adapterId)].sort(), ['claude', 'codex'])
-  assert.deepEqual(first.map(profile => profile.id), second.map(profile => profile.id))
-  assert.deepEqual(first.map(profile => profile.sourceKind), ['server', 'server'])
-  assert.deepEqual(first.map(profile => profile.readOnly), [true, true])
-  assert.deepEqual(first.map(profile => profile.organizationName), ['Engineering', 'Engineering'])
-  assert.deepEqual(first.map(profile => profile.contextWindow), [128000, 128000])
-  assert.equal(first.find(profile => profile.adapterId === 'codex').config.wireApi, 'responses')
-  assert.equal(first.find(profile => profile.adapterId === 'claude').config.connectionMode, 'bearer')
-})
-
-test('projects only adapters supported by each model protocol set', async () => {
+test('synchronizes models into one cross-adapter service profile DTO', async () => {
   const context = harness()
-  await context.projection.reconcile({
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [
-      { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'] },
-      { id: 'anthropic', displayName: 'Anthropic', contextSize: 128000, protocols: ['anthropic_messages'] },
-      { id: 'chat', displayName: 'Chat', contextSize: 64000, protocols: ['openai_chat'] }
-    ],
-    connectionRevision: 7
-  })
-  assert.deepEqual(context.projection.listProfiles()
-    .map(profile => [profile.model, profile.adapterId])
-    .sort(([leftModel, leftAdapter], [rightModel, rightAdapter]) => (
-      leftModel.localeCompare(rightModel) || leftAdapter.localeCompare(rightAdapter)
-    )), [
-    ['anthropic', 'claude'],
-    ['responses', 'codex']
+  await context.sync(catalog([
+    { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'] },
+    { id: 'chat', displayName: 'Chat', contextSize: 64000, protocols: ['openai_chat'] },
+    { id: 'claude', displayName: 'Claude', contextSize: 200000, protocols: ['anthropic_messages'] }
+  ]))
+
+  const profiles = context.projection.listProfiles()
+  assert.equal(profiles.length, 1)
+  assert.deepEqual(profiles[0].supportedAdapterIds, ['codex', 'claude'])
+  assert.deepEqual(profiles[0].models.map(({ id, protocols }) => ({ id, protocols })), [
+    { id: 'responses', protocols: ['openai_responses'] },
+    { id: 'chat', protocols: ['openai_chat'] },
+    { id: 'claude', protocols: ['anthropic_messages'] }
   ])
+  assert.equal(profiles[0].id, 'http://server.example.test::org-1')
+  assert.equal(profiles[0].canStart, true)
 })
 
-test('projects both adapters for models that support both managed protocols', async () => {
+test('prepareRuntime rejects a missing model and an adapter-incompatible model', async () => {
   const context = harness()
-  await context.projection.reconcile({
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [{
-      id: 'multi-protocol',
-      displayName: 'Multi-protocol',
-      contextSize: 128000,
-      protocols: ['openai_responses', 'anthropic_messages']
-    }],
-    connectionRevision: 7
+  await context.sync(catalog([
+    { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'] },
+    { id: 'chat', displayName: 'Chat', contextSize: 64000, protocols: ['openai_chat'] }
+  ]))
+  const serviceProfileId = context.projection.listProfiles()[0].id
+
+  assert.throws(() => context.projection.prepareRuntime({
+    serviceProfileId, modelId: 'missing', adapterId: 'codex', sessionId: 'missing-model'
+  }), { code: 'PROFILE_MODEL_UNAVAILABLE' })
+  assert.throws(() => context.projection.prepareRuntime({
+    serviceProfileId, modelId: 'chat', adapterId: 'codex', sessionId: 'chat-model'
+  }), { code: 'PROFILE_MODEL_PROTOCOL_UNAVAILABLE' })
+})
+
+test('launches explicitly selected Codex and Claude models using their adapter protocols', async () => {
+  const context = harness()
+  await context.sync(catalog([
+    { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'] },
+    { id: 'claude', displayName: 'Claude', contextSize: 200000, protocols: ['anthropic_messages'] }
+  ]))
+  const serviceProfileId = context.projection.listProfiles()[0].id
+  const codex = context.projection.prepareRuntime({
+    serviceProfileId, modelId: 'responses', adapterId: 'codex', sessionId: 'codex-session'
   })
-  assert.deepEqual(context.projection.listProfiles().map(profile => profile.adapterId).sort(), ['claude', 'codex'])
-})
-
-test('rejects missing, empty, unknown, and gemini model protocol sets', async () => {
-  for (const protocols of [undefined, [], ['unknown'], ['gemini']]) {
-    const context = harness()
-    const model = { id: 'model-1', displayName: 'Gateway Model', contextSize: 128000 }
-    if (protocols !== undefined) model.protocols = protocols
-    await assert.rejects(() => context.projection.reconcile({
-      serverOrigin: 'http://server.example.test',
-      organization: { id: 'org-1', name: 'Engineering' },
-      models: [model],
-      connectionRevision: 7
-    }), { code: 'INVALID_SERVER_MODEL' })
-  }
-})
-
-test('revokes removed Codex authority while retaining compatible Claude profile', async () => {
-  const context = harness()
-  const input = {
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [{
-      id: 'model-1',
-      displayName: 'Gateway Model',
-      contextSize: 128000,
-      protocols: ['openai_responses', 'anthropic_messages']
-    }],
-    connectionRevision: 7
-  }
-  await context.projection.reconcile(input)
-  const codex = context.projection.listProfiles().find(profile => profile.adapterId === 'codex')
-  const claude = context.projection.listProfiles().find(profile => profile.adapterId === 'claude')
-  context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'codex-session' })
-
-  await context.projection.reconcile({
-    ...input,
-    models: [{ ...input.models[0], protocols: ['anthropic_messages'] }]
+  const claude = context.projection.prepareRuntime({
+    serviceProfileId, modelId: 'claude', adapterId: 'claude', sessionId: 'claude-session'
   })
 
+  assert.deepEqual(codex.args.slice(-2), ['--model', 'responses'])
+  assert.equal(codex.modelId, 'responses')
+  assert.equal(codex.artifact.model, 'responses')
+  assert.equal(codex.env.UCLI_SERVER_BEARER, 'session-bearer')
+  assert.deepEqual(claude.args, ['--model', 'claude'])
+  assert.equal(claude.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:43210/anthropic')
+  assert.equal(claude.env.ANTHROPIC_AUTH_TOKEN, 'session-bearer')
+})
+
+test('reconciliation keeps only authorities whose profile, model, protocol, and revision remain valid', async () => {
+  const context = harness()
+  const initial = catalog([
+    { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] },
+    { id: 'claude', displayName: 'Claude', contextSize: 200000, protocols: ['anthropic_messages'] }
+  ])
+  await context.sync(initial)
+  const serviceProfileId = context.projection.listProfiles()[0].id
+  context.projection.prepareRuntime({ serviceProfileId, modelId: 'responses', adapterId: 'codex', sessionId: 'codex-session' })
+  context.projection.prepareRuntime({ serviceProfileId, modelId: 'claude', adapterId: 'claude', sessionId: 'claude-session' })
+
+  await context.sync(catalog([
+    { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['anthropic_messages'] },
+    { id: 'claude', displayName: 'Claude', contextSize: 200000, protocols: ['anthropic_messages'] }
+  ]))
   assert.deepEqual(context.calls.revoke, ['codex-session'])
-  assert.deepEqual(context.projection.listProfiles().map(profile => [profile.id, profile.adapterId]), [
-    [claude.id, 'claude']
-  ])
-})
 
-test('prepares runtime only for current ready profiles and revokes replaced session authority', async () => {
-  const context = harness()
-  await context.projection.reconcile({
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-    connectionRevision: 7
-  })
-  const codex = context.projection.listProfiles().find(profile => profile.adapterId === 'codex')
-  const launch = context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'session-1' })
-  assert.equal(launch.env.UCLI_SERVER_BEARER, 'session-bearer')
-  assert.equal(context.calls.create.length, 1)
-
-  context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'session-1' })
-  assert.deepEqual(context.calls.revoke, ['session-1'])
-  await context.projection.clearOnlineState(8)
-  assert.throws(
-    () => context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'session-2' }),
-    { code: 'PROFILE_NOT_READY' }
-  )
-})
-
-test('Claude server runtime targets the proxy Anthropic route', async () => {
-  const context = harness()
-  await context.projection.reconcile({
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-    connectionRevision: 7
-  })
-  const claude = context.projection.listProfiles().find(profile => profile.adapterId === 'claude')
-  const launch = context.projection.prepareRuntime({ profileId: claude.id, sessionId: 'claude-session' })
-  assert.equal(launch.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:43210/anthropic')
-  assert.equal(launch.env.ANTHROPIC_AUTH_TOKEN, 'session-bearer')
-})
-
-test('persisted ready profiles remain unavailable until the matching runtime identity is online', async () => {
-  const context = harness()
-  await context.projection.reconcile({
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-    connectionRevision: 7
-  })
-  context.setIdentity(null)
-  assert.deepEqual(context.projection.listProfiles().map(profile => [profile.status, profile.canStart]), [
-    ['unreachable', false], ['unreachable', false]
-  ])
-  context.setIdentity({ connectionId: 'connection-1', connectionRevision: 7 })
-  assert.deepEqual(context.projection.listProfiles().map(profile => [profile.status, profile.canStart]), [
-    ['ready', true], ['ready', true]
-  ])
-})
-
-test('reconciliation revokes every tracked session before accepting a new connection revision', async () => {
-  const context = harness()
-  const input = {
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-    connectionRevision: 7
-  }
-  await context.projection.reconcile(input)
-  const profile = context.projection.listProfiles()[0]
-  context.projection.prepareRuntime({ profileId: profile.id, sessionId: 'session-1' })
   context.setIdentity({ connectionId: 'connection-2', connectionRevision: 8 })
-  await context.projection.reconcile({ ...input, connectionRevision: 8 })
-  assert.deepEqual(context.calls.revoke, ['session-1'])
+  await context.sync(catalog([
+    { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['anthropic_messages'] },
+    { id: 'claude', displayName: 'Claude', contextSize: 200000, protocols: ['anthropic_messages'] }
+  ], 8))
+  assert.deepEqual(context.calls.revoke, ['codex-session', 'claude-session'])
 })
 
-test('same-revision replacement identity revokes prior server sessions', async () => {
+test('reconciliation revokes authorities from a replaced service profile identity', async () => {
   const context = harness()
-  const input = {
+  await context.sync(catalog([
+    { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'] }
+  ]))
+  const previousProfileId = context.projection.listProfiles()[0].id
+  context.projection.prepareRuntime({
+    serviceProfileId: previousProfileId, modelId: 'responses', adapterId: 'codex', sessionId: 'previous-profile'
+  })
+
+  await context.sync({
     serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
+    organization: { id: 'org-2', name: 'Product' },
+    models: [{ id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'] }],
     connectionRevision: 7
-  }
-  await context.projection.reconcile(input)
-  context.projection.prepareRuntime({ profileId: context.projection.listProfiles()[0].id, sessionId: 'session-1' })
-  context.setIdentity({ connectionId: 'connection-replaced', connectionRevision: 7 })
-  await context.projection.reconcile(input)
-  assert.deepEqual(context.calls.revoke, ['session-1'])
+  })
+  assert.deepEqual(context.calls.revoke, ['previous-profile'])
 })
 
-test('reconciliation revokes server sessions whose projected models were removed', async () => {
+test('same-revision connection replacement retains a valid selected-model authority', async () => {
   const context = harness()
-  const input = {
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-    connectionRevision: 7
-  }
-  await context.projection.reconcile(input)
-  context.projection.prepareRuntime({ profileId: context.projection.listProfiles()[0].id, sessionId: 'session-1' })
-  await context.projection.reconcile({ ...input, models: [] })
-  assert.deepEqual(context.calls.revoke, ['session-1'])
-})
-
-test('failed projection persistence leaves rows fail-closed and rejects reconciliation', async () => {
-  const context = harness({ flush: () => false })
-  await assert.rejects(() => context.projection.reconcile({
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-    connectionRevision: 7
-  }), { code: 'PROFILE_PERSISTENCE_PENDING' })
-  assert.deepEqual(context.projection.listProfiles().map(profile => [profile.status, profile.canStart]), [
-    ['unreachable', false], ['unreachable', false]
+  const input = catalog([
+    { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'] }
   ])
-})
-
-test('reconciliation remains fail-closed until held persistence succeeds or fails', async () => {
-  const hold = deferred()
-  const context = harness({ flush: () => hold.promise })
-  const request = context.projection.reconcile({
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-    connectionRevision: 7
+  await context.sync(input)
+  const serviceProfileId = context.projection.listProfiles()[0].id
+  context.projection.prepareRuntime({
+    serviceProfileId, modelId: 'responses', adapterId: 'codex', sessionId: 'same-revision'
   })
-  assert.deepEqual(context.projection.listProfiles().map(profile => profile.canStart), [false, false])
-  hold.resolve(true)
-  await request
-  assert.deepEqual(context.projection.listProfiles().map(profile => profile.canStart), [true, true])
 
-  const failed = deferred()
-  const failedContext = harness({ flush: () => failed.promise })
-  const failedRequest = failedContext.projection.reconcile({
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'org-1', name: 'Engineering' },
-    models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-    connectionRevision: 7
-  })
-  assert.deepEqual(failedContext.projection.listProfiles().map(profile => profile.canStart), [false, false])
-  failed.reject(new Error('flush failure'))
-  await assert.rejects(() => failedRequest, { code: 'PROFILE_PERSISTENCE_PENDING' })
-  assert.deepEqual(failedContext.projection.listProfiles().map(profile => profile.canStart), [false, false])
+  context.setIdentity({ connectionId: 'connection-replaced', connectionRevision: 7 })
+  await context.sync(input)
+  assert.deepEqual(context.calls.revoke, [])
 })
 
-test('rejects control-character organization and model identifiers so stable IDs cannot collide', async () => {
-  const context = harness()
-  await assert.rejects(() => context.projection.reconcile({
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'a', name: 'Engineering' },
-    models: [{ id: 'b\u0000c', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-    connectionRevision: 7
-  }), { code: 'INVALID_SERVER_MODEL' })
-  await assert.rejects(() => context.projection.reconcile({
-    serverOrigin: 'http://server.example.test',
-    organization: { id: 'a\u0000b', name: 'Engineering' },
-    models: [{ id: 'c', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-    connectionRevision: 7
-  }), { code: 'INVALID_SERVER_MODEL' })
-})
-
-test('server Codex files use an isolated namespace and never persist a session bearer', () => {
-  const root = mkdtempSync(join(tmpdir(), 'ucli-server-profile-'))
-  try {
-    const profile = {
-      id: '0123456789abcdef0123456789abcdef',
-      name: 'Organization Model',
-      model: 'model-1',
-      contextWindow: 128000
-    }
-    const written = codexProfileFiles.writeServerCodexProfileFileAtomic({
-      codexHome: root,
-      profile,
-      baseUrl: 'http://127.0.0.1:43123',
-      envKey: codexProfileFiles.serverCodexProfileSecretEnvName(profile.id)
-    })
-    const content = readFileSync(written.path, 'utf8')
-    assert.equal(existsSync(written.path), true)
-    assert.match(written.path, /ucli-server-0123456789abcdef0123456789abcdef\.config\.toml$/)
-    assert.match(content, /^# ucli-server-profile-id: 0123456789abcdef0123456789abcdef$/m)
-    assert.equal(content.includes('session-bearer'), false)
-    assert.throws(() => codexProfileFiles.inspectCodexProfileFile(written.path), { code: 'PROFILE_FILE_NOT_OWNED' })
-    assert.equal(codexProfileFiles.inspectServerCodexProfileFile(written.path).profileId, profile.id)
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('Codex runtime records only the generated server file digest in the projection row', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'ucli-server-digest-'))
+test('Codex creates independent per-model artifacts and cleans only stale owned files', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-model-'))
   try {
     const context = harness({ fileOps: codexProfileFiles, resolveCodexHome: () => root })
-    await context.projection.reconcile({
-      serverOrigin: 'http://server.example.test',
-      organization: { id: 'org-1', name: 'Engineering' },
-      models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-      connectionRevision: 7
+    await context.sync(catalog([
+      { id: 'responses-a', displayName: 'Responses A', contextSize: 128000, protocols: ['openai_responses'] },
+      { id: 'responses-b', displayName: 'Responses B', contextSize: 128000, protocols: ['openai_responses'] }
+    ]))
+    const serviceProfileId = context.projection.listProfiles()[0].id
+    const first = context.projection.prepareRuntime({
+      serviceProfileId, modelId: 'responses-a', adapterId: 'codex', sessionId: 'first'
     })
-    const codex = context.projection.listProfiles().find(profile => profile.adapterId === 'codex')
-    context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'session-digest' })
-    const row = context.stored.find(profile => profile.profileId === codex.id)
-    assert.match(row.codexFileSha256, /^[a-f0-9]{64}$/)
-    assert.equal(JSON.stringify(row).includes('session-bearer'), false)
-    assert.equal(JSON.stringify(row).includes('127.0.0.1'), false)
+    const second = context.projection.prepareRuntime({
+      serviceProfileId, modelId: 'responses-b', adapterId: 'codex', sessionId: 'second'
+    })
+
+    assert.notEqual(first.configPath, second.configPath)
+    assert.notEqual(first.artifactId, second.artifactId)
+    assert.equal(first.modelId, 'responses-a')
+    assert.equal(second.modelId, 'responses-b')
+    assert.equal(readFileSync(first.configPath, 'utf8').includes('session-bearer'), false)
+    assert.deepEqual(context.calls.artifacts.map(({ modelId }) => modelId), ['responses-a', 'responses-b'])
+    await context.sync(catalog([
+      { id: 'responses-a', displayName: 'Responses A', contextSize: 128000, protocols: ['openai_responses'] }
+    ]))
+    assert.equal(existsSync(first.configPath), true)
+    assert.equal(existsSync(second.configPath), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('runtime digest persistence rejects false, thrown, and asynchronous flushes before launch issuance', async () => {
-  for (const flush of [
-    () => false,
-    () => { throw new Error('flush failure') },
-    () => deferred().promise
-  ]) {
-    const fileOps = {
-      serverCodexProfileSecretEnvName: () => 'UCLI_SERVER_PROFILE_0123456789ABCDEF0123456789ABCDEF',
-      writeServerCodexProfileFileAtomic: () => ({ sha256: 'a'.repeat(64) })
-    }
-    let flushCalls = 0
-    const context = harness({
-      fileOps,
-      resolveCodexHome: () => 'C:\\codex',
-      flush: () => ++flushCalls === 1 ? true : flush()
-    })
-    await context.projection.reconcile({
-      serverOrigin: 'http://server.example.test',
-      organization: { id: 'org-1', name: 'Engineering' },
-      models: [{ id: 'model-1', displayName: 'Gateway Model', contextSize: 128000, protocols: ['openai_responses', 'anthropic_messages'] }],
-      connectionRevision: 7
-    })
-    const codex = context.projection.listProfiles().find(profile => profile.adapterId === 'codex')
-    assert.throws(() => context.projection.prepareRuntime({ profileId: codex.id, sessionId: 'digest-session' }), {
-      code: 'PROFILE_PERSISTENCE_PENDING'
-    })
-    assert.deepEqual(context.calls.revoke, ['digest-session'])
-  }
+test('failed persistence leaves the catalog fail-closed', async () => {
+  const context = harness({ flush: () => false })
+  await assert.rejects(() => context.sync(catalog([
+    { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'] }
+  ])), { code: 'PROFILE_PERSISTENCE_PENDING' })
+  assert.deepEqual(context.projection.listProfiles().map(({ status, canStart }) => ({ status, canStart })), [
+    { status: 'unreachable', canStart: false }
+  ])
 })
 
-test('profile service aggregates server profiles, allows binding, and rejects every server write', async () => {
-  const server = {
-    id: '0123456789abcdef0123456789abcdef',
-    adapterId: 'codex',
+test('reconciliation remains fail-closed while catalog persistence is pending', async () => {
+  const hold = deferred()
+  const context = harness({ flush: () => hold.promise })
+  const pending = context.sync(catalog([
+    { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'] }
+  ]))
+  assert.deepEqual(context.projection.listProfiles().map((profile) => profile.canStart), [false])
+  hold.resolve(true)
+  await pending
+  assert.deepEqual(context.projection.listProfiles().map((profile) => profile.canStart), [true])
+})
+
+test('profile service forwards the persisted session model and explicit adapter to server runtime preparation', () => {
+  const calls = []
+  const serviceProfile = {
+    id: 'http://server.example.test::org-1',
     sourceKind: 'server',
     readOnly: true,
+    supportedAdapterIds: ['codex', 'claude'],
+    models: [],
     status: 'ready',
-    canStart: true,
-    connectionRevision: 7
-  }
-  const bindings = []
-  const releasedRuntimeIds = []
-  const db = {
-    listAiCliProfiles: () => [],
-    listAiCliProfileBindings: ({ profileId } = {}) => profileId
-      ? bindings.filter(binding => binding.profileId === profileId)
-      : bindings,
-    getAiCliProfile: () => null,
-    upsertAiCliProfileBinding: binding => bindings.push(binding),
-    getAiCliProfileBinding: (scopeType, scopeKey, adapterId) => bindings.find(binding => (
-      binding.scopeType === scopeType && binding.scopeKey === scopeKey && binding.adapterId === adapterId
-    )) || null,
-    listAiCliProfileRevisions: () => []
+    canStart: true
   }
   const service = createProfileService({
-    db,
+    db: { listAiCliProfiles: () => [] },
     secretStore: {},
     resolveCodexHome: () => 'C:\\codex',
     readCodexRuntime: () => ({}),
     fileOps: {},
     serverModelProjection: {
-      listProfiles: () => [server],
-      releaseRuntime(sessionId) {
-        releasedRuntimeIds.push(sessionId)
-        return true
+      listProfiles: () => [serviceProfile],
+      prepareRuntime(options) {
+        calls.push(options)
+        return { status: 'ready' }
       }
     },
     flush: () => true
   })
 
-  assert.equal(service.listProfiles({ adapterId: 'codex' })[0].id, server.id)
-  assert.equal(service.releaseRuntime('summary-runtime-id'), true)
-  assert.deepEqual(releasedRuntimeIds, ['summary-runtime-id'])
-  await service.setBinding({ scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: server.id })
-  const selection = service.resolveSessionProfile({ adapterId: 'codex', cwd: 'C:\\project' })
-  assert.equal(selection.profileId, server.id)
-  for (const action of [
-    () => service.updateProfile(server.id, {}),
-    () => service.replaceProfileSecret(server.id, 'must-not-store'),
-    () => service.deleteProfileSecret(server.id),
-    () => service.deleteProfile(server.id),
-    () => service.repairProfile(server.id),
-    () => service.rollbackProfile(server.id, 'revision-1')
-  ]) {
-    await assert.rejects(action, { code: 'PROFILE_READ_ONLY' })
-  }
-  assert.deepEqual(sanitiseProfileError({ code: 'PROFILE_READ_ONLY', message: 'secret' }), {
-    code: 'PROFILE_READ_ONLY',
-    message: 'Organization-provided AI CLI profiles are read-only'
+  service.resolveCodexLaunchProfile(serviceProfile.id, { id: 'codex-session', model: 'responses' })
+  service.resolveLaunchProfile({
+    profileId: serviceProfile.id,
+    adapterId: 'claude',
+    session: { id: 'claude-session', model: 'claude' }
   })
-
-  const userOnlyService = createProfileService({
-    db,
-    secretStore: {},
-    resolveCodexHome: () => 'C:\\codex',
-    readCodexRuntime: () => ({}),
-    fileOps: {},
-    flush: () => true
-  })
-  assert.equal(userOnlyService.releaseRuntime('summary-runtime-id'), false)
+  assert.deepEqual(calls, [
+    { serviceProfileId: serviceProfile.id, modelId: 'responses', adapterId: 'codex', sessionId: 'codex-session' },
+    { serviceProfileId: serviceProfile.id, modelId: 'claude', adapterId: 'claude', sessionId: 'claude-session' }
+  ])
 })
