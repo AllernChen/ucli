@@ -35,6 +35,8 @@ test('registration dialog renders independent link and authorization status and 
   assert.match(dialog, /:closable="!connection\.busy"/)
   assert.match(dialog, /:mask-closable="!connection\.busy"/)
   assert.match(dialog, /:keyboard="!connection\.busy"/)
+  assert.match(dialog, /connection\.connectionError\?\.message/)
+  assert.doesNotMatch(dialog, /connection\.error/)
 })
 
 test('connection templates do not retain an invitation secret or full input URL', () => {

@@ -84,6 +84,8 @@ export const useServerConnectionStore = defineStore('server-connection', {
     _attemptRequest: 0,
     _registrationGeneration: 0,
     _catalogRequest: 0,
+    _modelRequest: 0,
+    _skillActionRequest: 0,
     _connectionIdentity: null
   }),
   getters: {
@@ -109,7 +111,11 @@ export const useServerConnectionStore = defineStore('server-connection', {
       const nextIdentity = catalogIdentity(this)
       if (nextIdentity !== this._connectionIdentity) {
         this._catalogRequest += 1
+        this._modelRequest += 1
+        this.models = []
         this.skills = []
+        this.modelCatalogError = null
+        this.skillsCatalogError = null
         this._connectionIdentity = nextIdentity
       }
       return true
@@ -277,13 +283,21 @@ export const useServerConnectionStore = defineStore('server-connection', {
     syncConnection() { return this.runConnectionAction(() => ipc.serverConnection.sync(), '无法同步服务端连接') },
     disconnect() { return this.runConnectionAction(() => ipc.serverConnection.disconnect(), '无法断开服务端连接') },
     async syncModels() {
+      const lifecycle = this._lifecycle
+      const identity = this._connectionIdentity
+      const request = ++this._modelRequest
       this.modelCatalogError = null
       try {
-        this.models = await ipc.serverConnection.listModels()
+        const models = await ipc.serverConnection.listModels()
         await useAiCliProfilesStore().load()
+        if (this._lifecycle === lifecycle && identity && identity === this._connectionIdentity && request === this._modelRequest) {
+          this.models = Array.isArray(models) ? models : []
+        }
         return this.models
       } catch (error) {
-        this.modelCatalogError = publicError(error)
+        if (this._lifecycle === lifecycle && identity && identity === this._connectionIdentity && request === this._modelRequest) {
+          this.modelCatalogError = publicError(error)
+        }
         throw error
       }
     },
@@ -324,25 +338,39 @@ export const useServerConnectionStore = defineStore('server-connection', {
     },
     async installSkill(versionId, targets) {
       const target = validateSkillTargets(targets)
-      this.skillsCatalogError = null
+      const lifecycle = this._lifecycle
+      const identity = this._connectionIdentity
+      const actionRequest = ++this._skillActionRequest
+      const catalogRequest = this._catalogRequest
+      if (identity && identity === this._connectionIdentity) this.skillsCatalogError = null
       try {
         const result = await ipc.serverConnection.installSkill(versionId, target)
         await this.syncSkills()
         return result
       } catch (error) {
-        this.skillsCatalogError = publicError(error)
+        if (this._lifecycle === lifecycle && identity && identity === this._connectionIdentity &&
+          actionRequest === this._skillActionRequest && catalogRequest === this._catalogRequest) {
+          this.skillsCatalogError = publicError(error)
+        }
         throw error
       }
     },
     async updateSkill(versionId, targets) {
       const target = validateSkillTargets(targets)
-      this.skillsCatalogError = null
+      const lifecycle = this._lifecycle
+      const identity = this._connectionIdentity
+      const actionRequest = ++this._skillActionRequest
+      const catalogRequest = this._catalogRequest
+      if (identity && identity === this._connectionIdentity) this.skillsCatalogError = null
       try {
         const result = await ipc.serverConnection.updateSkill(versionId, target)
         await this.syncSkills()
         return result
       } catch (error) {
-        this.skillsCatalogError = publicError(error)
+        if (this._lifecycle === lifecycle && identity && identity === this._connectionIdentity &&
+          actionRequest === this._skillActionRequest && catalogRequest === this._catalogRequest) {
+          this.skillsCatalogError = publicError(error)
+        }
         throw error
       }
     }

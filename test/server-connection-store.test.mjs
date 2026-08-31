@@ -266,6 +266,106 @@ test('catalog actions clear only their own error domain', async () => {
   assert.deepEqual(connection.skillsCatalogError, skillsCatalogError)
 })
 
+test('late organization-A Skill installation failure cannot overwrite organization-B catalog state', async () => {
+  const connection = store()
+  const installation = deferred()
+  const orgA = { ...initialState, revision: 1, organization: { id: 'org-a', name: 'A' }, connection: { ...initialState.connection, id: 'connection-a' } }
+  const disconnected = { revision: 2, status: 'disconnected', connection: null }
+  const orgB = { ...initialState, revision: 3, organization: { id: 'org-b', name: 'B' }, connection: { ...initialState.connection, id: 'connection-b' } }
+  const previousInstall = window.ucli.installServerConnectionSkill
+  window.ucli.installServerConnectionSkill = async () => installation.promise
+  connection.applyState(orgA)
+
+  try {
+    const installing = connection.installSkill('version-a', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
+    connection.applyState(disconnected)
+    connection.applyState(orgB)
+    installation.reject(Object.assign(new Error('synthetic-secret org-A install failure'), { code: 'synthetic-install-error' }))
+
+    await assert.rejects(installing)
+    assert.equal(connection.organization.id, 'org-b')
+    assert.equal(connection.skillsCatalogError, null)
+  } finally {
+    window.ucli.installServerConnectionSkill = previousInstall
+  }
+})
+
+test('late organization-A Skill update failure cannot overwrite organization-B catalog state', async () => {
+  const connection = store()
+  const update = deferred()
+  const orgA = { ...initialState, revision: 1, organization: { id: 'org-a', name: 'A' }, connection: { ...initialState.connection, id: 'connection-a' } }
+  const disconnected = { revision: 2, status: 'disconnected', connection: null }
+  const orgB = { ...initialState, revision: 3, organization: { id: 'org-b', name: 'B' }, connection: { ...initialState.connection, id: 'connection-b' } }
+  const previousUpdate = window.ucli.updateServerConnectionSkill
+  window.ucli.updateServerConnectionSkill = async () => update.promise
+  connection.applyState(orgA)
+
+  try {
+    const updating = connection.updateSkill('version-a', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
+    connection.applyState(disconnected)
+    connection.applyState(orgB)
+    update.reject(Object.assign(new Error('synthetic-secret org-A update failure'), { code: 'synthetic-update-error' }))
+
+    await assert.rejects(updating)
+    assert.equal(connection.organization.id, 'org-b')
+    assert.equal(connection.skillsCatalogError, null)
+  } finally {
+    window.ucli.updateServerConnectionSkill = previousUpdate
+  }
+})
+
+test('late organization-A model response cannot overwrite organization-B models', async () => {
+  const connection = store()
+  const oldModels = deferred()
+  const orgA = { ...initialState, revision: 1, organization: { id: 'org-a', name: 'A' }, connection: { ...initialState.connection, id: 'connection-a' } }
+  const disconnected = { revision: 2, status: 'disconnected', connection: null }
+  const orgB = { ...initialState, revision: 3, organization: { id: 'org-b', name: 'B' }, connection: { ...initialState.connection, id: 'connection-b' } }
+  const previousModels = window.ucli.listServerConnectionModels
+  let calls = 0
+  window.ucli.listServerConnectionModels = async () => (++calls === 1 ? oldModels.promise : [{ id: 'model-b' }])
+  connection.applyState(orgA)
+
+  try {
+    const loadingA = connection.syncModels()
+    connection.applyState(disconnected)
+    connection.applyState(orgB)
+    await connection.syncModels()
+    oldModels.resolve([{ id: 'model-a' }])
+
+    await loadingA
+    assert.deepEqual(connection.models, [{ id: 'model-b' }])
+    assert.equal(connection.modelCatalogError, null)
+  } finally {
+    window.ucli.listServerConnectionModels = previousModels
+  }
+})
+
+test('late organization-A model failure cannot overwrite organization-B catalog state', async () => {
+  const connection = store()
+  const oldModels = deferred()
+  const orgA = { ...initialState, revision: 1, organization: { id: 'org-a', name: 'A' }, connection: { ...initialState.connection, id: 'connection-a' } }
+  const disconnected = { revision: 2, status: 'disconnected', connection: null }
+  const orgB = { ...initialState, revision: 3, organization: { id: 'org-b', name: 'B' }, connection: { ...initialState.connection, id: 'connection-b' } }
+  const previousModels = window.ucli.listServerConnectionModels
+  let calls = 0
+  window.ucli.listServerConnectionModels = async () => (++calls === 1 ? oldModels.promise : [{ id: 'model-b' }])
+  connection.applyState(orgA)
+
+  try {
+    const loadingA = connection.syncModels()
+    connection.applyState(disconnected)
+    connection.applyState(orgB)
+    await connection.syncModels()
+    oldModels.reject(Object.assign(new Error('synthetic-secret org-A model failure'), { code: 'synthetic-model-error' }))
+
+    await assert.rejects(loadingA)
+    assert.deepEqual(connection.models, [{ id: 'model-b' }])
+    assert.equal(connection.modelCatalogError, null)
+  } finally {
+    window.ucli.listServerConnectionModels = previousModels
+  }
+})
+
 test('retains only stable public connection errors and refreshes catalog actions', async () => {
   const connection = store()
   window.ucli.syncServerConnection = async () => { throw Object.assign(new Error('synthetic-secret response'), { code: 'NETWORK_UNREACHABLE', retryable: true, stack: 'sensitive' }) }
