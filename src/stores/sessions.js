@@ -264,7 +264,7 @@ export const useSessionsStore = defineStore('sessions', {
       if (!row) {
         const isImport = !!(s.cliSessionId || s.nativeSessionId)
         const displayName = isImport
-          ? (s.name || s.displayName || 'Claude') + (s.startedAt ? ' · ' + fmtShort(s.startedAt) : '')
+          ? (s.name || s.displayName || adapter?.displayName || s.adapterId) + (s.startedAt ? ' · ' + fmtShort(s.startedAt) : '')
           : (s.name || adapter?.displayName || s.adapterId)
         row = {
           id: s.id, adapterId: s.adapterId, displayName,
@@ -379,7 +379,10 @@ export const useSessionsStore = defineStore('sessions', {
           row.stats.tokens = { input: evt.usage.inputTokens, output: evt.usage.outputTokens }
           if (evt.costUsd != null) row.stats.costUsd = evt.costUsd
           if (evt.turns != null) row.stats.turns = evt.turns
-          if (evt.model && !(row.adapterId === 'claude' && row.profileId)) row.model = evt.model
+          if (
+            evt.model && row.profileSourceKind !== 'server' &&
+            !(row.adapterId === 'claude' && row.profileId)
+          ) row.model = evt.model
           if (typeof evt.actualModel === 'string') row.actualModel = evt.actualModel
           if (evt.profileWarning === 'model_substituted' || evt.profileWarning === null) {
             row.profileWarning = evt.profileWarning

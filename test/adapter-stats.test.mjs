@@ -219,6 +219,11 @@ test('Codex latest transcript discovery ignores newer subagent rollouts', async 
   const subagentId = '019fd0c3-a019-7ad0-a634-489043a4f49c'
   const dir = join(codexHome, 'sessions', '2026', '08', '05')
   mkdirSync(dir, { recursive: true })
+  const adapter = new CodexAdapter({
+    session: { id: 'ucli-session', cwd, cliSessionId: null },
+    engine: null,
+    settings: { codexHome }
+  })
   const mainPath = join(dir, `rollout-main-${mainId}.jsonl`)
   writeFileSync(mainPath, JSON.stringify({
     type: 'session_meta',
@@ -236,14 +241,51 @@ test('Codex latest transcript discovery ignores newer subagent rollouts', async 
     }
   }) + '\n')
 
+  adapter._startedAt = Date.parse('2026-08-05T07:00:00.000Z')
+  try {
+    assert.equal(adapter._findLatestTranscript(), mainPath)
+  } finally {
+    await adapter.dispose()
+    rmSync(codexHome, { recursive: true, force: true })
+  }
+})
+
+test('Codex latest transcript discovery ignores a pre-existing same-directory rollout that changes after startup', async () => {
+  const codexHome = mkdtempSync(join(tmpdir(), 'ucli-codex-existing-rollout-'))
+  const cwd = 'F:\\projects\\ucli'
+  const existingId = '019fcac6-0c62-7da1-92ff-454e53dab197'
+  const createdId = '019fd111-1111-7111-8111-111111111111'
+  const dir = join(codexHome, 'sessions', '2026', '08', '31')
+  mkdirSync(dir, { recursive: true })
+  const existingPath = join(dir, `rollout-existing-${existingId}.jsonl`)
+  writeFileSync(existingPath, JSON.stringify({
+    type: 'session_meta',
+    payload: { id: existingId, timestamp: '2026-08-31T14:00:00.000Z', cwd }
+  }) + '\n')
+
   const adapter = new CodexAdapter({
     session: { id: 'ucli-session', cwd, cliSessionId: null },
     engine: null,
     settings: { codexHome }
   })
-  adapter._startedAt = Date.parse('2026-08-05T07:00:00.000Z')
   try {
-    assert.equal(adapter._findLatestTranscript(), mainPath)
+    writeFileSync(existingPath, [
+      JSON.stringify({
+        type: 'session_meta',
+        payload: { id: existingId, timestamp: '2026-08-31T14:00:00.000Z', cwd }
+      }),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'token_count' } })
+    ].join('\n') + '\n')
+
+    assert.equal(adapter._findLatestTranscript(), null)
+
+    const createdPath = join(dir, `rollout-created-${createdId}.jsonl`)
+    writeFileSync(createdPath, JSON.stringify({
+      type: 'session_meta',
+      payload: { id: createdId, timestamp: new Date().toISOString(), cwd }
+    }) + '\n')
+
+    assert.equal(adapter._findLatestTranscript(), createdPath)
   } finally {
     await adapter.dispose()
     rmSync(codexHome, { recursive: true, force: true })

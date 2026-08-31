@@ -204,6 +204,51 @@ test('renderer preserves only the server profile provenance marker', async () =>
   assert.equal(row.profileSourceKind, 'server')
 })
 
+test('renderer keeps a Codex service profile requested model when live stats report another model', async () => {
+  const bridge = globalThis.window?.ucli || {}
+  globalThis.window = { ucli: bridge }
+  const { useSessionsStore } = await import('../src/stores/sessions.js?server-model-stats')
+  setActivePinia(createPinia())
+  const store = useSessionsStore()
+  store.sessions.push({
+    id: 'server-codex', adapterId: 'codex', model: 'deepseek-v4-flash',
+    profileId: 'http://server.test::org-1', profileSourceKind: 'server',
+    capabilities: { statsOwner: 'ucli' },
+    stats: { tokens: { input: 0, output: 0 }, turns: 0 }
+  })
+
+  store._onEvent({
+    sessionId: 'server-codex', type: 'stats_update',
+    usage: { inputTokens: 10, outputTokens: 5 }, turns: 1,
+    model: 'gpt-5.6-sol', actualModel: 'gpt-5.6-sol',
+    profileWarning: 'model_substituted', ts: 1
+  })
+
+  const row = store.byId('server-codex')
+  assert.equal(row.model, 'deepseek-v4-flash')
+  assert.equal(row.actualModel, 'gpt-5.6-sol')
+  assert.equal(row.profileWarning, 'model_substituted')
+})
+
+test('renderer uses the adapter display name for an unnamed persisted native session', async () => {
+  const bridge = globalThis.window?.ucli || {}
+  globalThis.window = { ucli: bridge }
+  const { useSessionsStore } = await import('../src/stores/sessions.js?adapter-display-name')
+  setActivePinia(createPinia())
+  const store = useSessionsStore()
+  store.adapters = [{ id: 'codex', displayName: 'Codex', icon: 'C' }]
+
+  store._upsertSummary({
+    id: 'unnamed-codex', adapterId: 'codex', cwd: 'F:\\projects\\demo',
+    cliSessionId: '019fcac6-0c62-7da1-92ff-454e53dab197', name: null,
+    model: 'deepseek-v4-flash', tier: 'safety-rules', status: 'offline',
+    startedAt: Date.UTC(2026, 7, 31, 14, 2),
+    stats: { tokens: { input: 0, output: 0 }, turns: 0 }
+  })
+
+  assert.match(store.byId('unnamed-codex').displayName, /^Codex · /)
+})
+
 test('session storage persists only the allowlisted server profile source marker', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ucli-session-profile-source-'))
   const path = join(root, 'ucli.db')
