@@ -154,7 +154,7 @@ export function renderServerCodexProfileFile({ id, name, model, contextWindow },
     model_providers: {
       [providerId]: {
         name: safeName,
-        base_url: baseUrlResult.origin,
+        base_url: `${baseUrlResult.origin}/v1`,
         env_key: envKey,
         wire_api: 'responses',
         requires_openai_auth: false
