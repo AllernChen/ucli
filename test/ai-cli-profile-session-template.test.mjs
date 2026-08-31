@@ -260,9 +260,9 @@ async function withCodexServiceProfile(callback) {
   }
 }
 
-function createdCodexSession(handlers) {
+function createdCodexSession(handlers, overrides = {}) {
   return handlers.get('session:create')({}, {
-    adapterId: 'codex', cwd: 'F:\\projects\\demo', tier: 'safety-rules'
+    adapterId: 'codex', cwd: 'F:\\projects\\demo', tier: 'safety-rules', ...overrides
   })
 }
 
@@ -434,6 +434,59 @@ test('interactive Codex reprepare does not republish a reported model alias', as
     await handlers.get('session:start-adapter')({}, created.sessionId)
 
     const live = (await handlers.get('session:list')({})).find(session => session.id === created.sessionId)
+    const published = events.filter(({ payload }) => payload.type === 'profile-runtime').at(-1)?.payload
+    assert.equal(live.actualModel, null)
+    assert.equal(live.profileWarning, null)
+    assert.equal(published.actualModel, null)
+    assert.equal(published.profileWarning, null)
+  })
+})
+
+test('a successful system Codex restart clears a reported model alias', async () => {
+  await withCodexServiceProfile(async ({ handlers, adapters, events }) => {
+    const created = createdCodexSession(handlers, {
+      model: 'system-model', profileSelection: 'system'
+    })
+    const adapter = adapters.at(-1)
+    adapter.emit('event', { type: 'profile-model', actualModel: 'system-model-alias' })
+    await settleAdapterEvent()
+
+    let live = (await handlers.get('session:list')({})).find(session => session.id === created.sessionId)
+    assert.equal(live.profileId, null)
+    assert.equal(live.actualModel, 'system-model-alias')
+    assert.equal(live.profileWarning, 'model_substituted')
+    await handlers.get('session:stop')({}, created.sessionId)
+    events.length = 0
+
+    await handlers.get('session:restart')({}, created.sessionId)
+
+    live = (await handlers.get('session:list')({})).find(session => session.id === created.sessionId)
+    const published = events.filter(({ payload }) => payload.type === 'profile-runtime').at(-1)?.payload
+    assert.equal(live.actualModel, null)
+    assert.equal(live.profileWarning, null)
+    assert.equal(published.actualModel, null)
+    assert.equal(published.profileWarning, null)
+  })
+})
+
+test('system interactive Codex reprepare clears a reported model alias', async () => {
+  await withCodexServiceProfile(async ({ handlers, adapters, events }) => {
+    const created = createdCodexSession(handlers, {
+      model: 'system-model', profileSelection: 'system'
+    })
+    const adapter = adapters.at(-1)
+    adapter.emit('event', { type: 'profile-model', actualModel: 'system-model-alias' })
+    await settleAdapterEvent()
+
+    let live = (await handlers.get('session:list')({})).find(session => session.id === created.sessionId)
+    assert.equal(live.profileId, null)
+    assert.equal(live.actualModel, 'system-model-alias')
+    assert.equal(live.profileWarning, 'model_substituted')
+    events.length = 0
+
+    await handlers.get('session:start-adapter')({}, created.sessionId)
+
+    live = (await handlers.get('session:list')({})).find(session => session.id === created.sessionId)
     const published = events.filter(({ payload }) => payload.type === 'profile-runtime').at(-1)?.payload
     assert.equal(live.actualModel, null)
     assert.equal(live.profileWarning, null)

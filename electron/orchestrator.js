@@ -2992,6 +2992,10 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           isActive: false
         })
         assertCodexSessionCanStart(next)
+        Object.assign(next, {
+          actualModel: null,
+          profileWarning: null
+        })
       }
       const db = getDb()
       if (db) {
@@ -3394,6 +3398,10 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             canStart: next.canStart
           })
           assertCodexSessionCanStart(next)
+          Object.assign(next, {
+            actualModel: null,
+            profileWarning: null
+          })
         }
       }
       await hookReady
