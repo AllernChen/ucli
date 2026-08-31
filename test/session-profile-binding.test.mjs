@@ -180,6 +180,30 @@ test('renderer merges only allowlisted profile runtime fields', async () => {
   assert.equal(row.actualModel, 'claude-sonnet-5-20260801')
 })
 
+test('renderer preserves only the server profile provenance marker', async () => {
+  const bridge = globalThis.window?.ucli || {}
+  globalThis.window = { ucli: bridge }
+  const { useSessionsStore } = await import('../src/stores/sessions.js?strict-profile-source-kind')
+  setActivePinia(createPinia())
+  const store = useSessionsStore()
+  store._upsertSummary({
+    id: 'session-1', adapterId: 'codex', cwd: 'F:\\projects\\demo', model: 'local-model',
+    tier: 'safety-rules', status: 'offline', stats: {}, profileSourceKind: 'user'
+  })
+  const row = store.byId('session-1')
+  assert.equal(row.profileSourceKind, null)
+
+  store._onEvent({
+    sessionId: row.id, type: 'profile-runtime', profileSourceKind: 'local'
+  })
+  assert.equal(row.profileSourceKind, null)
+
+  store._onEvent({
+    sessionId: row.id, type: 'profile-runtime', profileSourceKind: 'server'
+  })
+  assert.equal(row.profileSourceKind, 'server')
+})
+
 test('session storage persists only the allowlisted server profile source marker', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ucli-session-profile-source-'))
   const path = join(root, 'ucli.db')

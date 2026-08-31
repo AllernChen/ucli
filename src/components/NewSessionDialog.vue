@@ -162,7 +162,7 @@ import { useSettingsStore } from '../stores/settings.js'
 import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import { ipc } from '../ipc.js'
 import { compatibleModelsForAdapter, validateServiceProfileSelection } from '../serviceProfileSelection.js'
-import { isServiceProfile } from '../sessionConfigPresentation.js'
+import { importedSessionModelForSelection, isServiceProfile } from '../sessionConfigPresentation.js'
 
 const props = defineProps({
   initialCwd: { type: String, default: '' },
@@ -453,7 +453,12 @@ async function importSelected() {
           const profileConfig = profileConfigForSelection(true, group.id)
           if (profileConfig.profileId) config.profileId = profileConfig.profileId
           if (profileConfig.profileSelection) config.profileSelection = profileConfig.profileSelection
-          if (profileConfig.model !== undefined) config.model = profileConfig.model
+          const importedModel = importedSessionModelForSelection({
+            selection: selectionValue(true, group.id),
+            discoveredModel: cs?.model,
+            explicitModel: profileConfig.model
+          })
+          if (importedModel !== undefined) config.model = importedModel
         }
         if (cs?.name) config.name = cs.name
         if (cs?.startedAt) config.startedAt = cs.startedAt

@@ -126,3 +126,53 @@ pass
 ```
 
 The final tuple/import audit again found only the two atomic-object `SessionConfigModal` callers.  Initial `NewSessionDialog` import and secondary `SessionDetail` import both retain their explicit-model validation and only preserve a discovered historical model when no explicit tuple model was selected.  No production `models[0]` or scalar profile mutation caller remains.
+
+## Review remediation — provenance migration and import preservation
+
+- Schema upgrade now backfills `sessions.profile_source_kind = 'server'` only when the persisted `profile_id` exactly matches a current normalized `server_service_profiles.profile_id`.  The additive migration runs after the normalized catalog schema and legacy catalog migration, is idempotent, and leaves local and unknown profile IDs null.  It never examines model, vendor, protocol, or an ID pattern.
+- Orchestrator session state, persistence writes, `session:list`, and `profile-runtime` now share a strict source-marker normalizer: only the literal `server` survives; every other source (`user`, system, missing, or malformed) becomes null.
+- Renderer summary upsert, runtime-event handling, and profile-result merges apply the same strict normalizer, so a stale or malformed bridge payload cannot reintroduce a non-server marker into in-memory presentation state.
+- The initial `NewSessionDialog` import and secondary `SessionDetail` import now use the same narrow model-selection seam.  `history` and explicit `system` retain the discovered model; explicit server/local profile tuples retain their explicit model value, including local `null`.
+
+### Review-round-2 RED / GREEN evidence
+
+```text
+node --test --test-name-pattern "legacy sessions backfill" test/server-connection-db.test.mjs
+RED: exact normalized service-profile legacy session returned profileSourceKind null, expected server
+GREEN: pass 1, fail 0
+
+node --test --test-name-pattern "local profile creation never" test/ai-cli-profile-session-template.test.mjs
+RED: session:list returned profileSourceKind 'user', expected null
+GREEN: pass 1, fail 0
+
+node --test --test-name-pattern "initial and secondary imports retain" test/session-config-presentation.test.mjs
+RED: importedSessionModelForSelection was not exported
+GREEN: pass 1, fail 0
+
+node --test --test-name-pattern "renderer preserves only" test/session-profile-binding.test.mjs
+RED: renderer summary retained profileSourceKind 'user', expected null
+GREEN: pass 1, fail 0
+```
+
+The legacy migration test seeds an old `sessions` schema plus a normalized service catalog, verifies server/local/unknown rows after upgrade, clears the catalog, flushes, and reopens.  The exact server tuple remains `{ profileId, model, profileSourceKind: 'server' }`; local and unknown rows remain null.  The live fixture additionally proves server -> local -> system emits and persists respectively `'server'`, null, and null, while a locally-created profile can no longer leak `'user'` in `session:list` or the database.
+
+### Review-round-2 verification
+
+```text
+node --test test/server-connection-db.test.mjs test/ai-cli-profile-session-template.test.mjs test/session-config-presentation.test.mjs test/session-config-template.test.mjs test/service-profile-selection.test.mjs test/session-profile-binding.test.mjs
+pass 59, fail 0
+
+node --test --test-concurrency=1 [Task 9 focused implementation suite plus session-profile-binding]
+pass 152, fail 0
+
+npm run build
+pass
+
+npm test
+tests 1934; pass 1922; fail 0; skipped 12
+
+git diff --check
+pass
+```
+
+No installer flake occurred.  No server code, credentials, protocols, or fallback inference changed.  The only scope addition was the load-bearing session provenance migration required to keep a historical server selection identifiable after a catalog disconnect/reopen.

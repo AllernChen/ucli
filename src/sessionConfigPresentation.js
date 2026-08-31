@@ -21,6 +21,15 @@ export function sessionProfileDraftFor(session = {}) {
   }
 }
 
+export function importedSessionModelForSelection({
+  selection,
+  discoveredModel,
+  explicitModel
+} = {}) {
+  if (selection === 'history' || selection === 'system') return discoveredModel
+  return explicitModel !== undefined ? explicitModel : discoveredModel
+}
+
 export function deriveServiceProfileSessionState({
   profile = null,
   adapterId,

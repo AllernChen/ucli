@@ -103,6 +103,65 @@ test('opening a pre-server database adds the server schema without rewriting exi
   }
 })
 
+test('legacy sessions backfill server provenance only from an existing exact service profile', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-provenance-migration-'))
+  const path = join(root, 'ucli.db')
+  const initSqlJs = (await import('sql.js')).default
+  const SQL = await initSqlJs()
+  const legacy = new SQL.Database()
+  legacy.run(`CREATE TABLE sessions (
+    id TEXT PRIMARY KEY, project_path TEXT NOT NULL, adapter_id TEXT NOT NULL,
+    native_session_id TEXT, name TEXT, task_note TEXT DEFAULT '', tier TEXT NOT NULL DEFAULT 'safety-rules',
+    model TEXT, profile_id TEXT, status TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  )`)
+  legacy.run(`CREATE TABLE server_service_profiles (
+    profile_id TEXT PRIMARY KEY, server_origin TEXT NOT NULL, organization_id TEXT NOT NULL,
+    organization_name TEXT NOT NULL, connection_revision TEXT NOT NULL, availability_status TEXT NOT NULL,
+    UNIQUE(server_origin, organization_id)
+  )`)
+  legacy.run(`CREATE TABLE server_service_models (
+    service_profile_id TEXT NOT NULL, model_id TEXT NOT NULL, display_name TEXT NOT NULL,
+    context_size INTEGER NOT NULL, protocols_json TEXT NOT NULL, availability_status TEXT NOT NULL,
+    catalog_order INTEGER NOT NULL, codex_file_sha256 TEXT,
+    PRIMARY KEY(service_profile_id, model_id)
+  )`)
+  legacy.run("INSERT INTO server_service_profiles VALUES ('https://server.example.test::org-1', 'https://server.example.test', 'org-1', 'Example Org', '1', 'ready')")
+  legacy.run("INSERT INTO server_service_models VALUES ('https://server.example.test::org-1', 'responses-b', 'Responses B', 128000, '[\"openai_responses\"]', 'ready', 0, NULL)")
+  legacy.run(`INSERT INTO sessions VALUES
+    ('service-session', 'F:/project', 'codex', NULL, NULL, '', 'safety-rules', 'responses-b', 'https://server.example.test::org-1', 'offline', 1, 2),
+    ('local-session', 'F:/project', 'codex', NULL, NULL, '', 'safety-rules', 'local-model', 'local-profile', 'offline', 1, 2),
+    ('unknown-session', 'F:/project', 'codex', NULL, NULL, '', 'safety-rules', 'responses-b', 'https://server.example.test::missing', 'offline', 1, 2)`)
+  writeFileSync(path, Buffer.from(legacy.export()))
+  legacy.close()
+
+  let db = await openDb(path)
+  try {
+    assert.equal(db.getSession('service-session').profileSourceKind, 'server')
+    assert.equal(db.getSession('local-session').profileSourceKind, null)
+    assert.equal(db.getSession('unknown-session').profileSourceKind, null)
+    db.clearServerServiceCatalog()
+    assert.equal(db.flush(), true)
+    db.close()
+
+    db = await openDb(path)
+    const rehydrated = db.getSession('service-session')
+    assert.deepEqual({
+      profileId: rehydrated.profileId,
+      model: rehydrated.model,
+      profileSourceKind: rehydrated.profileSourceKind
+    }, {
+      profileId: 'https://server.example.test::org-1',
+      model: 'responses-b',
+      profileSourceKind: 'server'
+    })
+    assert.equal(db.getSession('local-session').profileSourceKind, null)
+    assert.equal(db.getSession('unknown-session').profileSourceKind, null)
+  } finally {
+    db.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('server connection operations hide candidates and atomically replace current with the next revision', async () => {
   await withDb(async (db) => {
     db.saveServerConnection(connection({ id: 'old-current', slot: 'current', connectionRevision: 3 }))

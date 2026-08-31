@@ -643,6 +643,7 @@ class Db {
       )
     `)
     this._migrateLegacyServerModelProfiles()
+    this._backfillSessionServiceProfileSourceKinds()
     if (initializeUsageLedger) this.initializeUsageLedgerAfterLegacyImport()
   }
 
@@ -2147,6 +2148,20 @@ class Db {
 
       this.sql.run('DROP TABLE server_model_profiles')
     })
+  }
+
+  _backfillSessionServiceProfileSourceKinds() {
+    this.sql.run(`
+      UPDATE sessions
+      SET profile_source_kind = 'server'
+      WHERE profile_source_kind IS NULL
+        AND profile_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM server_service_profiles
+          WHERE server_service_profiles.profile_id = sessions.profile_id
+        )
+    `)
   }
 
   replaceServerSkillVersions({ connectionRevision, versions }) {

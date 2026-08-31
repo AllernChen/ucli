@@ -1269,7 +1269,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           explicitProvider: null,
           providerOverride: null,
           providerWarning: null,
-          profileSourceKind: profile.sourceKind || null,
+          profileSourceKind: normalizeProfileSourceKind(profile.sourceKind),
           profileStatus: 'ready',
           profileRuntimeRevision: launch.runtimeRevision || null,
           pendingProfileRuntimeRevision: null,
@@ -1337,7 +1337,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       ...prepared,
       session: {
         ...prepared.session,
-        profileSourceKind: profile?.sourceKind || null
+        profileSourceKind: normalizeProfileSourceKind(profile?.sourceKind)
       }
     }
   }
@@ -1529,10 +1529,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     }
   }
 
+  function normalizeProfileSourceKind(value) {
+    return value === 'server' ? 'server' : null
+  }
+
   function profileRuntimeView(session) {
     return {
       profileId: session.profileId || null,
-      profileSourceKind: session.profileSourceKind || null,
+      profileSourceKind: normalizeProfileSourceKind(session.profileSourceKind),
       model: session.model || null,
       activeProfileId: session.activeProfileId || null,
       pendingProfileId: session.pendingProfileId || null,
@@ -1841,7 +1845,9 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           })
         : null
       const storedProfile = storedSelection?.profile || null
-      const storedProfileSourceKind = storedProfile?.sourceKind || s.profileSourceKind || null
+      const storedProfileSourceKind = normalizeProfileSourceKind(
+        storedProfile?.sourceKind || s.profileSourceKind
+      )
       const restoredSession = s.adapterId === 'codex' && s.profileId
         ? {
             profileId: s.profileId,
@@ -1912,7 +1918,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           pendingProviderWarning: null,
           pendingRuntimeRevision: null,
           profileId: restoredSession.profileId || null,
-          profileSourceKind: restoredSession.profileSourceKind || null,
+          profileSourceKind: normalizeProfileSourceKind(restoredSession.profileSourceKind),
           activeProfileId: null,
           pendingProfileId: null,
           profileStatus: restoredSession.profileStatus || null,
@@ -2334,7 +2340,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         provider_policy: session.providerPolicy,
         explicit_provider: session.explicitProvider,
         profile_id: session.profileId || null,
-        profile_source_kind: session.profileSourceKind || null,
+        profile_source_kind: normalizeProfileSourceKind(session.profileSourceKind),
         adapter_config_json: JSON.stringify(session.adapterConfig),
         status: 'starting', created_at: entry.createdAt
       })
@@ -2844,7 +2850,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       pendingProvider: e.session.pendingProvider || null,
       pendingProviderWarning: e.session.pendingProviderWarning || null,
       profileId: e.session.profileId || null,
-      profileSourceKind: e.session.profileSourceKind || null,
+      profileSourceKind: normalizeProfileSourceKind(e.session.profileSourceKind),
       activeProfileId: e.session.activeProfileId || null,
       pendingProfileId: e.session.pendingProfileId || null,
       profileStatus: e.session.profileStatus || null,
@@ -3204,7 +3210,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         ? {
             nativeProfileName: state.nativeProfileName || null,
             model: profile.sourceKind === 'server' ? resolvedSelection.model : profile.model,
-            profileSourceKind: profile.sourceKind || null,
+            profileSourceKind: normalizeProfileSourceKind(profile.sourceKind),
             actualModel: null,
             profileWarning: null,
             provider: state.providerId || profile.providerId,
@@ -3218,7 +3224,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             model: profile.sourceKind === 'server'
               ? resolvedSelection.model
               : profile.model ?? entry.session.systemModel ?? null,
-            profileSourceKind: profile.sourceKind || null,
+            profileSourceKind: normalizeProfileSourceKind(profile.sourceKind),
             actualModel: null,
             profileWarning: null
           }
@@ -3261,7 +3267,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     if (db) {
       db.updateSession(sessionId, {
         profile_id: desiredProfileId,
-        profile_source_kind: nextSession.profileSourceKind,
+        profile_source_kind: normalizeProfileSourceKind(nextSession.profileSourceKind),
         model: nextSession.model,
         provider: nextSession.provider,
         source_provider: nextSession.sourceProvider,

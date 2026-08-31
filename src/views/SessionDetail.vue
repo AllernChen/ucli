@@ -468,7 +468,7 @@ import SessionMaintenanceActions from '../components/SessionMaintenanceActions.v
 import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
 import GatewayChannelIcon from '../components/gateway/GatewayChannelIcon.vue'
 import { deriveGatewayRelayControl } from '../gatewayRelayPresentation.js'
-import { deriveSessionConfigState, isServiceProfile } from '../sessionConfigPresentation.js'
+import { deriveSessionConfigState, importedSessionModelForSelection, isServiceProfile } from '../sessionConfigPresentation.js'
 import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
 import { compatibleModelsForAdapter, validateServiceProfileSelection } from '../serviceProfileSelection.js'
 import { terminalSizeChanged } from '../terminalResize.js'
@@ -1302,11 +1302,15 @@ async function doImport() {
           const profileConfig = importProfileConfig(group.id)
           if (profileConfig.profileSelection) config.profileSelection = profileConfig.profileSelection
           if (profileConfig.profileId) config.profileId = profileConfig.profileId
-          if (profileConfig.model !== undefined) config.model = profileConfig.model
+          const importedModel = importedSessionModelForSelection({
+            selection: importProfileSelections.value[group.id],
+            discoveredModel: cs?.model,
+            explicitModel: profileConfig.model
+          })
+          if (importedModel !== undefined) config.model = importedModel
         }
         if (cs?.name) config.name = cs.name
         if (cs?.startedAt) config.startedAt = cs.startedAt
-        if (cs?.model && config.model === undefined) config.model = cs.model
         await sessions.createSession(config)
         count++
       }

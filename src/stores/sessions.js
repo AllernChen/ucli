@@ -44,6 +44,10 @@ function rendererSessionCapabilities(adapterId, value, descriptor) {
   return nativeWeb || unavailable ? normalized : DSH_UNAVAILABLE_CAPABILITIES
 }
 
+function normalizeProfileSourceKind(value) {
+  return value === 'server' ? 'server' : null
+}
+
 export const useSessionsStore = defineStore('sessions', {
   state: () => ({
     adapters: [],
@@ -174,13 +178,19 @@ export const useSessionsStore = defineStore('sessions', {
     async setProfile(id, selection) {
       const result = await ipc.setSessionProfile(id, selection)
       const row = this.sessions.find((session) => session.id === id)
-      if (row) Object.assign(row, result)
+      if (row) {
+        Object.assign(row, result)
+        row.profileSourceKind = normalizeProfileSourceKind(row.profileSourceKind)
+      }
       return result
     },
     async updateCodexProviderPolicy(id, policy) {
       const result = await ipc.updateCodexProviderPolicy(id, policy)
       const row = this.sessions.find((s) => s.id === id)
-      if (row) Object.assign(row, result)
+      if (row) {
+        Object.assign(row, result)
+        row.profileSourceKind = normalizeProfileSourceKind(row.profileSourceKind)
+      }
       return result
     },
 
@@ -269,7 +279,7 @@ export const useSessionsStore = defineStore('sessions', {
           providerWarning: s.providerWarning || null, pendingProvider: s.pendingProvider || null,
           pendingProviderWarning: s.pendingProviderWarning || null,
           profileId: s.profileId || null, activeProfileId: s.activeProfileId || null,
-          profileSourceKind: s.profileSourceKind || null,
+          profileSourceKind: normalizeProfileSourceKind(s.profileSourceKind),
           pendingProfileId: s.pendingProfileId || null, profileStatus: s.profileStatus || null,
           actualModel: s.actualModel || null, profileWarning: s.profileWarning || null,
           restartRequired: Boolean(s.restartRequired), canStart: s.canStart !== false,
@@ -303,7 +313,9 @@ export const useSessionsStore = defineStore('sessions', {
         if (s.pendingProvider !== undefined) row.pendingProvider = s.pendingProvider
         if (s.pendingProviderWarning !== undefined) row.pendingProviderWarning = s.pendingProviderWarning
         if (s.profileId !== undefined) row.profileId = s.profileId
-        if (s.profileSourceKind !== undefined) row.profileSourceKind = s.profileSourceKind
+        if (s.profileSourceKind !== undefined) {
+          row.profileSourceKind = normalizeProfileSourceKind(s.profileSourceKind)
+        }
         if (s.activeProfileId !== undefined) row.activeProfileId = s.activeProfileId
         if (s.pendingProfileId !== undefined) row.pendingProfileId = s.pendingProfileId
         if (s.profileStatus !== undefined) row.profileStatus = s.profileStatus
@@ -348,7 +360,9 @@ export const useSessionsStore = defineStore('sessions', {
           if (evt.canStart !== undefined) row.canStart = evt.canStart
         } else if (evt.type === 'profile-runtime') {
           if (evt.profileId !== undefined) row.profileId = evt.profileId
-          if (evt.profileSourceKind !== undefined) row.profileSourceKind = evt.profileSourceKind
+          if (evt.profileSourceKind !== undefined) {
+            row.profileSourceKind = normalizeProfileSourceKind(evt.profileSourceKind)
+          }
           if (evt.model !== undefined) row.model = evt.model
           if (evt.activeProfileId !== undefined) row.activeProfileId = evt.activeProfileId
           if (evt.pendingProfileId !== undefined) row.pendingProfileId = evt.pendingProfileId

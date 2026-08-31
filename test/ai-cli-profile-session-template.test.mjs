@@ -50,7 +50,7 @@ test('session profile mutation carries an exact profile/model selection through 
   assert.match(rendererIpc, /setSessionProfile: \(sessionId, selection\) => u\.setSessionProfile\(sessionId, validateSessionProfileSelection\(selection\)\)/)
   assert.match(sessionStore, /async setProfile\(id, selection\) \{\s*const result = await ipc\.setSessionProfile\(id, selection\)/)
   assert.match(orchestrator, /function setSessionProfile\(sessionId, selection\)/)
-  assert.match(orchestrator, /db\.updateSession\(sessionId, \{\s*profile_id: desiredProfileId,\s*profile_source_kind: nextSession\.profileSourceKind,\s*model: nextSession\.model,/)
+  assert.match(orchestrator, /db\.updateSession\(sessionId, \{\s*profile_id: desiredProfileId,\s*profile_source_kind: normalizeProfileSourceKind\(nextSession\.profileSourceKind\),\s*model: nextSession\.model,/)
 })
 
 test('the session profile selection rejects scalar calls and never guesses a service model in the renderer store', () => {
@@ -308,6 +308,7 @@ test('a selected service tuple remains marked historical after disconnect and re
       profileId: serviceProfile.id, model: 'responses-a'
     })
     assert.equal(db.getSession(created.sessionId).profileSourceKind, 'server')
+    assert.equal((await handlers.get('session:list')({})).find(session => session.id === created.sessionId).profileSourceKind, 'server')
     assert.equal(events.filter(event => event.payload?.type === 'profile-runtime').at(-1)?.payload.profileSourceKind, 'server')
 
     await restartAfterDisconnect()
@@ -344,6 +345,25 @@ test('an inherited service binding keeps its explicit non-first model', async ()
     assert.deepEqual({ profileId: session.profileId, model: session.model }, {
       profileId: profile.id, model: 'responses-bound'
     })
+  })
+})
+
+test('local profile creation never exposes user provenance in session DTOs', async () => {
+  await withCodexServiceProfile(async ({ handlers, db, serviceProfile, replaceServiceProfile }) => {
+    const serviceSession = createdCodexSession(handlers)
+    handlers.get('session:set-profile')({}, serviceSession.sessionId, {
+      profileId: serviceProfile.id, model: 'responses-a'
+    })
+    await replaceServiceProfile()
+    const local = await handlers.get('ai-cli-profiles:create')({}, {
+      adapterId: 'codex', name: 'Local Codex', kind: 'reference',
+      providerId: 'openai', model: 'gpt-5.4'
+    })
+    const created = createdCodexSession(handlers, { profileId: local.id })
+    const session = (await handlers.get('session:list')({}))
+      .find(candidate => candidate.id === created.sessionId)
+    assert.equal(session.profileSourceKind, null)
+    assert.equal(db.getSession(created.sessionId).profileSourceKind, null)
   })
 })
 
@@ -438,13 +458,15 @@ test('a late Codex stats report preserves the requested service model after cata
 })
 
 test('Codex service, local, and system profile transitions clear a reported model alias', async () => {
-  await withCodexServiceProfile(async ({ handlers, adapters, db, serviceProfile, replaceServiceProfile }) => {
+  await withCodexServiceProfile(async ({ handlers, adapters, db, events, serviceProfile, replaceServiceProfile }) => {
     const created = createdCodexSession(handlers)
     const adapter = adapters.at(-1)
     handlers.get('session:set-profile')({}, created.sessionId, {
       profileId: serviceProfile.id, model: 'responses-a'
     })
     assert.equal(db.getSession(created.sessionId).profileSourceKind, 'server')
+    assert.equal((await handlers.get('session:list')({})).find(session => session.id === created.sessionId).profileSourceKind, 'server')
+    assert.equal(events.filter(event => event.payload?.type === 'profile-runtime').at(-1)?.payload.profileSourceKind, 'server')
     adapter.emit('event', reportedCodexStats('responses-a-alias'))
     await settleAdapterEvent()
 
@@ -471,6 +493,8 @@ test('Codex service, local, and system profile transitions clear a reported mode
     assert.equal(live.actualModel, null)
     assert.equal(live.profileWarning, null)
     assert.equal(db.getSession(created.sessionId).profileSourceKind, null)
+    assert.equal(live.profileSourceKind, null)
+    assert.equal(events.filter(event => event.payload?.type === 'profile-runtime').at(-1)?.payload.profileSourceKind, null)
 
     handlers.get('session:set-profile')({}, created.sessionId, { profileId: null, model: null })
     live = (await handlers.get('session:list')({})).find(session => session.id === created.sessionId)
@@ -478,6 +502,8 @@ test('Codex service, local, and system profile transitions clear a reported mode
     assert.equal(live.actualModel, null)
     assert.equal(live.profileWarning, null)
     assert.equal(db.getSession(created.sessionId).profileSourceKind, null)
+    assert.equal(live.profileSourceKind, null)
+    assert.equal(events.filter(event => event.payload?.type === 'profile-runtime').at(-1)?.payload.profileSourceKind, null)
   })
 })
 

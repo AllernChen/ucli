@@ -3,7 +3,8 @@ import test from 'node:test'
 
 import {
   deriveServiceProfileSessionState,
-  deriveSessionConfigState
+  deriveSessionConfigState,
+  importedSessionModelForSelection
 } from '../src/sessionConfigPresentation.js'
 
 test('active unmanaged Codex sessions expose direct Provider controls', () => {
@@ -114,4 +115,25 @@ test('service profile session state keeps an absent imported model visible as hi
     historical: true,
     availabilityStatus: 'removed'
   })
+})
+
+test('initial and secondary imports retain discovered models for history and system selections', () => {
+  for (const selection of ['history', 'system']) {
+    assert.equal(importedSessionModelForSelection({
+      selection,
+      discoveredModel: 'historical-model',
+      explicitModel: 'catalog-default'
+    }), 'historical-model')
+  }
+
+  assert.equal(importedSessionModelForSelection({
+    selection: 'profile:server',
+    discoveredModel: 'historical-model',
+    explicitModel: 'selected-server-model'
+  }), 'selected-server-model')
+  assert.equal(importedSessionModelForSelection({
+    selection: 'profile:local',
+    discoveredModel: 'historical-model',
+    explicitModel: null
+  }), null)
 })
