@@ -191,7 +191,7 @@ refresh token 密文不放入 `ai_cli_profile_secrets`，避免 ProfileCenter �
 
 `ai_cli_profile_bindings` 增加可空 `model_id`：服务档案绑定必须保存精确的 `profile_id + model_id`，本地档案绑定继续保存 `model_id = NULL`。会话同时保留其模型和服务档案选择；启动时以精确 `(serviceProfileId, modelId, adapterId)` 验证，而非从档案、模型名称、供应商或目录顺序补全。
 
-升级在单个事务中检测旧 `server_model_profiles` 表，按规范化 origin/组织归并档案，并把旧 Codex/Claude 行分别映射为 `openai_responses`/`anthropic_messages` 后合并同一模型的已声明协议。只有旧档案、adapter 和历史 session model 形成精确且唯一的来源关系时，才回填 session 的统一服务档案选择；不能证明来源的历史会话原样保留并在后续启动时 fail closed。绑定只有唯一映射时才迁移为 `profile_id + model_id`，歧义或畸形的服务端绑定会删除而不是猜测。迁移可重入，全部写入成功后才移除旧表。
+升级在单个事务中检测旧 `server_model_profiles` 表，按规范化 origin/组织归并档案，并把旧 Codex/Claude 行分别映射为 `openai_responses`/`anthropic_messages` 后合并同一模型由旧 adapter 映射得出的协议。只有旧档案、adapter 和历史 session model 形成精确且唯一的来源关系时，才回填 session 的统一服务档案选择；不能证明来源的历史会话原样保留并在后续启动时 fail closed。绑定只有唯一映射时才迁移为 `profile_id + model_id`，歧义或畸形的服务端绑定会删除而不是猜测。迁移可重入，全部写入成功后才移除旧表。
 
 Codex 文件按服务档案与模型分别派生为自有 `ucli-server-*` artifact；不同模型不会共享文件或摘要。服务端投影不保存本机代理 endpoint 或 bearer。代理端口和会话凭证在启动 CLI 前生成。
 
