@@ -124,7 +124,7 @@ export const useServerConnectionStore = defineStore('server-connection', {
       const previousIdentity = this._connectionIdentity
       const applied = this.applyState(value)
       if (applied && this._lifecycle === lifecycle && this._connectionIdentity && this._connectionIdentity !== previousIdentity) {
-        void this.loadCachedSkills(lifecycle, this._connectionIdentity).catch(() => {})
+        void Promise.allSettled([this.syncModels(), this.loadCachedSkills(lifecycle, this._connectionIdentity)])
       }
       return applied
     },
@@ -153,7 +153,7 @@ export const useServerConnectionStore = defineStore('server-connection', {
             await this.loadAttempt(pendingAttempt.attemptId, lifecycle)
           }
           if (this._connectionIdentity) {
-            try { await this.loadCachedSkills(lifecycle, this._connectionIdentity) } catch { /* catalog availability does not end core subscriptions */ }
+            await Promise.allSettled([this.syncModels(), this.loadCachedSkills(lifecycle, this._connectionIdentity)])
           }
           return this
         } catch (error) {

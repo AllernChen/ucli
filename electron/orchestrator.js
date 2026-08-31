@@ -106,6 +106,7 @@ import { ConnectionManager } from './serverConnection/connectionManager.js'
 import { ExpiryReminder } from './serverConnection/expiryReminder.js'
 import { createLocalGatewayProxy } from './serverConnection/localGatewayProxy.js'
 import { createServerModelProjection } from './serverConnection/modelProjection.js'
+import { createServerModelProjectionSynchronizer } from './serverConnection/projectionSynchronizer.js'
 import { buildServiceProfileCatalog } from './serverConnection/serviceProfileCatalog.js'
 import { createSkillsCatalogAdapter } from './serverConnection/skillsCatalogAdapter.js'
 import { registerServerConnectionIpc } from './serverConnection/ipc.js'
@@ -1758,51 +1759,16 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       sourceLoader: skillsSourceLoader,
       skillsService
     })
-    let projectionSync = Promise.resolve()
-    syncServerModelProjection = (state = serverConnectionManager.getState()) => {
-      const sync = projectionSync.then(async () => {
-        const identity = serverConnectionManager?.getRuntimeConnectionIdentity()
-        if (!identity || !['connected', 'expiring'].includes(state.status)) {
-          const status = state.status === 'disabled' ? 'disabled'
-            : state.status === 'expired' ? 'expired'
-              : state.reason === 'grant_deleted' ? 'deleted'
-                : 'unreachable'
-          await serverModelProjection.clearOnlineState(state.connection?.connectionRevision, status)
-          return
-        }
-        try {
-          const bootstrap = await serverConnectionManager.getBootstrap()
-          const current = serverConnectionManager.getRuntimeConnectionIdentity()
-          if (!current || current.connectionId !== identity.connectionId || current.connectionRevision !== identity.connectionRevision) {
-            await serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
-            return
-          }
-          const catalog = buildServiceProfileCatalog({
-            serverOrigin: state.serverOrigin,
-            organization: bootstrap.organization,
-            models: bootstrap.models,
-            connectionRevision: identity.connectionRevision
-          })
-          db.replaceServerServiceCatalog({
-            profile: { ...catalog.profile, availabilityStatus: 'ready' },
-            models: catalog.models.map((model) => ({ ...model, availabilityStatus: 'ready' }))
-          })
-          await serverModelProjection.reconcileRuntimeAuthorities({
-            serviceProfileId: catalog.profile.id,
-            connectionRevision: identity.connectionRevision,
-            models: bootstrap.models
-          })
-        } catch (error) {
-          await serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
-          throw error
-        }
-      })
-      const settled = sync.finally(() => refreshPersistedServiceSessionRuntimes())
-      projectionSync = settled.catch(() => {})
-      return settled
-    }
+    const projectionSynchronizer = createServerModelProjectionSynchronizer({
+      manager: serverConnectionManager,
+      projection: serverModelProjection,
+      db,
+      buildCatalog: buildServiceProfileCatalog,
+      refreshSessionRuntimes: refreshPersistedServiceSessionRuntimes
+    })
+    syncServerModelProjection = () => projectionSynchronizer.sync()
     serverConnectionManager.subscribe(state => {
-      void syncServerModelProjection(state).catch(() => {})
+      void syncServerModelProjection().catch(() => {})
       if (['connected', 'expiring'].includes(state.status)) void serverSkillsCatalog?.sync().catch(() => {})
     })
     void serverConnectionManager.start()

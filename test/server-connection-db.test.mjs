@@ -485,7 +485,7 @@ test('legacy compatibility replacement preserves other normalized service catalo
   })
 })
 
-test('legacy service migration rolls back normalized writes when the pre-drop SQL seam fails', async () => {
+test('legacy service migration rolls back every normalized write when an in-transaction SQL failure occurs before the legacy drop', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ucli-server-service-migration-rollback-'))
   const path = join(root, 'ucli.db')
   const initSqlJs = (await import('sql.js')).default
@@ -498,16 +498,37 @@ test('legacy service migration rolls back normalized writes when the pre-drop SQ
     availability_status TEXT NOT NULL, codex_file_sha256 TEXT
   )`)
   legacy.run(`INSERT INTO server_model_profiles VALUES ('legacy', 'https://server.example.test', 'org-1', 'Example', 'responses', 'codex', 'Responses', 4096, 1, 'available', NULL)`)
-  writeFileSync(path, Buffer.from(legacy.export()))
+  legacy.run(`CREATE TABLE sessions (
+    id TEXT PRIMARY KEY, project_path TEXT NOT NULL, adapter_id TEXT NOT NULL,
+    native_session_id TEXT, name TEXT, task_note TEXT DEFAULT '', tier TEXT NOT NULL DEFAULT 'safety-rules',
+    model TEXT, profile_id TEXT, status TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  )`)
+  legacy.run(`CREATE TABLE ai_cli_profiles (
+    id TEXT PRIMARY KEY, adapter_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
+    native_profile_name TEXT UNIQUE, provider_id TEXT, base_url TEXT, model TEXT, reasoning_effort TEXT,
+    context_window INTEGER, config_json TEXT NOT NULL DEFAULT '{}', has_secret_hint INTEGER NOT NULL DEFAULT 0,
+    file_sha256 TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  )`)
+  legacy.run(`CREATE TABLE ai_cli_profile_bindings (
+    scope_type TEXT NOT NULL, scope_key TEXT NOT NULL, adapter_id TEXT NOT NULL, profile_id TEXT,
+    updated_at INTEGER NOT NULL, PRIMARY KEY (scope_type, scope_key, adapter_id)
+  )`)
+  legacy.run("INSERT INTO sessions VALUES ('legacy-session', 'F:/project', 'codex', NULL, NULL, '', 'safety-rules', 'legacy-alias', 'legacy', 'offline', 11, 12)")
+  legacy.run("INSERT INTO ai_cli_profile_bindings VALUES ('project', 'F:/project', 'codex', 'legacy', 13)")
+  const originalBytes = Buffer.from(legacy.export())
+  writeFileSync(path, originalBytes)
   legacy.close()
   try {
     await assert.rejects(
-      openDb(path, { testHooks: { beforeLegacyServerModelTableDrop: () => { throw new Error('injected migration SQL failure') } } }),
-      /injected migration SQL failure/
+      openDb(path, { testHooks: { beforeLegacyServerModelTableDrop: ({ run }) => run('INSERT INTO no_such_migration_table VALUES (1)') } }),
+      /no_such_migration_table/
     )
+    assert.equal(Buffer.compare(readFileSync(path), originalBytes), 0)
     const persisted = new SQL.Database(readFileSync(path))
     assert.equal(persisted.exec("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'server_model_profiles'")[0].values[0][0], 1)
     assert.deepEqual(persisted.exec('SELECT profile_id, model_id FROM server_model_profiles')[0].values, [['legacy', 'responses']])
+    assert.deepEqual(persisted.exec('SELECT * FROM sessions')[0].values, [['legacy-session', 'F:/project', 'codex', null, null, '', 'safety-rules', 'legacy-alias', 'legacy', 'offline', 11, 12]])
+    assert.deepEqual(persisted.exec('SELECT * FROM ai_cli_profile_bindings')[0].values, [['project', 'F:/project', 'codex', 'legacy', 13]])
     assert.equal(persisted.exec("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'server_service_profiles'")[0].values[0][0], 0)
     assert.equal(persisted.exec("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'server_service_models'")[0].values[0][0], 0)
     persisted.close()

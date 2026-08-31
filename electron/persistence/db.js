@@ -2147,7 +2147,9 @@ class Db {
         )
       }
 
-      this._testHooks?.beforeLegacyServerModelTableDrop?.()
+      this._testHooks?.beforeLegacyServerModelTableDrop?.(Object.freeze({
+        run: (statement, params = []) => this.sql.run(statement, params)
+      }))
       this.sql.run('DROP TABLE server_model_profiles')
     })
   }

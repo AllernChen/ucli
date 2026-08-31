@@ -17,6 +17,13 @@ const rendererIpc = readFileSync(new URL('../src/ipc.js', import.meta.url), 'utf
 const sessionStore = readFileSync(new URL('../src/stores/sessions.js', import.meta.url), 'utf8')
 const orchestrator = readFileSync(new URL('../electron/orchestrator.js', import.meta.url), 'utf8')
 
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
 test('the session configuration modal owns Codex profile and Provider selection', () => {
   assert.match(source, /view\.profileCapable/)
   assert.match(source, /view\.providerEditable/)
@@ -175,6 +182,7 @@ async function withCodexServiceProfile(callback) {
       protocols: ['openai_responses']
     }]
   }
+  let bootstrapGate = null
   globalThis.fetch = async (url) => {
     const pathname = new URL(String(url)).pathname
     if (pathname === '/api/v1/auth/token/refresh') {
@@ -184,6 +192,7 @@ async function withCodexServiceProfile(callback) {
       }, { cacheControl: 'no-store' })
     }
     if (pathname === '/api/v1/client/bootstrap') {
+      if (bootstrapGate) await bootstrapGate.promise
       return serverResponse({
         organization: catalog.organization,
         gateway: { baseUrl: `${origin}/gateway` },
@@ -265,6 +274,18 @@ async function withCodexServiceProfile(callback) {
         await orchestrator.shutdown()
         getDb()?.close()
         await boot()
+      },
+      async restartWhileBootstrapIsBlocked() {
+        bootstrapGate = deferred()
+        await orchestrator.shutdown()
+        getDb()?.close()
+        events.length = 0
+        await boot()
+        return () => {
+          const gate = bootstrapGate
+          bootstrapGate = null
+          gate?.resolve()
+        }
       }
     })
   } finally {
@@ -325,6 +346,32 @@ test('a selected service tuple remains marked historical after disconnect and re
       model: 'responses-a',
       profileSourceKind: 'server',
       canStart: false
+    })
+  })
+})
+
+test('a restored server session becomes startable only after the fenced startup projection publishes its exact tuple', async () => {
+  await withCodexServiceProfile(async ({ handlers, events, serviceProfile, restartWhileBootstrapIsBlocked }) => {
+    const created = createdCodexSession(handlers)
+    handlers.get('session:set-profile')({}, created.sessionId, {
+      profileId: serviceProfile.id, model: 'responses-a'
+    })
+    const releaseBootstrap = await restartWhileBootstrapIsBlocked()
+    const offline = (await handlers.get('session:list')({})).find(session => session.id === created.sessionId)
+    assert.deepEqual({ profileId: offline.profileId, model: offline.model, canStart: offline.canStart }, {
+      profileId: serviceProfile.id, model: 'responses-a', canStart: false
+    })
+
+    releaseBootstrap()
+    await waitUntil(async () => (await handlers.get('server-connection:list-models')({}))
+      .some(profile => profile.id === serviceProfile.id && profile.canStart))
+    const ready = (await handlers.get('session:list')({})).find(session => session.id === created.sessionId)
+    assert.deepEqual({ profileId: ready.profileId, model: ready.model, canStart: ready.canStart }, {
+      profileId: serviceProfile.id, model: 'responses-a', canStart: true
+    })
+    const published = events.filter(event => event.payload?.type === 'profile-runtime').at(-1)?.payload
+    assert.deepEqual({ profileId: published.profileId, model: published.model, canStart: published.canStart }, {
+      profileId: serviceProfile.id, model: 'responses-a', canStart: true
     })
   })
 })

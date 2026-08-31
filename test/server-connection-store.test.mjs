@@ -201,6 +201,74 @@ test('confirms only dual-available previews with one concurrent IPC call and ref
   await assert.rejects(connection.confirmAttempt(), { code: 'REGISTRATION_NOT_CONFIRMABLE' })
 })
 
+test('startup model synchronization is independently fenced from connection state and recovers on retry', async () => {
+  const connection = store()
+  const previousModels = window.ucli.listServerConnectionModels
+  const previousSkills = window.ucli.listServerConnectionSkills
+  let calls = 0
+  window.ucli.listServerConnectionModels = async () => {
+    calls += 1
+    if (calls === 1) throw Object.assign(new Error('synthetic-secret projection failure'), { code: 'projection-failed', retryable: true })
+    return [{ id: 'server-profile-b', sourceKind: 'server' }]
+  }
+  window.ucli.listServerConnectionSkills = async () => [{ id: 'skill-1' }]
+
+  try {
+    await connection.initialize()
+    assert.equal(connection.status, 'connected')
+    assert.equal(connection.connectionError, null)
+    assert.deepEqual(connection.modelCatalogError, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
+    assert.equal(JSON.stringify(connection.modelCatalogError).includes('synthetic-secret'), false)
+
+    await connection.syncModels()
+    assert.deepEqual(connection.models, [{ id: 'server-profile-b', sourceKind: 'server' }])
+    assert.equal(connection.connectionError, null)
+    assert.equal(connection.modelCatalogError, null)
+  } finally {
+    window.ucli.listServerConnectionModels = previousModels
+    window.ucli.listServerConnectionSkills = previousSkills
+  }
+})
+
+test('an automatic startup projection failure cannot surface under a replacement connection identity', async () => {
+  const connection = store()
+  const previousState = window.ucli.getServerConnectionState
+  const previousModels = window.ucli.listServerConnectionModels
+  const previousSkills = window.ucli.listServerConnectionSkills
+  const failureA = deferred()
+  const stateA = { ...initialState, organization: { id: 'org-a', name: 'Organization A' } }
+  const stateB = {
+    ...initialState,
+    revision: 2,
+    serverOrigin: 'https://replacement.example.test',
+    organization: { id: 'org-b', name: 'Organization B' },
+    connection: {
+      ...initialState.connection,
+      id: 'connection-b', serverOrigin: 'https://replacement.example.test',
+      organization: { id: 'org-b', name: 'Organization B' }, connectionRevision: 2
+    }
+  }
+  let calls = 0
+  window.ucli.getServerConnectionState = async () => stateA
+  window.ucli.listServerConnectionModels = async () => (++calls === 1 ? failureA.promise : [{ id: 'profile-b', sourceKind: 'server' }])
+  window.ucli.listServerConnectionSkills = async () => []
+  try {
+    const initializing = connection.initialize()
+    await new Promise(resolve => setImmediate(resolve))
+    stateListener(stateB)
+    failureA.reject(Object.assign(new Error('synthetic-secret old startup failure'), { code: 'projection-failed', retryable: true }))
+    await initializing
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(connection.models, [{ id: 'profile-b', sourceKind: 'server' }])
+    assert.equal(connection.connectionError, null)
+    assert.equal(connection.modelCatalogError, null)
+  } finally {
+    window.ucli.getServerConnectionState = previousState
+    window.ucli.listServerConnectionModels = previousModels
+    window.ucli.listServerConnectionSkills = previousSkills
+  }
+})
+
 test('confirmation remains successful when model catalog synchronization fails', async () => {
   const connection = store()
   await connection.loadAttempt('attempt-1')
