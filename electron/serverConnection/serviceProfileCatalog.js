@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 export const SERVICE_ADAPTER_PROTOCOL = Object.freeze({
   codex: 'openai_responses',
   claude: 'anthropic_messages',
@@ -27,7 +29,11 @@ function requiredText(value, name) {
 
 function normalizedOrigin(serverOrigin) {
   try {
-    return new URL(requiredText(serverOrigin, 'serverOrigin')).origin
+    const url = new URL(requiredText(serverOrigin, 'serverOrigin'))
+    if (!['http:', 'https:'].includes(url.protocol) || url.origin === 'null') {
+      throw new Error('serverOrigin must use HTTP(S)')
+    }
+    return url.origin
   } catch (cause) {
     throw error(ERROR_CODES.invalidModel, 'serverOrigin must be a valid URL')
   }
@@ -40,7 +46,16 @@ export function stableServiceProfileId({ serverOrigin, organizationId }) {
 }
 
 export function serviceModelArtifactId({ serviceProfileId, modelId }) {
-  return `${requiredText(serviceProfileId, 'serviceProfileId')}::${requiredText(modelId, 'modelId')}`
+  const profile = Buffer.from(requiredText(serviceProfileId, 'serviceProfileId'), 'utf8')
+  const model = Buffer.from(requiredText(modelId, 'modelId'), 'utf8')
+  const length = Buffer.allocUnsafe(4)
+  length.writeUInt32BE(profile.length, 0)
+  const modelLength = Buffer.allocUnsafe(4)
+  modelLength.writeUInt32BE(model.length, 0)
+  return createHash('sha256')
+    .update(Buffer.concat([length, profile, modelLength, model]))
+    .digest('hex')
+    .slice(0, 32)
 }
 
 function normalizeModel(model, serviceProfileId) {

@@ -4,8 +4,27 @@ import {
   buildServiceProfileCatalog,
   compatibleServiceModels,
   requireServiceModel,
+  serviceModelArtifactId,
   stableServiceProfileId,
 } from '../electron/serverConnection/serviceProfileCatalog.js'
+
+test('model artifact identity is a deterministic 32-character lowercase hex value', () => {
+  const input = { serviceProfileId: 'http://server::org', modelId: 'model-a' }
+  const first = serviceModelArtifactId(input)
+  assert.match(first, /^[0-9a-f]{32}$/)
+  assert.equal(first, serviceModelArtifactId(input))
+  assert.notEqual(first, serviceModelArtifactId({ ...input, modelId: 'model-b' }))
+  assert.notEqual(
+    serviceModelArtifactId({ serviceProfileId: 'http://server::org::model', modelId: 'x' }),
+    serviceModelArtifactId({ serviceProfileId: 'http://server::org', modelId: 'model::x' }),
+  )
+})
+
+test('service profile identity rejects non-HTTP(S) origins', () => {
+  for (const serverOrigin of ['file:///a', 'data:text/plain,hello', 'mailto:ops@example.com']) {
+    assert.throws(() => stableServiceProfileId({ serverOrigin, organizationId: 'org-1' }))
+  }
+})
 
 test('service profile identity excludes model and adapter', () => {
   const left = stableServiceProfileId({
