@@ -97,7 +97,7 @@ export const useSessionsStore = defineStore('sessions', {
           : (config.name || adapter?.displayName || config.adapterId),
         icon: adapter?.icon || '•',
         cwd: config.cwd,
-        model: config.model || adapter?.models?.[0] || null,
+        model: config.model || (config.profileId ? null : adapter?.models?.[0]) || null,
         provider: config.provider || null,
         sourceProvider: config.sourceProvider || null,
         providerPolicy: config.providerPolicy || (config.cliSessionId ? 'source' : 'live'),
@@ -170,8 +170,8 @@ export const useSessionsStore = defineStore('sessions', {
       if (row) row.displayName = name
       await ipc.updateSessionName(id, name)
     },
-    async setProfile(id, profileId) {
-      const result = await ipc.setSessionProfile(id, profileId || null)
+    async setProfile(id, selection) {
+      const result = await ipc.setSessionProfile(id, selection)
       const row = this.sessions.find((session) => session.id === id)
       if (row) Object.assign(row, result)
       return result

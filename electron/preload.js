@@ -13,6 +13,23 @@ async function invokeSummary(channel, ...args) {
   })
 }
 
+function validateSessionProfileSelection(selection) {
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection) ||
+    Object.keys(selection).length !== 2 || !Object.hasOwn(selection, 'profileId') ||
+    !Object.hasOwn(selection, 'model')) {
+    throw new TypeError('Invalid session profile selection')
+  }
+  if (selection.profileId !== null && (typeof selection.profileId !== 'string' ||
+    !selection.profileId || selection.profileId.length > 1024 || /[\0-\x1F\x7F]/.test(selection.profileId))) {
+    throw new TypeError('Invalid session profile selection')
+  }
+  if (selection.model !== null && (typeof selection.model !== 'string' ||
+    !/^[a-zA-Z0-9][a-zA-Z0-9._:@/+~-]{0,255}$/.test(selection.model))) {
+    throw new TypeError('Invalid session profile selection')
+  }
+  return { profileId: selection.profileId, model: selection.model }
+}
+
 /**
  * The single bridge between the renderer (Vue) and the main process.
  * Renderer code never touches Node directly — it calls `window.ucli.*`.
@@ -122,8 +139,8 @@ const api = {
     ipcRenderer.invoke('session:resume', sessionId, cliSessionId),
   stopSession: (sessionId) => ipcRenderer.invoke('session:stop', sessionId),
   restartSession: (sessionId) => ipcRenderer.invoke('session:restart', sessionId),
-  setSessionProfile: (sessionId, profileId) =>
-    ipcRenderer.invoke('session:set-profile', sessionId, profileId),
+  setSessionProfile: (sessionId, selection) =>
+    ipcRenderer.invoke('session:set-profile', sessionId, validateSessionProfileSelection(selection)),
   deleteSession: (sessionId) => ipcRenderer.invoke('session:delete', sessionId),
   listSessions: () => ipcRenderer.invoke('session:list'),
   updateSessionNote: (sessionId, note) => ipcRenderer.invoke('session:update-note', sessionId, note),

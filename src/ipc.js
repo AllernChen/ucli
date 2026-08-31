@@ -5,6 +5,23 @@
  */
 const u = window.ucli
 
+function validateSessionProfileSelection(selection) {
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection) ||
+    Object.keys(selection).length !== 2 || !Object.hasOwn(selection, 'profileId') ||
+    !Object.hasOwn(selection, 'model')) {
+    throw new TypeError('Invalid session profile selection')
+  }
+  if (selection.profileId !== null && (typeof selection.profileId !== 'string' ||
+    !selection.profileId || selection.profileId.length > 1024 || /[\0-\x1F\x7F]/.test(selection.profileId))) {
+    throw new TypeError('Invalid session profile selection')
+  }
+  if (selection.model !== null && (typeof selection.model !== 'string' ||
+    !/^[a-zA-Z0-9][a-zA-Z0-9._:@/+~-]{0,255}$/.test(selection.model))) {
+    throw new TypeError('Invalid session profile selection')
+  }
+  return { profileId: selection.profileId, model: selection.model }
+}
+
 export const ipc = {
   // logging
   log: (level, ...args) => u.log(level, ...args),
@@ -80,7 +97,7 @@ export const ipc = {
   resumeSession: (sessionId, cliSessionId) => u.resumeSession(sessionId, cliSessionId),
   stopSession: (sessionId) => u.stopSession(sessionId),
   restartSession: (sessionId) => u.restartSession(sessionId),
-  setSessionProfile: (sessionId, profileId) => u.setSessionProfile(sessionId, profileId),
+  setSessionProfile: (sessionId, selection) => u.setSessionProfile(sessionId, validateSessionProfileSelection(selection)),
   deleteSession: (sessionId) => u.deleteSession(sessionId),
   listSessions: () => u.listSessions(),
   updateSessionNote: (sessionId, note) => u.updateSessionNote(sessionId, note),
