@@ -28,7 +28,7 @@ function deferred() {
   return { promise, resolve, reject }
 }
 
-function setup({ client = {}, credentials = {}, skillsCatalog = null, serverModelProjection = null } = {}) {
+function setup({ client = {}, credentials = {}, skillsCatalog = null, serverModelProjection = null, syncModelProjection = null } = {}) {
   const handlers = new Map()
   const events = []
   const current = {
@@ -51,13 +51,19 @@ function setup({ client = {}, credentials = {}, skillsCatalog = null, serverMode
   })
   registerServerConnectionIpc({
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) }, manager,
-    skillsCatalog, serverModelProjection, send: (channel, payload) => events.push({ channel, payload })
+    skillsCatalog, serverModelProjection, syncModelProjection, send: (channel, payload) => events.push({ channel, payload })
   })
   return { handlers, manager, current, events }
 }
 
-test('IPC replays a preview completed before renderer registration and reads projection models', async () => {
-  const projected = [{ id: 'server:codex:model-1', adapterId: 'codex', sourceKind: 'server', canStart: true }]
+test('IPC replays a preview completed before renderer registration and returns only renderer-safe service profile fields', async () => {
+  const projected = [{
+    id: 'server:codex:model-1', sourceKind: 'server', readOnly: true,
+    serverOrigin: 'https://server.example.test', organization: { id: 'org-1', name: 'Example' },
+    availabilityStatus: 'ready', status: 'ready', canStart: true, supportedAdapterIds: ['codex'],
+    connectionRevision: 'secret-revision', nativeProfileName: 'internal', configPath: 'C:\\secret',
+    models: [{ id: 'model-1', displayName: 'Model One', contextSize: 4096, protocols: ['openai_responses'], availabilityStatus: 'ready', artifactId: 'artifact', codexFileSha256: 'digest' }]
+  }]
   const { handlers, events } = setup({ serverModelProjection: { listProfiles: () => projected } })
   const attempt = await handlers.get('server-connection:submit-link')({}, 'https://server.example.test/connect#link=opaque-secret')
 
@@ -65,8 +71,24 @@ test('IPC replays a preview completed before renderer registration and reads pro
   const replayed = await handlers.get('server-connection:get-pending-attempt')({})
   assert.equal(replayed.attemptId, attempt.attemptId)
   assert.equal(JSON.stringify(replayed).includes('opaque-secret'), false)
-  assert.deepEqual(await handlers.get('server-connection:list-models')({}), projected)
+  assert.deepEqual(await handlers.get('server-connection:list-models')({}), [{
+    id: 'server:codex:model-1', source: 'server', readOnly: true,
+    serverOrigin: 'https://server.example.test', organization: { id: 'org-1', name: 'Example' },
+    availabilityStatus: 'ready', status: 'ready', canStart: true, supportedAdapterIds: ['codex'],
+    models: [{ id: 'model-1', displayName: 'Model One', contextSize: 4096, protocols: ['openai_responses'], availabilityStatus: 'ready' }]
+  }])
   await assert.rejects(handlers.get('server-connection:get-pending-attempt')({}, 'extra'), { code: 'INVALID_SERVER_CONNECTION_IPC' })
+})
+
+test('explicit model sync waits for projection completion and sanitizes failures', async () => {
+  const projection = { listProfiles: () => [] }
+  const failure = Object.assign(new Error('raw response body Authorization: Bearer secret'), { code: 'projection_failed', retryable: true })
+  const { handlers } = setup({ serverModelProjection: projection, syncModelProjection: async () => { throw failure } })
+  await assert.rejects(
+    handlers.get('server-connection:list-models')({}),
+    error => error.code === null && error.retryable === true &&
+      !error.message.includes('secret') && error.stack === undefined
+  )
 })
 
 test('server Skills IPC exposes only catalog-backed list, sync, install and update actions', async () => {

@@ -108,7 +108,7 @@
                 :key="model.id"
                 :value="model.id"
                 :disabled="model.availabilityStatus !== 'ready'"
-              >{{ model.displayName || model.id }}</a-select-option>
+              >{{ serviceModelLabel(model) }}</a-select-option>
             </a-select>
           </a-form-item>
 
@@ -197,7 +197,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 
 import { ipc } from '../ipc.js'
-import { profileRuntimeNotice } from '../profilePresentation.js'
+import { profileRuntimeNotice, serviceModelLabel } from '../profilePresentation.js'
 import {
   deriveServiceProfileSessionState,
   deriveSessionConfigState,
@@ -421,8 +421,8 @@ function cancelProfileSwitch() {
 async function applyProfileSwitch(restartNow) {
   const current = session.value
   const selection = profileSwitch.value.selection
-  cancelProfileSwitch()
   if (!current || !selection) return
+  profileSwitch.value = { open: false, selection: null }
   pendingAction.value = restartNow ? 'restart' : 'profile'
   try {
     await sessions.setProfile(current.id, selection)
@@ -432,6 +432,7 @@ async function applyProfileSwitch(restartNow) {
     } else {
       message.info('档案已保存，将在下次重启生效')
     }
+    resetDrafts()
   } catch (error) {
     message.error('切换档案失败：' + (error?.message || error))
   } finally {

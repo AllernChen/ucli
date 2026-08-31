@@ -109,6 +109,7 @@ import { createServerModelProjection } from './serverConnection/modelProjection.
 import { buildServiceProfileCatalog } from './serverConnection/serviceProfileCatalog.js'
 import { createSkillsCatalogAdapter } from './serverConnection/skillsCatalogAdapter.js'
 import { registerServerConnectionIpc } from './serverConnection/ipc.js'
+import { serviceRuntimeRevision } from './serverConnection/serviceProfileCatalog.js'
 import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
 import { scanStorageCategories } from './storage/storageScanner.js'
 import { createStorageManagementService } from './storage/storageManagementService.js'
@@ -871,6 +872,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   let localGatewayProxy = null
   let serverModelProjection = null
   let serverSkillsCatalog = null
+  let syncServerModelProjection = () => Promise.resolve([])
   const approvalNotifications = new Map()
   const completionNotifications = new Set()
   const diagnostics = createDiagnosticsService({
@@ -1252,7 +1254,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             },
             env: {},
             status: 'ready',
-            runtimeRevision: `${profile.connectionRevision}:${profile.id}:${selection.model || ''}`
+            runtimeRevision: serviceRuntimeRevision({ connectionRevision: profile.connectionRevision, serviceProfileId: profile.id, modelId: selection.model, adapterId: 'codex' })
           }
         : profileService.resolveCodexLaunchProfile(selection.profileId, selection.model, session)
       return {
@@ -1321,7 +1323,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             settingSources: ['project', 'local'],
             artifact: { model: selection.model, connectionMode: 'bearer' },
             status: 'ready',
-            runtimeRevision: `${profile.connectionRevision}:${profile.id}:${selection.model || ''}`
+            runtimeRevision: serviceRuntimeRevision({ connectionRevision: profile.connectionRevision, serviceProfileId: profile.id, modelId: selection.model, adapterId: 'claude' })
           }
         : profileService.resolveLaunchProfile({
             profileId: selection.profileId,
@@ -1511,7 +1513,10 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   function resolveSessionProfileRuntime(session, selection = null) {
     const profileId = selection?.profileId ?? session.profileId
     if (!profileId) return { profileId: null, status: null, canStart: true, runtimeRevision: null }
-    const runtime = profileService.resolveProfileRuntime(profileId)
+    const runtime = profileService.resolveProfileRuntime(profileId, {
+      adapterId: session.adapterId,
+      modelId: selection?.model ?? session.model ?? null
+    })
     const profile = profileService.listProfiles({ adapterId: session.adapterId })
       .find((candidate) => candidate.id === profileId)
     if (profile?.sourceKind !== 'server') return runtime
@@ -1525,7 +1530,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       ...runtime,
       status: resolved.status,
       canStart: resolved.canStart,
-      runtimeRevision: resolved.canStart ? `${runtime.runtimeRevision || ''}:${resolved.model || ''}` : null
+      runtimeRevision: resolved.canStart ? runtime.runtimeRevision : null
     }
   }
 
@@ -1552,6 +1557,20 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     const result = profileRuntimeView(session)
     send('session:event', { sessionId, type: 'profile-runtime', ...result })
     return result
+  }
+
+  function refreshPersistedServiceSessionRuntimes() {
+    if (!profileService) return
+    for (const [sessionId, entry] of sessions) {
+      if (entry.session.profileSourceKind !== 'server' || !entry.session.profileId) continue
+      const resolved = resolveSessionProfileRuntime(entry.session)
+      Object.assign(entry.session, reconcileActiveProfile({
+        session: entry.session,
+        resolved,
+        isActive: hasActiveCodexProcess(entry)
+      }))
+      publishProfileRuntime(sessionId, entry.session)
+    }
   }
 
   function publishCodexRuntime(snapshot) {
@@ -1740,8 +1759,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       skillsService
     })
     let projectionSync = Promise.resolve()
-    const syncServerModelProjection = (state = serverConnectionManager.getState()) => {
-      projectionSync = projectionSync.then(async () => {
+    syncServerModelProjection = (state = serverConnectionManager.getState()) => {
+      const sync = projectionSync.then(async () => {
         const identity = serverConnectionManager?.getRuntimeConnectionIdentity()
         if (!identity || !['connected', 'expiring'].includes(state.status)) {
           const status = state.status === 'disabled' ? 'disabled'
@@ -1773,18 +1792,21 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             connectionRevision: identity.connectionRevision,
             models: bootstrap.models
           })
-        } catch {
+        } catch (error) {
           await serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
+          throw error
         }
-      }).catch(() => {})
-      return projectionSync
+      })
+      const settled = sync.finally(() => refreshPersistedServiceSessionRuntimes())
+      projectionSync = settled.catch(() => {})
+      return settled
     }
     serverConnectionManager.subscribe(state => {
-      void syncServerModelProjection(state)
+      void syncServerModelProjection(state).catch(() => {})
       if (['connected', 'expiring'].includes(state.status)) void serverSkillsCatalog?.sync().catch(() => {})
     })
     void serverConnectionManager.start()
-    void syncServerModelProjection()
+    void syncServerModelProjection().catch(() => {})
     void serverSkillsCatalog.sync().catch(() => {})
     try {
       await profileService.reconcileCodexProfiles()
@@ -1951,6 +1973,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       sessions.set(s.id, entry)
       engine.setSession(s.id, { tier: s.tier, rulesetId: 'default', ruleset: rulesets['default'] })
     }
+    refreshPersistedServiceSessionRuntimes()
     db.flush()
     startCodexConfigWatcher()
     try {
@@ -3555,7 +3578,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     })
     if (skillsService) registerSkillsIpc({ ipcMain, service: skillsService })
     if (serverConnectionManager) {
-      registerServerConnectionIpc({ ipcMain, manager: serverConnectionManager, skillsCatalog: serverSkillsCatalog, serverModelProjection, send })
+      registerServerConnectionIpc({
+        ipcMain,
+        manager: serverConnectionManager,
+        skillsCatalog: serverSkillsCatalog,
+        serverModelProjection,
+        syncModelProjection: syncServerModelProjection,
+        send
+      })
     }
     if (storageService) registerStorageIpc({ ipcMain, service: storageService })
     registerSummaryIpc({

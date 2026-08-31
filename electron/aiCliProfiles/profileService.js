@@ -8,6 +8,7 @@ import { codexNativeProfileName } from './codexProfileFile.js'
 import { sanitiseProfile } from './contracts.js'
 import { createProfileAdapterRegistry } from './profileAdapterRegistry.js'
 import { resolveSessionProfile as resolveProfileSelection } from './profileResolver.js'
+import { serviceRuntimeRevision } from '../serverConnection/serviceProfileCatalog.js'
 
 const OWNED_PROFILE_FILE = /^(ucli-[a-f0-9]{32})\.config\.toml$/
 
@@ -417,7 +418,11 @@ export function createProfileService({
         return { profileId, model: null, runtimeRevision: null }
       }
       if (profile.sourceKind === 'server') {
-        return { profileId, model: typeof model === 'string' && model ? model : null, runtimeRevision: `${profile.connectionRevision}:${profile.id}:${model || ''}` }
+        return {
+          profileId,
+          model: typeof model === 'string' && model ? model : null,
+          runtimeRevision: serviceRuntimeRevision({ connectionRevision: profile.connectionRevision, serviceProfileId: profile.id, modelId: model, adapterId: 'claude' })
+        }
       }
       return {
         profileId,
@@ -476,7 +481,7 @@ export function createProfileService({
       return service.resolveProfileRuntime(profileId)
     },
 
-    resolveProfileRuntime(profileId) {
+    resolveProfileRuntime(profileId, { adapterId = null, modelId = null } = {}) {
       const projected = serverProfile(profileId)
       if (projected) {
         return {
@@ -485,7 +490,7 @@ export function createProfileService({
           providerId: projected.providerId,
           status: projected.status,
           canStart: projected.canStart,
-          runtimeRevision: `${projected.connectionRevision}:${projected.id}`
+          runtimeRevision: serviceRuntimeRevision({ connectionRevision: projected.connectionRevision, serviceProfileId: projected.id, modelId, adapterId })
         }
       }
       const profile = db.getAiCliProfile(profileId)

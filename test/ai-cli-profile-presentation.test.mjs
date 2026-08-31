@@ -9,6 +9,7 @@ import {
   profileSecretLabel,
   serviceProfileAvailabilityPresentation,
   serviceProfileLabel,
+  serviceModelLabel,
   profileStatusPresentation
 } from '../src/profilePresentation.js'
 
@@ -41,6 +42,12 @@ test('profile presentation describes defaults and restart truthfully', () => {
   assert.deepEqual(profileBadges({ isAppDefault: true, isProjectDefault: true }), ['应用默认', '项目默认'])
   assert.equal(profileRuntimeNotice({ restartRequired: true }), '档案将在重启会话后生效')
   assert.equal(profileRuntimeNotice({ profileStatus: 'drifted' }), '当前档案不可启动，请先处理配置问题')
+})
+
+test('service model labels retain the exact model ID without duplicating identical display names', () => {
+  assert.equal(serviceModelLabel({ id: 'responses-a', displayName: 'Responses A' }), 'Responses A · responses-a')
+  assert.equal(serviceModelLabel({ id: 'responses-a', displayName: 'responses-a' }), 'responses-a')
+  assert.equal(serviceModelLabel({ id: 'responses-a', displayName: '' }), 'responses-a')
 })
 
 test('service profile presentation uses safe service fields only', () => {

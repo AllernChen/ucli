@@ -2,7 +2,8 @@ import {
   buildServiceProfileCatalog,
   requireServiceModel,
   SERVICE_ADAPTER_PROTOCOL,
-  serviceModelArtifactId
+  serviceModelArtifactId,
+  serviceRuntimeRevision
 } from './serviceProfileCatalog.js'
 
 const SERVER_STATUSES = new Set(['ready', 'unreachable', 'disabled', 'expired', 'deleted'])
@@ -291,7 +292,7 @@ export function createServerModelProjection({
             configPath: written.path,
             modelId: model.id,
             status: 'ready',
-            runtimeRevision: `${revisionKey(profile.connectionRevision)}:${serviceProfileId}:${model.id}:${adapterId}`
+            runtimeRevision: serviceRuntimeRevision({ connectionRevision: revisionKey(profile.connectionRevision), serviceProfileId, modelId: model.id, adapterId })
           }
         }
         if (adapterId !== 'claude' || SERVICE_ADAPTER_PROTOCOL[adapterId] !== 'anthropic_messages' ||
@@ -315,7 +316,7 @@ export function createServerModelProjection({
           artifact: { model: model.id, connectionMode: 'bearer' },
           modelId: model.id,
           status: 'ready',
-          runtimeRevision: `${revisionKey(profile.connectionRevision)}:${serviceProfileId}:${model.id}:${adapterId}`
+          runtimeRevision: serviceRuntimeRevision({ connectionRevision: revisionKey(profile.connectionRevision), serviceProfileId, modelId: model.id, adapterId })
         }
       } catch (error) {
         const revokeSession = proxy?.revokeSession || proxy?.revokeServerGatewaySession

@@ -82,7 +82,7 @@ function safeClaudeConfig(config = {}) {
   }
 }
 
-function safeProfile(profile = {}) {
+export function safeProfile(profile = {}) {
   if (profile.sourceKind === 'server') {
     return {
       id: typeof profile.id === 'string' ? profile.id : null,
@@ -96,6 +96,8 @@ function safeProfile(profile = {}) {
       availabilityStatus: SERVER_AVAILABILITY_STATUSES.has(profile.availabilityStatus)
         ? profile.availabilityStatus
         : 'unreachable',
+      status: SERVER_AVAILABILITY_STATUSES.has(profile.status) ? profile.status : 'unreachable',
+      canStart: profile.canStart === true,
       supportedAdapterIds: Array.isArray(profile.supportedAdapterIds)
         ? profile.supportedAdapterIds.filter((adapterId) => ADAPTER_IDS.has(adapterId))
         : [],

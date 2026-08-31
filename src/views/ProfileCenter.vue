@@ -273,7 +273,7 @@
         <a-form-item label="模型">
           <a-select v-model:value="selectedServiceModelId" placeholder="请选择兼容模型" :disabled="!selectedServiceProfile">
             <a-select-option v-for="model in compatibleServiceModels" :key="model.id" :value="model.id" :disabled="model.availabilityStatus !== 'ready'">
-              {{ model.displayName || model.id }} · {{ describeModelProtocols(model.protocols) }}
+              {{ serviceModelLabel(model) }} · {{ describeModelProtocols(model.protocols) }}
             </a-select-option>
           </a-select>
         </a-form-item>
@@ -314,7 +314,8 @@ import {
   profileOriginLabel,
   profileSecretLabel,
   profileStatusPresentation,
-  serviceProfileLabel
+  serviceProfileLabel,
+  serviceModelLabel
 } from '../profilePresentation.js'
 import {
   compatibleModelsForAdapter,

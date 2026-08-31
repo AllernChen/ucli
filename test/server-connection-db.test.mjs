@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -387,6 +387,8 @@ test('opening a legacy per-adapter catalog migrates selections once and clears u
   legacy.run(`INSERT INTO sessions VALUES
     ('codex-session', 'F:/project', 'codex', NULL, NULL, '', 'safety-rules', 'shared', 'legacy-codex', 'offline', 1, 2),
     ('claude-session', 'F:/project', 'claude', NULL, NULL, '', 'safety-rules', 'shared', 'legacy-claude', 'offline', 1, 2),
+    ('null-model', 'F:/project', 'codex', NULL, NULL, '', 'safety-rules', NULL, 'legacy-codex', 'offline', 1, 2),
+    ('stale-model', 'F:/project', 'codex', NULL, NULL, '', 'safety-rules', 'obsolete-alias', 'legacy-codex', 'offline', 1, 2),
     ('historical-unresolved', 'F:/project', 'codex', NULL, NULL, '', 'safety-rules', 'missing', 'legacy-missing', 'offline', 1, 2)`)
   legacy.run(`INSERT INTO ai_cli_profiles VALUES
     ('local-profile', 'codex', 'Local', 'local', NULL, NULL, NULL, NULL, NULL, NULL, '{}', 0, NULL, 1, 1)`)
@@ -410,8 +412,11 @@ test('opening a legacy per-adapter catalog migrates selections once and clears u
       { modelId: 'shared', protocols: ['openai_responses', 'anthropic_messages'] }
     ])
     assert.deepEqual(
-      ['codex-session', 'claude-session'].map((id) => db.getSession(id)).map(({ profileId, model }) => ({ profileId, model })),
-      [{ profileId: serviceProfileId, model: 'shared' }, { profileId: serviceProfileId, model: 'shared' }]
+      ['codex-session', 'claude-session', 'null-model', 'stale-model'].map((id) => db.getSession(id)).map(({ profileId, model }) => ({ profileId, model })),
+      [
+        { profileId: serviceProfileId, model: 'shared' }, { profileId: serviceProfileId, model: 'shared' },
+        { profileId: serviceProfileId, model: 'shared' }, { profileId: serviceProfileId, model: 'shared' }
+      ]
     )
     assert.equal(db.getSession('historical-unresolved').model, 'missing')
     assert.deepEqual(db.listAiCliProfileBindings(), [
@@ -424,7 +429,7 @@ test('opening a legacy per-adapter catalog migrates selections once and clears u
       profiles: db.listServerServiceProfiles(),
       models: db.listServerServiceModels(),
       bindings: db.listAiCliProfileBindings(),
-      sessions: ['codex-session', 'claude-session', 'historical-unresolved'].map((id) => db.getSession(id))
+      sessions: ['codex-session', 'claude-session', 'null-model', 'stale-model', 'historical-unresolved'].map((id) => db.getSession(id))
     }
     db.close()
     db = await openDb(path)
@@ -432,7 +437,7 @@ test('opening a legacy per-adapter catalog migrates selections once and clears u
       profiles: db.listServerServiceProfiles(),
       models: db.listServerServiceModels(),
       bindings: db.listAiCliProfileBindings(),
-      sessions: ['codex-session', 'claude-session', 'historical-unresolved'].map((id) => db.getSession(id))
+      sessions: ['codex-session', 'claude-session', 'null-model', 'stale-model', 'historical-unresolved'].map((id) => db.getSession(id))
     }, persisted)
   } finally {
     db.close()
@@ -480,6 +485,37 @@ test('legacy compatibility replacement preserves other normalized service catalo
   })
 })
 
+test('legacy service migration rolls back normalized writes when the pre-drop SQL seam fails', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-service-migration-rollback-'))
+  const path = join(root, 'ucli.db')
+  const initSqlJs = (await import('sql.js')).default
+  const SQL = await initSqlJs()
+  const legacy = new SQL.Database()
+  legacy.run(`CREATE TABLE server_model_profiles (
+    profile_id TEXT PRIMARY KEY, server_origin TEXT NOT NULL, organization_id TEXT NOT NULL,
+    organization_name TEXT NOT NULL, model_id TEXT NOT NULL, adapter_id TEXT NOT NULL,
+    display_name TEXT NOT NULL, context_size INTEGER NOT NULL, connection_revision INTEGER NOT NULL,
+    availability_status TEXT NOT NULL, codex_file_sha256 TEXT
+  )`)
+  legacy.run(`INSERT INTO server_model_profiles VALUES ('legacy', 'https://server.example.test', 'org-1', 'Example', 'responses', 'codex', 'Responses', 4096, 1, 'available', NULL)`)
+  writeFileSync(path, Buffer.from(legacy.export()))
+  legacy.close()
+  try {
+    await assert.rejects(
+      openDb(path, { testHooks: { beforeLegacyServerModelTableDrop: () => { throw new Error('injected migration SQL failure') } } }),
+      /injected migration SQL failure/
+    )
+    const persisted = new SQL.Database(readFileSync(path))
+    assert.equal(persisted.exec("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'server_model_profiles'")[0].values[0][0], 1)
+    assert.deepEqual(persisted.exec('SELECT profile_id, model_id FROM server_model_profiles')[0].values, [['legacy', 'responses']])
+    assert.equal(persisted.exec("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'server_service_profiles'")[0].values[0][0], 0)
+    assert.equal(persisted.exec("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'server_service_models'")[0].values[0][0], 0)
+    persisted.close()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('invalid service model protocols reject before replacing an existing catalog', async () => {
   await withDb(async (db) => {
     const profile = {
@@ -503,5 +539,19 @@ test('invalid service model protocols reject before replacing an existing catalo
       }), { code: 'INVALID_SERVICE_MODEL_PROTOCOLS' })
       assert.deepEqual(db.listServerServiceModels(profile.id), persisted)
     }
+  })
+})
+
+test('service-model protocol persistence canonicalizes duplicate public protocol values', async () => {
+  await withDb(async (db) => {
+    const profile = {
+      id: 'https://server.example.test::org-1', serverOrigin: 'https://server.example.test',
+      organization: { id: 'org-1', name: 'Example Org' }, connectionRevision: 'revision-1', availabilityStatus: 'available'
+    }
+    db.replaceServerServiceCatalog({ profile, models: [{
+      id: 'mixed', displayName: 'Mixed', contextSize: 4096,
+      protocols: ['anthropic_messages', 'openai_responses', 'anthropic_messages'], availabilityStatus: 'available'
+    }] })
+    assert.deepEqual(db.listServerServiceModels(profile.id)[0].protocols, ['openai_responses', 'anthropic_messages'])
   })
 })

@@ -47,6 +47,12 @@ export function serviceProfileLabel(profile = {}) {
   return endpoint === '未设置' ? '未设置服务' : (organization ? `${endpoint} · ${organization}` : endpoint)
 }
 
+export function serviceModelLabel(model = {}) {
+  const id = typeof model.id === 'string' ? model.id : ''
+  const displayName = typeof model.displayName === 'string' ? model.displayName.trim() : ''
+  return displayName && displayName !== id ? `${displayName} · ${id}` : (displayName || id)
+}
+
 export function profileSecretLabel(profile = {}) {
   if (!profile.hasSecret) return '未保存密钥'
   return profile.secretSuffix

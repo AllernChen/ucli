@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   buildServiceProfileCatalog,
+  serviceRuntimeRevision,
   compatibleServiceModels,
   requireServiceModel,
   serviceModelArtifactId,
@@ -17,6 +18,17 @@ test('model artifact identity is a deterministic 32-character lowercase hex valu
   assert.notEqual(
     serviceModelArtifactId({ serviceProfileId: 'http://server::org::model', modelId: 'x' }),
     serviceModelArtifactId({ serviceProfileId: 'http://server::org', modelId: 'model::x' }),
+  )
+})
+
+test('service runtime revision includes the adapter as part of the selected tuple', () => {
+  assert.equal(
+    serviceRuntimeRevision({ connectionRevision: 7, serviceProfileId: 'https://server.example.test::org', modelId: 'responses', adapterId: 'codex' }),
+    '7:https://server.example.test::org:responses:codex'
+  )
+  assert.notEqual(
+    serviceRuntimeRevision({ connectionRevision: 7, serviceProfileId: 'https://server.example.test::org', modelId: 'responses', adapterId: 'codex' }),
+    serviceRuntimeRevision({ connectionRevision: 7, serviceProfileId: 'https://server.example.test::org', modelId: 'responses', adapterId: 'claude' })
   )
 })
 
@@ -82,13 +94,13 @@ test('service model selection requires an available model compatible with the ad
   )
 })
 
-test('catalog validates model capabilities and preserves declared protocol order', () => {
+test('catalog validates model capabilities and canonicalizes protocol sets', () => {
   const catalog = buildServiceProfileCatalog({
     serverOrigin: 'http://10.44.100.100',
     organization: { id: 'org-1' },
     models: [{ id: 'mixed', displayName: 'Mixed', contextSize: 1, protocols: ['openai_chat', 'openai_chat', 'openai_responses'] }],
   })
-  assert.deepEqual(catalog.models[0].protocols, ['openai_chat', 'openai_responses'])
+  assert.deepEqual(catalog.models[0].protocols, ['openai_responses', 'openai_chat'])
   assert.throws(
     () => buildServiceProfileCatalog({ serverOrigin: 'http://example.com', organization: { id: 'org' }, models: [{ id: 'bad', displayName: 'Bad', contextSize: 0, protocols: ['openai_chat'] }] }),
     (error) => error.code === 'INVALID_SERVER_MODEL',

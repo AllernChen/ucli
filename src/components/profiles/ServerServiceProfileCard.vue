@@ -16,7 +16,7 @@
     <div class="service-model-list">
       <div v-for="model in profile.models" :key="model.id" class="service-model-row">
         <div>
-          <strong>{{ model.displayName || model.id }}</strong>
+          <strong>{{ serviceModelLabel(model) }}</strong>
           <span>{{ describeModelProtocols(model.protocols) }}</span>
         </div>
         <div>
@@ -45,7 +45,8 @@ import { computed } from 'vue'
 import { describeModelProtocols } from '../../serviceProfileSelection.js'
 import {
   serviceProfileAvailabilityPresentation,
-  serviceProfileLabel
+  serviceProfileLabel,
+  serviceModelLabel
 } from '../../profilePresentation.js'
 
 const props = defineProps({

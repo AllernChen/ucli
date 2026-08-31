@@ -87,7 +87,7 @@
         <span>服务模型</span>
         <a-select v-model:value="form.modelSelections[adapterId]" style="width: 280px" placeholder="请选择兼容模型">
           <a-select-option v-for="model in compatibleModels(adapterId, false)" :key="model.id" :value="model.id" :disabled="model.availabilityStatus !== 'ready'">
-            {{ model.displayName || model.id }}
+            {{ serviceModelLabel(model) }}
           </a-select-option>
         </a-select>
       </div>
@@ -112,7 +112,7 @@
         <span>服务模型</span>
         <a-select v-model:value="importModelSelections[adapterId]" style="width: 280px" placeholder="请选择兼容模型">
           <a-select-option v-for="model in compatibleModels(adapterId, true)" :key="model.id" :value="model.id" :disabled="model.availabilityStatus !== 'ready'">
-            {{ model.displayName || model.id }}
+            {{ serviceModelLabel(model) }}
           </a-select-option>
         </a-select>
       </div>
@@ -163,6 +163,7 @@ import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import { ipc } from '../ipc.js'
 import { compatibleModelsForAdapter, validateServiceProfileSelection } from '../serviceProfileSelection.js'
 import { importedSessionModelForSelection, isServiceProfile } from '../sessionConfigPresentation.js'
+import { serviceModelLabel } from '../profilePresentation.js'
 
 const props = defineProps({
   initialCwd: { type: String, default: '' },

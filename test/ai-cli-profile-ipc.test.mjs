@@ -100,7 +100,7 @@ test('profile IPC serializes server profiles through an explicit redaction DTO',
     id: 'service-profile', sourceKind: 'server', readOnly: true,
     serverOrigin: 'https://server.example.com',
     organization: { id: 'org-1', name: 'Engineering' },
-    availabilityStatus: 'ready', supportedAdapterIds: ['codex', 'claude'],
+    availabilityStatus: 'ready', status: 'unreachable', canStart: false, supportedAdapterIds: ['codex', 'claude'],
     connectionRevision: 'connection-secret', artifactDigest: 'digest-secret',
     config: { token: 'config-secret' }, headers: { Authorization: 'Bearer header-secret' },
     models: [{
@@ -116,7 +116,7 @@ test('profile IPC serializes server profiles through an explicit redaction DTO',
     id: 'service-profile', source: 'server', readOnly: true,
     serverOrigin: 'https://server.example.com',
     organization: { id: 'org-1', name: 'Engineering' },
-    availabilityStatus: 'ready', supportedAdapterIds: ['codex', 'claude'],
+    availabilityStatus: 'ready', status: 'unreachable', canStart: false, supportedAdapterIds: ['codex', 'claude'],
     models: [{
       id: 'responses', displayName: 'Responses', contextSize: 128000,
       protocols: ['openai_responses'], availabilityStatus: 'ready'
@@ -130,7 +130,7 @@ test('profile state includes a chat-only service profile exactly once without ma
     id: 'chat-only-service', sourceKind: 'server', readOnly: true,
     serverOrigin: 'https://server.example.com',
     organization: { id: 'org-1', name: 'Engineering' },
-    availabilityStatus: 'ready', supportedAdapterIds: [],
+    availabilityStatus: 'ready', status: 'unreachable', canStart: false, supportedAdapterIds: [],
     models: [{
       id: 'chat', displayName: 'Chat only', contextSize: 64000,
       protocols: ['openai_chat'], availabilityStatus: 'ready'
@@ -150,7 +150,7 @@ test('profile state includes a chat-only service profile exactly once without ma
     id: 'chat-only-service', source: 'server', readOnly: true,
     serverOrigin: 'https://server.example.com',
     organization: { id: 'org-1', name: 'Engineering' },
-    availabilityStatus: 'ready', supportedAdapterIds: [],
+    availabilityStatus: 'ready', status: 'unreachable', canStart: false, supportedAdapterIds: [],
     models: [{
       id: 'chat', displayName: 'Chat only', contextSize: 64000,
       protocols: ['openai_chat'], availabilityStatus: 'ready'

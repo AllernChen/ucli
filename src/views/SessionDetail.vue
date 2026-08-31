@@ -405,7 +405,7 @@
         <a-form-item v-for="adapterId in profileAdapterIds.filter(id => selectedServiceImportProfile(id))" :key="`${adapterId}:model`" :label="`${profileAdapterName(adapterId)} 服务模型`">
           <a-select v-model:value="importModelSelections[adapterId]" placeholder="请选择兼容模型">
             <a-select-option v-for="model in compatibleImportModels(adapterId)" :key="model.id" :value="model.id" :disabled="model.availabilityStatus !== 'ready'">
-              {{ model.displayName || model.id }}
+              {{ serviceModelLabel(model) }}
             </a-select-option>
           </a-select>
         </a-form-item>
@@ -471,6 +471,7 @@ import { deriveGatewayRelayControl } from '../gatewayRelayPresentation.js'
 import { deriveSessionConfigState, importedSessionModelForSelection, isServiceProfile } from '../sessionConfigPresentation.js'
 import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
 import { compatibleModelsForAdapter, validateServiceProfileSelection } from '../serviceProfileSelection.js'
+import { serviceModelLabel } from '../profilePresentation.js'
 import { terminalSizeChanged } from '../terminalResize.js'
 import {
   activatePaneSession,

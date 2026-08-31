@@ -12,7 +12,8 @@ const ERROR_CODES = Object.freeze({
   protocolUnavailable: 'PROFILE_MODEL_PROTOCOL_UNAVAILABLE',
 })
 
-const PUBLIC_PROTOCOLS = new Set(['openai_responses', 'openai_chat', 'anthropic_messages'])
+const PUBLIC_PROTOCOLS = Object.freeze(['openai_responses', 'openai_chat', 'anthropic_messages'])
+const PUBLIC_PROTOCOL_SET = new Set(PUBLIC_PROTOCOLS)
 
 function error(code, message) {
   const value = new Error(message)
@@ -58,6 +59,12 @@ export function serviceModelArtifactId({ serviceProfileId, modelId }) {
     .slice(0, 32)
 }
 
+export function serviceRuntimeRevision({ connectionRevision, serviceProfileId, modelId, adapterId }) {
+  return [connectionRevision, serviceProfileId, modelId, adapterId]
+    .map((value) => value == null ? '' : String(value))
+    .join(':')
+}
+
 function normalizeModel(model, serviceProfileId) {
   if (!model || typeof model !== 'object') {
     throw error(ERROR_CODES.invalidModel, 'model must be an object')
@@ -70,13 +77,14 @@ function normalizeModel(model, serviceProfileId) {
   if (!Array.isArray(model.protocols) || model.protocols.length === 0) {
     throw error(ERROR_CODES.invalidModel, `model ${id} protocols must be a non-empty array`)
   }
-  const protocols = []
+  const declaredProtocols = new Set()
   for (const protocol of model.protocols) {
-    if (!PUBLIC_PROTOCOLS.has(protocol)) {
+    if (!PUBLIC_PROTOCOL_SET.has(protocol)) {
       throw error(ERROR_CODES.invalidModel, `model ${id} declares an unsupported protocol`)
     }
-    if (!protocols.includes(protocol)) protocols.push(protocol)
+    declaredProtocols.add(protocol)
   }
+  const protocols = PUBLIC_PROTOCOLS.filter((protocol) => declaredProtocols.has(protocol))
   return Object.freeze({
     id,
     displayName,

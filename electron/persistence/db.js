@@ -44,7 +44,7 @@ let SQL = null
  * Open (or create) the database at `dbPath`. Must be awaited once before any
  * other `getDb()` call.
  */
-export async function openDb(dbPath, { deferUsageLedgerInitialization = false } = {}) {
+export async function openDb(dbPath, { deferUsageLedgerInitialization = false, testHooks = null } = {}) {
   if (!SQL) {
     try {
       const init = await import('sql.js')
@@ -63,7 +63,7 @@ export async function openDb(dbPath, { deferUsageLedgerInitialization = false } 
   let instance
   try {
     instance = new SQL.Database(buffer)
-    const db = new Db(instance, dbPath)
+    const db = new Db(instance, dbPath, null, testHooks)
     db._ensureSchema({ initializeUsageLedger: !deferUsageLedgerInitialization })
     _db = db
     return db
@@ -79,7 +79,7 @@ export async function openDb(dbPath, { deferUsageLedgerInitialization = false } 
     if (existsSync(lastValidBackupPath)) {
       try {
         instance = new SQL.Database(readFileSync(lastValidBackupPath))
-        db = new Db(instance, dbPath)
+        db = new Db(instance, dbPath, null, testHooks)
         db._ensureSchema({ initializeUsageLedger: !deferUsageLedgerInitialization })
         restoredFromBackup = true
       } catch {
@@ -91,7 +91,7 @@ export async function openDb(dbPath, { deferUsageLedgerInitialization = false } 
 
     if (!db) {
       instance = new SQL.Database()
-      db = new Db(instance, dbPath)
+      db = new Db(instance, dbPath, null, testHooks)
       db._ensureSchema({ initializeUsageLedger: !deferUsageLedgerInitialization })
     }
     db.recoveryInfo = { reason: 'invalid-database', backupPath, restoredFromBackup }
@@ -148,10 +148,11 @@ let _db = null
 export function getDb() { return _db }
 
 class Db {
-  constructor(sql, path, recoveryInfo = null) {
+  constructor(sql, path, recoveryInfo = null, testHooks = null) {
     this.sql = sql
     this.path = path
     this.recoveryInfo = recoveryInfo
+    this._testHooks = testHooks
     this._transactionTail = Promise.resolve()
     this._transactionActive = false
   }
@@ -2123,8 +2124,8 @@ class Db {
       const sessions = rows(this.sql.exec('SELECT id, adapter_id, model, profile_id FROM sessions WHERE profile_id IS NOT NULL'))
       for (const session of sessions) {
         const selection = uniquelyMappedSelection(selectionByLegacyProfile.get(session.profile_id), session.adapter_id)
-        if (!selection || selection.modelId !== session.model) continue
-        this.sql.run('UPDATE sessions SET profile_id = ? WHERE id = ?', [selection.profileId, session.id])
+        if (!selection) continue
+        this.sql.run('UPDATE sessions SET profile_id = ?, model = ? WHERE id = ?', [selection.profileId, selection.modelId, session.id])
       }
 
       const bindings = rows(this.sql.exec('SELECT * FROM ai_cli_profile_bindings'))
@@ -2146,6 +2147,7 @@ class Db {
         )
       }
 
+      this._testHooks?.beforeLegacyServerModelTableDrop?.()
       this.sql.run('DROP TABLE server_model_profiles')
     })
   }
@@ -2733,29 +2735,33 @@ function stringifyJsonObject(value) {
   return JSON.stringify(value && typeof value === 'object' && !Array.isArray(value) ? value : {})
 }
 
-const SERVICE_MODEL_PROTOCOLS = new Set([
+const SERVICE_MODEL_PROTOCOLS = Object.freeze([
   'openai_responses', 'openai_chat', 'anthropic_messages'
 ])
+const SERVICE_MODEL_PROTOCOL_SET = new Set(SERVICE_MODEL_PROTOCOLS)
+
+function canonicalServiceModelProtocols(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.some((protocol) => !SERVICE_MODEL_PROTOCOL_SET.has(protocol))) return null
+  const seen = new Set(value)
+  return SERVICE_MODEL_PROTOCOLS.filter((protocol) => seen.has(protocol))
+}
 
 function parseProtocolArray(value) {
   if (typeof value !== 'string') return []
   try {
     const protocols = JSON.parse(value)
-    if (!Array.isArray(protocols) || protocols.length === 0 ||
-      protocols.some((protocol) => !SERVICE_MODEL_PROTOCOLS.has(protocol))) return []
-    return protocols
+    return canonicalServiceModelProtocols(protocols) || []
   } catch {
     return []
   }
 }
 
 function stringifyProtocolArray(value) {
-  return JSON.stringify(value)
+  return JSON.stringify(canonicalServiceModelProtocols(value))
 }
 
 function assertServiceModelProtocols(model) {
-  if (!Array.isArray(model?.protocols) || model.protocols.length === 0 ||
-    model.protocols.some((protocol) => !SERVICE_MODEL_PROTOCOLS.has(protocol))) {
+  if (!canonicalServiceModelProtocols(model?.protocols)) {
     throw Object.assign(new TypeError('Service model protocols must be a non-empty public protocol array'), {
       code: 'INVALID_SERVICE_MODEL_PROTOCOLS'
     })
