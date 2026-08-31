@@ -97,7 +97,7 @@ export const useSessionsStore = defineStore('sessions', {
           : (config.name || adapter?.displayName || config.adapterId),
         icon: adapter?.icon || '•',
         cwd: config.cwd,
-        model: config.model || (config.profileId ? null : adapter?.models?.[0]) || null,
+        model: config.model || null,
         provider: config.provider || null,
         sourceProvider: config.sourceProvider || null,
         providerPolicy: config.providerPolicy || (config.cliSessionId ? 'source' : 'live'),
@@ -285,6 +285,7 @@ export const useSessionsStore = defineStore('sessions', {
       } else {
         row.status = s.status
         row.stats = s.stats
+        if (s.model !== undefined) row.model = s.model
         if (s.cliSessionId) row.cliSessionId = s.cliSessionId
         if (s.nativeSessionId) row.nativeSessionId = s.nativeSessionId
         if (s.adapterConfig !== undefined) row.adapterConfig = s.adapterConfig
@@ -348,6 +349,7 @@ export const useSessionsStore = defineStore('sessions', {
         } else if (evt.type === 'profile-runtime') {
           if (evt.profileId !== undefined) row.profileId = evt.profileId
           if (evt.profileSourceKind !== undefined) row.profileSourceKind = evt.profileSourceKind
+          if (evt.model !== undefined) row.model = evt.model
           if (evt.activeProfileId !== undefined) row.activeProfileId = evt.activeProfileId
           if (evt.pendingProfileId !== undefined) row.pendingProfileId = evt.pendingProfileId
           if (evt.profileStatus !== undefined) row.profileStatus = evt.profileStatus

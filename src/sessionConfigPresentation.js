@@ -1,9 +1,24 @@
-import { validateServiceProfileSelection } from './serviceProfileSelection.js'
+import {
+  compatibleModelsForAdapter,
+  validateServiceProfileSelection
+} from './serviceProfileSelection.js'
 
 const PROFILE_ADAPTERS = new Set(['codex', 'claude'])
 
 export function isServiceProfile(profile) {
   return profile?.source === 'server' || profile?.sourceKind === 'server'
+}
+
+export function isReadyServiceProfileForAdapter(profile, adapterId) {
+  return isServiceProfile(profile) && profile.availabilityStatus === 'ready' &&
+    compatibleModelsForAdapter(profile, adapterId).some(model => model?.availabilityStatus === 'ready')
+}
+
+export function sessionProfileDraftFor(session = {}) {
+  return {
+    profileId: session.profileId || 'system',
+    model: session.profileId ? (session.model || null) : null
+  }
 }
 
 export function deriveServiceProfileSessionState({

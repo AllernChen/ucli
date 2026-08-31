@@ -201,7 +201,9 @@ import { profileRuntimeNotice } from '../profilePresentation.js'
 import {
   deriveServiceProfileSessionState,
   deriveSessionConfigState,
-  isServiceProfile
+  isReadyServiceProfileForAdapter,
+  isServiceProfile,
+  sessionProfileDraftFor
 } from '../sessionConfigPresentation.js'
 import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
 import { compatibleModelsForAdapter } from '../serviceProfileSelection.js'
@@ -294,8 +296,9 @@ const providerNotice = computed(() => {
 function resetDrafts() {
   nameDraft.value = session.value?.displayName || ''
   noteDraft.value = session.value?.taskNote || ''
-  selectedProfileId.value = session.value?.profileId || 'system'
-  selectedModelId.value = session.value?.model || null
+  const profileDraft = sessionProfileDraftFor(session.value)
+  selectedProfileId.value = profileDraft.profileId
+  selectedModelId.value = profileDraft.model
   profileSwitch.value = { open: false, selection: null }
   diagnosticsVisible.value = false
 }
@@ -374,7 +377,7 @@ function profileLabel(profile) {
 
 function canSelectProfile(profile) {
   return isServiceProfile(profile)
-    ? compatibleModelsForAdapter(profile, session.value?.adapterId).length > 0
+    ? isReadyServiceProfileForAdapter(profile, session.value?.adapterId)
     : profile.canStart
 }
 
@@ -409,6 +412,9 @@ async function setSessionProfile() {
 }
 
 function cancelProfileSwitch() {
+  const profileDraft = sessionProfileDraftFor(session.value)
+  selectedProfileId.value = profileDraft.profileId
+  selectedModelId.value = profileDraft.model
   profileSwitch.value = { open: false, selection: null }
 }
 

@@ -88,6 +88,11 @@ test('session configuration modal selects a server model separately and sends an
   assert.match(source, /sessions\.setProfile\(current\.id, selection\)/)
 })
 
+test('cancelling a profile restart restores the persisted profile tuple draft', () => {
+  const { source } = loadComponent('../src/components/SessionConfigModal.vue')
+  assert.match(source, /function cancelProfileSwitch\(\) \{\s*const profileDraft = sessionProfileDraftFor\(session\.value\)\s*selectedProfileId\.value = profileDraft\.profileId\s*selectedModelId\.value = profileDraft\.model/)
+})
+
 test('session settings never own layout or routine maintenance actions', () => {
   const { source } = loadComponent('../src/components/SessionConfigModal.vue')
 

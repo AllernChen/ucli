@@ -81,3 +81,48 @@ Two earlier full-suite attempts exposed deterministic, pre-existing static templ
 - No live smoke was run, no `ucli-server` code was changed, no secrets are added to renderer DTOs, and no protocol was broadened.
 - `profileSourceKind` is intentionally the smallest production boundary expansion needed for historical server-profile presentation and is covered by a real orchestrator/IPC dynamic test.
 - The selector intentionally does not preselect any server model.  A missing, removed, unavailable, or incompatible model remains unlaunchable until a valid explicit model is selected.
+
+## Review remediation — explicit selection preservation
+
+Follow-up review found four issues and all are fixed in the companion commit.
+
+- The renderer store no longer uses an adapter `models[0]` fallback while creating an optimistic summary.  It starts with `config.model` or `null`, then accepts the allowlisted `model` field from `profile-runtime` and from a rehydrated/list summary update.  A dynamic Pinia test proves an inherited server binding with `responses-bound` (not the first catalog item) remains exact through creation, list upsert, and runtime publication.
+- `sessions.profile_source_kind` is now an additive schema field.  Database mapping accepts and persists only `server` or `null`; no profile ID, model, vendor, or protocol is inspected to infer it.  The orchestrator writes it atomically with `profile_id` and `model` on create/set-profile, and restores an unavailable server tuple from persisted `profileId`, `model`, and the allowlisted marker.
+- A real orchestrator lifecycle test selects a service tuple, disconnects/removes the catalog, shuts down, reopens, and verifies `session:list` still exposes the historical `{ profileId, model, profileSourceKind: 'server', canStart: false }`.  It also verifies the emitted `profile-runtime` marker before restart.  Service → local → system transition coverage verifies the database marker is cleared for local/system selections.
+- Session configuration now enables a service profile only when its profile and at least one compatible child model are `ready`, matching new/import behavior.  Cancelling the restart confirmation restores the persisted profile/model draft via a tested pure helper; the modal invokes that helper on cancellation.
+
+### Follow-up RED / GREEN evidence
+
+```text
+node --test test/session-profile-binding.test.mjs
+RED: optimistic inherited summary selected `wrong-first` instead of null
+RED: refreshed existing list summary kept null instead of `responses-selected`
+RED: session source marker round-trip returned undefined instead of server
+
+node --test --test-name-pattern "selected service tuple remains" test/ai-cli-profile-session-template.test.mjs
+RED: database source marker was null instead of server before disconnect/reopen
+```
+
+The initial helper tests for ready service selection and draft reset also failed because their production exports did not exist.  After the minimal changes:
+
+```text
+node --test test/session-profile-binding.test.mjs
+pass 8, fail 0
+
+node --test test/session-profile-binding.test.mjs test/ai-cli-profile-session-template.test.mjs test/session-config-presentation.test.mjs test/session-config-template.test.mjs test/service-profile-selection.test.mjs test/ai-cli-profile-db.test.mjs test/server-connection-db.test.mjs
+pass 63, fail 0
+
+node --test test/ai-cli-profile-db.test.mjs test/ai-cli-profile-service.test.mjs test/ai-cli-profile-ipc.test.mjs test/ai-cli-profile-session-template.test.mjs test/claude-profile-service.test.mjs test/claude-profile-launch-coordinator.test.mjs test/claude-profile-launch.test.mjs test/server-connection-store.test.mjs test/server-settings-template.test.mjs test/service-profile-selection.test.mjs test/ai-cli-profile-template.test.mjs test/ai-cli-profile-presentation.test.mjs test/session-config-presentation.test.mjs test/session-config-template.test.mjs test/session-profile-binding.test.mjs
+pass 133, fail 0
+
+npm run build
+pass
+
+npm test
+tests 1930; pass 1918; fail 0; skipped 12
+
+git diff --check
+pass
+```
+
+The final tuple/import audit again found only the two atomic-object `SessionConfigModal` callers.  Initial `NewSessionDialog` import and secondary `SessionDetail` import both retain their explicit-model validation and only preserve a discovered historical model when no explicit tuple model was selected.  No production `models[0]` or scalar profile mutation caller remains.

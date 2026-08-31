@@ -197,6 +197,7 @@ class Db {
         provider_policy   TEXT,
         explicit_provider TEXT,
         profile_id        TEXT,
+        profile_source_kind TEXT,
         adapter_config_json TEXT NOT NULL DEFAULT '{}',
         status            TEXT DEFAULT 'offline',
         created_at        INTEGER NOT NULL,
@@ -223,6 +224,9 @@ class Db {
     }
     if (!sessionColumns.some((column) => column.name === 'profile_id')) {
       this.sql.run('ALTER TABLE sessions ADD COLUMN profile_id TEXT')
+    }
+    if (!sessionColumns.some((column) => column.name === 'profile_source_kind')) {
+      this.sql.run('ALTER TABLE sessions ADD COLUMN profile_source_kind TEXT')
     }
     if (!sessionColumns.some((column) => column.name === 'adapter_config_json')) {
       this.sql.run("ALTER TABLE sessions ADD COLUMN adapter_config_json TEXT NOT NULL DEFAULT '{}'")
@@ -717,13 +721,14 @@ class Db {
   // ---- sessions ----
   insertSession(s) {
     this.sql.run(
-      `INSERT INTO sessions (id, project_path, adapter_id, native_session_id, name, task_note, tier, model, system_model, provider, source_provider, provider_policy, explicit_provider, profile_id, adapter_config_json, status, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO sessions (id, project_path, adapter_id, native_session_id, name, task_note, tier, model, system_model, provider, source_provider, provider_policy, explicit_provider, profile_id, profile_source_kind, adapter_config_json, status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [s.id, s.project_path, s.adapter_id, s.native_session_id || null, s.name || null,
        s.task_note || '', s.tier, s.model || null,
        Object.hasOwn(s, 'system_model') ? (s.system_model || null) : (s.model || null),
        s.provider || null, s.source_provider || null, s.provider_policy || null, s.explicit_provider || null,
-       s.profile_id || null, s.adapter_config_json || '{}', s.status, s.created_at, Date.now()]
+       s.profile_id || null, normalizeSessionProfileSourceKind(s.profile_source_kind),
+       s.adapter_config_json || '{}', s.status, s.created_at, Date.now()]
     )
     this.sql.run(
       `INSERT OR IGNORE INTO session_stats (session_id) VALUES (?)`, [s.id]
@@ -731,11 +736,14 @@ class Db {
   }
 
   updateSession(sessionId, fields) {
-    const allowed = ['native_session_id', 'name', 'task_note', 'status', 'model', 'system_model', 'provider', 'source_provider', 'provider_policy', 'explicit_provider', 'profile_id', 'adapter_config_json']
+    const allowed = ['native_session_id', 'name', 'task_note', 'status', 'model', 'system_model', 'provider', 'source_provider', 'provider_policy', 'explicit_provider', 'profile_id', 'profile_source_kind', 'adapter_config_json']
     const sets = []
     const vals = []
     for (const k of allowed) {
-      if (fields[k] !== undefined) { sets.push(`${k}=?`); vals.push(fields[k]) }
+      if (fields[k] !== undefined) {
+        sets.push(`${k}=?`)
+        vals.push(k === 'profile_source_kind' ? normalizeSessionProfileSourceKind(fields[k]) : fields[k])
+      }
     }
     if (!sets.length) return
     sets.push('updated_at=?'); vals.push(Date.now()); vals.push(sessionId)
@@ -3340,6 +3348,7 @@ function rowToSession(row) {
     providerPolicy: row.provider_policy || null,
     explicitProvider: row.explicit_provider || null,
     profileId: row.profile_id || null,
+    profileSourceKind: normalizeSessionProfileSourceKind(row.profile_source_kind),
     adapterConfig: parseJsonObject(row.adapter_config_json),
     status: row.status,
     createdAt: row.created_at,
@@ -3357,4 +3366,8 @@ function rowToSession(row) {
       }
     }
   }
+}
+
+function normalizeSessionProfileSourceKind(value) {
+  return value === 'server' ? 'server' : null
 }
