@@ -38,9 +38,11 @@ test('running profile switches require an explicit restart decision and cancella
 
 test('unavailable server profiles are disabled without rewriting their explicit ids to system auth', () => {
   const source = readFileSync(new URL('../src/components/NewSessionDialog.vue', import.meta.url), 'utf8')
-  assert.match(source, /profile\.sourceKind === 'server'/)
-  assert.match(source, /profile\.canStart/)
-  assert.match(source, /return profile\?\.adapterId === adapterId \? \{ profileId \} : \{\}/)
+  assert.match(source, /isServiceProfile/)
+  assert.match(source, /canSelectProfile/)
+  assert.match(source, /model: modelId/)
+  assert.match(source, /validateServiceProfileSelection/)
+  assert.doesNotMatch(source, /models\[0\]/)
 })
 
 test('session profile mutation carries an exact profile/model selection through the bridge and persists it together', () => {
@@ -265,6 +267,19 @@ function createdCodexSession(handlers, overrides = {}) {
     adapterId: 'codex', cwd: 'F:\\projects\\demo', tier: 'safety-rules', ...overrides
   })
 }
+
+test('a selected service profile exposes its source kind for historical session presentation', async () => {
+  await withCodexServiceProfile(async ({ handlers, serviceProfile }) => {
+    const created = createdCodexSession(handlers)
+    handlers.get('session:set-profile')({}, created.sessionId, {
+      profileId: serviceProfile.id, model: 'responses-a'
+    })
+
+    const session = (await handlers.get('session:list')({}))
+      .find(candidate => candidate.id === created.sessionId)
+    assert.equal(session.profileSourceKind, 'server')
+  })
+})
 
 test('a failed tuple persistence leaves the live session and emitted state unchanged', async t => {
   await withPersistedSession(t, async ({ handlers, events, db }) => {

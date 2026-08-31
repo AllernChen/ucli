@@ -103,6 +103,7 @@ export const useSessionsStore = defineStore('sessions', {
         providerPolicy: config.providerPolicy || (config.cliSessionId ? 'source' : 'live'),
         explicitProvider: config.explicitProvider || null,
         profileId: config.profileId || null,
+        profileSourceKind: null,
         activeProfileId: null,
         pendingProfileId: null,
         profileStatus: null,
@@ -268,6 +269,7 @@ export const useSessionsStore = defineStore('sessions', {
           providerWarning: s.providerWarning || null, pendingProvider: s.pendingProvider || null,
           pendingProviderWarning: s.pendingProviderWarning || null,
           profileId: s.profileId || null, activeProfileId: s.activeProfileId || null,
+          profileSourceKind: s.profileSourceKind || null,
           pendingProfileId: s.pendingProfileId || null, profileStatus: s.profileStatus || null,
           actualModel: s.actualModel || null, profileWarning: s.profileWarning || null,
           restartRequired: Boolean(s.restartRequired), canStart: s.canStart !== false,
@@ -300,6 +302,7 @@ export const useSessionsStore = defineStore('sessions', {
         if (s.pendingProvider !== undefined) row.pendingProvider = s.pendingProvider
         if (s.pendingProviderWarning !== undefined) row.pendingProviderWarning = s.pendingProviderWarning
         if (s.profileId !== undefined) row.profileId = s.profileId
+        if (s.profileSourceKind !== undefined) row.profileSourceKind = s.profileSourceKind
         if (s.activeProfileId !== undefined) row.activeProfileId = s.activeProfileId
         if (s.pendingProfileId !== undefined) row.pendingProfileId = s.pendingProfileId
         if (s.profileStatus !== undefined) row.profileStatus = s.profileStatus
@@ -344,6 +347,7 @@ export const useSessionsStore = defineStore('sessions', {
           if (evt.canStart !== undefined) row.canStart = evt.canStart
         } else if (evt.type === 'profile-runtime') {
           if (evt.profileId !== undefined) row.profileId = evt.profileId
+          if (evt.profileSourceKind !== undefined) row.profileSourceKind = evt.profileSourceKind
           if (evt.activeProfileId !== undefined) row.activeProfileId = evt.activeProfileId
           if (evt.pendingProfileId !== undefined) row.pendingProfileId = evt.pendingProfileId
           if (evt.profileStatus !== undefined) row.profileStatus = evt.profileStatus

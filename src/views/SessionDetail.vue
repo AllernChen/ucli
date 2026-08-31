@@ -16,7 +16,7 @@
       <span class="spacer"></span>
       <GatewayHeaderControl />
       <a-space size="small">
-        <a-button size="small" @click="showImport = true">📥 导入</a-button>
+        <a-button size="small" @click="openImportDialog">📥 导入</a-button>
         <a-button size="small" @click="openNew">➕ 新建</a-button>
         <span v-if="assignedPaneCount > 1" class="shortcut-hint"><kbd>Tab</kbd> 切换会话</span>
         <a-radio-group v-model:value="splitCount" size="small" button-style="solid">
@@ -359,7 +359,7 @@
                     <div>
                       <span class="iss-name">{{ s.name || s.sessionId?.slice(0, 12) }}</span>
                       <a-tag v-if="s.imported" color="default">已添加</a-tag>
-                      <span class="iss-meta" v-if="s.model">{{ s.model }}</span>
+                      <span class="iss-meta" v-if="s.model">{{ s.model }}（历史模型）</span>
                       <span class="iss-meta provider-change" v-if="s.providerChanged">provider: {{ s.sourceProvider }} → {{ s.resumeProvider }}</span>
                       <span class="iss-meta" v-else-if="s.sourceProvider">provider: {{ s.sourceProvider }}</span>
                       <span class="iss-meta" v-if="s.turns">{{ s.turns }} 轮</span>
@@ -387,11 +387,25 @@
           </a-radio-group>
         </a-form-item>
         <a-form-item v-for="adapterId in profileAdapterIds" :key="adapterId" :label="`${profileAdapterName(adapterId)} 配置档案`">
-          <a-select v-model:value="importProfileSelections[adapterId]">
-            <a-select-option value="history">保持历史连接</a-select-option>
+          <a-select v-model:value="importProfileSelections[adapterId]" @change="clearImportModelSelection(adapterId)">
+            <a-select-option value="history">保持历史连接（保留历史选择）</a-select-option>
             <a-select-option value="system">跟随当前</a-select-option>
-            <a-select-option v-for="profile in profilesForAdapter(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!profile.canStart">
-              {{ profile.name }}{{ profile.canStart ? '' : '（不可用）' }}
+            <a-select-opt-group label="服务档案">
+              <a-select-option v-for="profile in serverProfilesForImport(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!canSelectImportProfile(profile, adapterId)">
+                {{ importProfileLabel(profile) }}{{ profile.canStart === false ? '（不可用）' : '' }}
+              </a-select-option>
+            </a-select-opt-group>
+            <a-select-opt-group label="本地档案">
+              <a-select-option v-for="profile in localProfilesForImport(adapterId)" :key="profile.id" :value="`profile:${profile.id}`" :disabled="!canSelectImportProfile(profile, adapterId)">
+                {{ importProfileLabel(profile) }}{{ profile.canStart === false ? '（不可用）' : '' }}
+              </a-select-option>
+            </a-select-opt-group>
+          </a-select>
+        </a-form-item>
+        <a-form-item v-for="adapterId in profileAdapterIds.filter(id => selectedServiceImportProfile(id))" :key="`${adapterId}:model`" :label="`${profileAdapterName(adapterId)} 服务模型`">
+          <a-select v-model:value="importModelSelections[adapterId]" placeholder="请选择兼容模型">
+            <a-select-option v-for="model in compatibleImportModels(adapterId)" :key="model.id" :value="model.id" :disabled="model.availabilityStatus !== 'ready'">
+              {{ model.displayName || model.id }}
             </a-select-option>
           </a-select>
         </a-form-item>
@@ -454,8 +468,9 @@ import SessionMaintenanceActions from '../components/SessionMaintenanceActions.v
 import GatewayHeaderControl from '../components/gateway/GatewayHeaderControl.vue'
 import GatewayChannelIcon from '../components/gateway/GatewayChannelIcon.vue'
 import { deriveGatewayRelayControl } from '../gatewayRelayPresentation.js'
-import { deriveSessionConfigState } from '../sessionConfigPresentation.js'
+import { deriveSessionConfigState, isServiceProfile } from '../sessionConfigPresentation.js'
 import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
+import { compatibleModelsForAdapter, validateServiceProfileSelection } from '../serviceProfileSelection.js'
 import { terminalSizeChanged } from '../terminalResize.js'
 import {
   activatePaneSession,
@@ -610,8 +625,54 @@ const panes = ref([])
 const assignedPaneCount = computed(() => panes.value.filter((pane) => pane.sessionId).length)
 
 const profileAdapterIds = ['codex', 'claude']
-const profilesForAdapter = (adapterId) => aiProfiles.profiles.filter((profile) => profile.adapterId === adapterId)
+const localProfilesForImport = (adapterId) => aiProfiles.profiles
+  .filter((profile) => profile.adapterId === adapterId && !isServiceProfile(profile))
+const serverProfilesForImport = () => aiProfiles.profiles.filter(isServiceProfile)
 const profileAdapterName = (adapterId) => sessions.adapters.find((adapter) => adapter.id === adapterId)?.displayName || adapterId
+function importProfileLabel(profile) {
+  return isServiceProfile(profile) ? (profile.organization?.name || profile.id) : profile.name
+}
+function selectedServiceImportProfile(adapterId) {
+  const selection = importProfileSelections.value[adapterId]
+  if (typeof selection !== 'string' || !selection.startsWith('profile:')) return null
+  const profile = aiProfiles.profileById(selection.slice('profile:'.length))
+  return isServiceProfile(profile) ? profile : null
+}
+function compatibleImportModels(adapterId) {
+  return compatibleModelsForAdapter(selectedServiceImportProfile(adapterId), adapterId)
+}
+function canSelectImportProfile(profile, adapterId) {
+  return isServiceProfile(profile)
+    ? profile.availabilityStatus === 'ready' && compatibleModelsForAdapter(profile, adapterId).length > 0
+    : profile.canStart !== false
+}
+function clearImportModelSelection(adapterId) {
+  importModelSelections.value[adapterId] = null
+}
+function importProfileConfig(adapterId) {
+  const selection = importProfileSelections.value[adapterId]
+  if (selection === 'system') return { profileSelection: 'system' }
+  if (typeof selection !== 'string' || !selection.startsWith('profile:')) return {}
+  const profileId = selection.slice('profile:'.length)
+  const profile = aiProfiles.profileById(profileId)
+  if (isServiceProfile(profile)) {
+    const model = importModelSelections.value[adapterId]
+    const validation = validateServiceProfileSelection({ profile, adapterId, modelId: model })
+    return validation.valid ? { profileId, model } : { error: validation.reason }
+  }
+  return profile?.adapterId === adapterId ? { profileId, model: null } : {}
+}
+function importSelectionError() {
+  for (const adapterId of profileAdapterIds) {
+    const reason = importProfileConfig(adapterId).error
+    if (reason) return ({
+      'model-required': '请选择兼容模型',
+      'model-unavailable': '所选模型当前不可用',
+      'protocol-unavailable': '所选模型与当前 CLI 不兼容'
+    })[reason]
+  }
+  return null
+}
 
 const sessionConfig = ref({ open: false, sessionId: '' })
 
@@ -1160,9 +1221,16 @@ const importDiscovered = ref({ claude: [], codex: [], opencode: [], ucode: [] })
 const importSelection = ref({})
 const importTier = ref('safety-rules')
 const importProfileSelections = ref({ codex: 'history', claude: 'history' })
+const importModelSelections = ref({ codex: null, claude: null })
 const importing = ref(false)
 const discoveringImport = ref(false)
 const importError = ref('')
+
+function openImportDialog() {
+  importProfileSelections.value = { codex: 'history', claude: 'history' }
+  importModelSelections.value = { codex: null, claude: null }
+  showImport.value = true
+}
 
 const importGroups = computed(() => {
   const groups = []
@@ -1213,6 +1281,8 @@ async function doImport() {
   if (!totalImportSelected.value || !importCwd.value) {
     message.warning('请选择目录和会话'); return
   }
+  const selectionError = importSelectionError()
+  if (selectionError) { message.warning(selectionError); return }
   importing.value = true
   try {
     let count = 0
@@ -1229,16 +1299,14 @@ async function doImport() {
           sourceProvider: cs?.sourceProvider || undefined
         }
         if (['codex', 'claude'].includes(group.id)) {
-          const profileSelection = importProfileSelections.value[group.id]
-          if (profileSelection === 'system') config.profileSelection = 'system'
-          else if (profileSelection.startsWith('profile:')) {
-            const profileId = profileSelection.slice('profile:'.length)
-            if (aiProfiles.profileById(profileId)?.adapterId === group.id) config.profileId = profileId
-          }
+          const profileConfig = importProfileConfig(group.id)
+          if (profileConfig.profileSelection) config.profileSelection = profileConfig.profileSelection
+          if (profileConfig.profileId) config.profileId = profileConfig.profileId
+          if (profileConfig.model !== undefined) config.model = profileConfig.model
         }
         if (cs?.name) config.name = cs.name
         if (cs?.startedAt) config.startedAt = cs.startedAt
-        if (cs?.model) config.model = cs.model
+        if (cs?.model && config.model === undefined) config.model = cs.model
         await sessions.createSession(config)
         count++
       }

@@ -1532,6 +1532,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   function profileRuntimeView(session) {
     return {
       profileId: session.profileId || null,
+      profileSourceKind: session.profileSourceKind || null,
       model: session.model || null,
       activeProfileId: session.activeProfileId || null,
       pendingProfileId: session.pendingProfileId || null,
@@ -2841,6 +2842,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       pendingProvider: e.session.pendingProvider || null,
       pendingProviderWarning: e.session.pendingProviderWarning || null,
       profileId: e.session.profileId || null,
+      profileSourceKind: e.session.profileSourceKind || null,
       activeProfileId: e.session.activeProfileId || null,
       pendingProfileId: e.session.pendingProfileId || null,
       profileStatus: e.session.profileStatus || null,
