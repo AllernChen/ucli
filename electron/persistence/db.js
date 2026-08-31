@@ -1960,7 +1960,6 @@ class Db {
       catalogs.set(key, catalog)
     }
     this._runImmediateTransaction(() => {
-      this.clearServerServiceCatalog()
       for (const catalog of catalogs.values()) {
         this.replaceServerServiceCatalog({ ...catalog, models: [...catalog.models.values()] })
       }
@@ -1995,6 +1994,8 @@ class Db {
     const organizationName = profile?.organization?.name ?? profile?.organizationName
     const profileId = stableServiceProfileId({ serverOrigin: profile?.serverOrigin, organizationId })
     const serverOrigin = profileId.slice(0, profileId.indexOf('::'))
+    const catalogModels = Array.isArray(models) ? models : []
+    for (const model of catalogModels) assertServiceModelProtocols(model)
     return this._runImmediateTransaction(() => {
       this.sql.run(
         `INSERT INTO server_service_profiles (
@@ -2012,7 +2013,7 @@ class Db {
         ]
       )
       this.sql.run('DELETE FROM server_service_models WHERE service_profile_id = ?', [profileId])
-      for (const [catalogOrder, model] of (models || []).entries()) {
+      for (const [catalogOrder, model] of catalogModels.entries()) {
         this.sql.run(
           `INSERT INTO server_service_models (
              service_profile_id, model_id, display_name, context_size, protocols_json,
@@ -2719,18 +2720,23 @@ function parseProtocolArray(value) {
     const protocols = JSON.parse(value)
     if (!Array.isArray(protocols) || protocols.length === 0 ||
       protocols.some((protocol) => !SERVICE_MODEL_PROTOCOLS.has(protocol))) return []
-    return [...new Set(protocols)]
+    return protocols
   } catch {
     return []
   }
 }
 
 function stringifyProtocolArray(value) {
-  const protocols = Array.isArray(value) && value.length > 0 &&
-    value.every((protocol) => SERVICE_MODEL_PROTOCOLS.has(protocol))
-    ? [...new Set(value)]
-    : []
-  return JSON.stringify(protocols)
+  return JSON.stringify(value)
+}
+
+function assertServiceModelProtocols(model) {
+  if (!Array.isArray(model?.protocols) || model.protocols.length === 0 ||
+    model.protocols.some((protocol) => !SERVICE_MODEL_PROTOCOLS.has(protocol))) {
+    throw Object.assign(new TypeError('Service model protocols must be a non-empty public protocol array'), {
+      code: 'INVALID_SERVICE_MODEL_PROTOCOLS'
+    })
+  }
 }
 
 function isLegacyServerModelProfile(row) {

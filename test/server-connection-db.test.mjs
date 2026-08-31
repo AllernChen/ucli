@@ -325,3 +325,69 @@ test('opening a legacy per-adapter catalog migrates selections once and clears u
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('legacy compatibility replacement preserves other normalized service catalogs', async () => {
+  await withDb(async (db) => {
+    const first = {
+      id: 'https://first.example.test::org-1', serverOrigin: 'https://first.example.test',
+      organization: { id: 'org-1', name: 'First Org' }, connectionRevision: 'revision-1', availabilityStatus: 'available'
+    }
+    const second = {
+      id: 'https://second.example.test::org-2', serverOrigin: 'https://second.example.test',
+      organization: { id: 'org-2', name: 'Second Org' }, connectionRevision: 'revision-2', availabilityStatus: 'available'
+    }
+    db.replaceServerServiceCatalog({
+      profile: first,
+      models: [{ id: 'first-model', displayName: 'First', contextSize: 4096, protocols: ['openai_responses'], availabilityStatus: 'available' }]
+    })
+    db.replaceServerServiceCatalog({
+      profile: second,
+      models: [{ id: 'second-model', displayName: 'Second', contextSize: 8192, protocols: ['anthropic_messages'], availabilityStatus: 'available' }]
+    })
+    db.updateServerServiceModelArtifact({
+      serviceProfileId: second.id, modelId: 'second-model', codexFileSha256: 'second-artifact'
+    })
+
+    db.replaceServerModelProfiles({
+      connectionRevision: 'revision-3',
+      profiles: [{
+        profileId: 'legacy-first', serverOrigin: first.serverOrigin, organizationId: 'org-1',
+        organizationName: 'First Org', modelId: 'replacement-model', adapterId: 'codex',
+        displayName: 'Replacement', contextSize: 16384, availabilityStatus: 'available'
+      }]
+    })
+
+    assert.deepEqual(db.listServerServiceModels(second.id), [{
+      serviceProfileId: second.id, serverOrigin: second.serverOrigin, organizationId: 'org-2',
+      organizationName: 'Second Org', connectionRevision: 'revision-2', modelId: 'second-model',
+      displayName: 'Second', contextSize: 8192, protocols: ['anthropic_messages'], availabilityStatus: 'available',
+      catalogOrder: 0, codexFileSha256: 'second-artifact'
+    }])
+  })
+})
+
+test('invalid service model protocols reject before replacing an existing catalog', async () => {
+  await withDb(async (db) => {
+    const profile = {
+      id: 'https://server.example.test::org-1', serverOrigin: 'https://server.example.test',
+      organization: { id: 'org-1', name: 'Example Org' }, connectionRevision: 'revision-1', availabilityStatus: 'available'
+    }
+    const priorModels = [{
+      id: 'valid-model', displayName: 'Valid', contextSize: 4096,
+      protocols: ['openai_responses'], availabilityStatus: 'available'
+    }]
+    db.replaceServerServiceCatalog({ profile, models: priorModels })
+    const persisted = db.listServerServiceModels(profile.id)
+
+    for (const protocols of [[], ['unsupported_protocol']]) {
+      assert.throws(() => db.replaceServerServiceCatalog({
+        profile,
+        models: [{
+          id: 'invalid-model', displayName: 'Invalid', contextSize: 4096,
+          protocols, availabilityStatus: 'available'
+        }]
+      }), { code: 'INVALID_SERVICE_MODEL_PROTOCOLS' })
+      assert.deepEqual(db.listServerServiceModels(profile.id), persisted)
+    }
+  })
+})
