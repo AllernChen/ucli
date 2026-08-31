@@ -11,6 +11,9 @@
 | 正式服务端基线 | PASS：UCLI Server `0.3.1`，发布提交 `1cd51df59d06ae0e8ab9c60cb6fea9e0d9f6a0c5`，当前生产运行时镜像 `sha256:daedf2b364c94aa6a1b1cfc6ed6f91350f98ac248f0a79767e87271c25e28c9b`，2026-08-30 已验证部署。下方真实 smoke 行保留其实际运行时证据，不改写为后续发布镜像。 |
 | 本地协议合同 | PASS：Tasks 1–5 后四文件客户端/服务端合同门 48/48 通过。该门只覆盖固定 fixtures 的协议/目录与稳定 503 合同：`openai_responses`、`openai_chat`、`anthropic_messages`、固定端点、Bootstrap/Gateway 双目录协议一致性、无 `models[0]` 推断，以及 `no-store`/request ID/retryable。Codex/Claude 投影、Chat-only 无托管档案、透明 503 代理、凭证/本地能力保留和非 live smoke 请求由下列更广的九套实现门单独验证。 |
 | 本地实现门 | PASS：声明的九套实现测试覆盖模型投影、透明 503 代理、凭证和本地能力保留、协议专属 smoke 请求与默认跳过的真实 smoke；它不是四文件 48-test 合同门的一部分。 |
+| 统一服务档案多模型客户端改造 | 本地验收覆盖每个规范化 server origin/organization 一项服务档案、嵌套声明模型/协议、Codex→`openai_responses` 与 Claude→`anthropic_messages` 的显式兼容性、`openai_chat` 保持可见但不可托管启动、精确 `(serviceProfileId, modelId)` 默认/会话绑定、无模型/供应商/目录顺序/协议推断、按模型隔离的 Codex artifact，以及 fail-closed 选择与迁移来源回填。该改造仅修改客户端；不需要服务端变更或新的服务授权。 |
+| Task 9 本地接受门 | PASS：固定服务端合同门 58/58、聚焦实现门（含 `session-profile-binding`）152/152、`npm test`、文档/固定合同复合门 31/31、`git diff --check` 与 `npm run verify:release` 均以 exit 0 完成。 |
+| 本次文档与本地验证边界 | 此次真实 smoke 之后的客户端域重构没有消耗另一份授权，也没有运行新的 live smoke。下方 2026-08-30T16:10:42+08:00 的记录及其现有证据保持为唯一的最终 live-smoke 记录。 |
 | 本地回滚兼容性 | 已做静态命名空间证明：当前版本的 `ucli-server-*` 文件不属于旧 `ucli-<32hex>` 所有权规则；这不是 0.11.6 二进制降级实证。 |
 | 合并提交 Windows 产物 | PASS：2026-08-30 18:16（Asia/Shanghai）从 PR #26 合并提交 `17683491cb7e1d57d0775f3fe76351d21077f146` 构建 Windows x64 产物。Setup `UCLI-Setup-0.12.0-x64.exe`（134,216,193 bytes，SHA-256 `90D4827280C7142AD346766DCCAF4A903E9827458A4F3E2748C770334E4A5EE7`）；blockmap（137,325 bytes，SHA-256 `B90E289F78F536ACA8EE2F6E9224EB3632907D20B5420C7C7824C314F37F0419`）；Portable `UCLI-Portable-0.12.0-x64.exe`（133,961,402 bytes，SHA-256 `1878F2BDF386B8E55CB64DF41E1FC17FE93A557309A35230361A0722C86D6F04`）；`latest.yml`（348 bytes，SHA-256 `E303668E6F165680BB063F90FB8E697441B35B156DB36138DBC478A12E940A6B`）。四者由同一次 `npm run dist:win` 生成，`npm run verify:release` 已通过。其后的证据文档提交不属于 `electron-builder.yml` 的打包输入。 |
 | Windows 最终修复候选 | PASS：2026-08-31 00:15（Asia/Shanghai）在 Windows x64 上从最终修复源码构建。Setup `UCLI-Setup-0.12.0-x64.exe`（134,216,932 bytes，SHA-256 `A0EE73F5F9FE77A41C90F1D80E81C55E19E3D2929E0827E09F6FC98205B91E0C`）；Portable `UCLI-Portable-0.12.0-x64.exe`（133,961,537 bytes，SHA-256 `F2F7049D79387E721FB2D2C5989728B6D37CFC357910C3A1933FD721FA20B35B`）。`npm run verify:release` 通过；全量测试 1881 项、1869 通过、12 跳过、0 失败，NSIS 条件卸载目标测试 7/7 通过。此前 22:12 构建被本候选取代。 |
@@ -22,6 +25,8 @@
 ### 0.12.0 数据与紧急关闭
 
 - [x] 服务端能力没有自动默认模型或自动安装 Skills；独立模式、已有本地会话、Profiles、Skills 和数据保持可用。
+- [x] 服务档案按规范化 origin 与组织聚合；默认项和会话只在显式 `(serviceProfileId, modelId)` 选择可用时启动。`openai_chat` 保持目录可见，但不是托管 Codex 或 Claude 启动目标。
+- [x] 服务档案/模型迁移对精确来源回填；歧义绑定清除、无法证明来源的历史会话保留并 fail closed。Codex artifact 按模型隔离，模型或 Skills 同步错误不改变连接/授权成功状态。
 - [x] 紧急关闭只移除服务端入口/能力，不删除本地会话、Profiles、Skills 或数据。
 - [ ] 在隔离安装中手工确认断网、5xx、disabled/expired/account/org inactive 状态不影响本地能力。
 - [x] 新部署的真实 smoke 已完成模型流、Skills 下载哈希和清理。验收仅保留协议、阶段、allowlisted 稳定诊断和清理结果；未记录链接、URL、token、请求/响应体、完整 headers、身份信息或堆栈。

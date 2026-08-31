@@ -20,7 +20,7 @@
 - link secret、access token 和本机代理 bearer 不得持久化。
 - 服务端模型不得自动成为默认模型，失效时不得静默回退。
 - 服务端 Skill 不自动安装或更新，断开后不删除已安装副本。
-- 模型协议只接受 `openai_responses`、`openai_chat` 和 `anthropic_messages`；Bootstrap 每个模型的 `protocols` 必填且非空，模型选择不得依赖 `models[0]`、模型名称或目录顺序。
+- 模型协议只接受 `openai_responses`、`openai_chat` 和 `anthropic_messages`；Bootstrap 每个模型的 `protocols` 必填且非空，模型选择不得依赖 `models[0]`、模型名称、供应商或目录顺序。
 
 ---
 
@@ -183,15 +183,17 @@ installationId 在首次 Redeem 前通过数据库事务写入并立即 flush。
 
 refresh token 密文不放入 `ai_cli_profile_secrets`，避免 ProfileCenter 的密钥操作影响服务端连接。
 
-### 7.3 server_model_profiles
+### 7.3 规范化服务档案与模型目录
 
-记录稳定 profile ID、服务端模型 ID、adapter ID、组织、展示名、上下文长度、connection revision、可用状态和 Codex 文件摘要。
+`server_service_profiles` 每个规范化 HTTP(S) origin 与 organization ID 只保存一行。稳定 `profile_id` 只由该 origin 与组织 ID 派生，因而不包含 model 或 adapter；记录组织展示名、connection revision 和档案可用状态。
 
-profile ID 根据 origin、organization ID、模型 ID 和 adapter ID 稳定派生。同一服务端重新连接时复用 ID。
+`server_service_models` 以 `(service_profile_id, model_id)` 为键保存嵌套子模型：展示名、正安全整数 context size、服务端声明的非空公开协议数组、模型可用状态、目录顺序，以及仅属于该模型的 Codex 文件摘要。协议不在本地补全或猜测；`openai_chat` 模型保持目录可见，但不创建托管启动项。
 
-Codex 文件命名为 `ucli-server-<32位UUID去连字符>.config.toml`，所有权标记为 `ucli-server-profile-id`。
+`ai_cli_profile_bindings` 增加可空 `model_id`：服务档案绑定必须保存精确的 `profile_id + model_id`，本地档案绑定继续保存 `model_id = NULL`。会话同时保留其模型和服务档案选择；启动时以精确 `(serviceProfileId, modelId, adapterId)` 验证，而非从档案、模型名称、供应商或目录顺序补全。
 
-服务端投影不保存本机代理 endpoint 或 bearer。代理端口和会话凭证在启动 CLI 前生成。
+升级在单个事务中检测旧 `server_model_profiles` 表，按规范化 origin/组织归并档案，并把旧 Codex/Claude 行分别映射为 `openai_responses`/`anthropic_messages` 后合并同一模型的已声明协议。只有旧档案、adapter 和历史 session model 形成精确且唯一的来源关系时，才回填 session 的统一服务档案选择；不能证明来源的历史会话原样保留并在后续启动时 fail closed。绑定只有唯一映射时才迁移为 `profile_id + model_id`，歧义或畸形的服务端绑定会删除而不是猜测。迁移可重入，全部写入成功后才移除旧表。
+
+Codex 文件按服务档案与模型分别派生为自有 `ucli-server-*` artifact；不同模型不会共享文件或摘要。服务端投影不保存本机代理 endpoint 或 bearer。代理端口和会话凭证在启动 CLI 前生成。
 
 ### 7.4 server_skill_versions 与 server_skill_packages
 
@@ -260,6 +262,8 @@ access token 只存在内存，并在到期前 60 秒 Refresh。refresh token �
 
 模型路由失败只有在 HTTP `503`、`Cache-Control: no-store`、`X-UCLI-Request-ID`、JSON 结构、稳定 `code` 和 `retryable` 全部匹配时才可作为稳定诊断接受。允许的组合仅为 `model_protocol_unavailable` / 不可重试、`model_channel_unavailable` / 可重试、`upstream_unavailable` / 可重试。其余组合 fail closed；三类稳定 503 都不是授权失败，不清除凭证、不改变授权状态，并保留本地模型、Skills、会话和数据。
 
+连接成功与模型/Skills 目录同步错误分区处理。Bootstrap、凭证和授权状态只由连接生命周期错误改变；模型目录投影或 Skills 同步失败只撤销其各自在线能力并保留当前连接和本地能力。模型缺失、移除、不可用或 adapter 协议不兼容同样只使该精确服务选择不可启动，绝不替换为其他模型或本地默认项。
+
 ## 11. 本机模型代理
 
 服务端 access token 默认 900 秒过期，而 CLI 子进程环境不能随 Refresh 安全轮换，因此不能把服务端 token 直接写入模型档案。
@@ -285,19 +289,15 @@ access token 只存在内存，并在到期前 60 秒 Refresh。refresh token �
 
 ## 12. 服务端模型投影
 
-Bootstrap 模型只按其协议集合创建投影：Codex 仅创建 `openai_responses` 投影，Claude 仅创建 `anthropic_messages` 投影；仅有 `openai_chat` 的模型不创建 0.12.0 托管档案。一个模型同时具备两种托管协议时可创建两个对应投影。
+`profileService` 聚合用户档案和 `sourceKind: server` 的只读服务档案。每个规范化 origin/组织只展示一个服务档案，模型作为嵌套目录公开；服务端投影拒绝创建、编辑、密钥、修复、回滚和删除操作。
 
-`profileService` 聚合用户档案和 `sourceKind: server` 的只读投影。服务端投影拒绝创建、编辑、密钥、修复、回滚和删除操作。
+服务档案 DTO 包含组织、状态、支持的 adapter 和模型的安全字段。模型只保留 ID、展示名、context size、服务端声明协议和可用状态；不会向 renderer 公开 connection revision、artifact hash、凭证、headers 或原生配置内容。ProfileCenter 与会话选择器显示“组织提供”。
 
-profile DTO 增加 `sourceKind`、`readOnly`、`organizationName` 和服务端状态。ProfileCenter 与会话选择器显示“组织提供”。
+Codex 仅可选择声明 `openai_responses` 的模型，Claude 仅可选择声明 `anthropic_messages` 的模型。仅 `openai_chat` 的模型仍可见，但在 0.12.0 不可由两个托管 adapter 启动。一个模型可声明两种托管协议并被对应 adapter 选择；模型/协议兼容性从显式声明校验，不从名称、供应商或目录顺序推断。
 
-用户档案继续从 `ProfileSecretStore` 获取密钥；服务端投影由 connection manager 在启动前签发本机会话 bearer。
+用户档案继续从 `ProfileSecretStore` 获取密钥；服务端投影由 connection manager 在启动前签发本机会话 bearer。Codex 启动前为精确的服务档案/模型对创建或更新隔离的 `ucli-server-*` 文件，并显式传递模型；Claude 复用现有 Bearer 环境适配器并显式传递模型。
 
-Codex 启动前创建或更新 `ucli-server-*` 文件，将 base URL 指向当前代理。Claude 复用现有 Bearer 环境适配器。
-
-服务端投影不自动成为应用或项目默认项。用户显式选择后，连接不可用必须 fail closed，不能静默回退到系统模型。
-
-新建会话、恢复会话、运行中档案切换和交互式总结必须使用同一 runtime resolver。
+服务档案可以成为用户明确设置的应用、项目或会话选择，但这些位置都持久化精确 `(serviceProfileId, modelId)`。缺少、移除、不可用或协议不兼容的模型不能启动，且不会静默回退到系统模型、其他模型或本地档案。新建会话、导入/恢复历史会话、运行中档案切换和交互式总结使用同一 runtime resolver。
 
 ## 13. 服务端 Skills
 
@@ -530,7 +530,7 @@ IPC 错误只包含稳定错误码、用户信息和可重试标记，不包含 
 
 至少验证 Windows 安装版、Windows portable 和目标 macOS 版本。Linux 未验证时在发布说明中明确。
 
-回滚到 0.11.6 时，旧版本必须忽略服务端表和 `ucli-server-*` 文件。该行为使用真实 0.11.6 二进制验证。
+回滚到 0.11.6 时，旧版本必须忽略服务端表和 `ucli-server-*` 文件。该行为使用真实 0.11.6 二进制验证。统一服务档案迁移是仅客户端的加性数据库升级：它不要求服务端改动，也不要求新的设备授权；旧版本不使用新表，当前版本在无法精确证明旧选择来源时保留历史会话而不猜测启动配置。
 
 紧急关闭只停用服务端入口和能力，不迁移或删除本地模型、Skills、会话和数据。
 

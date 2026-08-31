@@ -353,13 +353,27 @@ Bootstrap 中每个模型的 `models[].protocols` 为必填且非空。公开值
 
 `GET /v1/models` 返回 OpenAI 风格的 `{ "object": "list", "data": [...] }`，且目录中同一模型的协议集合必须与 Bootstrap 一致。客户端只会在选中模型同时出现在两份目录、并且两处均声明所选协议后发起 live 请求。
 
-Codex 仅投影 `openai_responses`；Claude 仅投影 `anthropic_messages`；仅有 `openai_chat` 的模型不创建 0.12.0 托管档案。一个模型同时声明两种托管协议时可分别投影给对应客户端。
+### 12.1 客户端服务档案投影
+
+客户端按规范化后的服务端 origin 与组织 ID 创建恰好一个服务档案；稳定 ID 不含模型或 adapter。该档案是只读的组织来源 DTO，包含嵌套的服务端声明模型目录，而不是为同一模型或 adapter 复制父档案。
+
+每个子模型保留服务端声明的 ID、展示名、正安全整数 context size 和非空公开协议集合。公开协议仅为 `openai_responses`、`openai_chat` 与 `anthropic_messages`；客户端不从模型 ID、展示名、供应商、目录顺序或其他隐含属性推断协议或选择模型。
+
+Codex 只可启动同时声明 `openai_responses` 的显式模型；Claude 只可启动同时声明 `anthropic_messages` 的显式模型。仅有 `openai_chat` 的模型仍在嵌套目录中可见，但在 0.12.0 不可由任一托管 adapter 启动。一个模型可声明多个公开协议，但可启动性始终由所选 adapter 的固定协议逐项验证。
+
+服务端默认项和会话选择都持久化精确的 `(serviceProfileId, modelId)` 对；本地档案继续使用 `modelId: null`。缺少、已移除、不可用或协议不兼容的模型均 fail closed，不替换为第一个目录项、其他模型或系统默认项。所有启动路径都把这对选择传给 runtime，并将运行时授权绑定到服务档案、模型、adapter 和 connection revision。
+
+Codex 的自有原生配置按服务档案和模型分别派生并隔离；不同模型不会共享 `ucli-server-*` artifact。Claude 不创建原生配置文件，而是对已选择模型使用现有的本机代理 Bearer 路径。
+
+上述客户端投影不改变 Gateway 合同：固定端点、Bootstrap/Gateway 双目录协议一致性、`Cache-Control: no-store` 和 `X-UCLI-Request-ID` 稳定诊断规则保持不变。
+
+### 12.2 网关路由与稳定诊断
 
 网关路由的稳定失败必须是 HTTP `503`，并同时具有 `Cache-Control: no-store`、`X-UCLI-Request-ID`、稳定错误码和规定的 `retryable` 值。仅允许 `model_protocol_unavailable`（不可重试）、`model_channel_unavailable`（可重试）和 `upstream_unavailable`（可重试）；客户端严格解析这些字段。它们是路由可用性而非授权失败，不清除凭证、不降级授权状态，也不影响本地能力。
 
 流式请求沿用 OpenAI/Anthropic 的取消与错误处理。单个上游模型失败不得映射为设备授权失效。
 
-### 12.1 最终真实协议 smoke 证据（2026-08-30）
+### 12.3 最终真实协议 smoke 证据（2026-08-30）
 
 最终记录来自修复成功证据诊断后创建的全新授权，并且仅执行一次显式 `openai_responses` smoke。Preview、首次/幂等 Redeem、强制 Refresh、Bootstrap、Gateway 双目录、非空模型流、Skills 目录、ZIP 大小/SHA-256 和 cleanup 全部通过；Skill 未安装或执行。更早一次功能链路 PASS 因成功模型响应诊断丢失不能作为最终验收，本节仅以 16:10:42 的新授权记录为准。
 
