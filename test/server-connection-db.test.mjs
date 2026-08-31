@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { openDb } from '../electron/persistence/db.js'
+import { stableServiceProfileId } from '../electron/serverConnection/serviceProfileCatalog.js'
 
 async function withDb(work) {
   const root = mkdtempSync(join(tmpdir(), 'ucli-server-db-'))
@@ -39,11 +40,11 @@ function tableColumns(db, table) {
   return db.sql.exec(`PRAGMA table_info(${table})`)[0].values.map((row) => row[1])
 }
 
-test('server schema has isolated installation, connection, model, and skill tables with required constraints', async () => {
+test('server schema has isolated installation, normalized service catalog, and skill tables with required constraints', async () => {
   await withDb(async (db) => {
     const tables = db.sql.exec("SELECT name FROM sqlite_master WHERE type='table'")[0].values.flat()
     for (const name of [
-      'server_installation', 'server_connections', 'server_model_profiles',
+      'server_installation', 'server_connections', 'server_service_profiles', 'server_service_models',
       'server_skill_versions', 'server_skill_packages'
     ]) assert.equal(tables.includes(name), true)
     assert.deepEqual(tableColumns(db, 'server_installation'), [
@@ -55,9 +56,13 @@ test('server schema has isolated installation, connection, model, and skill tabl
       'received_local_time', 'server_offset_ms', 'last_synced_at', 'connection_revision',
       'degraded_reason', 'reminder_state_json'
     ])
-    assert.deepEqual(tableColumns(db, 'server_model_profiles'), [
-      'profile_id', 'server_origin', 'organization_id', 'organization_name', 'model_id', 'adapter_id',
-      'display_name', 'context_size', 'connection_revision', 'availability_status', 'codex_file_sha256'
+    assert.deepEqual(tableColumns(db, 'server_service_profiles'), [
+      'profile_id', 'server_origin', 'organization_id', 'organization_name', 'connection_revision',
+      'availability_status'
+    ])
+    assert.deepEqual(tableColumns(db, 'server_service_models'), [
+      'service_profile_id', 'model_id', 'display_name', 'context_size', 'protocols_json',
+      'availability_status', 'catalog_order', 'codex_file_sha256'
     ])
     assert.deepEqual(tableColumns(db, 'server_skill_versions'), [
       'version_id', 'server_origin', 'organization_id', 'slug', 'version', 'name', 'description', 'sha256',
@@ -151,4 +156,172 @@ test('server projections replace by revision and disconnect cleanup preserves lo
     db.deleteSkillPackage('local-package')
     assert.equal(db.getServerSkillPackage('local-package'), null)
   })
+})
+
+test('normalized service catalog survives reopen, replaces only its child models, and clears with connections', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-service-catalog-'))
+  const path = join(root, 'ucli.db')
+  const serviceProfileId = stableServiceProfileId({
+    serverOrigin: 'http://10.44.100.100:80/path', organizationId: 'org-1'
+  })
+  const profile = {
+    id: serviceProfileId,
+    serverOrigin: 'http://10.44.100.100:80/path',
+    organization: { id: 'org-1', name: 'Product R&D' },
+    connectionRevision: 'revision-1',
+    availabilityStatus: 'available'
+  }
+  const models = [
+    { id: 'chat', displayName: 'Chat', contextSize: 64000, protocols: ['openai_chat'], availabilityStatus: 'available' },
+    { id: 'claude', displayName: 'Claude', contextSize: 200000, protocols: ['anthropic_messages'], availabilityStatus: 'available' },
+    { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'], availabilityStatus: 'available' }
+  ]
+  let db = await openDb(path)
+  try {
+    db.replaceServerServiceCatalog({ profile, models })
+    db.close()
+
+    db = await openDb(path)
+    assert.deepEqual(db.listServerServiceProfiles(), [{
+      profileId: serviceProfileId,
+      serverOrigin: 'http://10.44.100.100',
+      organizationId: 'org-1',
+      organizationName: 'Product R&D',
+      connectionRevision: 'revision-1',
+      availabilityStatus: 'available'
+    }])
+    assert.deepEqual(
+      db.listServerServiceModels(serviceProfileId).map((row) => row.modelId),
+      ['chat', 'claude', 'responses']
+    )
+    db.replaceServerServiceCatalog({
+      profile: {
+        id: 'https://second.example.test::org-2', serverOrigin: 'https://second.example.test',
+        organization: { id: 'org-2', name: 'Second Org' }, connectionRevision: 'revision-2', availabilityStatus: 'available'
+      },
+      models: [{ id: 'other', displayName: 'Other', contextSize: 4096, protocols: ['openai_responses'], availabilityStatus: 'available' }]
+    })
+    db.replaceServerServiceCatalog({ profile, models: [models[1], models[2]] })
+    assert.deepEqual(db.listServerServiceProfiles(), [
+      {
+        profileId: serviceProfileId,
+        serverOrigin: 'http://10.44.100.100',
+        organizationId: 'org-1',
+        organizationName: 'Product R&D',
+        connectionRevision: 'revision-1',
+        availabilityStatus: 'available'
+      },
+      {
+        profileId: 'https://second.example.test::org-2',
+        serverOrigin: 'https://second.example.test',
+        organizationId: 'org-2',
+        organizationName: 'Second Org',
+        connectionRevision: 'revision-2',
+        availabilityStatus: 'available'
+      }
+    ])
+    assert.deepEqual(
+      db.listServerServiceModels(serviceProfileId).map((row) => row.modelId),
+      ['claude', 'responses']
+    )
+    assert.deepEqual(db.listServerServiceModels('https://second.example.test::org-2').map((row) => row.modelId), ['other'])
+    db.updateServerServiceModelArtifact({ serviceProfileId, modelId: 'responses', codexFileSha256: 'artifact-hash' })
+    assert.equal(db.listServerServiceModels(serviceProfileId)[1].codexFileSha256, 'artifact-hash')
+    db.clearServerConnections()
+    assert.deepEqual(db.listServerServiceProfiles(), [])
+    assert.deepEqual(db.listServerServiceModels(), [])
+  } finally {
+    db.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('opening a legacy per-adapter catalog migrates selections once and clears unresolved bindings', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-server-service-migration-'))
+  const path = join(root, 'ucli.db')
+  const initSqlJs = (await import('sql.js')).default
+  const SQL = await initSqlJs()
+  const legacy = new SQL.Database()
+  legacy.run(`CREATE TABLE sessions (
+    id TEXT PRIMARY KEY, project_path TEXT NOT NULL, adapter_id TEXT NOT NULL,
+    native_session_id TEXT, name TEXT, task_note TEXT DEFAULT '', tier TEXT NOT NULL DEFAULT 'safety-rules',
+    model TEXT, profile_id TEXT, status TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  )`)
+  legacy.run(`CREATE TABLE ai_cli_profiles (
+    id TEXT PRIMARY KEY, adapter_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
+    native_profile_name TEXT UNIQUE, provider_id TEXT, base_url TEXT, model TEXT, reasoning_effort TEXT,
+    context_window INTEGER, config_json TEXT NOT NULL DEFAULT '{}', has_secret_hint INTEGER NOT NULL DEFAULT 0,
+    file_sha256 TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  )`)
+  legacy.run(`CREATE TABLE ai_cli_profile_bindings (
+    scope_type TEXT NOT NULL, scope_key TEXT NOT NULL, adapter_id TEXT NOT NULL, profile_id TEXT,
+    updated_at INTEGER NOT NULL, PRIMARY KEY (scope_type, scope_key, adapter_id)
+  )`)
+  legacy.run(`CREATE TABLE server_model_profiles (
+    profile_id TEXT PRIMARY KEY, server_origin TEXT NOT NULL, organization_id TEXT NOT NULL,
+    organization_name TEXT NOT NULL, model_id TEXT NOT NULL, adapter_id TEXT NOT NULL,
+    display_name TEXT NOT NULL, context_size INTEGER NOT NULL, connection_revision INTEGER NOT NULL,
+    availability_status TEXT NOT NULL, codex_file_sha256 TEXT
+  )`)
+  for (const [profileId, modelId, adapterId] of [
+    ['legacy-codex', 'shared', 'codex'],
+    ['legacy-claude', 'shared', 'claude'],
+    ['legacy-responses', 'responses-only', 'codex']
+  ]) {
+    legacy.run(`INSERT INTO server_model_profiles VALUES (?, 'http://10.44.100.100:80', 'org-1', 'Product R&D', ?, ?, ?, 128000, 1, 'available', NULL)`, [profileId, modelId, adapterId, modelId])
+  }
+  legacy.run(`INSERT INTO sessions VALUES
+    ('codex-session', 'F:/project', 'codex', NULL, NULL, '', 'safety-rules', 'shared', 'legacy-codex', 'offline', 1, 2),
+    ('claude-session', 'F:/project', 'claude', NULL, NULL, '', 'safety-rules', 'shared', 'legacy-claude', 'offline', 1, 2),
+    ('historical-unresolved', 'F:/project', 'codex', NULL, NULL, '', 'safety-rules', 'missing', 'legacy-missing', 'offline', 1, 2)`)
+  legacy.run(`INSERT INTO ai_cli_profiles VALUES
+    ('local-profile', 'codex', 'Local', 'local', NULL, NULL, NULL, NULL, NULL, NULL, '{}', 0, NULL, 1, 1)`)
+  legacy.run(`INSERT INTO ai_cli_profile_bindings VALUES
+    ('app', '*', 'codex', 'legacy-codex', 1),
+    ('project', 'F:/project', 'claude', 'legacy-claude', 2),
+    ('project', 'F:/ambiguous', 'codex', 'legacy-missing', 3),
+    ('project', 'F:/local', 'codex', 'local-profile', 4)`)
+  writeFileSync(path, Buffer.from(legacy.export()))
+  legacy.close()
+
+  const serviceProfileId = 'http://10.44.100.100::org-1'
+  let db = await openDb(path)
+  try {
+    assert.deepEqual(db.listServerServiceProfiles(), [{
+      profileId: serviceProfileId, serverOrigin: 'http://10.44.100.100', organizationId: 'org-1',
+      organizationName: 'Product R&D', connectionRevision: '1', availabilityStatus: 'available'
+    }])
+    assert.deepEqual(db.listServerServiceModels(serviceProfileId).map(({ modelId, protocols }) => ({ modelId, protocols })), [
+      { modelId: 'responses-only', protocols: ['openai_responses'] },
+      { modelId: 'shared', protocols: ['openai_responses', 'anthropic_messages'] }
+    ])
+    assert.deepEqual(
+      ['codex-session', 'claude-session'].map((id) => db.getSession(id)).map(({ profileId, model }) => ({ profileId, model })),
+      [{ profileId: serviceProfileId, model: 'shared' }, { profileId: serviceProfileId, model: 'shared' }]
+    )
+    assert.equal(db.getSession('historical-unresolved').model, 'missing')
+    assert.deepEqual(db.listAiCliProfileBindings(), [
+      { scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: serviceProfileId, modelId: 'shared', updatedAt: 1 },
+      { scopeType: 'project', scopeKey: 'F:/local', adapterId: 'codex', profileId: 'local-profile', modelId: null, updatedAt: 4 },
+      { scopeType: 'project', scopeKey: 'F:/project', adapterId: 'claude', profileId: serviceProfileId, modelId: 'shared', updatedAt: 2 }
+    ])
+    assert.equal(db.sql.exec("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'server_model_profiles'")[0].values[0][0], 0)
+    const persisted = {
+      profiles: db.listServerServiceProfiles(),
+      models: db.listServerServiceModels(),
+      bindings: db.listAiCliProfileBindings(),
+      sessions: ['codex-session', 'claude-session', 'historical-unresolved'].map((id) => db.getSession(id))
+    }
+    db.close()
+    db = await openDb(path)
+    assert.deepEqual({
+      profiles: db.listServerServiceProfiles(),
+      models: db.listServerServiceModels(),
+      bindings: db.listAiCliProfileBindings(),
+      sessions: ['codex-session', 'claude-session', 'historical-unresolved'].map((id) => db.getSession(id))
+    }, persisted)
+  } finally {
+    db.close()
+    rmSync(root, { recursive: true, force: true })
+  }
 })
