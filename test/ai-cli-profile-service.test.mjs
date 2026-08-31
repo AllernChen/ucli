@@ -142,6 +142,22 @@ test('service binds and launches the exact selected server model without profile
   }
 })
 
+test('service lists a chat-only server profile for display without making it adapter-compatible', async () => {
+  const serverProfile = {
+    id: 'chat-only-service', sourceKind: 'server', supportedAdapterIds: [],
+    models: [{ id: 'chat', protocols: ['openai_chat'], availabilityStatus: 'ready' }]
+  }
+  const context = await harness({
+    serverModelProjection: { listProfiles: () => [serverProfile] }
+  })
+  try {
+    assert.deepEqual(context.service.listProfiles({ adapterId: 'codex' }), [])
+    assert.deepEqual(context.service.listServiceProfiles().map(profile => profile.id), ['chat-only-service'])
+  } finally {
+    context.close()
+  }
+})
+
 test('createProfile rolls back database and secret rows when file projection fails', async () => {
   const context = await harness({
     fileOps: {

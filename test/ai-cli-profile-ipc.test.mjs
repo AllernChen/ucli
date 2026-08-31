@@ -16,6 +16,7 @@ function register(serviceOverrides = {}) {
   const service = {
     listCliConfigurationState: () => [{ adapterId: 'codex', mode: 'profiles', profileCount: 1 }],
     listProfiles: () => [profile],
+    listServiceProfiles: () => [],
     createProfile: async (draft) => { calls.push(['create', draft]); return profile },
     updateProfile: async (...args) => { calls.push(['update', ...args]); return profile },
     replaceProfileSecret: async (...args) => { calls.push(['secret', ...args]); return profile },
@@ -122,6 +123,39 @@ test('profile IPC serializes server profiles through an explicit redaction DTO',
     }]
   }])
   assert.equal(/connection-secret|digest-secret|config-secret|header-secret|artifact-secret|hash-secret|model-secret/.test(JSON.stringify(state)), false)
+})
+
+test('profile state includes a chat-only service profile exactly once without making it selectable', async () => {
+  const chatOnlyProfile = {
+    id: 'chat-only-service', sourceKind: 'server', readOnly: true,
+    serverOrigin: 'https://server.example.com',
+    organization: { id: 'org-1', name: 'Engineering' },
+    availabilityStatus: 'ready', supportedAdapterIds: [],
+    models: [{
+      id: 'chat', displayName: 'Chat only', contextSize: 64000,
+      protocols: ['openai_chat'], availabilityStatus: 'ready'
+    }]
+  }
+  const { handlers } = register({
+    listCliConfigurationState: () => [
+      { adapterId: 'codex', mode: 'profiles', profileCount: 0 },
+      { adapterId: 'claude', mode: 'profiles', profileCount: 0 }
+    ],
+    listProfiles: () => [],
+    listServiceProfiles: () => [chatOnlyProfile]
+  })
+
+  const state = await handlers.get('ai-cli-profiles:get-state')({}, {})
+  assert.deepEqual(state.profiles, [{
+    id: 'chat-only-service', source: 'server', readOnly: true,
+    serverOrigin: 'https://server.example.com',
+    organization: { id: 'org-1', name: 'Engineering' },
+    availabilityStatus: 'ready', supportedAdapterIds: [],
+    models: [{
+      id: 'chat', displayName: 'Chat only', contextSize: 64000,
+      protocols: ['openai_chat'], availabilityStatus: 'ready'
+    }]
+  }])
 })
 
 test('profile binding accepts canonical service IDs and rejects unsafe opaque IDs before delegation', async () => {

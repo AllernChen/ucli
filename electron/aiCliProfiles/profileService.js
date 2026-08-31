@@ -245,6 +245,10 @@ export function createProfileService({
       return allProfiles({ adapterId }).map(rendererProfile)
     },
 
+    listServiceProfiles() {
+      return (serverModelProjection?.listProfiles?.() || []).map(rendererProfile)
+    },
+
     async createProfile(input) {
       const id = uuid()
       const adapterId = input?.adapterId || 'codex'

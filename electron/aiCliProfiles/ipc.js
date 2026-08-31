@@ -235,6 +235,9 @@ export function registerAiCliProfileIpc({
         if (!profilesById.has(profile.id)) profilesById.set(profile.id, profile)
       }
     }
+    for (const profile of service.listServiceProfiles()) {
+      if (!profilesById.has(profile.id)) profilesById.set(profile.id, profile)
+    }
     return {
       cliConfiguration,
       cliInventory: cliInventory.map(safeInventory),

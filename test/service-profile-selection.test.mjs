@@ -50,3 +50,15 @@ test('describes only approved public protocols in declared order', () => {
   assert.equal(describeModelProtocols(['unknown', 'anthropic_messages']), 'Anthropic Messages')
   assert.equal(describeModelProtocols([]), '未声明协议')
 })
+
+test('keeps a chat-only service model displayable but unavailable to managed adapters', () => {
+  const chatOnlyProfile = {
+    id: 'chat-only-service',
+    models: [{ id: 'chat', protocols: ['openai_chat'], availabilityStatus: 'ready' }]
+  }
+  assert.deepEqual(compatibleModelsForAdapter(chatOnlyProfile, 'codex'), [])
+  assert.deepEqual(compatibleModelsForAdapter(chatOnlyProfile, 'claude'), [])
+  assert.deepEqual(validateServiceProfileSelection({
+    profile: chatOnlyProfile, adapterId: 'codex', modelId: 'chat'
+  }), { valid: false, reason: 'protocol-unavailable' })
+})
