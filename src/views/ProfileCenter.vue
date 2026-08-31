@@ -205,6 +205,37 @@
           <a-button type="primary" @click="openCreate">新建档案</a-button>
         </a-empty>
       </a-spin>
+
+      <section class="service-profile-section">
+        <div class="service-profile-heading">
+          <div>
+            <h3>服务档案</h3>
+            <p>组织提供的服务按服务端和组织归并，只读展示全部模型能力。</p>
+          </div>
+        </div>
+        <a-alert
+          v-if="connection.modelCatalogError"
+          type="warning"
+          show-icon
+          message="模型目录同步失败"
+          :description="connection.modelCatalogError.message"
+        >
+          <template #action>
+            <a-button size="small" :loading="modelCatalogRetrying" :disabled="!canRetryModelCatalog" @click="retryModelCatalog">重试模型目录</a-button>
+          </template>
+        </a-alert>
+        <div v-if="profiles.serviceProfiles.length" class="service-profile-card-grid">
+          <ServerServiceProfileCard
+            v-for="profile in profiles.serviceProfiles"
+            :key="profile.id"
+            :profile="profile"
+            :can-select-default="canSelectServiceProfile(profile)"
+            :project-default-enabled="Boolean(projectPath)"
+            @select-default="openServiceDefaultDialog"
+          />
+        </div>
+        <a-empty v-else description="还没有组织服务档案" />
+      </section>
     </template>
 
     <CodexProfileDrawer
@@ -230,6 +261,34 @@
       :rolling-back-id="rollingBackId"
       @rollback="rollback"
     />
+    <a-modal v-model:open="serviceDefaultDialogOpen" title="选择服务档案默认模型" :mask-closable="false">
+      <a-form layout="vertical">
+        <a-form-item label="服务档案">
+          <a-select v-model:value="selectedServiceProfileId" placeholder="请选择服务档案" @change="selectedServiceModelId = null">
+            <a-select-option v-for="profile in profiles.serviceProfiles" :key="profile.id" :value="profile.id">
+              {{ serviceProfileLabel(profile) }}
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item label="模型">
+          <a-select v-model:value="selectedServiceModelId" placeholder="请选择兼容模型" :disabled="!selectedServiceProfile">
+            <a-select-option v-for="model in compatibleServiceModels" :key="model.id" :value="model.id" :disabled="model.availabilityStatus !== 'ready'">
+              {{ model.displayName || model.id }} · {{ describeModelProtocols(model.protocols) }}
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+      </a-form>
+      <a-alert
+        v-if="selectedServiceModelId && !serviceDefaultSelection.valid"
+        type="warning"
+        show-icon
+        :message="serviceSelectionMessage"
+      />
+      <template #footer>
+        <a-button @click="serviceDefaultDialogOpen = false">取消</a-button>
+        <a-button type="primary" :loading="profiles.saving" :disabled="!serviceDefaultSelection.valid" @click="saveServiceDefault">保存默认</a-button>
+      </template>
+    </a-modal>
   </div>
 </template>
 
@@ -241,6 +300,7 @@ import { useRoute, useRouter } from 'vue-router'
 import CodexProfileDrawer from '../components/profiles/CodexProfileDrawer.vue'
 import ClaudeProfileDrawer from '../components/profiles/ClaudeProfileDrawer.vue'
 import ProfileRevisionDrawer from '../components/profiles/ProfileRevisionDrawer.vue'
+import ServerServiceProfileCard from '../components/profiles/ServerServiceProfileCard.vue'
 import {
   createDshManagementController,
   presentDshManagement
@@ -253,12 +313,20 @@ import {
   profileEndpointLabel,
   profileOriginLabel,
   profileSecretLabel,
-  profileStatusPresentation
+  profileStatusPresentation,
+  serviceProfileLabel
 } from '../profilePresentation.js'
+import {
+  compatibleModelsForAdapter,
+  describeModelProtocols,
+  validateServiceProfileSelection
+} from '../serviceProfileSelection.js'
 import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
+import { useServerConnectionStore } from '../stores/serverConnection.js'
 
 const appVersion = __UCLI_VERSION__
 const profiles = useAiCliProfilesStore()
+const connection = useServerConnectionStore()
 const route = useRoute()
 const router = useRouter()
 const supportedCliIds = ['codex', 'claude', 'opencode', 'ucode', 'deepseek-harness']
@@ -275,6 +343,13 @@ const dshRuntimeView = ref(presentDshManagement(null))
 const dshLoading = ref(false)
 const dshAction = ref('')
 const newDshProfileName = ref('')
+const serviceDefaultDialogOpen = ref(false)
+const selectedServiceProfileId = ref(null)
+const selectedServiceModelId = ref(null)
+const serviceDefaultScope = ref('app')
+const modelCatalogRetrying = ref(false)
+const modelCatalogRetryAttempts = ref(0)
+const MODEL_CATALOG_RETRY_LIMIT = 3
 let dshProfileReadRevision = 0
 
 const dshRuntimeController = createDshManagementController({
@@ -296,8 +371,18 @@ const cliEntries = computed(() => supportedCliIds.map((id) => ({
 })))
 const selectedEntry = computed(() => cliEntries.value.find((item) => item.id === selectedCli.value) || cliEntries.value[0])
 const profileCapableCli = computed(() => ['codex', 'claude'].includes(selectedCli.value))
-const visibleProfiles = computed(() => profiles.profiles.filter((profile) => profile.adapterId === selectedCli.value))
+const visibleProfiles = computed(() => profiles.localProfiles.filter((profile) => profile.adapterId === selectedCli.value))
 const dshProfiles = computed(() => dshProfileState.value.profiles)
+const selectedServiceProfile = computed(() => profiles.serviceProfiles
+  .find(profile => profile.id === selectedServiceProfileId.value) || null)
+const compatibleServiceModels = computed(() => compatibleModelsForAdapter(selectedServiceProfile.value, selectedCli.value))
+const serviceDefaultSelection = computed(() => validateServiceProfileSelection({
+  profile: selectedServiceProfile.value,
+  adapterId: selectedCli.value,
+  modelId: selectedServiceModelId.value
+}))
+const canRetryModelCatalog = computed(() => Boolean(connection.modelCatalogError?.retryable) &&
+  !modelCatalogRetrying.value && modelCatalogRetryAttempts.value < MODEL_CATALOG_RETRY_LIMIT)
 const canInitializeDshProfile = computed(() => {
   const name = newDshProfileName.value.trim()
   return ['managed', 'system'].includes(dshRuntimeView.value.selected) &&
@@ -326,6 +411,57 @@ const profileServiceLabel = (profile) => {
       : (profile.baseUrl ? profileEndpointLabel(profile.baseUrl) : 'Anthropic 官方地址')
   }
   return profile.kind === 'managed' ? profileEndpointLabel(profile.baseUrl) : profile.providerId
+}
+
+const serviceSelectionMessage = computed(() => ({
+  'model-required': '请选择一个模型',
+  'model-unavailable': '所选模型当前不可用',
+  'protocol-unavailable': `所选模型不支持 ${selectedEntry.value.name}`
+})[serviceDefaultSelection.value.reason] || '')
+
+function canSelectServiceProfile(profile) {
+  return compatibleModelsForAdapter(profile, selectedCli.value).length > 0
+}
+
+function openServiceDefaultDialog({ profileId, scopeType }) {
+  selectedServiceProfileId.value = profileId
+  selectedServiceModelId.value = null
+  serviceDefaultScope.value = scopeType
+  serviceDefaultDialogOpen.value = true
+}
+
+async function saveServiceDefault() {
+  if (!serviceDefaultSelection.value.valid) return
+  const scopeType = serviceDefaultScope.value
+  const scopeKey = scopeType === 'project' ? projectPath.value : '*'
+  if (!scopeKey) return
+  try {
+    await profiles.setBinding({
+      scopeType,
+      scopeKey,
+      adapterId: selectedCli.value,
+      profileId: selectedServiceProfileId.value,
+      model: selectedServiceModelId.value
+    })
+    serviceDefaultDialogOpen.value = false
+    message.success('服务档案默认模型已保存')
+  } catch (error) {
+    message.error(error?.message || '保存服务档案默认模型失败')
+  }
+}
+
+async function retryModelCatalog() {
+  if (!canRetryModelCatalog.value) return
+  modelCatalogRetrying.value = true
+  modelCatalogRetryAttempts.value += 1
+  try {
+    await connection.syncModels()
+    modelCatalogRetryAttempts.value = 0
+  } catch {
+    // The model catalog alert keeps the safe error and exposes the remaining retries.
+  } finally {
+    modelCatalogRetrying.value = false
+  }
 }
 
 const cliProfileSupportLabel = (adapterId) => {

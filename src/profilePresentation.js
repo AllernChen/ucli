@@ -29,6 +29,24 @@ export function profileOriginLabel(profile = {}) {
     : null
 }
 
+const SERVICE_PROFILE_AVAILABILITY = {
+  ready: { label: '可用', color: 'green' },
+  unreachable: { label: '服务端暂时不可达', color: 'orange' },
+  disabled: { label: '服务端授权已停用', color: 'red' },
+  expired: { label: '服务端授权已到期', color: 'red' },
+  deleted: { label: '服务端授权已删除', color: 'red' }
+}
+
+export function serviceProfileAvailabilityPresentation(status) {
+  return SERVICE_PROFILE_AVAILABILITY[status] || SERVICE_PROFILE_AVAILABILITY.unreachable
+}
+
+export function serviceProfileLabel(profile = {}) {
+  const endpoint = profileEndpointLabel(profile.serverOrigin)
+  const organization = typeof profile.organization?.name === 'string' ? profile.organization.name.trim() : ''
+  return endpoint === '未设置' ? '未设置服务' : (organization ? `${endpoint} · ${organization}` : endpoint)
+}
+
 export function profileSecretLabel(profile = {}) {
   if (!profile.hasSecret) return '未保存密钥'
   return profile.secretSuffix

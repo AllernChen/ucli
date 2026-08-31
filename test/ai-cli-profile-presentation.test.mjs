@@ -7,6 +7,8 @@ import {
   profileOriginLabel,
   profileRuntimeNotice,
   profileSecretLabel,
+  serviceProfileAvailabilityPresentation,
+  serviceProfileLabel,
   profileStatusPresentation
 } from '../src/profilePresentation.js'
 
@@ -39,4 +41,11 @@ test('profile presentation describes defaults and restart truthfully', () => {
   assert.deepEqual(profileBadges({ isAppDefault: true, isProjectDefault: true }), ['应用默认', '项目默认'])
   assert.equal(profileRuntimeNotice({ restartRequired: true }), '档案将在重启会话后生效')
   assert.equal(profileRuntimeNotice({ profileStatus: 'drifted' }), '当前档案不可启动，请先处理配置问题')
+})
+
+test('service profile presentation uses safe service fields only', () => {
+  assert.equal(serviceProfileLabel({ serverOrigin: 'https://api.example.com', organization: { name: 'Research' } }), 'api.example.com · Research')
+  assert.equal(serviceProfileLabel({ serverOrigin: 'not-a-url', organization: {} }), '未设置服务')
+  assert.deepEqual(serviceProfileAvailabilityPresentation('ready'), { label: '可用', color: 'green' })
+  assert.deepEqual(serviceProfileAvailabilityPresentation('disabled'), { label: '服务端授权已停用', color: 'red' })
 })
