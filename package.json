@@ -15,7 +15,7 @@
     "electron-winstaller": true
   },
   "scripts": {
-    "postinstall": "node scripts/fix-node-pty-permissions.cjs",
+    "postinstall": "node scripts/ensure-electron-runtime.mjs && node scripts/fix-node-pty-permissions.cjs",
     "package:dsh-bridge": "node scripts/package-dsh-bridge.mjs",
     "predev": "npm run package:dsh-bridge",
     "dev": "electron-vite dev",
