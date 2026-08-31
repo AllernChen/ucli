@@ -15,6 +15,9 @@ function validateSessionProfileSelection(selection) {
     !selection.profileId || selection.profileId.length > 1024 || /[\0-\x1F\x7F]/.test(selection.profileId))) {
     throw new TypeError('Invalid session profile selection')
   }
+  if (selection.profileId === null && selection.model !== null) {
+    throw new TypeError('Invalid session profile selection')
+  }
   if (selection.model !== null && (typeof selection.model !== 'string' ||
     !/^[a-zA-Z0-9][a-zA-Z0-9._:@/+~-]{0,255}$/.test(selection.model))) {
     throw new TypeError('Invalid session profile selection')

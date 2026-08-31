@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { register } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
+
+import { getDb, openDb } from '../electron/persistence/db.js'
+
+register('./fixtures/electron-stub-loader.mjs', import.meta.url)
 
 const source = readFileSync(new URL('../src/components/SessionConfigModal.vue', import.meta.url), 'utf8')
 const preload = readFileSync(new URL('../electron/preload.js', import.meta.url), 'utf8')
@@ -39,7 +46,7 @@ test('session profile mutation carries an exact profile/model selection through 
   assert.match(rendererIpc, /setSessionProfile: \(sessionId, selection\) => u\.setSessionProfile\(sessionId, validateSessionProfileSelection\(selection\)\)/)
   assert.match(sessionStore, /async setProfile\(id, selection\) \{\s*const result = await ipc\.setSessionProfile\(id, selection\)/)
   assert.match(orchestrator, /function setSessionProfile\(sessionId, selection\)/)
-  assert.match(orchestrator, /db\.updateSession\(sessionId, \{\s*profile_id: desiredProfileId,\s*model: entry\.session\.model,/)
+  assert.match(orchestrator, /db\.updateSession\(sessionId, \{\s*profile_id: desiredProfileId,\s*model: nextSession\.model,/)
 })
 
 test('the session profile selection rejects scalar calls and never guesses a service model in the renderer store', () => {
@@ -47,4 +54,82 @@ test('the session profile selection rejects scalar calls and never guesses a ser
   assert.match(rendererIpc, /function validateSessionProfileSelection\(selection\)/)
   assert.match(orchestrator, /function validateSessionProfileSelection\(selection\)/)
   assert.doesNotMatch(sessionStore, /config\.model \|\| adapter\?\.models\?\.\[0\]/)
+})
+
+async function withPersistedSession(t, callback) {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-session-profile-'))
+  const userData = join(root, 'user-data')
+  mkdirSync(userData, { recursive: true })
+  const previousUserData = process.env.UCLI_TEST_USER_DATA
+  process.env.UCLI_TEST_USER_DATA = userData
+  const seed = await openDb(join(userData, 'ucli.db'))
+  seed.insertSession({
+    id: 'session-1', project_path: 'F:\\projects\\demo', adapter_id: 'claude',
+    tier: 'safety-rules', model: 'system-model', status: 'offline', created_at: 1
+  })
+  seed.flush()
+  seed.close()
+
+  const electron = await import('electron')
+  const handlers = new Map()
+  electron.ipcMain.handle = (channel, handler) => handlers.set(channel, handler)
+  const module = await import(`../electron/orchestrator.js?session-profile=${Date.now()}`)
+  const orchestrator = module.createOrchestrator()
+  const events = []
+  orchestrator.setMainWindow({
+    isDestroyed: () => false,
+    webContents: { send: (channel, payload) => events.push({ channel, payload }) }
+  })
+  await orchestrator.initPersistence()
+  orchestrator.registerIpc()
+  try {
+    await callback({ handlers, events, db: getDb() })
+  } finally {
+    await orchestrator.shutdown()
+    getDb()?.close()
+    if (previousUserData === undefined) delete process.env.UCLI_TEST_USER_DATA
+    else process.env.UCLI_TEST_USER_DATA = previousUserData
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+test('a failed tuple persistence leaves the live session and emitted state unchanged', async t => {
+  await withPersistedSession(t, async ({ handlers, events, db }) => {
+    const profile = await handlers.get('ai-cli-profiles:create')({}, {
+      adapterId: 'claude', name: 'Local Claude', connectionMode: 'subscription', model: 'local-model'
+    })
+    const before = (await handlers.get('session:list')({}))[0]
+    const originalUpdate = db.updateSession
+    db.updateSession = () => { throw new Error('disk failure') }
+    try {
+      assert.throws(() => handlers.get('session:set-profile')({}, 'session-1', {
+        profileId: profile.id, model: null
+      }), /disk failure/)
+    } finally {
+      db.updateSession = originalUpdate
+    }
+    assert.deepEqual((await handlers.get('session:list')({}))[0], before)
+    assert.equal(db.getSession('session-1').profileId, null)
+    assert.equal(db.getSession('session-1').model, 'system-model')
+    assert.deepEqual(events.filter(({ channel }) => channel === 'session:event'), [])
+  })
+})
+
+test('a system profile selection rejects a model before session or database mutation', async t => {
+  await withPersistedSession(t, async ({ handlers, events, db }) => {
+    const before = (await handlers.get('session:list')({}))[0]
+    let writes = 0
+    const originalUpdate = db.updateSession
+    db.updateSession = (...args) => { writes += 1; return originalUpdate.apply(db, args) }
+    try {
+      assert.throws(() => handlers.get('session:set-profile')({}, 'session-1', {
+        profileId: null, model: 'must-not-be-ignored'
+      }), /Invalid session profile selection/)
+    } finally {
+      db.updateSession = originalUpdate
+    }
+    assert.equal(writes, 0)
+    assert.deepEqual((await handlers.get('session:list')({}))[0], before)
+    assert.deepEqual(events.filter(({ channel }) => channel === 'session:event'), [])
+  })
 })

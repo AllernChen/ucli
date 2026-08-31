@@ -208,6 +208,9 @@ function validateSessionProfileSelection(selection) {
     !selection.profileId || selection.profileId.length > 1024 || /[\0-\x1F\x7F]/.test(selection.profileId))) {
     throw new TypeError('Invalid session profile selection')
   }
+  if (selection.profileId === null && selection.model !== null) {
+    throw new TypeError('Invalid session profile selection')
+  }
   if (selection.model !== null && !isSafeClaudeModel(selection.model)) {
     throw new TypeError('Invalid session profile selection')
   }
@@ -2444,7 +2447,18 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           }
         }
         if (evt.contextWindow) entry.session.contextWindow = evt.contextWindow
-        if (evt.model && entry.session.adapterId === 'claude' && entry.session.profileId) {
+        const selectedProfile = entry.session.profileId
+          ? profileService?.listProfiles({ adapterId: entry.session.adapterId })
+            .find((profile) => profile.id === entry.session.profileId)
+          : null
+        if (evt.model && selectedProfile?.sourceKind === 'server') {
+          const actualModel = isSafeClaudeModel(evt.model) ? evt.model : null
+          const profileWarning = actualModel && actualModel !== entry.session.model
+            ? 'model_substituted'
+            : null
+          Object.assign(entry.session, { actualModel, profileWarning })
+          evt = { ...evt, actualModel, profileWarning }
+        } else if (evt.model && entry.session.adapterId === 'claude' && entry.session.profileId) {
           const modelState = describeClaudeModelSelection({
             requestedModel: entry.session.model,
             actualModel: evt.model
@@ -3214,20 +3228,21 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       resolved,
       isActive: hasActiveCodexProcess(entry)
     })
-    Object.assign(entry.session, desiredSession, runtime)
+    const nextSession = { ...entry.session, ...desiredSession, ...runtime }
 
     const db = getDb()
     if (db) {
       db.updateSession(sessionId, {
         profile_id: desiredProfileId,
-        model: entry.session.model,
-        provider: entry.session.provider,
-        source_provider: entry.session.sourceProvider,
-        provider_policy: entry.session.providerPolicy,
-        explicit_provider: entry.session.explicitProvider
+        model: nextSession.model,
+        provider: nextSession.provider,
+        source_provider: nextSession.sourceProvider,
+        provider_policy: nextSession.providerPolicy,
+        explicit_provider: nextSession.explicitProvider
       })
       scheduleFlush()
     }
+    Object.assign(entry.session, nextSession)
     return publishProfileRuntime(sessionId, entry.session)
   }
 
