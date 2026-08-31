@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import { registerAiCliProfileIpc } from '../electron/aiCliProfiles/ipc.js'
+import { stableServiceProfileId } from '../electron/serverConnection/serviceProfileCatalog.js'
 
 function register(serviceOverrides = {}) {
   const handlers = new Map()
@@ -121,6 +122,31 @@ test('profile IPC serializes server profiles through an explicit redaction DTO',
     }]
   }])
   assert.equal(/connection-secret|digest-secret|config-secret|header-secret|artifact-secret|hash-secret|model-secret/.test(JSON.stringify(state)), false)
+})
+
+test('profile binding accepts canonical service IDs and rejects unsafe opaque IDs before delegation', async () => {
+  const { handlers, calls } = register()
+  const profileId = stableServiceProfileId({
+    serverOrigin: 'http://server.example.test:80/', organizationId: 'org-1'
+  })
+
+  await handlers.get('ai-cli-profiles:set-binding')({}, {
+    scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId, model: 'responses'
+  })
+  assert.deepEqual(calls, [['binding', {
+    scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId, model: 'responses'
+  }]])
+
+  for (const invalidProfileId of ['', 'server\0profile', 'server\u0001profile', 'a'.repeat(1025)]) {
+    const callsBefore = calls.length
+    await assert.rejects(
+      handlers.get('ai-cli-profiles:set-binding')({}, {
+        scopeType: 'app', scopeKey: '*', adapterId: 'codex', profileId: invalidProfileId, model: 'responses'
+      }),
+      { code: 'INVALID_PROFILE_IPC' }
+    )
+    assert.equal(calls.length, callsBefore)
+  }
 })
 
 test('profile IPC returns only sanitized state, profiles, and revisions', async () => {

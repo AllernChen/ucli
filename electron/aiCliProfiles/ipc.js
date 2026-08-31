@@ -1,6 +1,7 @@
 import { sanitiseProfileError, validateProfileBaseUrl } from './contracts.js'
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/
+const BINDING_PROFILE_ID_MAX_LENGTH = 1024
 const ADAPTER_IDS = new Set(['codex', 'claude', 'opencode', 'ucode'])
 const PROFILE_STATUSES = new Set(['ready', 'missing_file', 'drifted', 'missing_provider', 'secret_unavailable', 'missing_profile'])
 const SERVER_AVAILABILITY_STATUSES = new Set(['ready', 'unreachable', 'disabled', 'expired', 'deleted'])
@@ -28,6 +29,13 @@ function requireObject(value, field) {
 function requireId(value, field) {
   if (typeof value !== 'string' || !ID_PATTERN.test(value)) {
     throw ipcError(`${field} is invalid`)
+  }
+  return value
+}
+
+function requireBindingProfileId(value) {
+  if (typeof value !== 'string' || !value.trim() || value.length > BINDING_PROFILE_ID_MAX_LENGTH || /[\0-\x1F\x7F]/.test(value)) {
+    throw ipcError('profileId is invalid')
   }
   return value
 }
@@ -264,7 +272,7 @@ export function registerAiCliProfileIpc({
       scopeType: value.scopeType,
       scopeKey: value.scopeType === 'app' ? '*' : value.scopeKey,
       adapterId: requireAdapterId(value.adapterId),
-      profileId: value.profileId === null ? null : requireId(value.profileId, 'profileId'),
+      profileId: value.profileId === null ? null : requireBindingProfileId(value.profileId),
       model: value.model === undefined || value.model === null
         ? null
         : typeof value.model === 'string' && value.model.trim()
