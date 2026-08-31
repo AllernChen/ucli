@@ -1267,6 +1267,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           explicitProvider: null,
           providerOverride: null,
           providerWarning: null,
+          profileSourceKind: profile.sourceKind || null,
           profileStatus: 'ready',
           profileRuntimeRevision: launch.runtimeRevision || null,
           pendingProfileRuntimeRevision: null,
@@ -1327,7 +1328,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             baseEnv: process.env
           })
       : null
-    return prepareClaudeProfileSession({ session, selection, launch })
+    const prepared = prepareClaudeProfileSession({ session, selection, launch })
+    return {
+      ...prepared,
+      session: {
+        ...prepared.session,
+        profileSourceKind: profile?.sourceKind || null
+      }
+    }
   }
 
   function interactiveProfileSnapshot(adapterId, prepared) {
@@ -1839,6 +1847,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             providerOverride: null,
             providerWarning: null,
             model: storedProfile?.sourceKind === 'server' ? storedSelection.model : null,
+            profileSourceKind: storedProfile?.sourceKind || null,
             profileStatus: storedSelection?.status || 'missing_profile',
             canStart: storedSelection?.canStart === true
           }
@@ -1848,6 +1857,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
               model: storedProfile?.sourceKind === 'server'
                 ? storedSelection.model
                 : storedProfile?.model ?? persistedSystemModel,
+              profileSourceKind: storedProfile?.sourceKind || null,
               profileStatus: storedSelection?.status || 'missing_profile',
               canStart: storedSelection?.canStart === true,
               provider,
@@ -1896,6 +1906,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           pendingProviderWarning: null,
           pendingRuntimeRevision: null,
           profileId: restoredSession.profileId || null,
+          profileSourceKind: restoredSession.profileSourceKind || null,
           activeProfileId: null,
           pendingProfileId: null,
           profileStatus: restoredSession.profileStatus || null,
@@ -2447,11 +2458,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           }
         }
         if (evt.contextWindow) entry.session.contextWindow = evt.contextWindow
-        const selectedProfile = entry.session.profileId
-          ? profileService?.listProfiles({ adapterId: entry.session.adapterId })
-            .find((profile) => profile.id === entry.session.profileId)
-          : null
-        if (evt.model && selectedProfile?.sourceKind === 'server') {
+        if (evt.model && entry.session.profileSourceKind === 'server') {
           const actualModel = isSafeClaudeModel(evt.model) ? evt.model : null
           const profileWarning = actualModel && actualModel !== entry.session.model
             ? 'model_substituted'
@@ -3185,6 +3192,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         ? {
             nativeProfileName: state.nativeProfileName || null,
             model: profile.sourceKind === 'server' ? resolvedSelection.model : profile.model,
+            profileSourceKind: profile.sourceKind || null,
             provider: state.providerId || profile.providerId,
             sourceProvider: null,
             providerPolicy: null,
@@ -3196,6 +3204,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             model: profile.sourceKind === 'server'
               ? resolvedSelection.model
               : profile.model ?? entry.session.systemModel ?? null,
+            profileSourceKind: profile.sourceKind || null,
             actualModel: null,
             profileWarning: null
           }
@@ -3213,10 +3222,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
               profileId: null,
               nativeProfileName: null
             }, { imported: Boolean(entry.session.cliSessionId) }),
-            nativeProfileName: null
+            nativeProfileName: null,
+            profileSourceKind: null,
+            actualModel: null,
+            profileWarning: null
           }
         : {
             profileId: null,
+            profileSourceKind: null,
             model: entry.session.systemModel ?? null,
             actualModel: null,
             profileWarning: null
