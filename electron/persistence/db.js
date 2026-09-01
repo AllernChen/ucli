@@ -15,6 +15,10 @@ import {
   normalizeSummaryJsonField
 } from '../summaries/summaryPersistenceValidation.js'
 import { normalizeSummaryTaskMetadata } from '../../shared/summaryTaskContracts.js'
+import {
+  SERVICE_ADAPTER_PROTOCOL,
+  stableServiceProfileId
+} from '../serverConnection/serviceProfileCatalog.js'
 
 const USAGE_MODEL_KEY_PREFIX = 'model:'
 const USAGE_SESSION_TOTAL_KEY = '__ucli_internal__:session-total'
@@ -40,7 +44,7 @@ let SQL = null
  * Open (or create) the database at `dbPath`. Must be awaited once before any
  * other `getDb()` call.
  */
-export async function openDb(dbPath, { deferUsageLedgerInitialization = false } = {}) {
+export async function openDb(dbPath, { deferUsageLedgerInitialization = false, testHooks = null } = {}) {
   if (!SQL) {
     try {
       const init = await import('sql.js')
@@ -59,7 +63,7 @@ export async function openDb(dbPath, { deferUsageLedgerInitialization = false } 
   let instance
   try {
     instance = new SQL.Database(buffer)
-    const db = new Db(instance, dbPath)
+    const db = new Db(instance, dbPath, null, testHooks)
     db._ensureSchema({ initializeUsageLedger: !deferUsageLedgerInitialization })
     _db = db
     return db
@@ -75,7 +79,7 @@ export async function openDb(dbPath, { deferUsageLedgerInitialization = false } 
     if (existsSync(lastValidBackupPath)) {
       try {
         instance = new SQL.Database(readFileSync(lastValidBackupPath))
-        db = new Db(instance, dbPath)
+        db = new Db(instance, dbPath, null, testHooks)
         db._ensureSchema({ initializeUsageLedger: !deferUsageLedgerInitialization })
         restoredFromBackup = true
       } catch {
@@ -87,7 +91,7 @@ export async function openDb(dbPath, { deferUsageLedgerInitialization = false } 
 
     if (!db) {
       instance = new SQL.Database()
-      db = new Db(instance, dbPath)
+      db = new Db(instance, dbPath, null, testHooks)
       db._ensureSchema({ initializeUsageLedger: !deferUsageLedgerInitialization })
     }
     db.recoveryInfo = { reason: 'invalid-database', backupPath, restoredFromBackup }
@@ -144,12 +148,29 @@ let _db = null
 export function getDb() { return _db }
 
 class Db {
-  constructor(sql, path, recoveryInfo = null) {
+  constructor(sql, path, recoveryInfo = null, testHooks = null) {
     this.sql = sql
     this.path = path
     this.recoveryInfo = recoveryInfo
+    this._testHooks = testHooks
     this._transactionTail = Promise.resolve()
     this._transactionActive = false
+  }
+
+  _runImmediateTransaction(work) {
+    if (this._transactionActive) return work()
+    this.sql.run('BEGIN IMMEDIATE')
+    this._transactionActive = true
+    try {
+      const result = work()
+      this.sql.run('COMMIT')
+      return result
+    } catch (error) {
+      try { this.sql.run('ROLLBACK') } catch { /* preserve original error */ }
+      throw error
+    } finally {
+      this._transactionActive = false
+    }
   }
 
   // ---- schema ----
@@ -177,6 +198,7 @@ class Db {
         provider_policy   TEXT,
         explicit_provider TEXT,
         profile_id        TEXT,
+        profile_source_kind TEXT,
         adapter_config_json TEXT NOT NULL DEFAULT '{}',
         status            TEXT DEFAULT 'offline',
         created_at        INTEGER NOT NULL,
@@ -203,6 +225,9 @@ class Db {
     }
     if (!sessionColumns.some((column) => column.name === 'profile_id')) {
       this.sql.run('ALTER TABLE sessions ADD COLUMN profile_id TEXT')
+    }
+    if (!sessionColumns.some((column) => column.name === 'profile_source_kind')) {
+      this.sql.run('ALTER TABLE sessions ADD COLUMN profile_source_kind TEXT')
     }
     if (!sessionColumns.some((column) => column.name === 'adapter_config_json')) {
       this.sql.run("ALTER TABLE sessions ADD COLUMN adapter_config_json TEXT NOT NULL DEFAULT '{}'")
@@ -340,6 +365,10 @@ class Db {
         PRIMARY KEY (scope_type, scope_key, adapter_id)
       )
     `)
+    const bindingColumns = rows(this.sql.exec('PRAGMA table_info(ai_cli_profile_bindings)'))
+    if (!bindingColumns.some((column) => column.name === 'model_id')) {
+      this.sql.run('ALTER TABLE ai_cli_profile_bindings ADD COLUMN model_id TEXT')
+    }
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS ai_cli_profile_revisions (
         id          TEXT PRIMARY KEY,
@@ -386,18 +415,28 @@ class Db {
       )
     `)
     this.sql.run(`
-      CREATE TABLE IF NOT EXISTS server_model_profiles (
-        profile_id          TEXT PRIMARY KEY,
-        server_origin       TEXT NOT NULL,
-        organization_id     TEXT NOT NULL,
-        organization_name   TEXT NOT NULL,
-        model_id            TEXT NOT NULL,
-        adapter_id          TEXT NOT NULL,
-        display_name        TEXT NOT NULL,
-        context_size        INTEGER NOT NULL,
-        connection_revision INTEGER NOT NULL,
+      CREATE TABLE IF NOT EXISTS server_service_profiles (
+        profile_id TEXT PRIMARY KEY,
+        server_origin TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        organization_name TEXT NOT NULL,
+        connection_revision TEXT NOT NULL,
         availability_status TEXT NOT NULL,
-        codex_file_sha256   TEXT
+        UNIQUE(server_origin, organization_id)
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS server_service_models (
+        service_profile_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        context_size INTEGER NOT NULL,
+        protocols_json TEXT NOT NULL,
+        availability_status TEXT NOT NULL,
+        catalog_order INTEGER NOT NULL,
+        codex_file_sha256 TEXT,
+        PRIMARY KEY(service_profile_id, model_id),
+        FOREIGN KEY(service_profile_id) REFERENCES server_service_profiles(profile_id) ON DELETE CASCADE
       )
     `)
     this.sql.run(`
@@ -604,6 +643,8 @@ class Db {
         expires_at      INTEGER
       )
     `)
+    this._migrateLegacyServerModelProfiles()
+    this._backfillSessionServiceProfileSourceKinds()
     if (initializeUsageLedger) this.initializeUsageLedgerAfterLegacyImport()
   }
 
@@ -682,13 +723,14 @@ class Db {
   // ---- sessions ----
   insertSession(s) {
     this.sql.run(
-      `INSERT INTO sessions (id, project_path, adapter_id, native_session_id, name, task_note, tier, model, system_model, provider, source_provider, provider_policy, explicit_provider, profile_id, adapter_config_json, status, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO sessions (id, project_path, adapter_id, native_session_id, name, task_note, tier, model, system_model, provider, source_provider, provider_policy, explicit_provider, profile_id, profile_source_kind, adapter_config_json, status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [s.id, s.project_path, s.adapter_id, s.native_session_id || null, s.name || null,
        s.task_note || '', s.tier, s.model || null,
        Object.hasOwn(s, 'system_model') ? (s.system_model || null) : (s.model || null),
        s.provider || null, s.source_provider || null, s.provider_policy || null, s.explicit_provider || null,
-       s.profile_id || null, s.adapter_config_json || '{}', s.status, s.created_at, Date.now()]
+       s.profile_id || null, normalizeSessionProfileSourceKind(s.profile_source_kind),
+       s.adapter_config_json || '{}', s.status, s.created_at, Date.now()]
     )
     this.sql.run(
       `INSERT OR IGNORE INTO session_stats (session_id) VALUES (?)`, [s.id]
@@ -696,11 +738,14 @@ class Db {
   }
 
   updateSession(sessionId, fields) {
-    const allowed = ['native_session_id', 'name', 'task_note', 'status', 'model', 'system_model', 'provider', 'source_provider', 'provider_policy', 'explicit_provider', 'profile_id', 'adapter_config_json']
+    const allowed = ['native_session_id', 'name', 'task_note', 'status', 'model', 'system_model', 'provider', 'source_provider', 'provider_policy', 'explicit_provider', 'profile_id', 'profile_source_kind', 'adapter_config_json']
     const sets = []
     const vals = []
     for (const k of allowed) {
-      if (fields[k] !== undefined) { sets.push(`${k}=?`); vals.push(fields[k]) }
+      if (fields[k] !== undefined) {
+        sets.push(`${k}=?`)
+        vals.push(k === 'profile_source_kind' ? normalizeSessionProfileSourceKind(fields[k]) : fields[k])
+      }
     }
     if (!sets.length) return
     sets.push('updated_at=?'); vals.push(Date.now()); vals.push(sessionId)
@@ -1654,16 +1699,18 @@ class Db {
   upsertAiCliProfileBinding(binding) {
     this.sql.run(
       `INSERT INTO ai_cli_profile_bindings (
-         scope_type, scope_key, adapter_id, profile_id, updated_at
-       ) VALUES (?, ?, ?, ?, ?)
+         scope_type, scope_key, adapter_id, profile_id, model_id, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(scope_type, scope_key, adapter_id) DO UPDATE SET
-         profile_id = excluded.profile_id,
-         updated_at = excluded.updated_at`,
+          profile_id = excluded.profile_id,
+          model_id = excluded.model_id,
+          updated_at = excluded.updated_at`,
       [
         binding.scopeType,
         binding.scopeKey,
         binding.adapterId,
         binding.profileId || null,
+        binding.modelId || null,
         Number.isFinite(binding.updatedAt) ? binding.updatedAt : Date.now()
       ]
     )
@@ -1849,40 +1896,276 @@ class Db {
   }
 
   clearServerConnections() {
-    this.sql.run('DELETE FROM server_model_profiles')
-    this.sql.run('DELETE FROM server_skill_versions')
-    this.sql.run('DELETE FROM server_connections')
+    this._runImmediateTransaction(() => {
+      this.clearServerServiceCatalog()
+      this.sql.run('DELETE FROM server_skill_versions')
+      this.sql.run('DELETE FROM server_connections')
+    })
   }
 
   clearCurrentServerConnection({ connectionId }) {
-    this.sql.run("DELETE FROM server_connections WHERE slot = 'current' AND id = ?", [connectionId])
-    if (this.sql.getRowsModified() === 0) return false
-    this.sql.run('DELETE FROM server_model_profiles')
-    this.sql.run('DELETE FROM server_skill_versions')
-    return true
+    return this._runImmediateTransaction(() => {
+      this.sql.run("DELETE FROM server_connections WHERE slot = 'current' AND id = ?", [connectionId])
+      if (this.sql.getRowsModified() === 0) return false
+      this.clearServerServiceCatalog()
+      this.sql.run('DELETE FROM server_skill_versions')
+      return true
+    })
   }
 
   listServerModelProfiles() {
-    return rows(this.sql.exec(
-      'SELECT * FROM server_model_profiles ORDER BY display_name, profile_id'
-    )).map(rowToServerModelProfile)
+    const result = []
+    for (const model of this.listServerServiceModels()) {
+      for (const [adapterId, protocol] of Object.entries(SERVICE_ADAPTER_PROTOCOL)) {
+        if (!model.protocols.includes(protocol)) continue
+        result.push({
+          profileId: model.serviceProfileId,
+          serverOrigin: model.serverOrigin,
+          organizationId: model.organizationId,
+          organizationName: model.organizationName,
+          modelId: model.modelId,
+          adapterId,
+          displayName: model.displayName,
+          contextSize: model.contextSize,
+          connectionRevision: model.connectionRevision,
+          availabilityStatus: model.availabilityStatus,
+          codexFileSha256: model.codexFileSha256
+        })
+      }
+    }
+    return result.sort((left, right) => left.displayName.localeCompare(right.displayName) || left.profileId.localeCompare(right.profileId))
   }
 
   replaceServerModelProfiles({ connectionRevision, profiles }) {
-    this.sql.run('DELETE FROM server_model_profiles')
-    for (const profile of profiles) {
+    const catalogs = new Map()
+    for (const legacy of profiles || []) {
+      const profileId = stableServiceProfileId({
+        serverOrigin: legacy.serverOrigin,
+        organizationId: legacy.organizationId
+      })
+      const key = profileId
+      const catalog = catalogs.get(key) || {
+        profile: {
+          id: profileId,
+          serverOrigin: legacy.serverOrigin,
+          organization: { id: legacy.organizationId, name: legacy.organizationName },
+          connectionRevision: String(connectionRevision),
+          availabilityStatus: legacy.availabilityStatus
+        },
+        models: new Map()
+      }
+      const protocol = SERVICE_ADAPTER_PROTOCOL[legacy.adapterId]
+      if (protocol) {
+        const model = catalog.models.get(legacy.modelId) || {
+          id: legacy.modelId,
+          displayName: legacy.displayName,
+          contextSize: legacy.contextSize,
+          protocols: [],
+          availabilityStatus: legacy.availabilityStatus,
+          codexFileSha256: legacy.codexFileSha256 ?? null
+        }
+        if (!model.protocols.includes(protocol)) model.protocols.push(protocol)
+        catalog.models.set(legacy.modelId, model)
+      }
+      catalogs.set(key, catalog)
+    }
+    this._runImmediateTransaction(() => {
+      for (const catalog of catalogs.values()) {
+        this.replaceServerServiceCatalog({ ...catalog, models: [...catalog.models.values()] })
+      }
+    })
+  }
+
+  listServerServiceProfiles() {
+    return rows(this.sql.exec(
+      'SELECT * FROM server_service_profiles ORDER BY server_origin, organization_id'
+    )).map(rowToServerServiceProfile)
+  }
+
+  listServerServiceModels(serviceProfileId = null) {
+    const query = serviceProfileId == null
+      ? `SELECT models.*, profiles.server_origin, profiles.organization_id, profiles.organization_name,
+          profiles.connection_revision
+         FROM server_service_models AS models
+         JOIN server_service_profiles AS profiles ON profiles.profile_id = models.service_profile_id
+         ORDER BY models.service_profile_id, models.catalog_order, models.model_id`
+      : `SELECT models.*, profiles.server_origin, profiles.organization_id, profiles.organization_name,
+          profiles.connection_revision
+         FROM server_service_models AS models
+         JOIN server_service_profiles AS profiles ON profiles.profile_id = models.service_profile_id
+         WHERE models.service_profile_id = ?
+         ORDER BY models.catalog_order, models.model_id`
+    return rows(this.sql.exec(query, serviceProfileId == null ? [] : [serviceProfileId]))
+      .map(rowToServerServiceModel)
+  }
+
+  replaceServerServiceCatalog({ profile, models }) {
+    const organizationId = profile?.organization?.id ?? profile?.organizationId
+    const organizationName = profile?.organization?.name ?? profile?.organizationName
+    const profileId = stableServiceProfileId({ serverOrigin: profile?.serverOrigin, organizationId })
+    const serverOrigin = profileId.slice(0, profileId.indexOf('::'))
+    const catalogModels = Array.isArray(models) ? models : []
+    for (const model of catalogModels) assertServiceModelProtocols(model)
+    return this._runImmediateTransaction(() => {
       this.sql.run(
-        `INSERT INTO server_model_profiles (
-           profile_id, server_origin, organization_id, organization_name, model_id, adapter_id,
-           display_name, context_size, connection_revision, availability_status, codex_file_sha256
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO server_service_profiles (
+           profile_id, server_origin, organization_id, organization_name, connection_revision, availability_status
+         ) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(profile_id) DO UPDATE SET
+           server_origin = excluded.server_origin,
+           organization_id = excluded.organization_id,
+           organization_name = excluded.organization_name,
+           connection_revision = excluded.connection_revision,
+           availability_status = excluded.availability_status`,
         [
-          profile.profileId, profile.serverOrigin, profile.organizationId, profile.organizationName,
-          profile.modelId, profile.adapterId, profile.displayName, profile.contextSize,
-          connectionRevision, profile.availabilityStatus, profile.codexFileSha256 ?? null
+          profileId, serverOrigin, organizationId, organizationName,
+          String(profile.connectionRevision), profile.availabilityStatus
         ]
       )
-    }
+      this.sql.run('DELETE FROM server_service_models WHERE service_profile_id = ?', [profileId])
+      for (const [catalogOrder, model] of catalogModels.entries()) {
+        this.sql.run(
+          `INSERT INTO server_service_models (
+             service_profile_id, model_id, display_name, context_size, protocols_json,
+             availability_status, catalog_order, codex_file_sha256
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            profileId, model.id ?? model.modelId, model.displayName, model.contextSize,
+            stringifyProtocolArray(model.protocols), model.availabilityStatus, catalogOrder,
+            model.codexFileSha256 ?? null
+          ]
+        )
+      }
+      return this.listServerServiceProfiles().find((candidate) => candidate.profileId === profileId) || null
+    })
+  }
+
+  updateServerServiceModelArtifact({ serviceProfileId, modelId, codexFileSha256 }) {
+    this.sql.run(
+      `UPDATE server_service_models SET codex_file_sha256 = ?
+       WHERE service_profile_id = ? AND model_id = ?`,
+      [codexFileSha256 ?? null, serviceProfileId, modelId]
+    )
+    return this.sql.getRowsModified() > 0
+  }
+
+  clearServerServiceCatalog() {
+    return this._runImmediateTransaction(() => {
+      this.sql.run('DELETE FROM server_service_models')
+      this.sql.run('DELETE FROM server_service_profiles')
+    })
+  }
+
+  _migrateLegacyServerModelProfiles() {
+    const exists = rows(this.sql.exec(
+      "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'server_model_profiles'"
+    )).length > 0
+    if (!exists) return
+
+    this._runImmediateTransaction(() => {
+      const requiredColumns = [
+        'profile_id', 'server_origin', 'organization_id', 'organization_name', 'model_id', 'adapter_id',
+        'display_name', 'context_size', 'connection_revision', 'availability_status', 'codex_file_sha256'
+      ]
+      const columns = rows(this.sql.exec('PRAGMA table_info(server_model_profiles)')).map((column) => column.name)
+      if (!requiredColumns.every((column) => columns.includes(column))) {
+        return
+      }
+
+      const legacyRows = rows(this.sql.exec('SELECT * FROM server_model_profiles ORDER BY rowid'))
+      const catalogs = new Map()
+      const selectionByLegacyProfile = new Map()
+      for (const legacy of legacyRows) {
+        const protocol = SERVICE_ADAPTER_PROTOCOL[legacy.adapter_id]
+        if (!protocol || !isLegacyServerModelProfile(legacy)) continue
+        let profileId
+        try {
+          profileId = stableServiceProfileId({
+            serverOrigin: legacy.server_origin,
+            organizationId: legacy.organization_id
+          })
+        } catch {
+          continue
+        }
+        const catalog = catalogs.get(profileId) || {
+          profile: {
+            id: profileId,
+            serverOrigin: legacy.server_origin,
+            organization: { id: legacy.organization_id, name: legacy.organization_name },
+            connectionRevision: String(legacy.connection_revision),
+            availabilityStatus: legacy.availability_status
+          },
+          models: new Map()
+        }
+        const model = catalog.models.get(legacy.model_id) || {
+          id: legacy.model_id,
+          displayName: legacy.display_name,
+          contextSize: legacy.context_size,
+          protocols: [],
+          availabilityStatus: legacy.availability_status,
+          codexFileSha256: legacy.codex_file_sha256 ?? null
+        }
+        if (!model.protocols.includes(protocol)) model.protocols.push(protocol)
+        catalog.models.set(legacy.model_id, model)
+        catalogs.set(profileId, catalog)
+
+        const selection = { profileId, modelId: legacy.model_id, adapterId: legacy.adapter_id }
+        const existing = selectionByLegacyProfile.get(legacy.profile_id) || []
+        existing.push(selection)
+        selectionByLegacyProfile.set(legacy.profile_id, existing)
+      }
+
+      for (const catalog of catalogs.values()) {
+        const models = [...catalog.models.values()].sort((left, right) => left.id.localeCompare(right.id))
+        this.replaceServerServiceCatalog({ profile: catalog.profile, models })
+      }
+
+      const localProfileIds = new Set(rows(this.sql.exec('SELECT id FROM ai_cli_profiles')).map((profile) => profile.id))
+      const sessions = rows(this.sql.exec('SELECT id, adapter_id, model, profile_id FROM sessions WHERE profile_id IS NOT NULL'))
+      for (const session of sessions) {
+        const selection = uniquelyMappedSelection(selectionByLegacyProfile.get(session.profile_id), session.adapter_id)
+        if (!selection) continue
+        this.sql.run('UPDATE sessions SET profile_id = ?, model = ? WHERE id = ?', [selection.profileId, selection.modelId, session.id])
+      }
+
+      const bindings = rows(this.sql.exec('SELECT * FROM ai_cli_profile_bindings'))
+      for (const binding of bindings) {
+        if (binding.profile_id == null || localProfileIds.has(binding.profile_id)) continue
+        const selection = uniquelyMappedSelection(selectionByLegacyProfile.get(binding.profile_id), binding.adapter_id)
+        if (!selection) {
+          this.sql.run(
+            `DELETE FROM ai_cli_profile_bindings
+             WHERE scope_type = ? AND scope_key = ? AND adapter_id = ?`,
+            [binding.scope_type, binding.scope_key, binding.adapter_id]
+          )
+          continue
+        }
+        this.sql.run(
+          `UPDATE ai_cli_profile_bindings SET profile_id = ?, model_id = ?
+           WHERE scope_type = ? AND scope_key = ? AND adapter_id = ?`,
+          [selection.profileId, selection.modelId, binding.scope_type, binding.scope_key, binding.adapter_id]
+        )
+      }
+
+      this._testHooks?.beforeLegacyServerModelTableDrop?.(Object.freeze({
+        run: (statement, params = []) => this.sql.run(statement, params)
+      }))
+      this.sql.run('DROP TABLE server_model_profiles')
+    })
+  }
+
+  _backfillSessionServiceProfileSourceKinds() {
+    this.sql.run(`
+      UPDATE sessions
+      SET profile_source_kind = 'server'
+      WHERE profile_source_kind IS NULL
+        AND profile_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM server_service_profiles
+          WHERE server_service_profiles.profile_id = sessions.profile_id
+        )
+    `)
   }
 
   replaceServerSkillVersions({ connectionRevision, versions }) {
@@ -2454,6 +2737,52 @@ function stringifyJsonObject(value) {
   return JSON.stringify(value && typeof value === 'object' && !Array.isArray(value) ? value : {})
 }
 
+const SERVICE_MODEL_PROTOCOLS = Object.freeze([
+  'openai_responses', 'openai_chat', 'anthropic_messages'
+])
+const SERVICE_MODEL_PROTOCOL_SET = new Set(SERVICE_MODEL_PROTOCOLS)
+
+function canonicalServiceModelProtocols(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.some((protocol) => !SERVICE_MODEL_PROTOCOL_SET.has(protocol))) return null
+  const seen = new Set(value)
+  return SERVICE_MODEL_PROTOCOLS.filter((protocol) => seen.has(protocol))
+}
+
+function parseProtocolArray(value) {
+  if (typeof value !== 'string') return []
+  try {
+    const protocols = JSON.parse(value)
+    return canonicalServiceModelProtocols(protocols) || []
+  } catch {
+    return []
+  }
+}
+
+function stringifyProtocolArray(value) {
+  return JSON.stringify(canonicalServiceModelProtocols(value))
+}
+
+function assertServiceModelProtocols(model) {
+  if (!canonicalServiceModelProtocols(model?.protocols)) {
+    throw Object.assign(new TypeError('Service model protocols must be a non-empty public protocol array'), {
+      code: 'INVALID_SERVICE_MODEL_PROTOCOLS'
+    })
+  }
+}
+
+function isLegacyServerModelProfile(row) {
+  return [
+    row.profile_id, row.server_origin, row.organization_id, row.organization_name,
+    row.model_id, row.adapter_id, row.display_name, row.availability_status
+  ].every((value) => typeof value === 'string' && value.trim() !== '') &&
+    Number.isSafeInteger(row.context_size) && row.context_size > 0
+}
+
+function uniquelyMappedSelection(selections, adapterId) {
+  const matches = (selections || []).filter((selection) => selection.adapterId === adapterId)
+  return matches.length === 1 ? matches[0] : null
+}
+
 function usageCounter(value) {
   return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0
 }
@@ -2826,6 +3155,7 @@ function rowToAiCliProfileBinding(row) {
     scopeKey: row.scope_key,
     adapterId: row.adapter_id,
     profileId: row.profile_id || null,
+    modelId: row.model_id || null,
     updatedAt: row.updated_at
   }
 }
@@ -2900,6 +3230,34 @@ function rowToServerModelProfile(row) {
     contextSize: row.context_size,
     connectionRevision: row.connection_revision,
     availabilityStatus: row.availability_status,
+    codexFileSha256: row.codex_file_sha256 ?? null
+  }
+}
+
+function rowToServerServiceProfile(row) {
+  return {
+    profileId: row.profile_id,
+    serverOrigin: row.server_origin,
+    organizationId: row.organization_id,
+    organizationName: row.organization_name,
+    connectionRevision: row.connection_revision,
+    availabilityStatus: row.availability_status
+  }
+}
+
+function rowToServerServiceModel(row) {
+  return {
+    serviceProfileId: row.service_profile_id,
+    serverOrigin: row.server_origin,
+    organizationId: row.organization_id,
+    organizationName: row.organization_name,
+    connectionRevision: row.connection_revision,
+    modelId: row.model_id,
+    displayName: row.display_name,
+    contextSize: row.context_size,
+    protocols: parseProtocolArray(row.protocols_json),
+    availabilityStatus: row.availability_status,
+    catalogOrder: row.catalog_order,
     codexFileSha256: row.codex_file_sha256 ?? null
   }
 }
@@ -3013,6 +3371,7 @@ function rowToSession(row) {
     providerPolicy: row.provider_policy || null,
     explicitProvider: row.explicit_provider || null,
     profileId: row.profile_id || null,
+    profileSourceKind: normalizeSessionProfileSourceKind(row.profile_source_kind),
     adapterConfig: parseJsonObject(row.adapter_config_json),
     status: row.status,
     createdAt: row.created_at,
@@ -3030,4 +3389,8 @@ function rowToSession(row) {
       }
     }
   }
+}
+
+function normalizeSessionProfileSourceKind(value) {
+  return value === 'server' ? 'server' : null
 }

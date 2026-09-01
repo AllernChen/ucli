@@ -201,12 +201,245 @@ test('confirms only dual-available previews with one concurrent IPC call and ref
   await assert.rejects(connection.confirmAttempt(), { code: 'REGISTRATION_NOT_CONFIRMABLE' })
 })
 
-test('retains only stable public errors and refreshes catalog actions', async () => {
+test('startup model synchronization is independently fenced from connection state and recovers on retry', async () => {
+  const connection = store()
+  const previousModels = window.ucli.listServerConnectionModels
+  const previousSkills = window.ucli.listServerConnectionSkills
+  let calls = 0
+  window.ucli.listServerConnectionModels = async () => {
+    calls += 1
+    if (calls === 1) throw Object.assign(new Error('synthetic-secret projection failure'), { code: 'projection-failed', retryable: true })
+    return [{ id: 'server-profile-b', sourceKind: 'server' }]
+  }
+  window.ucli.listServerConnectionSkills = async () => [{ id: 'skill-1' }]
+
+  try {
+    await connection.initialize()
+    assert.equal(connection.status, 'connected')
+    assert.equal(connection.connectionError, null)
+    assert.deepEqual(connection.modelCatalogError, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
+    assert.equal(JSON.stringify(connection.modelCatalogError).includes('synthetic-secret'), false)
+
+    await connection.syncModels()
+    assert.deepEqual(connection.models, [{ id: 'server-profile-b', sourceKind: 'server' }])
+    assert.equal(connection.connectionError, null)
+    assert.equal(connection.modelCatalogError, null)
+  } finally {
+    window.ucli.listServerConnectionModels = previousModels
+    window.ucli.listServerConnectionSkills = previousSkills
+  }
+})
+
+test('an automatic startup projection failure cannot surface under a replacement connection identity', async () => {
+  const connection = store()
+  const previousState = window.ucli.getServerConnectionState
+  const previousModels = window.ucli.listServerConnectionModels
+  const previousSkills = window.ucli.listServerConnectionSkills
+  const failureA = deferred()
+  const stateA = { ...initialState, organization: { id: 'org-a', name: 'Organization A' } }
+  const stateB = {
+    ...initialState,
+    revision: 2,
+    serverOrigin: 'https://replacement.example.test',
+    organization: { id: 'org-b', name: 'Organization B' },
+    connection: {
+      ...initialState.connection,
+      id: 'connection-b', serverOrigin: 'https://replacement.example.test',
+      organization: { id: 'org-b', name: 'Organization B' }, connectionRevision: 2
+    }
+  }
+  let calls = 0
+  window.ucli.getServerConnectionState = async () => stateA
+  window.ucli.listServerConnectionModels = async () => (++calls === 1 ? failureA.promise : [{ id: 'profile-b', sourceKind: 'server' }])
+  window.ucli.listServerConnectionSkills = async () => []
+  try {
+    const initializing = connection.initialize()
+    await new Promise(resolve => setImmediate(resolve))
+    stateListener(stateB)
+    failureA.reject(Object.assign(new Error('synthetic-secret old startup failure'), { code: 'projection-failed', retryable: true }))
+    await initializing
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(connection.models, [{ id: 'profile-b', sourceKind: 'server' }])
+    assert.equal(connection.connectionError, null)
+    assert.equal(connection.modelCatalogError, null)
+  } finally {
+    window.ucli.getServerConnectionState = previousState
+    window.ucli.listServerConnectionModels = previousModels
+    window.ucli.listServerConnectionSkills = previousSkills
+  }
+})
+
+test('confirmation remains successful when model catalog synchronization fails', async () => {
+  const connection = store()
+  await connection.loadAttempt('attempt-1')
+  const previousModels = window.ucli.listServerConnectionModels
+  const previousSkills = window.ucli.syncServerConnectionSkills
+  window.ucli.listServerConnectionModels = async () => {
+    throw Object.assign(new Error('synthetic-secret model response'), { code: 'synthetic-model-error', retryable: true })
+  }
+  window.ucli.syncServerConnectionSkills = async () => [{ id: 'version-1', lifecycleStatus: 'AVAILABLE' }]
+
+  try {
+    const state = await connection.confirmAttempt()
+
+    assert.equal(state, initialState)
+    assert.equal(connection.status, 'connected')
+    assert.equal(connection.connectionError, null)
+    assert.deepEqual(connection.modelCatalogError, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
+    assert.equal(connection.skillsCatalogError, null)
+    assert.equal(JSON.stringify(connection.modelCatalogError).includes('synthetic-secret'), false)
+  } finally {
+    window.ucli.listServerConnectionModels = previousModels
+    window.ucli.syncServerConnectionSkills = previousSkills
+  }
+})
+
+test('redeem remains successful when Skills catalog synchronization fails', async () => {
+  const connection = store()
+  await connection.loadAttempt('attempt-1')
+  const previousModels = window.ucli.listServerConnectionModels
+  const previousSkills = window.ucli.syncServerConnectionSkills
+  window.ucli.listServerConnectionModels = async () => [{ id: 'server-profile', sourceKind: 'server' }]
+  window.ucli.syncServerConnectionSkills = async () => {
+    throw Object.assign(new Error('synthetic-secret Skills response'), { code: 'synthetic-skills-error', retryable: true })
+  }
+
+  try {
+    const state = await connection.retryRedeem()
+
+    assert.equal(state, initialState)
+    assert.equal(connection.status, 'connected')
+    assert.equal(connection.connectionError, null)
+    assert.equal(connection.modelCatalogError, null)
+    assert.deepEqual(connection.skillsCatalogError, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
+    assert.equal(JSON.stringify(connection.skillsCatalogError).includes('synthetic-secret'), false)
+  } finally {
+    window.ucli.listServerConnectionModels = previousModels
+    window.ucli.syncServerConnectionSkills = previousSkills
+  }
+})
+
+test('catalog actions clear only their own error domain', async () => {
+  const connection = store()
+  const connectionError = { code: 'NETWORK_UNREACHABLE', message: '服务端连接暂时不可用，请稍后重试', retryable: true }
+  const skillsCatalogError = { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: false }
+  connection.connectionError = connectionError
+  connection.modelCatalogError = { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true }
+  connection.skillsCatalogError = skillsCatalogError
+
+  await connection.syncModels()
+
+  assert.deepEqual(connection.connectionError, connectionError)
+  assert.equal(connection.modelCatalogError, null)
+  assert.deepEqual(connection.skillsCatalogError, skillsCatalogError)
+})
+
+test('late organization-A Skill installation failure cannot overwrite organization-B catalog state', async () => {
+  const connection = store()
+  const installation = deferred()
+  const orgA = { ...initialState, revision: 1, organization: { id: 'org-a', name: 'A' }, connection: { ...initialState.connection, id: 'connection-a' } }
+  const disconnected = { revision: 2, status: 'disconnected', connection: null }
+  const orgB = { ...initialState, revision: 3, organization: { id: 'org-b', name: 'B' }, connection: { ...initialState.connection, id: 'connection-b' } }
+  const previousInstall = window.ucli.installServerConnectionSkill
+  window.ucli.installServerConnectionSkill = async () => installation.promise
+  connection.applyState(orgA)
+
+  try {
+    const installing = connection.installSkill('version-a', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
+    connection.applyState(disconnected)
+    connection.applyState(orgB)
+    installation.reject(Object.assign(new Error('synthetic-secret org-A install failure'), { code: 'synthetic-install-error' }))
+
+    await assert.rejects(installing)
+    assert.equal(connection.organization.id, 'org-b')
+    assert.equal(connection.skillsCatalogError, null)
+  } finally {
+    window.ucli.installServerConnectionSkill = previousInstall
+  }
+})
+
+test('late organization-A Skill update failure cannot overwrite organization-B catalog state', async () => {
+  const connection = store()
+  const update = deferred()
+  const orgA = { ...initialState, revision: 1, organization: { id: 'org-a', name: 'A' }, connection: { ...initialState.connection, id: 'connection-a' } }
+  const disconnected = { revision: 2, status: 'disconnected', connection: null }
+  const orgB = { ...initialState, revision: 3, organization: { id: 'org-b', name: 'B' }, connection: { ...initialState.connection, id: 'connection-b' } }
+  const previousUpdate = window.ucli.updateServerConnectionSkill
+  window.ucli.updateServerConnectionSkill = async () => update.promise
+  connection.applyState(orgA)
+
+  try {
+    const updating = connection.updateSkill('version-a', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
+    connection.applyState(disconnected)
+    connection.applyState(orgB)
+    update.reject(Object.assign(new Error('synthetic-secret org-A update failure'), { code: 'synthetic-update-error' }))
+
+    await assert.rejects(updating)
+    assert.equal(connection.organization.id, 'org-b')
+    assert.equal(connection.skillsCatalogError, null)
+  } finally {
+    window.ucli.updateServerConnectionSkill = previousUpdate
+  }
+})
+
+test('late organization-A model response cannot overwrite organization-B models', async () => {
+  const connection = store()
+  const oldModels = deferred()
+  const orgA = { ...initialState, revision: 1, organization: { id: 'org-a', name: 'A' }, connection: { ...initialState.connection, id: 'connection-a' } }
+  const disconnected = { revision: 2, status: 'disconnected', connection: null }
+  const orgB = { ...initialState, revision: 3, organization: { id: 'org-b', name: 'B' }, connection: { ...initialState.connection, id: 'connection-b' } }
+  const previousModels = window.ucli.listServerConnectionModels
+  let calls = 0
+  window.ucli.listServerConnectionModels = async () => (++calls === 1 ? oldModels.promise : [{ id: 'model-b' }])
+  connection.applyState(orgA)
+
+  try {
+    const loadingA = connection.syncModels()
+    connection.applyState(disconnected)
+    connection.applyState(orgB)
+    await connection.syncModels()
+    oldModels.resolve([{ id: 'model-a' }])
+
+    await loadingA
+    assert.deepEqual(connection.models, [{ id: 'model-b' }])
+    assert.equal(connection.modelCatalogError, null)
+  } finally {
+    window.ucli.listServerConnectionModels = previousModels
+  }
+})
+
+test('late organization-A model failure cannot overwrite organization-B catalog state', async () => {
+  const connection = store()
+  const oldModels = deferred()
+  const orgA = { ...initialState, revision: 1, organization: { id: 'org-a', name: 'A' }, connection: { ...initialState.connection, id: 'connection-a' } }
+  const disconnected = { revision: 2, status: 'disconnected', connection: null }
+  const orgB = { ...initialState, revision: 3, organization: { id: 'org-b', name: 'B' }, connection: { ...initialState.connection, id: 'connection-b' } }
+  const previousModels = window.ucli.listServerConnectionModels
+  let calls = 0
+  window.ucli.listServerConnectionModels = async () => (++calls === 1 ? oldModels.promise : [{ id: 'model-b' }])
+  connection.applyState(orgA)
+
+  try {
+    const loadingA = connection.syncModels()
+    connection.applyState(disconnected)
+    connection.applyState(orgB)
+    await connection.syncModels()
+    oldModels.reject(Object.assign(new Error('synthetic-secret org-A model failure'), { code: 'synthetic-model-error' }))
+
+    await assert.rejects(loadingA)
+    assert.deepEqual(connection.models, [{ id: 'model-b' }])
+    assert.equal(connection.modelCatalogError, null)
+  } finally {
+    window.ucli.listServerConnectionModels = previousModels
+  }
+})
+
+test('retains only stable public connection errors and refreshes catalog actions', async () => {
   const connection = store()
   window.ucli.syncServerConnection = async () => { throw Object.assign(new Error('synthetic-secret response'), { code: 'NETWORK_UNREACHABLE', retryable: true, stack: 'sensitive' }) }
   await assert.rejects(connection.syncConnection())
-  assert.deepEqual(connection.error, { code: 'NETWORK_UNREACHABLE', message: '服务端连接暂时不可用，请稍后重试', retryable: true })
-  assert.equal(JSON.stringify(connection.error).includes('synthetic-secret'), false)
+  assert.deepEqual(connection.connectionError, { code: 'NETWORK_UNREACHABLE', message: '服务端连接暂时不可用，请稍后重试', retryable: true })
+  assert.equal(JSON.stringify(connection.connectionError).includes('synthetic-secret'), false)
   await connection.syncSkills()
   await connection.installSkill('version-1', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
   await connection.updateSkill('version-1', { targetAdapterIds: ['codex'], scopeType: 'user', projectPath: '' })
@@ -433,7 +666,7 @@ test('unknown server errors never retain attacker-controlled codes or text', asy
   const connection = store()
   window.ucli.syncServerConnection = async () => { throw Object.assign(new Error('synthetic-secret'), { code: 'synthetic-secret-code', retryable: true }) }
   await assert.rejects(connection.syncConnection())
-  assert.deepEqual(connection.error, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
+  assert.deepEqual(connection.connectionError, { code: 'SERVER_CONNECTION_OPERATION_FAILED', message: '服务端操作失败，请稍后重试', retryable: true })
 })
 
 test('stable terminal grant errors retain reauthorization guidance', async () => {
@@ -446,7 +679,7 @@ test('stable terminal grant errors retain reauthorization guidance', async () =>
     ]) {
       window.ucli.syncServerConnection = async () => { throw Object.assign(new Error('opaque server detail'), { code }) }
       await assert.rejects(connection.syncConnection(), { code })
-      assert.deepEqual(connection.error, { code, message, retryable: false })
+      assert.deepEqual(connection.connectionError, { code, message, retryable: false })
     }
   } finally {
     window.ucli.syncServerConnection = previousSync

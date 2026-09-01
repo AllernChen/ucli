@@ -62,19 +62,53 @@
         <a-form layout="vertical">
           <a-form-item v-if="view.profileCapable" label="配置档案">
             <a-select
-              :value="session.profileId || 'system'"
+              v-model:value="selectedProfileId"
+              :disabled="pendingAction !== ''"
+              @change="selectSessionProfile"
+            >
+              <a-select-option value="system">系统 / 来源策略</a-select-option>
+              <a-select-opt-group label="服务档案">
+                <a-select-option
+                  v-for="profile in serverProfilesForSession"
+                  :key="profile.id"
+                  :value="profile.id"
+                  :disabled="!canSelectProfile(profile)"
+                >
+                  {{ profileLabel(profile) }}{{ canSelectProfile(profile) ? '' : '（当前不可用）' }}
+                </a-select-option>
+              </a-select-opt-group>
+              <a-select-opt-group label="本地档案">
+              <a-select-option
+                v-for="profile in localProfilesForSession"
+                :key="profile.id"
+                :value="profile.id"
+                :disabled="!canSelectProfile(profile)"
+              >
+                {{ profileLabel(profile) }}{{ canSelectProfile(profile) ? '' : '（当前不可用）' }}
+              </a-select-option>
+              </a-select-opt-group>
+              <a-select-option v-if="historicalProfileId" :value="historicalProfileId" disabled>
+                历史服务档案（已移除）
+              </a-select-option>
+            </a-select>
+          </a-form-item>
+
+          <a-form-item v-if="selectedServiceProfile" label="模型">
+            <a-select
+              v-model:value="selectedModelId"
+              placeholder="请选择兼容模型"
               :disabled="pendingAction !== ''"
               @change="setSessionProfile"
             >
-              <a-select-option value="system">系统 / 来源策略</a-select-option>
-              <a-select-option
-                v-for="profile in profilesForSession"
-                :key="profile.id"
-                :value="profile.id"
-                :disabled="!profile.canStart"
-              >
-                {{ profile.name }}{{ profile.canStart ? '' : '（不可用）' }}
+              <a-select-option v-if="serviceProfileState.historicalModel" :value="serviceProfileState.historicalModel.id" disabled>
+                {{ serviceProfileState.historicalModel.displayName }}（保留历史选择／已移除）
               </a-select-option>
+              <a-select-option
+                v-for="model in compatibleModels"
+                :key="model.id"
+                :value="model.id"
+                :disabled="model.availabilityStatus !== 'ready'"
+              >{{ serviceModelLabel(model) }}</a-select-option>
             </a-select>
           </a-form-item>
 
@@ -163,9 +197,16 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 
 import { ipc } from '../ipc.js'
-import { profileRuntimeNotice } from '../profilePresentation.js'
-import { deriveSessionConfigState } from '../sessionConfigPresentation.js'
+import { profileRuntimeNotice, serviceModelLabel } from '../profilePresentation.js'
+import {
+  deriveServiceProfileSessionState,
+  deriveSessionConfigState,
+  isReadyServiceProfileForAdapter,
+  isServiceProfile,
+  sessionProfileDraftFor
+} from '../sessionConfigPresentation.js'
 import { deriveSessionCapabilityState } from '../sessionMaintenancePresentation.js'
+import { compatibleModelsForAdapter } from '../serviceProfileSelection.js'
 import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import { useSessionsStore } from '../stores/sessions.js'
 import GatewayRelayToggle from './gateway/GatewayRelayToggle.vue'
@@ -183,7 +224,30 @@ const session = computed(() => sessions.byId(props.sessionId) || null)
 const view = computed(() => deriveSessionConfigState(session.value || {}))
 const capabilities = computed(() => deriveSessionCapabilityState(session.value || {}))
 const adapter = computed(() => sessions.adapters.find((item) => item.id === session.value?.adapterId) || null)
-const profilesForSession = computed(() => aiProfiles.profiles.filter((profile) => profile.adapterId === session.value?.adapterId))
+const profilesForSession = computed(() => aiProfiles.profiles.filter((profile) =>
+  profile.adapterId === session.value?.adapterId || isServiceProfile(profile)
+))
+const localProfilesForSession = computed(() => profilesForSession.value.filter((profile) => !isServiceProfile(profile)))
+const serverProfilesForSession = computed(() => profilesForSession.value.filter(isServiceProfile))
+const selectedProfileId = ref('system')
+const selectedModelId = ref(null)
+const selectedProfile = computed(() => aiProfiles.profileById(selectedProfileId.value))
+const historicalProfileId = computed(() => (
+  session.value?.profileId && !selectedProfile.value && session.value?.profileSourceKind === 'server'
+    ? session.value.profileId
+    : null
+))
+const selectedServiceProfile = computed(() => isServiceProfile(selectedProfile.value) || Boolean(historicalProfileId.value))
+const compatibleModels = computed(() => compatibleModelsForAdapter(selectedProfile.value, session.value?.adapterId))
+const serviceProfileState = computed(() => deriveServiceProfileSessionState({
+  profile: selectedProfile.value,
+  adapterId: session.value?.adapterId,
+  profileId: selectedProfileId.value === 'system' ? null : selectedProfileId.value,
+  model: selectedModelId.value,
+  historical: Boolean(historicalProfileId.value || (
+    selectedModelId.value && !selectedProfile.value?.models?.some(model => model?.id === selectedModelId.value)
+  ))
+}))
 
 const nameDraft = ref('')
 const noteDraft = ref('')
@@ -191,7 +255,7 @@ const savingBasics = ref(false)
 const pendingAction = ref('')
 const diagnosticsVisible = ref(false)
 const codexRuntime = ref(null)
-const profileSwitch = ref({ open: false, profileId: null })
+const profileSwitch = ref({ open: false, selection: null })
 let stopCodexRuntimeListener = null
 let runtimeSubscriptionVersion = 0
 
@@ -232,7 +296,10 @@ const providerNotice = computed(() => {
 function resetDrafts() {
   nameDraft.value = session.value?.displayName || ''
   noteDraft.value = session.value?.taskNote || ''
-  profileSwitch.value = { open: false, profileId: null }
+  const profileDraft = sessionProfileDraftFor(session.value)
+  selectedProfileId.value = profileDraft.profileId
+  selectedModelId.value = profileDraft.model
+  profileSwitch.value = { open: false, selection: null }
   diagnosticsVisible.value = false
 }
 
@@ -304,39 +371,68 @@ function sessionIsActive(current) {
   return current && !['offline', 'exited', 'error'].includes(current.status)
 }
 
-async function setSessionProfile(value) {
+function profileLabel(profile) {
+  return isServiceProfile(profile) ? (profile.organization?.name || profile.id) : profile.name
+}
+
+function canSelectProfile(profile) {
+  return isServiceProfile(profile)
+    ? isReadyServiceProfileForAdapter(profile, session.value?.adapterId)
+    : profile.canStart
+}
+
+function selectSessionProfile(value) {
+  if (value === 'system' || !isServiceProfile(selectedProfile.value)) {
+    selectedModelId.value = null
+    setSessionProfile()
+  } else {
+    selectedModelId.value = null
+  }
+}
+
+async function setSessionProfile() {
   const current = session.value
-  const profileId = value === 'system' ? null : value
-  if (!current || current.profileId === profileId) return
+  if (!current) return
+  const profileId = selectedProfileId.value === 'system' ? null : selectedProfileId.value
+  const selection = { profileId, model: selectedServiceProfile.value ? selectedModelId.value : null }
+  if (selectedServiceProfile.value && !serviceProfileState.value.canStart) {
+    message.warning(serviceProfileState.value.reason === 'model-required' ? '请选择兼容模型' : '所选模型当前不可用')
+    return
+  }
+  if (current.profileId === selection.profileId && current.model === selection.model) return
   if (sessionIsActive(current)) {
-    profileSwitch.value = { open: true, profileId }
+    profileSwitch.value = { open: true, selection }
     return
   }
   try {
-    await sessions.setProfile(current.id, profileId)
+    await sessions.setProfile(current.id, selection)
   } catch (error) {
     message.error('切换档案失败：' + (error?.message || error))
   }
 }
 
 function cancelProfileSwitch() {
-  profileSwitch.value = { open: false, profileId: null }
+  const profileDraft = sessionProfileDraftFor(session.value)
+  selectedProfileId.value = profileDraft.profileId
+  selectedModelId.value = profileDraft.model
+  profileSwitch.value = { open: false, selection: null }
 }
 
 async function applyProfileSwitch(restartNow) {
   const current = session.value
-  const profileId = profileSwitch.value.profileId
-  cancelProfileSwitch()
-  if (!current) return
+  const selection = profileSwitch.value.selection
+  if (!current || !selection) return
+  profileSwitch.value = { open: false, selection: null }
   pendingAction.value = restartNow ? 'restart' : 'profile'
   try {
-    await sessions.setProfile(current.id, profileId)
+    await sessions.setProfile(current.id, selection)
     if (restartNow) {
       if (sessionIsActive(current)) await sessions.stop(current.id)
       await sessions.restart(current.id)
     } else {
       message.info('档案已保存，将在下次重启生效')
     }
+    resetDrafts()
   } catch (error) {
     message.error('切换档案失败：' + (error?.message || error))
   } finally {

@@ -1,119 +1,73 @@
-import { createHash } from 'node:crypto'
-
-import { PUBLIC_MODEL_PROTOCOLS } from './contracts.js'
+import {
+  buildServiceProfileCatalog,
+  requireServiceModel,
+  SERVICE_ADAPTER_PROTOCOL,
+  serviceModelArtifactId,
+  serviceRuntimeRevision
+} from './serviceProfileCatalog.js'
 
 const SERVER_STATUSES = new Set(['ready', 'unreachable', 'disabled', 'expired', 'deleted'])
-const PUBLIC_MODEL_PROTOCOL_SET = new Set(PUBLIC_MODEL_PROTOCOLS)
-const ADAPTER_PROTOCOLS = Object.freeze({
-  codex: 'openai_responses',
-  claude: 'anthropic_messages'
-})
 
 function projectionError(code, message) {
   return Object.assign(new Error(message), { code })
 }
 
-function canonicalOrigin(value) {
-  let parsed
-  try { parsed = new URL(String(value || '')) } catch {
-    throw projectionError('INVALID_SERVER_ORIGIN', 'Server origin is invalid')
-  }
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password ||
-    parsed.pathname !== '/' || parsed.search || parsed.hash) {
-    throw projectionError('INVALID_SERVER_ORIGIN', 'Server origin is invalid')
-  }
-  return parsed.origin
+function revisionKey(value) {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return null
 }
 
-function stableProfileId({ serverOrigin, organizationId, modelId, adapterId }) {
-  const fields = [serverOrigin, organizationId, modelId, adapterId]
-  if (fields.some(value => /[\u0000-\u001f\u007f]/.test(value))) {
-    throw projectionError('INVALID_SERVER_MODEL', 'Server model identifier is invalid')
-  }
-  return createHash('sha256')
-    .update(fields.map(value => `${Buffer.byteLength(value, 'utf8')}:${value}`).join('|'))
-    .digest('hex')
-    .slice(0, 32)
+function sameRevision(left, right) {
+  const leftKey = revisionKey(left)
+  const rightKey = revisionKey(right)
+  return leftKey !== null && leftKey === rightKey
 }
 
-function safeModel(model = {}) {
-  const id = String(model.id || '').trim()
-  const displayName = String(model.displayName || '').trim()
-  const contextSize = Number(model.contextSize)
-  const protocols = Array.isArray(model.protocols) ? [...model.protocols] : []
-  if (!id || !displayName || !Number.isSafeInteger(contextSize) || contextSize <= 0 ||
-    protocols.length === 0 || protocols.some(protocol => !PUBLIC_MODEL_PROTOCOL_SET.has(protocol))) {
-    throw projectionError('INVALID_SERVER_MODEL', 'Server model is invalid')
-  }
-  return { id, displayName, contextSize, protocols }
+function sameIdentity(left, right) {
+  return Boolean(left && right && left.connectionId === right.connectionId &&
+    sameRevision(left.connectionRevision, right.connectionRevision))
 }
 
-function safeOrganization(organization = {}) {
-  const id = String(organization.id || '').trim()
-  const name = String(organization.name || '').trim()
-  if (!id || !name) throw projectionError('INVALID_SERVER_MODEL', 'Server organization is invalid')
-  return { id, name }
-}
-
-function asDto(profile, online = false) {
+function serviceProfileDto(profile, models, online) {
   const durableStatus = SERVER_STATUSES.has(profile.availabilityStatus) ? profile.availabilityStatus : 'unreachable'
   const status = durableStatus === 'ready' && !online ? 'unreachable' : durableStatus
+  const modelAvailabilityById = new Map(models.map((model) => [model.modelId, model.availabilityStatus]))
+  const catalog = buildServiceProfileCatalog({
+    serverOrigin: profile.serverOrigin,
+    organization: { id: profile.organizationId, name: profile.organizationName },
+    models: models.map((model) => ({
+      id: model.modelId,
+      displayName: model.displayName,
+      contextSize: model.contextSize,
+      protocols: model.protocols
+    })),
+    connectionRevision: profile.connectionRevision
+  })
   return {
-    id: profile.profileId,
-    adapterId: profile.adapterId,
-    name: profile.displayName,
+    id: catalog.profile.id,
+    serverOrigin: catalog.profile.serverOrigin,
+    organization: { ...catalog.profile.organization },
+    availabilityStatus: durableStatus,
+    name: profile.organizationName,
     kind: 'managed',
-    nativeProfileName: profile.adapterId === 'codex' ? `ucli-server-${profile.profileId}` : null,
-    providerId: profile.adapterId === 'codex' ? `ucli_server_${profile.profileId.slice(0, 12)}` : 'anthropic-bearer',
-    baseUrl: null,
-    model: profile.modelId,
-    reasoningEffort: null,
-    contextWindow: profile.contextSize,
-    config: profile.adapterId === 'codex'
-      ? { wireApi: 'responses' }
-      : { connectionMode: 'bearer', baseUrl: null },
     sourceKind: 'server',
     readOnly: true,
     organizationName: profile.organizationName,
-    serverStatus: status,
     connectionRevision: profile.connectionRevision,
-    hasSecret: false,
-    secretSuffix: null,
+    supportedAdapterIds: [...catalog.profile.supportedAdapterIds],
+    models: catalog.models.map((model) => ({
+      id: model.id,
+      displayName: model.displayName,
+      contextSize: model.contextSize,
+      protocols: [...model.protocols],
+      availabilityStatus: modelAvailabilityById.get(model.id) || 'unreachable',
+      artifactId: model.artifactId
+    })),
+    serverStatus: status,
     status,
-    canStart: status === 'ready',
-    isAppDefault: false,
-    isProjectDefault: false,
-    updatedAt: null
+    canStart: status === 'ready'
   }
-}
-
-function profileRows({ serverOrigin, organization, models, connectionRevision }) {
-  const origin = canonicalOrigin(serverOrigin)
-  const org = safeOrganization(organization)
-  if (!Number.isSafeInteger(connectionRevision) || connectionRevision < 0) {
-    throw projectionError('INVALID_SERVER_MODEL', 'Connection revision is invalid')
-  }
-  const rows = []
-  for (const model of models || []) {
-    const safe = safeModel(model)
-    for (const [adapterId, protocol] of Object.entries(ADAPTER_PROTOCOLS)) {
-      if (!safe.protocols.includes(protocol)) continue
-      rows.push({
-        profileId: stableProfileId({ serverOrigin: origin, organizationId: org.id, modelId: safe.id, adapterId }),
-        serverOrigin: origin,
-        organizationId: org.id,
-        organizationName: org.name,
-        modelId: safe.id,
-        adapterId,
-        displayName: safe.displayName,
-        contextSize: safe.contextSize,
-        connectionRevision,
-        availabilityStatus: 'ready',
-        codexFileSha256: null
-      })
-    }
-  }
-  return rows
 }
 
 export function createServerModelProjection({
@@ -124,28 +78,41 @@ export function createServerModelProjection({
   getRuntimeConnectionIdentity = () => proxy?.getRuntimeConnectionIdentity?.() || null,
   flush = () => db.flush?.() ?? true
 } = {}) {
-  if (!db || typeof db.listServerModelProfiles !== 'function' ||
-    typeof db.replaceServerModelProfiles !== 'function') {
-    throw new TypeError('A server model profile database is required')
+  if (!db || typeof db.listServerServiceProfiles !== 'function' ||
+    typeof db.listServerServiceModels !== 'function' ||
+    typeof db.updateServerServiceModelArtifact !== 'function') {
+    throw new TypeError('A server service catalog database is required')
   }
+
   const sessions = new Map()
   let onlineIdentity = null
 
-  function stored() { return db.listServerModelProfiles().map(profile => ({ ...profile })) }
-  function find(profileId) { return stored().find(profile => profile.profileId === profileId) || null }
+  function storedProfiles() {
+    return db.listServerServiceProfiles().map((profile) => ({ ...profile }))
+  }
+
+  function storedProfile(serviceProfileId) {
+    return storedProfiles().find((profile) => profile.profileId === serviceProfileId) || null
+  }
+
+  function storedModels(serviceProfileId) {
+    return db.listServerServiceModels(serviceProfileId).map((model) => ({
+      ...model,
+      protocols: Array.isArray(model.protocols) ? [...model.protocols] : []
+    }))
+  }
+
   function currentIdentity(profile) {
     const identity = getRuntimeConnectionIdentity()
-    if (!identity || identity.connectionRevision !== profile.connectionRevision ||
+    if (!identity || !sameRevision(identity.connectionRevision, profile.connectionRevision) ||
       typeof identity.connectionId !== 'string' || !identity.connectionId) return null
     return identity
   }
-  function sameIdentity(left, right) {
-    return Boolean(left && right && left.connectionId === right.connectionId &&
-      left.connectionRevision === right.connectionRevision)
-  }
+
   function isOnline(profile) {
     return profile.availabilityStatus === 'ready' && sameIdentity(onlineIdentity, currentIdentity(profile))
   }
+
   async function persistOrThrow() {
     try {
       if (await flush() === false) throw new Error('flush failed')
@@ -153,6 +120,7 @@ export function createServerModelProjection({
       throw projectionError('PROFILE_PERSISTENCE_PENDING', 'Server profile changes are pending persistence')
     }
   }
+
   function persistDigestOrThrow() {
     try {
       const result = flush()
@@ -166,10 +134,7 @@ export function createServerModelProjection({
       throw projectionError('PROFILE_PERSISTENCE_PENDING', 'Server profile changes are pending persistence')
     }
   }
-  function invalidateOnlineState() {
-    onlineIdentity = null
-    for (const sessionId of [...sessions.keys()]) revoke(sessionId)
-  }
+
   function revoke(sessionId) {
     if (!sessions.has(sessionId)) return false
     sessions.delete(sessionId)
@@ -178,36 +143,90 @@ export function createServerModelProjection({
     return true
   }
 
+  function invalidateOnlineState() {
+    onlineIdentity = null
+    for (const sessionId of [...sessions.keys()]) revoke(sessionId)
+  }
+
+  function runtimeCatalog(profile, models) {
+    return buildServiceProfileCatalog({
+      serverOrigin: profile.serverOrigin,
+      organization: { id: profile.organizationId, name: profile.organizationName },
+      models: models.map((model) => ({
+        id: model.id ?? model.modelId,
+        displayName: model.displayName,
+        contextSize: model.contextSize,
+        protocols: model.protocols
+      })),
+      connectionRevision: profile.connectionRevision
+    })
+  }
+
+  function cleanStaleCodexFiles(catalog) {
+    if (!resolveCodexHome || typeof codexProfileFiles.cleanStaleServerCodexProfileFiles !== 'function') return
+    const validArtifactIds = new Set(catalog.models
+      .filter((model) => model.protocols.includes(SERVICE_ADAPTER_PROTOCOL.codex))
+      .map((model) => model.artifactId))
+    codexProfileFiles.cleanStaleServerCodexProfileFiles({
+      codexHome: resolveCodexHome(),
+      validArtifactIds
+    })
+  }
+
+  function ensureCurrentAuthority(sessionId, runtime, catalog, identity) {
+    if (runtime.serviceProfileId !== catalog.profile.id) {
+      revoke(sessionId)
+      return
+    }
+    const profile = storedProfile(runtime.serviceProfileId)
+    if (!profile || !sameRevision(profile.connectionRevision, runtime.connectionRevision) ||
+      profile.availabilityStatus !== 'ready' || !sameIdentity(identity, currentIdentity(profile))) {
+      revoke(sessionId)
+      return
+    }
+    try {
+      requireServiceModel(catalog, { adapterId: runtime.adapterId, modelId: runtime.modelId })
+    } catch {
+      revoke(sessionId)
+    }
+  }
+
   return {
-    async reconcile(input) {
-      const profiles = profileRows(input)
-      const identity = getRuntimeConnectionIdentity()
-      const previousOnlineIdentity = onlineIdentity
-      onlineIdentity = null
-      if (!identity || identity.connectionRevision !== input.connectionRevision) {
+    listProfiles() {
+      return storedProfiles().map((profile) => serviceProfileDto(profile, storedModels(profile.profileId), isOnline(profile)))
+    },
+
+    async reconcileRuntimeAuthorities({ serviceProfileId, connectionRevision, models } = {}) {
+      const profile = storedProfile(serviceProfileId)
+      if (!profile || !sameRevision(profile.connectionRevision, connectionRevision) || !Array.isArray(models)) {
         invalidateOnlineState()
-        db.replaceServerModelProfiles({ connectionRevision: input.connectionRevision, profiles: profiles.map(profile => ({
-          ...profile, availabilityStatus: 'unreachable'
-        })) })
-        await persistOrThrow()
         return this.listProfiles()
       }
-      if (!sameIdentity(previousOnlineIdentity, identity)) {
+      const catalog = runtimeCatalog(profile, models)
+      if (catalog.profile.id !== serviceProfileId) {
+        invalidateOnlineState()
+        return this.listProfiles()
+      }
+      const identity = currentIdentity(profile)
+      const previousOnlineIdentity = onlineIdentity
+      onlineIdentity = null
+      if (!identity) {
+        invalidateOnlineState()
+        return this.listProfiles()
+      }
+      if (!previousOnlineIdentity || !sameRevision(previousOnlineIdentity.connectionRevision, identity.connectionRevision)) {
         for (const sessionId of [...sessions.keys()]) revoke(sessionId)
       } else {
-        const nextProfileIds = new Set(profiles.map(profile => profile.profileId))
-        for (const [sessionId, runtime] of sessions) {
-          if (!nextProfileIds.has(runtime.profileId)) revoke(sessionId)
-        }
+        for (const [sessionId, runtime] of sessions) ensureCurrentAuthority(sessionId, runtime, catalog, identity)
       }
-      db.replaceServerModelProfiles({ connectionRevision: input.connectionRevision, profiles })
       try {
         await persistOrThrow()
       } catch (error) {
         invalidateOnlineState()
         throw error
       }
-      if (!sameIdentity(identity, getRuntimeConnectionIdentity())) {
+      cleanStaleCodexFiles(catalog)
+      if (!sameIdentity(identity, currentIdentity(profile))) {
         invalidateOnlineState()
         throw projectionError('PROFILE_NOT_READY', 'Server profile is not ready')
       }
@@ -215,18 +234,17 @@ export function createServerModelProjection({
       return this.listProfiles()
     },
 
-    listProfiles() {
-      return stored().map(profile => asDto(profile, isOnline(profile)))
-    },
-
-    prepareRuntime({ profileId, sessionId } = {}) {
-      const profile = find(profileId)
+    prepareRuntime({ serviceProfileId, modelId, adapterId, sessionId } = {}) {
+      const profile = storedProfile(serviceProfileId)
       if (!profile || !isOnline(profile)) {
         throw projectionError('PROFILE_NOT_READY', 'Server profile is not ready')
       }
       if (typeof sessionId !== 'string' || !sessionId) {
         throw projectionError('PROFILE_NOT_READY', 'Server profile session is invalid')
       }
+      const models = storedModels(serviceProfileId)
+      const catalog = runtimeCatalog(profile, models)
+      const model = requireServiceModel(catalog, { adapterId, modelId })
       const identity = currentIdentity(profile)
       const createSession = proxy?.createSession || proxy?.createServerGatewaySession
       if (!identity || typeof createSession !== 'function') {
@@ -237,49 +255,68 @@ export function createServerModelProjection({
       if (!issued || typeof issued.baseUrl !== 'string' || typeof issued.bearer !== 'string' || !issued.bearer) {
         throw projectionError('PROFILE_NOT_READY', 'Server profile is not ready')
       }
+      const artifactId = serviceModelArtifactId({ serviceProfileId, modelId: model.id })
       try {
-        const dto = asDto(profile)
-        const envName = profile.adapterId === 'codex'
-          ? (codexProfileFiles.serverCodexProfileSecretEnvName?.(profile.profileId) || 'UCLI_SERVER_BEARER')
-          : 'ANTHROPIC_AUTH_TOKEN'
-        if (profile.adapterId === 'codex') {
-          if (typeof codexProfileFiles.writeServerCodexProfileFileAtomic === 'function' && resolveCodexHome) {
-            const written = codexProfileFiles.writeServerCodexProfileFileAtomic({
-              codexHome: resolveCodexHome(), profile: dto, baseUrl: issued.baseUrl, envKey: envName
-            })
-            const next = stored().map(candidate => candidate.profileId === profile.profileId
-              ? { ...candidate, codexFileSha256: written.sha256 }
-              : candidate)
-            db.replaceServerModelProfiles({ connectionRevision: profile.connectionRevision, profiles: next })
-            persistDigestOrThrow()
-          }
-          if (!currentIdentity(profile) || currentIdentity(profile).connectionId !== identity.connectionId) {
+        if (adapterId === 'codex') {
+          if (!resolveCodexHome || typeof codexProfileFiles.writeServerCodexProfileFileAtomic !== 'function') {
             throw projectionError('PROFILE_NOT_READY', 'Server profile is not ready')
           }
-          sessions.set(sessionId, { profileId, identity: Object.freeze({ ...identity }) })
+          const envName = codexProfileFiles.serverCodexProfileSecretEnvName?.(artifactId) || 'UCLI_SERVER_BEARER'
+          const written = codexProfileFiles.writeServerCodexProfileFileAtomic({
+            codexHome: resolveCodexHome(),
+            profile: { id: artifactId, name: model.displayName, model: model.id, contextWindow: model.contextSize },
+            baseUrl: issued.baseUrl,
+            envKey: envName
+          })
+          db.updateServerServiceModelArtifact({
+            serviceProfileId,
+            modelId: model.id,
+            codexFileSha256: written.sha256
+          })
+          persistDigestOrThrow()
+          if (!sameIdentity(identity, currentIdentity(profile))) {
+            throw projectionError('PROFILE_NOT_READY', 'Server profile is not ready')
+          }
+          sessions.set(sessionId, Object.freeze({
+            serviceProfileId,
+            modelId: model.id,
+            adapterId,
+            connectionRevision: revisionKey(profile.connectionRevision)
+          }))
+          const nativeProfileName = codexProfileFiles.serverCodexNativeProfileName?.(artifactId) || `ucli-server-${artifactId}`
           return {
-            args: ['--profile', dto.nativeProfileName],
+            args: ['--profile', nativeProfileName, '--model', model.id],
             env: { [envName]: issued.bearer },
-            artifact: { nativeProfileName: dto.nativeProfileName, model: dto.model, providerId: dto.providerId },
+            artifact: { nativeProfileName, model: model.id, providerId: `ucli_server_${artifactId.slice(0, 12)}` },
+            artifactId,
+            configPath: written.path,
+            modelId: model.id,
             status: 'ready',
-            runtimeRevision: `${profile.connectionRevision}:${profile.profileId}`
+            runtimeRevision: serviceRuntimeRevision({ connectionRevision: revisionKey(profile.connectionRevision), serviceProfileId, modelId: model.id, adapterId })
           }
         }
-        if (!currentIdentity(profile) || currentIdentity(profile).connectionId !== identity.connectionId) {
+        if (adapterId !== 'claude' || SERVICE_ADAPTER_PROTOCOL[adapterId] !== 'anthropic_messages' ||
+          !sameIdentity(identity, currentIdentity(profile))) {
           throw projectionError('PROFILE_NOT_READY', 'Server profile is not ready')
         }
-        sessions.set(sessionId, { profileId, identity: Object.freeze({ ...identity }) })
+        sessions.set(sessionId, Object.freeze({
+          serviceProfileId,
+          modelId: model.id,
+          adapterId,
+          connectionRevision: revisionKey(profile.connectionRevision)
+        }))
         return {
-          args: dto.model ? ['--model', dto.model] : [],
+          args: ['--model', model.id],
           env: {
-            [envName]: issued.bearer,
+            ANTHROPIC_AUTH_TOKEN: issued.bearer,
             ANTHROPIC_BASE_URL: `${issued.baseUrl.replace(/\/$/, '')}/anthropic`,
             CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
           },
           settingSources: ['project', 'local'],
-          artifact: { model: dto.model, connectionMode: 'bearer' },
+          artifact: { model: model.id, connectionMode: 'bearer' },
+          modelId: model.id,
           status: 'ready',
-          runtimeRevision: `${profile.connectionRevision}:${profile.profileId}`
+          runtimeRevision: serviceRuntimeRevision({ connectionRevision: revisionKey(profile.connectionRevision), serviceProfileId, modelId: model.id, adapterId })
         }
       } catch (error) {
         const revokeSession = proxy?.revokeSession || proxy?.revokeServerGatewaySession
@@ -292,18 +329,8 @@ export function createServerModelProjection({
       return revoke(sessionId)
     },
 
-    async clearOnlineState(connectionRevision, status = 'unreachable') {
-      onlineIdentity = null
-      const profiles = stored()
-      for (const sessionId of [...sessions.keys()]) revoke(sessionId)
-      if (!profiles.length) return []
-      const next = profiles.map(profile => ({
-        ...profile,
-        connectionRevision: Number.isSafeInteger(connectionRevision) ? connectionRevision : profile.connectionRevision,
-        availabilityStatus: SERVER_STATUSES.has(status) && status !== 'ready' ? status : 'unreachable'
-      }))
-      db.replaceServerModelProfiles({ connectionRevision, profiles: next })
-      await persistOrThrow()
+    async clearOnlineState() {
+      invalidateOnlineState()
       return this.listProfiles()
     }
   }

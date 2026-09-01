@@ -50,7 +50,7 @@ async function confirm() {
   try {
     await connection.confirmAttempt()
     emit('update:open', false)
-  } catch { message.error(connection.error?.message || '无法完成服务端连接') }
+  } catch { message.error(connection.connectionError?.message || '无法完成服务端连接') }
 }
 
 async function cancel() {

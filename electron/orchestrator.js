@@ -106,8 +106,11 @@ import { ConnectionManager } from './serverConnection/connectionManager.js'
 import { ExpiryReminder } from './serverConnection/expiryReminder.js'
 import { createLocalGatewayProxy } from './serverConnection/localGatewayProxy.js'
 import { createServerModelProjection } from './serverConnection/modelProjection.js'
+import { createServerModelProjectionSynchronizer } from './serverConnection/projectionSynchronizer.js'
+import { buildServiceProfileCatalog } from './serverConnection/serviceProfileCatalog.js'
 import { createSkillsCatalogAdapter } from './serverConnection/skillsCatalogAdapter.js'
 import { registerServerConnectionIpc } from './serverConnection/ipc.js'
+import { serviceRuntimeRevision } from './serverConnection/serviceProfileCatalog.js'
 import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
 import { scanStorageCategories } from './storage/storageScanner.js'
 import { createStorageManagementService } from './storage/storageManagementService.js'
@@ -196,6 +199,25 @@ const SUMMARY_ERROR_MESSAGES = Object.freeze({
 const STORAGE_CATEGORY_ID_SET = new Set(STORAGE_CATEGORY_IDS)
 const STORAGE_STATUSES = new Set(['ready', 'partial', 'unavailable', 'busy', 'scheduled'])
 const STORAGE_CLEAR_MODES = new Set(['none', 'immediate', 'restart'])
+
+function validateSessionProfileSelection(selection) {
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection) ||
+    Object.keys(selection).length !== 2 || !Object.hasOwn(selection, 'profileId') ||
+    !Object.hasOwn(selection, 'model')) {
+    throw new TypeError('Invalid session profile selection')
+  }
+  if (selection.profileId !== null && (typeof selection.profileId !== 'string' ||
+    !selection.profileId || selection.profileId.length > 1024 || /[\0-\x1F\x7F]/.test(selection.profileId))) {
+    throw new TypeError('Invalid session profile selection')
+  }
+  if (selection.profileId === null && selection.model !== null) {
+    throw new TypeError('Invalid session profile selection')
+  }
+  if (selection.model !== null && !isSafeClaudeModel(selection.model)) {
+    throw new TypeError('Invalid session profile selection')
+  }
+  return { profileId: selection.profileId, model: selection.model }
+}
 
 function invalidStorageRequest() {
   return Object.assign(new Error('Invalid storage request'), { code: 'INVALID_STORAGE_REQUEST' })
@@ -851,6 +873,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   let localGatewayProxy = null
   let serverModelProjection = null
   let serverSkillsCatalog = null
+  let syncServerModelProjection = () => Promise.resolve([])
   const approvalNotifications = new Map()
   const completionNotifications = new Set()
   const diagnostics = createDiagnosticsService({
@@ -1204,6 +1227,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   function prepareCodexSessionRuntime(session, {
     imported = false,
     explicitProfileId,
+    explicitModel,
     forceSystem = false,
     deferServerRuntime = false
   } = {}) {
@@ -1213,7 +1237,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           adapterId: 'codex',
           cwd: session.cwd,
           imported,
-          explicitProfileId: explicitProfileId || session.profileId || null
+          explicitProfileId: explicitProfileId || session.profileId || null,
+          explicitModel: explicitModel ?? ((explicitProfileId || session.profileId) ? session.model : null)
         })
     if (selection?.canStart === false) {
       throw new Error('The selected Codex profile is no longer available. Choose another profile before starting.')
@@ -1225,17 +1250,19 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         ? {
             artifact: {
               nativeProfileName: profile.nativeProfileName,
-              model: profile.model,
+              model: selection.model,
               providerId: profile.providerId
             },
             env: {},
             status: 'ready',
-            runtimeRevision: `${profile.connectionRevision}:${profile.id}`
+            runtimeRevision: serviceRuntimeRevision({ connectionRevision: profile.connectionRevision, serviceProfileId: profile.id, modelId: selection.model, adapterId: 'codex' })
           }
-        : profileService.resolveCodexLaunchProfile(selection.profileId, session)
+        : profileService.resolveCodexLaunchProfile(selection.profileId, selection.model, session)
       return {
         session: {
           ...session,
+          actualModel: null,
+          profileWarning: null,
           profileId: selection.profileId,
           nativeProfileName: launch.artifact.nativeProfileName,
           model: launch.artifact.model,
@@ -1245,6 +1272,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           explicitProvider: null,
           providerOverride: null,
           providerWarning: null,
+          profileSourceKind: normalizeProfileSourceKind(profile.sourceKind),
           profileStatus: 'ready',
           profileRuntimeRevision: launch.runtimeRevision || null,
           pendingProfileRuntimeRevision: null,
@@ -1258,6 +1286,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     return {
       session: applyCodexProviderPolicy({
         ...session,
+        actualModel: null,
+        profileWarning: null,
         profileId: null,
         nativeProfileName: null,
         profileStatus: null,
@@ -1270,6 +1300,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   function prepareClaudeSessionRuntime(session, {
     imported = false,
     explicitProfileId,
+    explicitModel,
     forceSystem = false,
     deferServerRuntime = false
   } = {}) {
@@ -1279,7 +1310,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           adapterId: 'claude',
           cwd: session.cwd,
           imported,
-          explicitProfileId: explicitProfileId || session.profileId || null
+          explicitProfileId: explicitProfileId || session.profileId || null,
+          explicitModel: explicitModel ?? ((explicitProfileId || session.profileId) ? session.model : null)
         })
     const profile = selection?.profileId
       ? profileService.listProfiles({ adapterId: 'claude' }).find(candidate => candidate.id === selection.profileId)
@@ -1287,20 +1319,30 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     const launch = selection?.profileId
       ? deferServerRuntime && profile?.sourceKind === 'server'
         ? {
-            args: profile.model ? ['--model', profile.model] : [],
+            args: selection.model ? ['--model', selection.model] : [],
             env: {},
             settingSources: ['project', 'local'],
-            artifact: { model: profile.model, connectionMode: 'bearer' },
+            artifact: { model: selection.model, connectionMode: 'bearer' },
             status: 'ready',
-            runtimeRevision: `${profile.connectionRevision}:${profile.id}`
+            runtimeRevision: serviceRuntimeRevision({ connectionRevision: profile.connectionRevision, serviceProfileId: profile.id, modelId: selection.model, adapterId: 'claude' })
           }
         : profileService.resolveLaunchProfile({
             profileId: selection.profileId,
+            adapterId: 'claude',
+            model: selection.model,
+            sessionId: session.id,
             session,
             baseEnv: process.env
           })
       : null
-    return prepareClaudeProfileSession({ session, selection, launch })
+    const prepared = prepareClaudeProfileSession({ session, selection, launch })
+    return {
+      ...prepared,
+      session: {
+        ...prepared.session,
+        profileSourceKind: normalizeProfileSourceKind(profile?.sourceKind)
+      }
+    }
   }
 
   function interactiveProfileSnapshot(adapterId, prepared) {
@@ -1344,7 +1386,11 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
 
   function isInteractiveProfileSnapshotCurrent(snapshot) {
     if (!snapshot?.profileId) return true
-    const current = profileService.resolveProfileRuntime(snapshot.profileId)
+    const current = resolveSessionProfileRuntime({
+      adapterId: snapshot.adapterId,
+      profileId: snapshot.profileId,
+      model: snapshot.model ?? snapshot.session?.model ?? null
+    })
     return current?.canStart !== false &&
       current?.profileId === snapshot.profileId &&
       (current?.runtimeRevision || null) === snapshot.runtimeRevision
@@ -1358,7 +1404,9 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   function interactiveProfileReadiness(snapshot) {
     if (!snapshot?.profileId) return null
     return Object.freeze({
+      adapterId: snapshot.adapterId,
       profileId: snapshot.profileId,
+      model: snapshot.session.model || null,
       runtimeRevision: snapshot.runtimeRevision || null
     })
   }
@@ -1429,13 +1477,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       entry.status = 'launching'
       return false
     }
-    const desiredStamp = profileService.getClaudeProfileLaunchStamp(entry.session.profileId || null)
+    const desiredStamp = profileService.getClaudeProfileLaunchStamp(entry.session.profileId || null, entry.session.model || null)
     return armClaudeProfileLaunch({
       entry,
       desiredStamp,
       prepareRuntime: () => prepareClaudeSessionRuntime(entry.session, {
         imported: Boolean(entry.session.cliSessionId),
         explicitProfileId: entry.session.profileId || null,
+        explicitModel: entry.session.model || null,
         forceSystem: !entry.session.profileId
       })
     })
@@ -1462,9 +1511,39 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     }
   }
 
+  function resolveSessionProfileRuntime(session, selection = null) {
+    const profileId = selection?.profileId ?? session.profileId
+    if (!profileId) return { profileId: null, status: null, canStart: true, runtimeRevision: null }
+    const runtime = profileService.resolveProfileRuntime(profileId, {
+      adapterId: session.adapterId,
+      modelId: selection?.model ?? session.model ?? null
+    })
+    const profile = profileService.listProfiles({ adapterId: session.adapterId })
+      .find((candidate) => candidate.id === profileId)
+    if (profile?.sourceKind !== 'server') return runtime
+    const resolved = profileService.resolveSessionProfile({
+      adapterId: session.adapterId,
+      cwd: session.cwd,
+      explicitProfileId: profileId,
+      explicitModel: selection?.model ?? session.model ?? null
+    })
+    return {
+      ...runtime,
+      status: resolved.status,
+      canStart: resolved.canStart,
+      runtimeRevision: resolved.canStart ? runtime.runtimeRevision : null
+    }
+  }
+
+  function normalizeProfileSourceKind(value) {
+    return value === 'server' ? 'server' : null
+  }
+
   function profileRuntimeView(session) {
     return {
       profileId: session.profileId || null,
+      profileSourceKind: normalizeProfileSourceKind(session.profileSourceKind),
+      model: session.model || null,
       activeProfileId: session.activeProfileId || null,
       pendingProfileId: session.pendingProfileId || null,
       profileStatus: session.profileStatus || null,
@@ -1481,11 +1560,25 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     return result
   }
 
+  function refreshPersistedServiceSessionRuntimes() {
+    if (!profileService) return
+    for (const [sessionId, entry] of sessions) {
+      if (entry.session.profileSourceKind !== 'server' || !entry.session.profileId) continue
+      const resolved = resolveSessionProfileRuntime(entry.session)
+      Object.assign(entry.session, reconcileActiveProfile({
+        session: entry.session,
+        resolved,
+        isActive: hasActiveCodexProcess(entry)
+      }))
+      publishProfileRuntime(sessionId, entry.session)
+    }
+  }
+
   function publishCodexRuntime(snapshot) {
     for (const [sessionId, entry] of sessions) {
       if (entry.session.adapterId !== 'codex') continue
       if (entry.session.profileId) {
-        const resolved = profileService?.resolveCodexProfileRuntime(entry.session.profileId) || {
+        const resolved = profileService ? resolveSessionProfileRuntime(entry.session) : {
           profileId: entry.session.profileId,
           status: 'missing_profile',
           canStart: false,
@@ -1666,43 +1759,20 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       sourceLoader: skillsSourceLoader,
       skillsService
     })
-    let projectionSync = Promise.resolve()
-    const syncServerModelProjection = (state = serverConnectionManager.getState()) => {
-      projectionSync = projectionSync.then(async () => {
-        const identity = serverConnectionManager?.getRuntimeConnectionIdentity()
-        if (!identity || !['connected', 'expiring'].includes(state.status)) {
-          const status = state.status === 'disabled' ? 'disabled'
-            : state.status === 'expired' ? 'expired'
-              : state.reason === 'grant_deleted' ? 'deleted'
-                : 'unreachable'
-          await serverModelProjection.clearOnlineState(state.connection?.connectionRevision, status)
-          return
-        }
-        try {
-          const bootstrap = await serverConnectionManager.getBootstrap()
-          const current = serverConnectionManager.getRuntimeConnectionIdentity()
-          if (!current || current.connectionId !== identity.connectionId || current.connectionRevision !== identity.connectionRevision) {
-            await serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
-            return
-          }
-          await serverModelProjection.reconcile({
-            serverOrigin: state.serverOrigin,
-            organization: bootstrap.organization,
-            models: bootstrap.models,
-            connectionRevision: identity.connectionRevision
-          })
-        } catch {
-          await serverModelProjection.clearOnlineState(state.connection?.connectionRevision)
-        }
-      }).catch(() => {})
-      return projectionSync
-    }
+    const projectionSynchronizer = createServerModelProjectionSynchronizer({
+      manager: serverConnectionManager,
+      projection: serverModelProjection,
+      db,
+      buildCatalog: buildServiceProfileCatalog,
+      refreshSessionRuntimes: refreshPersistedServiceSessionRuntimes
+    })
+    syncServerModelProjection = () => projectionSynchronizer.sync()
     serverConnectionManager.subscribe(state => {
-      void syncServerModelProjection(state)
+      void syncServerModelProjection().catch(() => {})
       if (['connected', 'expiring'].includes(state.status)) void serverSkillsCatalog?.sync().catch(() => {})
     })
     void serverConnectionManager.start()
-    void syncServerModelProjection()
+    void syncServerModelProjection().catch(() => {})
     void serverSkillsCatalog.sync().catch(() => {})
     try {
       await profileService.reconcileCodexProfiles()
@@ -1754,9 +1824,18 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       const persistedSystemModel = s.adapterId === 'claude' && cliSessionId
         ? normalizeClaudeHistoryModel(s.systemModel ?? s.model)
         : s.systemModel ?? null
-      const storedProfile = s.profileId
-        ? profileService.listProfiles({ adapterId: s.adapterId }).find((profile) => profile.id === s.profileId) || null
+      const storedSelection = s.profileId
+        ? profileService.resolveSessionProfile({
+            adapterId: s.adapterId,
+            cwd: s.cwd || s.projectPath,
+            explicitProfileId: s.profileId,
+            explicitModel: s.model || null
+          })
         : null
+      const storedProfile = storedSelection?.profile || null
+      const storedProfileSourceKind = normalizeProfileSourceKind(
+        storedProfile?.sourceKind || s.profileSourceKind
+      )
       const restoredSession = s.adapterId === 'codex' && s.profileId
         ? {
             profileId: s.profileId,
@@ -1767,15 +1846,20 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             explicitProvider: null,
             providerOverride: null,
             providerWarning: null,
-            profileStatus: storedProfile?.status || 'missing_profile',
-            canStart: storedProfile?.canStart === true
+            model: storedProfileSourceKind === 'server' ? (storedSelection?.model || s.model || null) : null,
+            profileSourceKind: storedProfileSourceKind,
+            profileStatus: storedSelection?.status || 'missing_profile',
+            canStart: storedSelection?.canStart === true
           }
         : s.adapterId === 'claude' && s.profileId
           ? {
               profileId: s.profileId,
-              model: storedProfile?.model ?? persistedSystemModel,
-              profileStatus: storedProfile?.status || 'missing_profile',
-              canStart: storedProfile?.canStart === true,
+              model: storedProfileSourceKind === 'server'
+                ? (storedSelection?.model || s.model || null)
+                : storedProfile?.model ?? persistedSystemModel,
+              profileSourceKind: storedProfileSourceKind,
+              profileStatus: storedSelection?.status || 'missing_profile',
+              canStart: storedSelection?.canStart === true,
               provider,
               sourceProvider,
               providerPolicy: null,
@@ -1822,6 +1906,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           pendingProviderWarning: null,
           pendingRuntimeRevision: null,
           profileId: restoredSession.profileId || null,
+          profileSourceKind: normalizeProfileSourceKind(restoredSession.profileSourceKind),
           activeProfileId: null,
           pendingProfileId: null,
           profileStatus: restoredSession.profileStatus || null,
@@ -1854,6 +1939,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       sessions.set(s.id, entry)
       engine.setSession(s.id, { tier: s.tier, rulesetId: 'default', ruleset: rulesets['default'] })
     }
+    refreshPersistedServiceSessionRuntimes()
     db.flush()
     startCodexConfigWatcher()
     try {
@@ -2129,6 +2215,9 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         try {
           const launch = profileService.resolveLaunchProfile({
             profileId: profile.id,
+            adapterId,
+            model: session.model || null,
+            sessionId,
             session,
             baseEnv: process.env
           })
@@ -2240,6 +2329,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         provider_policy: session.providerPolicy,
         explicit_provider: session.explicitProvider,
         profile_id: session.profileId || null,
+        profile_source_kind: normalizeProfileSourceKind(session.profileSourceKind),
         adapter_config_json: JSON.stringify(session.adapterConfig),
         status: 'starting', created_at: entry.createdAt
       })
@@ -2370,7 +2460,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           }
         }
         if (evt.contextWindow) entry.session.contextWindow = evt.contextWindow
-        if (evt.model && entry.session.adapterId === 'claude' && entry.session.profileId) {
+        if (evt.model && entry.session.profileSourceKind === 'server') {
+          const actualModel = isSafeClaudeModel(evt.model) ? evt.model : null
+          const profileWarning = actualModel && actualModel !== entry.session.model
+            ? 'model_substituted'
+            : null
+          Object.assign(entry.session, { actualModel, profileWarning })
+          evt = { ...evt, actualModel, profileWarning }
+        } else if (evt.model && entry.session.adapterId === 'claude' && entry.session.profileId) {
           const modelState = describeClaudeModelSelection({
             requestedModel: entry.session.model,
             actualModel: evt.model
@@ -2742,6 +2839,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       pendingProvider: e.session.pendingProvider || null,
       pendingProviderWarning: e.session.pendingProviderWarning || null,
       profileId: e.session.profileId || null,
+      profileSourceKind: normalizeProfileSourceKind(e.session.profileSourceKind),
       activeProfileId: e.session.activeProfileId || null,
       pendingProfileId: e.session.pendingProfileId || null,
       profileStatus: e.session.profileStatus || null,
@@ -2893,6 +2991,10 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           isActive: false
         })
         assertCodexSessionCanStart(next)
+        Object.assign(next, {
+          actualModel: null,
+          profileWarning: null
+        })
       }
       const db = getDb()
       if (db) {
@@ -2901,7 +3003,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
           source_provider: entry.session.sourceProvider,
           provider_policy: entry.session.providerPolicy,
           explicit_provider: entry.session.explicitProvider,
-          profile_id: entry.session.profileId || null
+          profile_id: entry.session.profileId || null,
+          model: entry.session.model
         })
         scheduleFlush()
       }
@@ -3060,7 +3163,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     return result
   }
 
-  function setSessionProfile(sessionId, profileId) {
+  function setSessionProfile(sessionId, selection) {
     const entry = sessions.get(sessionId)
     if (!entry) throw new Error('no session')
     if (!['codex', 'claude'].includes(entry.session.adapterId)) {
@@ -3068,24 +3171,37 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     }
     if (!profileService) throw new Error('profile service is unavailable')
 
-    const desiredProfileId = profileId || null
+    const desiredSelection = validateSessionProfileSelection(selection)
+    const desiredProfileId = desiredSelection.profileId
     let resolved
     let desiredSession
     if (desiredProfileId) {
-      const profile = profileService.listProfiles({ adapterId: entry.session.adapterId })
-        .find((item) => item.id === desiredProfileId)
+      const resolvedSelection = profileService.resolveSessionProfile({
+        adapterId: entry.session.adapterId,
+        cwd: entry.session.cwd,
+        explicitProfileId: desiredProfileId,
+        explicitModel: desiredSelection.model
+      })
+      const profile = resolvedSelection.profile
       if (!profile) throw new Error('profile not found')
-      const state = profileService.resolveProfileRuntime(desiredProfileId)
+      if (!resolvedSelection.canStart) throw new Error('profile model is unavailable')
+      if (profile.sourceKind !== 'server' && desiredSelection.model !== null) {
+        throw new Error('local profiles do not accept a model selection')
+      }
+      const state = resolveSessionProfileRuntime(entry.session, resolvedSelection)
       resolved = {
         profileId: desiredProfileId,
-        status: state.status,
-        canStart: state.canStart,
+        status: resolvedSelection.status,
+        canStart: resolvedSelection.canStart,
         runtimeRevision: state.runtimeRevision
       }
       desiredSession = entry.session.adapterId === 'codex'
         ? {
             nativeProfileName: state.nativeProfileName || null,
-            model: profile.model,
+            model: profile.sourceKind === 'server' ? resolvedSelection.model : profile.model,
+            profileSourceKind: normalizeProfileSourceKind(profile.sourceKind),
+            actualModel: null,
+            profileWarning: null,
             provider: state.providerId || profile.providerId,
             sourceProvider: null,
             providerPolicy: null,
@@ -3094,7 +3210,10 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             providerWarning: null
           }
         : {
-            model: profile.model ?? entry.session.systemModel ?? null,
+            model: profile.sourceKind === 'server'
+              ? resolvedSelection.model
+              : profile.model ?? entry.session.systemModel ?? null,
+            profileSourceKind: normalizeProfileSourceKind(profile.sourceKind),
             actualModel: null,
             profileWarning: null
           }
@@ -3112,10 +3231,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
               profileId: null,
               nativeProfileName: null
             }, { imported: Boolean(entry.session.cliSessionId) }),
-            nativeProfileName: null
+            nativeProfileName: null,
+            profileSourceKind: null,
+            actualModel: null,
+            profileWarning: null
           }
         : {
             profileId: null,
+            profileSourceKind: null,
             model: entry.session.systemModel ?? null,
             actualModel: null,
             profileWarning: null
@@ -3127,20 +3250,22 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       resolved,
       isActive: hasActiveCodexProcess(entry)
     })
-    Object.assign(entry.session, desiredSession, runtime)
+    const nextSession = { ...entry.session, ...desiredSession, ...runtime }
 
     const db = getDb()
     if (db) {
       db.updateSession(sessionId, {
         profile_id: desiredProfileId,
-        model: entry.session.model,
-        provider: entry.session.provider,
-        source_provider: entry.session.sourceProvider,
-        provider_policy: entry.session.providerPolicy,
-        explicit_provider: entry.session.explicitProvider
+        profile_source_kind: normalizeProfileSourceKind(nextSession.profileSourceKind),
+        model: nextSession.model,
+        provider: nextSession.provider,
+        source_provider: nextSession.sourceProvider,
+        provider_policy: nextSession.providerPolicy,
+        explicit_provider: nextSession.explicitProvider
       })
       scheduleFlush()
     }
+    Object.assign(entry.session, nextSession)
     return publishProfileRuntime(sessionId, entry.session)
   }
 
@@ -3273,6 +3398,10 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
             canStart: next.canStart
           })
           assertCodexSessionCanStart(next)
+          Object.assign(next, {
+            actualModel: null,
+            profileWarning: null
+          })
         }
       }
       await hookReady
@@ -3415,7 +3544,14 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     })
     if (skillsService) registerSkillsIpc({ ipcMain, service: skillsService })
     if (serverConnectionManager) {
-      registerServerConnectionIpc({ ipcMain, manager: serverConnectionManager, skillsCatalog: serverSkillsCatalog, serverModelProjection, send })
+      registerServerConnectionIpc({
+        ipcMain,
+        manager: serverConnectionManager,
+        skillsCatalog: serverSkillsCatalog,
+        serverModelProjection,
+        syncModelProjection: syncServerModelProjection,
+        send
+      })
     }
     if (storageService) registerStorageIpc({ ipcMain, service: storageService })
     registerSummaryIpc({
@@ -3722,9 +3858,10 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       return result
     })
     ipcMain.handle('session:restart', (_e, sessionId) => restartSession(sessionId))
-    ipcMain.handle('session:set-profile', (_e, sessionId, profileId) =>
-      setSessionProfile(sessionId, profileId)
-    )
+    ipcMain.handle('session:set-profile', (_e, sessionId, selection, ...extra) => {
+      if (extra.length) throw new TypeError('Invalid session profile selection')
+      return setSessionProfile(sessionId, selection)
+    })
     ipcMain.handle('session:stop', (_e, sessionId) => stopSession(sessionId))
     ipcMain.handle('session:delete', async (_e, sessionId) => {
       return removeSessionProjection(sessionId)

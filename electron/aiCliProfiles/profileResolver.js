@@ -1,25 +1,59 @@
 import { resolve } from 'node:path'
 
+import { SERVICE_ADAPTER_PROTOCOL } from '../serverConnection/serviceProfileCatalog.js'
+
 function normaliseProjectScope(value) {
   const path = resolve(String(value || '.'))
   return process.platform === 'win32' ? path.toLowerCase() : path
 }
 
-function selectedProfile({ adapterId, profileId, selectionSource, profiles }) {
+function serviceModelSelection({ adapterId, model, profile }) {
+  if (typeof model !== 'string' || !model) {
+    return { status: 'model-required', canStart: false }
+  }
+  if (!profile.supportedAdapterIds?.includes(adapterId)) {
+    return { status: 'protocol-unavailable', canStart: false }
+  }
+  const selectedModel = profile.models?.find((candidate) => candidate.id === model)
+  if (!selectedModel || selectedModel.availabilityStatus && selectedModel.availabilityStatus !== 'ready') {
+    return { status: 'model-unavailable', canStart: false }
+  }
+  if (!selectedModel.protocols?.includes(SERVICE_ADAPTER_PROTOCOL[adapterId])) {
+    return { status: 'protocol-unavailable', canStart: false }
+  }
+  if (profile.canStart === false || ['unreachable', 'disabled', 'expired', 'deleted'].includes(profile.status || profile.serverStatus || profile.availabilityStatus)) {
+    return { status: 'model-unavailable', canStart: false }
+  }
+  return { status: 'ready', canStart: true }
+}
+
+function selectedProfile({ adapterId, profileId, model = null, selectionSource, profiles }) {
   if (!profileId) {
     return {
       profileId: null,
+      model: null,
       profile: null,
       selectionSource,
-      status: null,
+      status: 'ready',
       canStart: true
     }
   }
-  const profile = profiles.find((candidate) => (
-    candidate.id === profileId && candidate.adapterId === adapterId
+  const profile = profiles.find((candidate) => candidate.id === profileId && (
+    candidate.sourceKind === 'server' || candidate.adapterId === adapterId
   )) || null
+  if (profile?.sourceKind === 'server') {
+    const resolution = serviceModelSelection({ adapterId, model, profile })
+    return {
+      profileId,
+      model: typeof model === 'string' && model ? model : null,
+      profile,
+      selectionSource,
+      ...resolution
+    }
+  }
   return {
     profileId,
+    model: null,
     profile,
     selectionSource,
     status: profile ? (profile.status || profile.serverStatus || null) : 'missing_profile',
@@ -32,6 +66,7 @@ export function resolveSessionProfile({
   cwd,
   imported = false,
   explicitProfileId,
+  explicitModel = null,
   profiles = [],
   bindings = []
 } = {}) {
@@ -39,6 +74,7 @@ export function resolveSessionProfile({
     return selectedProfile({
       adapterId,
       profileId: explicitProfileId,
+      model: explicitModel,
       selectionSource: 'explicit',
       profiles
     })
@@ -46,6 +82,7 @@ export function resolveSessionProfile({
   if (imported) {
     return {
       profileId: null,
+      model: null,
       profile: null,
       selectionSource: 'history',
       status: null,
@@ -62,6 +99,7 @@ export function resolveSessionProfile({
     return selectedProfile({
       adapterId,
       profileId: projectBinding.profileId,
+      model: projectBinding.modelId || null,
       selectionSource: 'project',
       profiles
     })
@@ -74,6 +112,7 @@ export function resolveSessionProfile({
     return selectedProfile({
       adapterId,
       profileId: appBinding.profileId,
+      model: appBinding.modelId || null,
       selectionSource: 'app',
       profiles
     })
@@ -82,7 +121,7 @@ export function resolveSessionProfile({
   return selectedProfile({
     adapterId,
     profileId: null,
-    selectionSource: 'system',
+    selectionSource: 'none',
     profiles
   })
 }

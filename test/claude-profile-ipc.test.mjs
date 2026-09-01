@@ -31,6 +31,7 @@ function register() {
       { adapterId: 'ucode', mode: 'system', profileCount: 0, projectBinding: null }
     ],
     listProfiles: ({ adapterId }) => profiles[adapterId] || [],
+    listServiceProfiles: () => [],
     createProfile: async (draft) => { calls.push(['create', draft]); return profiles.claude[0] },
     updateProfile: async (...args) => { calls.push(['update', ...args]); return profiles.claude[0] },
     replaceProfileSecret: async () => profiles.claude[0],

@@ -62,6 +62,7 @@ test('new databases contain profile tables and a nullable session profile bindin
       PROFILE_TABLES
     )
     assert.equal(tableColumns(db, 'sessions').includes('profile_id'), true)
+    assert.equal(tableColumns(db, 'ai_cli_profile_bindings').includes('model_id'), true)
   })
 })
 
@@ -152,6 +153,7 @@ test('profile bindings and session references produce an explicit usage count', 
       scopeKey: '*',
       adapterId: 'codex',
       profileId: 'profile-1',
+      modelId: null,
       updatedAt: 10
     })
     db.upsertAiCliProfileBinding({
@@ -159,6 +161,7 @@ test('profile bindings and session references produce an explicit usage count', 
       scopeKey: 'F:\\projects\\demo',
       adapterId: 'codex',
       profileId: 'profile-1',
+      modelId: null,
       updatedAt: 11
     })
 
@@ -168,6 +171,7 @@ test('profile bindings and session references produce an explicit usage count', 
         scopeKey: '*',
         adapterId: 'codex',
         profileId: 'profile-1',
+        modelId: null,
         updatedAt: 10
       },
       {
@@ -175,6 +179,7 @@ test('profile bindings and session references produce an explicit usage count', 
         scopeKey: 'F:\\projects\\demo',
         adapterId: 'codex',
         profileId: 'profile-1',
+        modelId: null,
         updatedAt: 11
       }
     ])

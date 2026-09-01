@@ -1,12 +1,30 @@
 <template>
   <a-card title="服务端连接" class="settings-card server-connection-panel">
     <a-alert
-      v-if="connection.error"
+      v-if="connection.connectionError"
       type="error"
       show-icon
       closable
-      :message="connection.error.message"
-      @close="connection.error = null"
+      :message="connection.connectionError.message"
+      @close="connection.connectionError = null"
+    />
+    <a-alert
+      v-if="connection.modelCatalogError"
+      type="warning"
+      show-icon
+      closable
+      message="模型目录同步失败"
+      :description="connection.modelCatalogError.message"
+      @close="connection.modelCatalogError = null"
+    />
+    <a-alert
+      v-if="connection.skillsCatalogError"
+      type="warning"
+      show-icon
+      closable
+      message="组织 Skills 目录同步失败"
+      :description="connection.skillsCatalogError.message"
+      @close="connection.skillsCatalogError = null"
     />
 
     <a-descriptions size="small" :column="1" bordered>
@@ -84,18 +102,19 @@ async function submit() {
     await connection.submitLink(input)
     emit('attempt')
   } catch {
-    message.error(connection.error?.message || '无法读取连接链接')
+    message.error(connection.connectionError?.message || '无法读取连接链接')
   }
 }
 
 async function retry() {
-  try { await connection.retryConnection() } catch { message.error(connection.error?.message || '无法重试服务端连接') }
+  try { await connection.retryConnection() } catch { message.error(connection.connectionError?.message || '无法重试服务端连接') }
 }
 
 async function sync() {
   try {
-    await Promise.all([connection.syncConnection(), connection.syncModels(), connection.syncSkills()])
-  } catch { message.error(connection.error?.message || '无法同步服务端连接') }
+    await connection.syncConnection()
+    await Promise.allSettled([connection.syncModels(), connection.syncSkills()])
+  } catch { message.error(connection.connectionError?.message || '无法同步服务端连接') }
 }
 
 function disconnectConfirmation() {
@@ -106,7 +125,7 @@ function disconnectConfirmation() {
     okType: 'danger',
     cancelText: '取消',
     async onOk() {
-      try { await connection.disconnect() } catch { message.error(connection.error?.message || '无法断开服务端连接') }
+      try { await connection.disconnect() } catch { message.error(connection.connectionError?.message || '无法断开服务端连接') }
     }
   })
 }
