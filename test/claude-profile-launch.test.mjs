@@ -195,6 +195,61 @@ test('Claude adapter launch keeps secrets out of argv and temporary settings', (
   assert.equal(JSON.stringify(buildClaudeSettings('runner.js')).includes(secret), false)
 })
 
+test('Claude server profile launch preserves the executable search path', () => {
+  const launch = buildClaudeAdapterLaunch({
+    session: { id: 'server-session', model: 'server-model' },
+    settingsFile: 'C:\\temp\\settings.json',
+    hookPort: 43123,
+    baseEnv: { PATH: 'F:\\soft\\nvm\\nodejs', SYSTEMROOT: 'C:\\Windows' },
+    profileLaunch: {
+      args: ['--model', 'server-model'],
+      env: {
+        ANTHROPIC_AUTH_TOKEN: 'server-bearer',
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:43124/anthropic',
+        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
+      },
+      settingSources: ['project', 'local']
+    }
+  })
+
+  assert.equal(launch.env.PATH, 'F:\\soft\\nvm\\nodejs')
+  assert.equal(launch.env.SYSTEMROOT, 'C:\\Windows')
+})
+
+test('Claude server profile launch excludes inherited Claude routing', () => {
+  const launch = buildClaudeAdapterLaunch({
+    session: { id: 'server-session', model: 'server-model' },
+    settingsFile: 'C:\\temp\\settings.json',
+    hookPort: 43123,
+    baseEnv: {
+      PATH: 'F:\\soft\\nvm\\nodejs',
+      ANTHROPIC_API_KEY: 'inherited-api-key',
+      anthropic_auth_token: 'inherited-bearer',
+      Anthropic_Base_Url: 'https://inherited.example.com',
+      Claude_Code_Use_Bedrock: '1'
+    },
+    profileLaunch: {
+      args: ['--model', 'server-model'],
+      env: {
+        ANTHROPIC_AUTH_TOKEN: 'server-bearer',
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:43124/anthropic',
+        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
+      },
+      settingSources: ['project', 'local']
+    }
+  })
+
+  assert.deepEqual(
+    Object.keys(launch.env).filter((key) => key.toUpperCase() === 'ANTHROPIC_AUTH_TOKEN'),
+    ['ANTHROPIC_AUTH_TOKEN']
+  )
+  assert.equal('ANTHROPIC_API_KEY' in launch.env, false)
+  assert.equal('Anthropic_Base_Url' in launch.env, false)
+  assert.equal('Claude_Code_Use_Bedrock' in launch.env, false)
+  assert.equal(launch.env.ANTHROPIC_AUTH_TOKEN, 'server-bearer')
+  assert.equal(launch.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:43124/anthropic')
+})
+
 test('Claude session preparation keeps launch credentials outside persisted session state', () => {
   const prepared = prepareClaudeProfileSession({
     session: { id: 'session-1', adapterId: 'claude', model: 'haiku' },

@@ -4,7 +4,10 @@ import { tmpdir } from 'os'
 import { createRequire } from 'module'
 import { BaseAdapter } from './cliAdapter.js'
 import { findClaudeProjectDirectory, isSafeNativeSessionId } from '../sessionDiscovery.js'
-import { buildClaudeProfileArgs } from '../aiCliProfiles/claudeProfileAdapter.js'
+import {
+  buildClaudeProfileArgs,
+  scrubClaudeRoutingEnvironment
+} from '../aiCliProfiles/claudeProfileAdapter.js'
 import {
   encodeClaudeDecisionResponse,
   extractClaudePlanSnapshot,
@@ -163,6 +166,9 @@ export function buildClaudeAdapterLaunch({
   const settingSources = Array.isArray(profileLaunch?.settingSources)
     ? [...new Set(profileLaunch.settingSources.filter((source) => ['project', 'local'].includes(source)))]
     : []
+  const launchBaseEnv = profileLaunch
+    ? scrubClaudeRoutingEnvironment(baseEnv)
+    : baseEnv
   return {
     args: [
       '--permission-mode', 'default',
@@ -171,7 +177,8 @@ export function buildClaudeAdapterLaunch({
       ...profileArgs
     ],
     env: {
-      ...(profileLaunch?.env || baseEnv),
+      ...launchBaseEnv,
+      ...(profileLaunch?.env || {}),
       UCLI_HOOK_PORT: String(hookPort ?? ''),
       UCLI_SESSION_ID: session.id,
       TERM: 'xterm-256color',

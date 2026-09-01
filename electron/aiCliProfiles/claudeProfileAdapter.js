@@ -113,17 +113,21 @@ export function buildClaudeProfileArgs({ session = {}, profile = null } = {}) {
   return args
 }
 
+export function scrubClaudeRoutingEnvironment(baseEnv = process.env) {
+  const env = { ...baseEnv }
+  for (const key of Object.keys(env)) {
+    if (ROUTING_KEY_SET.has(key.toUpperCase())) delete env[key]
+  }
+  return env
+}
+
 export function buildClaudeProfileEnvironment({
   baseEnv = process.env,
   profile = null,
   secret = null
 } = {}) {
-  const env = { ...baseEnv }
+  const env = profile ? scrubClaudeRoutingEnvironment(baseEnv) : { ...baseEnv }
   if (!profile) return env
-
-  for (const key of Object.keys(env)) {
-    if (ROUTING_KEY_SET.has(key.toUpperCase())) delete env[key]
-  }
   const connectionMode = profile.config?.connectionMode
   if (connectionMode === 'subscription') return env
   if (!['api_key', 'bearer'].includes(connectionMode)) {
