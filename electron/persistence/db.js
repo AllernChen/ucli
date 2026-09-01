@@ -444,6 +444,7 @@ class Db {
         version_id          TEXT PRIMARY KEY,
         server_origin       TEXT NOT NULL,
         organization_id     TEXT NOT NULL,
+        organization_name   TEXT,
         slug                TEXT NOT NULL,
         version             TEXT NOT NULL,
         name                TEXT NOT NULL,
@@ -504,6 +505,10 @@ class Db {
         updated_at        INTEGER NOT NULL
       )
     `)
+    const serverSkillVersionColumns = rows(this.sql.exec('PRAGMA table_info(server_skill_versions)'))
+    if (!serverSkillVersionColumns.some((column) => column.name === 'organization_name')) {
+      this.sql.run('ALTER TABLE server_skill_versions ADD COLUMN organization_name TEXT')
+    }
     this.sql.run(`
       CREATE TABLE IF NOT EXISTS skill_source_identities (
         package_id          TEXT PRIMARY KEY,
@@ -2204,11 +2209,11 @@ class Db {
     for (const version of versions) {
       this.sql.run(
         `INSERT INTO server_skill_versions (
-           version_id, server_origin, organization_id, slug, version, name, description, sha256,
+         version_id, server_origin, organization_id, organization_name, slug, version, name, description, sha256,
            size_bytes, published_at, created_at, download_url, lifecycle_status, connection_revision
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          version.versionId, version.serverOrigin, version.organizationId, version.slug, version.version,
+          version.versionId, version.serverOrigin, version.organizationId, version.organizationName ?? null, version.slug, version.version,
           version.name, version.description, version.sha256, version.sizeBytes, version.publishedAt,
           version.createdAt, version.downloadUrl, version.lifecycleStatus, connectionRevision
         ]
@@ -3394,6 +3399,7 @@ function rowToServerSkillVersion(row) {
     versionId: row.version_id,
     serverOrigin: row.server_origin,
     organizationId: row.organization_id,
+    ...(row.organization_name == null ? {} : { organizationName: row.organization_name }),
     slug: row.slug,
     version: row.version,
     name: row.name,

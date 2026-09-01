@@ -66,7 +66,7 @@ test('server schema has isolated installation, normalized service catalog, and s
       'availability_status', 'catalog_order', 'codex_file_sha256'
     ])
     assert.deepEqual(tableColumns(db, 'server_skill_versions'), [
-      'version_id', 'server_origin', 'organization_id', 'slug', 'version', 'name', 'description', 'sha256',
+      'version_id', 'server_origin', 'organization_id', 'organization_name', 'slug', 'version', 'name', 'description', 'sha256',
       'size_bytes', 'published_at', 'created_at', 'download_url', 'lifecycle_status', 'connection_revision'
     ])
     assert.deepEqual(tableColumns(db, 'server_skill_packages'), [
@@ -215,6 +215,33 @@ test('server projections replace by revision and disconnect cleanup preserves lo
     assert.equal(db.getSkillPackage('local-package').id, 'local-package')
     db.deleteSkillPackage('local-package')
     assert.equal(db.getServerSkillPackage('local-package'), null)
+  })
+})
+
+test('explicit disconnect clears catalog versions without deleting installed organization provenance', async () => {
+  await withDb(async (db) => {
+    db.insertSkillPackage({
+      id: 'organization-package', name: 'server-skill', description: 'from server', sourceType: 'server',
+      sourceLocator: 'https://server.example.test/organizations/organization-1/skills/server-skill', sourceRef: 'version-1',
+      sourceRefType: 'fixed', sourceSubdir: '', resolvedRevision: 'a'.repeat(64), contentSha256: 'content-hash',
+      manifest: {}, createdAt: 1, updatedAt: 1
+    })
+    db.upsertSkillSourceIdentity({
+      packageId: 'organization-package', originKind: 'organization', serverOrigin: 'https://server.example.test',
+      organizationId: 'organization-1', organizationName: 'Example Org', identityStatus: 'resolved',
+      catalogVersionId: 'version-1', artifactSha256: 'a'.repeat(64), createdAt: 1, updatedAt: 1
+    })
+    db.replaceServerSkillVersions({ connectionRevision: 1, versions: [{
+      versionId: 'version-1', serverOrigin: 'https://server.example.test', organizationId: 'organization-1',
+      slug: 'server-skill', version: '1.0.0', name: 'Server skill', description: 'from server', sha256: 'a'.repeat(64),
+      sizeBytes: 10, publishedAt: '2026-08-27T00:00:00.000Z', createdAt: '2026-08-27T00:00:00.000Z',
+      downloadUrl: 'https://server.example.test/api/v1/skills/version-1/download', lifecycleStatus: 'ACTIVE'
+    }] })
+
+    db.clearServerConnections()
+
+    assert.equal(db.getServerSkillVersion('version-1'), null)
+    assert.equal(db.getSkillSourceIdentity('organization-package').originKind, 'organization')
   })
 })
 

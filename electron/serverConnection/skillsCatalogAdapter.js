@@ -84,7 +84,14 @@ function identityOf(connectionManager) {
   const organizationId = state.organization?.id
   if (!identity || typeof identity.connectionId !== 'string' || !Number.isSafeInteger(identity.connectionRevision) ||
     typeof serverOrigin !== 'string' || typeof organizationId !== 'string' || !organizationId) return null
-  return Object.freeze({ ...identity, serverOrigin, organizationId })
+  return Object.freeze({
+    ...identity,
+    serverOrigin,
+    organizationId,
+    ...(typeof state.organization?.name === 'string' && state.organization.name.trim()
+      ? { organizationName: state.organization.name.trim() }
+      : {})
+  })
 }
 
 export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = globalThis.fetch, stagingRoot, sourceLoader, skillsService, onStagingOpen = null }) {
@@ -281,6 +288,7 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
       assertCurrent(identity)
       const persisted = versions.map(item => ({
         versionId: item.id, serverOrigin: identity.serverOrigin, organizationId: identity.organizationId,
+        organizationName: identity.organizationName,
         slug: item.skill.slug, version: item.version, name: item.skill.name, description: item.skill.description,
         sha256: item.sha256, sizeBytes: item.sizeBytes, publishedAt: item.publishedAt, createdAt: item.createdAt,
         downloadUrl: item.downloadUrl, lifecycleStatus: revocations.get(item.id) || 'ACTIVE',
@@ -390,6 +398,7 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
     return {
       locator: `${identity.serverOrigin}/organizations/${encodeURIComponent(identity.organizationId)}/skills/${encodeURIComponent(version.slug)}`,
       versionId: version.versionId, serverOrigin: identity.serverOrigin, organizationId: identity.organizationId,
+      organizationName: version.organizationName || identity.organizationName,
       slug: version.slug, version: version.version, sha256: version.sha256
     }
   }

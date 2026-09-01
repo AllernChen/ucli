@@ -10,6 +10,7 @@ import {
 import { sanitiseGitHubSource, sanitiseSkillError, validateSkillCompatibility } from './contracts.js'
 import { createSkillDiscovery } from './discovery.js'
 import { copySkillDirectoryAtomic, diffSkillDirectories, inspectSkillDirectory, removeManagedSkillDirectory } from './fileOps.js'
+import { backfillSkillManagementMetadata } from './metadataMigration.js'
 
 function serviceError(message, code) {
   return Object.assign(new Error(message), { code })
@@ -141,6 +142,7 @@ export function createSkillsService({
   const packagesRootIdentity = captureDirectoryIdentity(packagesRoot)
   const migrationCopy = migrationFileOps.copy || copySkillDirectoryAtomic
   const migrationRemove = migrationFileOps.remove || removeManagedSkillDirectory
+  backfillSkillManagementMetadata({ db, now })
 
   const projectionOptions = (scopeType, projectPath) => ({
     scopeType, projectPath, home: skillHome, env
@@ -268,6 +270,8 @@ export function createSkillsService({
     } : null
     return {
       ...pkg,
+      sourceIdentity: db.getSkillSourceIdentity?.(pkg.id) || null,
+      cliDesiredStates: db.listSkillCliDesiredStates?.({ packageId: pkg.id }) || [],
       fileList: canonical?.fileList || [],
       totalBytes: canonical?.totalBytes || 0,
       installations,
@@ -276,6 +280,70 @@ export function createSkillsService({
       compatibility: validateSkillCompatibility(pkg.name),
       visibility: serviceVisibility(visibleProjections, installations[0]?.scopeType)
     }
+  }
+
+  function sourceIdentityFor(packageId, source, timestamp) {
+    if (source?.serverOrigin) {
+      const resolvedName = typeof source.organizationName === 'string' && source.organizationName.trim()
+        ? source.organizationName.trim()
+        : null
+      return {
+        packageId,
+        originKind: 'organization',
+        serverOrigin: source.serverOrigin,
+        organizationId: source.organizationId,
+        organizationName: resolvedName || source.organizationId,
+        identityStatus: resolvedName ? 'resolved' : 'name_pending',
+        catalogVersionId: source.versionId,
+        artifactSha256: source.sha256.toLowerCase(),
+        createdAt: timestamp,
+        updatedAt: timestamp
+      }
+    }
+    return {
+      packageId,
+      originKind: ['github', 'gitlab'].includes(source?.type) ? source.type : 'local',
+      serverOrigin: null,
+      organizationId: null,
+      organizationName: null,
+      identityStatus: 'resolved',
+      catalogVersionId: null,
+      artifactSha256: null,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }
+  }
+
+  function initialDesiredStates(installations, timestamp) {
+    const directTargets = new Set(installations.map((installation) => installation.targetAdapterId))
+    const states = new Map()
+    for (const installation of installations) {
+      states.set(installation.targetAdapterId, {
+        packageId: installation.packageId,
+        scopeType: installation.scopeType,
+        scopeKey: installation.scopeKey,
+        adapterId: installation.targetAdapterId,
+        desiredState: installation.enabled ? 'enabled' : 'disabled',
+        enforcementStatus: 'satisfied',
+        reasonCode: null,
+        updatedAt: timestamp
+      })
+      const visibility = serviceVisibility([installation.targetAdapterId], installation.scopeType)
+      for (const [adapterId, visibilityState] of Object.entries(visibility)) {
+        if (!visibilityState.visible || visibilityState.direct || directTargets.has(adapterId)) continue
+        states.set(adapterId, {
+          packageId: installation.packageId,
+          scopeType: installation.scopeType,
+          scopeKey: installation.scopeKey,
+          adapterId,
+          desiredState: 'inherit',
+          enforcementStatus: 'satisfied',
+          reasonCode: null,
+          updatedAt: timestamp
+        })
+      }
+    }
+    return [...states.values()]
   }
 
   function installedMatches(preview) {
@@ -498,7 +566,13 @@ export function createSkillsService({
           guard
         )
         if (serverMapping) {
-          await db.transaction(() => { guard?.(); db.linkServerSkillPackage({ ...serverMapping, packageId: reusable.id }); guard?.() })
+          const timestamp = now()
+          await db.transaction(() => {
+            guard?.()
+            db.linkServerSkillPackage({ ...serverMapping, packageId: reusable.id })
+            db.upsertSkillSourceIdentity(sourceIdentityFor(reusable.id, serverMapping, timestamp))
+            guard?.()
+          })
           await persistOrThrow(guard)
         }
         return result
@@ -581,6 +655,8 @@ export function createSkillsService({
           })
           for (const installation of installations) db.insertSkillInstallation(installation)
           if (serverMapping) db.linkServerSkillPackage({ ...serverMapping, packageId })
+          db.upsertSkillSourceIdentity(sourceIdentityFor(packageId, serverMapping || prepared.source, timestamp))
+          for (const state of initialDesiredStates(installations, timestamp)) db.upsertSkillCliDesiredState(state)
           guard?.()
         })
         await persistOrThrow(guard)
@@ -681,7 +757,13 @@ export function createSkillsService({
         throw serviceError('A managed projection has drifted', 'SKILL_DRIFTED')
       }
       if (next.contentSha256 === pkg.contentSha256) {
-        await db.transaction(() => { guard?.(); db.linkServerSkillPackage({ ...serverSource, packageId }); guard?.() })
+        const timestamp = now()
+        await db.transaction(() => {
+          guard?.()
+          db.linkServerSkillPackage({ ...serverSource, packageId })
+          db.upsertSkillSourceIdentity(sourceIdentityFor(packageId, serverSource, timestamp))
+          guard?.()
+        })
         await persistOrThrow(guard)
         return packageView(db.getSkillPackage(packageId))
       }
@@ -709,6 +791,7 @@ export function createSkillsService({
             manifest: next.manifest, contentSha256: next.contentSha256, lastCheckedAt: now(), updatedAt: now()
           })
           db.linkServerSkillPackage({ ...serverSource, packageId })
+          db.upsertSkillSourceIdentity(sourceIdentityFor(packageId, serverSource, now()))
           guard?.()
         })
         await persistOrThrow(guard)
@@ -1173,16 +1256,22 @@ export function createSkillsService({
     if (!item) return false
     if (item.enabled && existsSync(item.targetPath)) removeManagedSkillDirectory(item.targetPath, item.deployedSha256)
     db.deleteSkillInstallation(item.id)
-    const remaining = db.listSkillInstallations({ packageId: item.packageId })
-    if (!remaining.length) {
-      const pkg = db.getSkillPackage(item.packageId)
-      if (pkg) {
-        removeManagedSkillDirectory(packageDirectory(pkg.id), pkg.contentSha256)
-        db.deleteSkillPackage(pkg.id)
-        const packageParent = join(packagesRoot, pkg.id)
-        if (existsSync(packageParent)) rmSync(packageParent, { recursive: true, force: true })
+    await persistOrThrow()
+    return true
+  }
+
+  async function removePackage(packageId) {
+    const pkg = db.getSkillPackage(packageId)
+    if (!pkg) return false
+    for (const installation of db.listSkillInstallations({ packageId })) {
+      if (installation.enabled && existsSync(installation.targetPath)) {
+        removeManagedSkillDirectory(installation.targetPath, installation.deployedSha256)
       }
+      db.deleteSkillInstallation(installation.id)
     }
+    removeManagedSkillDirectory(packageDirectory(pkg.id), pkg.contentSha256)
+    db.deleteSkillPackage(pkg.id)
+    removeEmptyPackageParent(pkg.id)
     await persistOrThrow()
     return true
   }
@@ -1418,6 +1507,7 @@ export function createSkillsService({
     setEnabled,
     resolveDrift,
     removeInstallation,
+    removePackage,
     adopt,
     previewUpdate,
     update,

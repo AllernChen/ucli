@@ -51,6 +51,37 @@ test('sync requests the catalog without a cursor, then advances from the final c
   assert.equal(requests.every(({ options }) => options.redirect === 'manual' && options.headers.Authorization === 'Bearer access-token'), true)
 })
 
+test('verified catalog versions retain the current organization name as trusted source metadata', async () => {
+  const connectionManager = {
+    getRuntimeConnectionIdentity: () => ({ connectionId: 'connection-1', connectionRevision: 7 }),
+    getState: () => ({ serverOrigin: 'https://server.example.test', organization: { id: 'org-1', name: 'Example Org' } }),
+    getBootstrap: async () => ({ organization: { id: 'org-1' }, skillsCatalogUrl: 'https://server.example.test/api/v1/skills/catalog' }),
+    getAccessToken: async () => 'access-token'
+  }
+  const db = {
+    transaction: async work => work(),
+    replaceServerSkillVersions: ({ versions }) => { db.versions = versions },
+    listServerSkillVersions: () => db.versions || []
+  }
+  const item = {
+    id: 'version-1', version: '1.0.0', sha256: 'a'.repeat(64), sizeBytes: 1,
+    publishedAt: '2026-08-27T00:00:00.000Z', createdAt: '2026-08-27T00:00:00.000Z',
+    skill: { slug: 'example', name: 'Example', description: 'Example skill' },
+    downloadUrl: 'https://server.example.test/api/v1/skills/version-1/download'
+  }
+  const adapter = createSkillsCatalogAdapter({
+    connectionManager, db, stagingRoot: '.ucli-test-staging', sourceLoader: {}, skillsService: {},
+    fetchImpl: async url => new Response(JSON.stringify(url.endsWith('/revocations') ? [] : [item]), { headers: { 'content-type': 'application/json' } })
+  })
+
+  try {
+    await adapter.sync()
+    assert.equal(db.versions[0].organizationName, 'Example Org')
+  } finally {
+    await adapter.shutdown()
+  }
+})
+
 test('catalog and revocations require JSON MIME and route every lifecycle 401 through the identity-fenced manager', async () => {
   const item = {
     id: 'version-1', version: '1.0.0', sha256: 'a'.repeat(64), sizeBytes: 1,

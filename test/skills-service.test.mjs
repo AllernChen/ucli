@@ -55,6 +55,105 @@ async function withService(work, overrides = {}) {
   }
 }
 
+test('local installations expose trusted provenance and preserve canonical metadata until package removal', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['codex'],
+      scopeType: 'user'
+    })
+
+    assert.deepEqual(installed.sourceIdentity, {
+      packageId: installed.id,
+      originKind: 'local',
+      serverOrigin: null,
+      organizationId: null,
+      organizationName: null,
+      identityStatus: 'resolved',
+      catalogVersionId: null,
+      artifactSha256: null,
+      createdAt: installed.sourceIdentity.createdAt,
+      updatedAt: installed.sourceIdentity.updatedAt
+    })
+    assert.deepEqual(installed.cliDesiredStates.map(({ adapterId, desiredState }) => ({ adapterId, desiredState })), [
+      { adapterId: 'codex', desiredState: 'enabled' },
+      { adapterId: 'deepseek-harness', desiredState: 'inherit' },
+      { adapterId: 'opencode', desiredState: 'inherit' },
+      { adapterId: 'ucode', desiredState: 'inherit' }
+    ])
+
+    await service.removeInstallation(installed.installations[0].id)
+    assert.ok(db.getSkillPackage(installed.id))
+    assert.ok(db.getSkillSourceIdentity(installed.id))
+    assert.equal(db.listSkillInstallations({ packageId: installed.id }).length, 0)
+
+    await service.removePackage(installed.id)
+    assert.equal(db.getSkillPackage(installed.id), null)
+    assert.equal(db.getSkillSourceIdentity(installed.id), null)
+  })
+})
+
+test('verified server installation and update atomically retain organization provenance', async () => {
+  const sources = []
+  await withService(async ({ root, db, service }) => {
+    const first = join(root, 'server-first')
+    const second = join(root, 'server-second')
+    createSkill(first, 'First organization version')
+    createSkill(second, 'Updated organization version')
+    sources.push(first, second)
+
+    const source = (versionId, sha256) => ({
+      locator: 'https://server.example.test/organizations/org-1/skills/release-notes',
+      versionId,
+      serverOrigin: 'https://server.example.test',
+      organizationId: 'org-1',
+      organizationName: 'Example Org',
+      slug: 'release-notes',
+      version: versionId,
+      sha256
+    })
+    const targets = { targetAdapterIds: ['codex'], scopeType: 'user' }
+    const installed = await service.installVerifiedServerArchive({
+      archivePath: 'verified.zip', archiveIdentity: {}, source: source('version-1', 'a'.repeat(64)), targets
+    })
+    assert.deepEqual(db.getSkillSourceIdentity(installed.id), {
+      packageId: installed.id,
+      originKind: 'organization',
+      serverOrigin: 'https://server.example.test',
+      organizationId: 'org-1',
+      organizationName: 'Example Org',
+      identityStatus: 'resolved',
+      catalogVersionId: 'version-1',
+      artifactSha256: 'a'.repeat(64),
+      createdAt: db.getSkillSourceIdentity(installed.id).createdAt,
+      updatedAt: db.getSkillSourceIdentity(installed.id).updatedAt
+    })
+
+    await service.updateVerifiedServerArchive({
+      packageId: installed.id, archivePath: 'verified.zip', archiveIdentity: {}, source: source('version-2', 'b'.repeat(64)), targets
+    })
+    assert.deepEqual(db.getSkillSourceIdentity(installed.id), {
+      ...db.getSkillSourceIdentity(installed.id),
+      catalogVersionId: 'version-2',
+      artifactSha256: 'b'.repeat(64)
+    })
+  }, {
+    sourceLoader: {
+      async withVerifiedArchive(_archive, work) {
+        return work({
+          workingDirectory: sources.shift(),
+          source: { type: 'zip', locator: 'verified.zip', ref: '', subdir: '' },
+          resolvedRevision: null,
+          cleanup() {}
+        })
+      }
+    }
+  })
+})
+
 test('install stores one managed package and the minimum projections for four CLIs', async () => {
   await withService(async ({ root, db, service }) => {
     const source = join(root, 'source')
