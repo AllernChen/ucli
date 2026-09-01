@@ -5,12 +5,15 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 import {
   buildSkillVisibility, listSkillPresentationAdapters, planSkillProjections,
-  resolveDshAgentsRoot, resolveProjectScopeRoot, resolveSkillRoot, SKILL_ADAPTERS
+  listSkillProjectionCapabilities, resolveDshAgentsRoot, resolveProjectScopeRoot,
+  resolveSkillRoot, SKILL_ADAPTERS
 } from './adapters.js'
 import { sanitiseGitHubSource, sanitiseSkillError, validateSkillCompatibility } from './contracts.js'
 import { createSkillDiscovery } from './discovery.js'
 import { copySkillDirectoryAtomic, diffSkillDirectories, inspectSkillDirectory, removeManagedSkillDirectory } from './fileOps.js'
 import { backfillSkillManagementMetadata } from './metadataMigration.js'
+import { planSkillCliStateChange } from './projectionPlanner.js'
+import { createSkillStateCoordinator } from './stateCoordinator.js'
 
 function serviceError(message, code) {
   return Object.assign(new Error(message), { code })
@@ -1391,7 +1394,11 @@ export function createSkillsService({
     return packageView(db.getSkillPackage(pkg.id))
   }
 
-  async function applyToAdapter(packageId, targetAdapterId, { guard = null } = {}) {
+  async function applyToAdapter(packageId, targetAdapterId, {
+    guard = null,
+    deferDesiredStateCommit = false,
+    deferFlush = false
+  } = {}) {
     guard?.()
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
@@ -1486,10 +1493,10 @@ export function createSkillsService({
           enabled: true, deployedSha256: deployed.contentSha256, status: 'ready',
           createdAt: timestamp, updatedAt: timestamp
         })
-        recomputeDesiredStates(packageId, timestamp)
+        if (!deferDesiredStateCommit) recomputeDesiredStates(packageId, timestamp)
         guard?.()
       })
-      await persistOrThrow(guard)
+      if (!deferFlush) await persistOrThrow(guard)
       return packageView(db.getSkillPackage(packageId))
     } catch (error) {
       const requiresDurableCompensation = error?.code === 'SKILL_PERSISTENCE_PENDING' || error?.code === 'SERVER_SKILL_STALE'
@@ -1498,7 +1505,7 @@ export function createSkillsService({
         if (db.getSkillInstallation(installationId)) {
           await db.transaction(() => {
             db.deleteSkillInstallation(installationId)
-            recomputeDesiredStates(packageId, now())
+            if (!deferDesiredStateCommit) recomputeDesiredStates(packageId, now())
           })
         }
         if (requiresDurableCompensation) {
@@ -1518,7 +1525,11 @@ export function createSkillsService({
     }
   }
 
-  async function setEnabled(installationId, enabled, { guard = null } = {}) {
+  async function setEnabled(installationId, enabled, {
+    guard = null,
+    deferDesiredStateCommit = false,
+    deferFlush = false
+  } = {}) {
     guard?.()
     const item = db.getSkillInstallation(installationId)
     if (!item) throw serviceError('Skill installation was not found', 'SKILL_INSTALLATION_NOT_FOUND')
@@ -1537,7 +1548,7 @@ export function createSkillsService({
           db.updateSkillInstallation(item.id, {
             enabled: true, deployedSha256: deployed.contentSha256, status: 'ready', updatedAt: timestamp
           })
-          recomputeDesiredStates(item.packageId, timestamp)
+          if (!deferDesiredStateCommit) recomputeDesiredStates(item.packageId, timestamp)
         })
       } else {
         guard?.()
@@ -1548,10 +1559,10 @@ export function createSkillsService({
           db.updateSkillInstallation(item.id, {
             enabled: false, deployedSha256: null, status: 'disabled', updatedAt: timestamp
           })
-          recomputeDesiredStates(item.packageId, timestamp)
+          if (!deferDesiredStateCommit) recomputeDesiredStates(item.packageId, timestamp)
         })
       }
-      await persistOrThrow(guard)
+      if (!deferFlush) await persistOrThrow(guard)
       return inspectInstallation(db.getSkillInstallation(item.id))
     } catch (error) {
       if (!changed) throw error
@@ -1566,7 +1577,7 @@ export function createSkillsService({
           db.updateSkillInstallation(item.id, {
             enabled: item.enabled, deployedSha256: item.deployedSha256, status: item.status, updatedAt: item.updatedAt
           })
-          recomputeDesiredStates(item.packageId, item.updatedAt)
+          if (!deferDesiredStateCommit) recomputeDesiredStates(item.packageId, item.updatedAt)
         })
         const result = await flush()
         if (result === false) throw new Error('flush failed')
@@ -2034,6 +2045,181 @@ export function createSkillsService({
     }))
   }
 
+  function stateScope(request) {
+    if (!request || typeof request !== 'object' || !['user', 'project'].includes(request.scopeType) ||
+      typeof request.scopeKey !== 'string' || !request.scopeKey) {
+      throw serviceError('Skill scope is invalid', 'SKILL_SCOPE_INVALID')
+    }
+    if (request.scopeType === 'user') {
+      if (request.scopeKey !== '*') throw serviceError('Skill scope is invalid', 'SKILL_SCOPE_INVALID')
+      return { type: 'user', key: '*' }
+    }
+    return { type: 'project', key: normalizedPath(request.scopeKey) }
+  }
+
+  function stateSnapshot(request) {
+    const pkg = db.getSkillPackage(request.packageId)
+    if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    const scope = stateScope(request)
+    const canonical = inspectSkillDirectory(packageDirectory(pkg.id))
+    if (canonical.contentSha256 !== pkg.contentSha256) {
+      throw serviceError('Managed package was modified outside UCLI', 'SKILL_DRIFTED')
+    }
+    const installations = db.listSkillInstallations({ packageId: pkg.id })
+      .filter((item) => item.scopeType === scope.type && normalizedPath(item.scopeKey) === normalizedPath(scope.key))
+      .map((item) => {
+        const inspected = inspectInstallation(item)
+        return {
+          ...inspected,
+          deployedSha256: inspected.deployedSha256 || pkg.contentSha256
+        }
+      })
+    const desiredStates = db.listSkillCliDesiredStates({ packageId: pkg.id })
+      .filter((item) => item.scopeType === scope.type && normalizedPath(item.scopeKey) === normalizedPath(scope.key))
+    if (!installations.length || !desiredStates.length) {
+      throw serviceError('Skill package has no installation scope', 'SKILL_SCOPE_INVALID')
+    }
+    const capabilityOptions = scope.type === 'user'
+      ? { scopeType: 'user', home: skillHome, env }
+      : null
+    return {
+      package: pkg,
+      scope,
+      compatibility: validateSkillCompatibility(pkg.name),
+      capabilityOptions,
+      capabilities: listSkillProjectionCapabilities(scope.type === 'user'
+        ? capabilityOptions
+        : { scopeType: 'project', projectPath: scope.key, home: skillHome, env }),
+      installations,
+      desiredStates
+    }
+  }
+
+  async function ensureStateProjection({ request, adapterId }) {
+    const before = db.listSkillInstallations({ packageId: request.packageId })
+      .find((item) => item.targetAdapterId === adapterId && item.scopeType === request.scopeType &&
+        normalizedPath(item.scopeKey) === normalizedPath(request.scopeKey)) || null
+    await applyToAdapter(request.packageId, adapterId, {
+      deferDesiredStateCommit: true,
+      deferFlush: true
+    })
+    const installation = db.listSkillInstallations({ packageId: request.packageId })
+      .find((item) => item.targetAdapterId === adapterId && item.scopeType === request.scopeType &&
+        normalizedPath(item.scopeKey) === normalizedPath(request.scopeKey))
+    if (!installation) throw serviceError('Skill projection was not created', 'SKILL_TARGET_MISSING')
+    return {
+      adapterId,
+      installationId: installation.id,
+      created: !before,
+      sha256: installation.deployedSha256 || db.getSkillPackage(request.packageId).contentSha256
+    }
+  }
+
+  async function verifyStateProjection({ request, adapterId, expectedSha256 }) {
+    const installation = db.listSkillInstallations({ packageId: request.packageId })
+      .find((item) => item.targetAdapterId === adapterId && item.scopeType === request.scopeType &&
+        normalizedPath(item.scopeKey) === normalizedPath(request.scopeKey) && item.enabled)
+    if (!installation) throw serviceError('Skill projection is missing', 'SKILL_TARGET_MISSING')
+    const inspection = inspectSkillDirectory(installation.targetPath)
+    if (inspection.contentSha256 !== expectedSha256 || installation.deployedSha256 !== expectedSha256) {
+      throw serviceError('Skill projection has drifted', 'SKILL_DRIFTED')
+    }
+    return { sha256: inspection.contentSha256 }
+  }
+
+  async function disableStateProjection({ request, adapterId }) {
+    const installation = db.listSkillInstallations({ packageId: request.packageId })
+      .find((item) => item.targetAdapterId === adapterId && item.scopeType === request.scopeType &&
+        normalizedPath(item.scopeKey) === normalizedPath(request.scopeKey) && item.enabled)
+    if (!installation) throw serviceError('Skill projection is missing', 'SKILL_TARGET_MISSING')
+    await setEnabled(installation.id, false, { deferDesiredStateCommit: true, deferFlush: true })
+    return { adapterId, installationId: installation.id }
+  }
+
+  async function restoreStateProjection({ installationId }) {
+    if (!installationId) throw serviceError('Skill installation was not found', 'SKILL_INSTALLATION_NOT_FOUND')
+    await setEnabled(installationId, true, { deferDesiredStateCommit: true, deferFlush: true })
+  }
+
+  async function removeCreatedStateProjection({ installationId, expectedSha256 }) {
+    const installation = db.getSkillInstallation(installationId)
+    if (!installation) return
+    if (installation.enabled) {
+      const inspected = inspectSkillDirectory(installation.targetPath)
+      if (inspected.contentSha256 !== expectedSha256 || installation.deployedSha256 !== expectedSha256) {
+        throw serviceError('Created skill projection has drifted', 'SKILL_DRIFTED')
+      }
+      await setEnabled(installation.id, false, { deferDesiredStateCommit: true, deferFlush: true })
+    }
+    await db.transaction(() => db.deleteSkillInstallation(installation.id))
+  }
+
+  async function commitStateDesired({ request, changes }) {
+    const scope = stateScope(request)
+    await db.transaction(() => {
+      for (const change of changes) {
+        const current = db.listSkillCliDesiredStates({
+          packageId: request.packageId,
+          scopeType: scope.type,
+          scopeKey: scope.key,
+          adapterId: change.adapterId
+        })[0]
+        db.upsertSkillCliDesiredState({
+          ...(current || {
+            packageId: request.packageId,
+            scopeType: scope.type,
+            scopeKey: scope.key,
+            adapterId: change.adapterId
+          }),
+          desiredState: change.desiredState,
+          enforcementStatus: 'satisfied',
+          reasonCode: null,
+          updatedAt: now()
+        })
+      }
+    })
+  }
+
+  async function markStateRecovery({ request }) {
+    const scope = stateScope(request)
+    await db.transaction(() => {
+      for (const current of db.listSkillCliDesiredStates({
+        packageId: request.packageId,
+        scopeType: scope.type,
+        scopeKey: scope.key
+      })) {
+        db.upsertSkillCliDesiredState({
+          ...current,
+          enforcementStatus: 'recovery_required',
+          reasonCode: 'SKILL_PROJECTION_RECOVERY_REQUIRED',
+          updatedAt: now()
+        })
+      }
+    })
+    try { await persistOrThrow() } catch { /* the in-memory recovery gate remains authoritative for this process */ }
+  }
+
+  const stateCoordinator = createSkillStateCoordinator({
+    loadSnapshot: stateSnapshot,
+    plan: planSkillCliStateChange,
+    ensureDirect: ensureStateProjection,
+    verifyDirect: verifyStateProjection,
+    disableDirect: disableStateProjection,
+    commitDesired: commitStateDesired,
+    flush: () => persistOrThrow(),
+    rescan: async ({ packageId, request }) => {
+      const scope = stateScope(request)
+      const affectedInstallationIds = db.listSkillInstallations({ packageId })
+        .filter((item) => item.scopeType === scope.type && normalizedPath(item.scopeKey) === normalizedPath(scope.key))
+        .map((item) => item.id)
+      return { affectedInstallationIds, affectedSessions: getAffectedSessions(affectedInstallationIds).map((item) => item.id) }
+    },
+    restoreDirect: restoreStateProjection,
+    removeCreatedDirect: removeCreatedStateProjection,
+    markRecovery: markStateRecovery,
+    packageView: async (packageId) => packageView(db.getSkillPackage(packageId))
+  })
+
   return {
     inspectSource: async (source, context = {}) => {
       const preview = await sourceLoader.inspect(source)
@@ -2057,6 +2243,8 @@ export function createSkillsService({
     installMany,
     installVerifiedServerArchive,
     updateVerifiedServerArchive,
+    previewCliStateChange: stateCoordinator.preview,
+    applyCliStateChange: stateCoordinator.apply,
     applyToAdapter,
     setEnabled,
     resolveDrift,

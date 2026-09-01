@@ -96,6 +96,162 @@ test('local installations expose trusted provenance and preserve canonical metad
   })
 })
 
+test('CLI state reconciliation creates OpenCode before disabling Codex and commits explicit desired states', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['codex'],
+      scopeType: 'user'
+    })
+    const request = {
+      packageId: installed.id,
+      scopeType: 'user',
+      scopeKey: '*',
+      changes: [
+        { adapterId: 'codex', desiredState: 'disabled' },
+        { adapterId: 'opencode', desiredState: 'enabled' }
+      ]
+    }
+
+    const preview = service.previewCliStateChange(request)
+    assert.equal(preview.classification, 'migration_required')
+
+    const result = await service.applyCliStateChange({ ...request, expectedRevision: preview.revision })
+
+    assert.equal(existsSync(join(root, 'home', '.config', 'opencode', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(existsSync(join(root, 'home', '.agents', 'skills', 'release-notes')), false)
+    assert.deepEqual(db.listSkillCliDesiredStates({ packageId: installed.id })
+      .filter((item) => ['codex', 'opencode'].includes(item.adapterId))
+      .map(({ adapterId, desiredState, enforcementStatus }) => ({ adapterId, desiredState, enforcementStatus })), [
+      { adapterId: 'codex', desiredState: 'disabled', enforcementStatus: 'satisfied' },
+      { adapterId: 'opencode', desiredState: 'enabled', enforcementStatus: 'satisfied' }
+    ])
+    assert.equal(result.package.id, installed.id)
+    assert.equal(result.plan.revision, preview.revision)
+  })
+})
+
+test('CLI state reconciliation blocks inherited OpenCode disable while Codex remains enabled without mutation', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source },
+      targetAdapterIds: ['codex'],
+      scopeType: 'user'
+    })
+    const before = db.listSkillCliDesiredStates({ packageId: installed.id })
+    const request = {
+      packageId: installed.id,
+      scopeType: 'user',
+      scopeKey: '*',
+      changes: [{ adapterId: 'opencode', desiredState: 'disabled' }]
+    }
+
+    const preview = service.previewCliStateChange(request)
+    assert.equal(preview.classification, 'blocked')
+    assert.equal(preview.reasonCode, 'SKILL_CLI_ISOLATION_UNSUPPORTED')
+    await assert.rejects(
+      service.applyCliStateChange({ ...request, expectedRevision: preview.revision }),
+      { code: 'SKILL_CLI_ISOLATION_UNSUPPORTED' }
+    )
+
+    assert.equal(existsSync(join(root, 'home', '.agents', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(existsSync(join(root, 'home', '.config', 'opencode', 'skills', 'release-notes')), false)
+    assert.deepEqual(db.listSkillCliDesiredStates({ packageId: installed.id }), before)
+  })
+})
+
+test('CLI state reconciliation rejects stale previews and drift before changing projections', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    const request = {
+      packageId: installed.id, scopeType: 'user', scopeKey: '*',
+      changes: [{ adapterId: 'opencode', desiredState: 'enabled' }]
+    }
+    const preview = service.previewCliStateChange(request)
+    const current = db.listSkillCliDesiredStates({ packageId: installed.id, adapterId: 'opencode' })[0]
+    db.upsertSkillCliDesiredState({ ...current, enforcementStatus: 'migration_required', updatedAt: current.updatedAt + 1 })
+
+    await assert.rejects(
+      service.applyCliStateChange({ ...request, expectedRevision: preview.revision }),
+      { code: 'SKILL_PROJECTION_PLAN_STALE' }
+    )
+    assert.equal(existsSync(join(root, 'home', '.config', 'opencode', 'skills', 'release-notes')), false)
+
+    createSkill(join(root, 'home', '.agents', 'skills', 'release-notes'), 'Changed outside UCLI')
+    const driftPreview = service.previewCliStateChange(request)
+    await assert.rejects(
+      service.applyCliStateChange({ ...request, expectedRevision: driftPreview.revision }),
+      { code: 'SKILL_DRIFTED' }
+    )
+    assert.equal(existsSync(join(root, 'home', '.config', 'opencode', 'skills', 'release-notes')), false)
+  })
+})
+
+test('CLI state reconciliation marks persistence uncertainty as recovery while retaining the verified replacement projection', async () => {
+  let failFlush = false
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    const request = {
+      packageId: installed.id, scopeType: 'user', scopeKey: '*',
+      changes: [
+        { adapterId: 'codex', desiredState: 'disabled' },
+        { adapterId: 'opencode', desiredState: 'enabled' }
+      ]
+    }
+    const preview = service.previewCliStateChange(request)
+    failFlush = true
+
+    const recoveryPreview = service.previewCliStateChange(request)
+    await assert.rejects(
+      service.applyCliStateChange({ ...request, expectedRevision: recoveryPreview.revision }),
+      { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' }
+    )
+    assert.equal(existsSync(join(root, 'home', '.config', 'opencode', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(db.listSkillCliDesiredStates({ packageId: installed.id })
+      .every((item) => item.enforcementStatus === 'recovery_required'), true)
+    const blockedPreview = service.previewCliStateChange(request)
+    await assert.rejects(
+      service.applyCliStateChange({ ...request, expectedRevision: blockedPreview.revision }),
+      { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' }
+    )
+  }, {
+    flushFactory: (db) => () => failFlush ? false : db.flush()
+  })
+})
+
+test('CLI state reconciliation migrates a DSH projection to Codex while retaining DeepSeek Harness visibility', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['deepseek-harness'], scopeType: 'user'
+    })
+    const request = {
+      packageId: installed.id, scopeType: 'user', scopeKey: '*',
+      changes: [{ adapterId: 'codex', desiredState: 'enabled' }]
+    }
+    const preview = service.previewCliStateChange(request)
+
+    const result = await service.applyCliStateChange({ ...request, expectedRevision: preview.revision })
+
+    assert.equal(result.package.installations[0].targetAdapterId, 'codex')
+    assert.equal(result.package.visibility['deepseek-harness'].visible, true)
+    assert.equal(db.listSkillCliDesiredStates({ packageId: installed.id, adapterId: 'deepseek-harness' })[0].desiredState, 'enabled')
+  })
+})
+
 test('verified server installation and update atomically retain organization provenance', async () => {
   const sources = []
   await withService(async ({ root, db, service }) => {

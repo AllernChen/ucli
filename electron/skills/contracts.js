@@ -3,7 +3,7 @@ import { isAllowedGitLabUrl } from '../../src/gitRemotePolicy.js'
 
 const PORTABLE_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
-function skillError(message, code = 'SKILL_MANIFEST_INVALID') {
+export function skillError(message, code = 'SKILL_MANIFEST_INVALID') {
   return Object.assign(new Error(message), { code })
 }
 

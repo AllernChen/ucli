@@ -10,6 +10,7 @@ import {
   sanitiseGitRemoteSource,
   sanitiseGitLabSource,
   sanitiseGitHubSource,
+  skillError,
   validateDshSkillName,
   validateSkillCompatibility
 } from '../electron/skills/contracts.js'
@@ -21,6 +22,12 @@ import {
   resolveSkillRoot,
   SKILL_ADAPTERS
 } from '../electron/skills/adapters.js'
+
+test('projection errors retain only their stable public code', () => {
+  const error = skillError('Skill projection plan is stale', 'SKILL_PROJECTION_PLAN_STALE')
+  assert.equal(error.message, 'Skill projection plan is stale')
+  assert.equal(error.code, 'SKILL_PROJECTION_PLAN_STALE')
+})
 
 test('skill manifest requires Agent Skills name and description', () => {
   const parsed = parseSkillManifest(`---\nname: release-notes\ndescription: Prepare release notes\nallowed-tools:\n  - Read\n---\n\n# Instructions\n`)
