@@ -323,6 +323,16 @@ Codex 仅可选择声明 `openai_responses` 的模型，Claude 仅可选择声�
 
 断开只移除在线目录和下载入口，不删除已安装 Skill。重连后按 origin、组织、slug 和 version 恢复关联。
 
+### 13.1 组织 Skills、本地 Skills 与严格 CLI 状态
+
+客户端分别聚合“组织 Skills”和“本地 Skills”。组织目录采用缓存优先：进入页面时读取本地缓存并后台调用 `ensure-skills-fresh`，五分钟 TTL 内不重复网络同步；同一连接身份的同步合并，匹配连接 revision 的目录变更事件通知页面重新读取。临时网络失败保留最后成功缓存并只报告 Skills 同步错误；显式断开仅清理未安装在线目录和下载入口。
+
+安装组织 Skill 后，`skill_source_identities` 保存规范化服务端、组织、目录版本和制品摘要。该来源身份在断开、暂时离线或目录替换后仍然保留，因此已安装包继续显示在原组织，不会按名称、内容或当前连接误归为本地 Skills。
+
+`skill_cli_desired_states` 使用 `enabled`、`disabled` 和 `inherit` 表示用户对每个 CLI 的期望。`inherit` 只表示通过另一健康物理投影可见，用户尚未请求独立管理。提供者停用而消费者仍为 enabled 时，协调器先创建并校验消费者投影；若消费者需要在提供者保持 enabled 时严格停用，但客户端没有可测试的继承排除能力，则返回 `SKILL_CLI_ISOLATION_UNSUPPORTED` 并阻止写入。
+
+批量操作按稳定 package ID 顺序逐项执行，结果包含 succeeded、failed、skipped、recoveryRequired 与 aborted。普通失败允许后续项继续；`SKILL_PERSISTENCE_PENDING` 或恢复一致性失败会中止余项，避免报告不可靠的成功。停用不删除规范包，移除投影不删除规范包或来源身份；只有独立确认的“移除受管包”才删除规范副本、来源身份、期望状态、服务端映射和其余投影。
+
 ## 14. 双有效期与提醒
 
 URL 有效期只决定当前注册链接是否可用，不创建长期提醒。

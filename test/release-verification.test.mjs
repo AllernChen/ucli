@@ -162,6 +162,24 @@ test('Gateway release acceptance documents every required Feishu prerequisite', 
   }
 })
 
+test('Skills delivery documents retain the local management safety contract', async () => {
+  const documents = await Promise.all([
+    readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8'),
+    readFile(new URL('../docs/ucli-client-protocol.md', import.meta.url), 'utf8'),
+    readFile(new URL('../docs/ucli-client-registration-upgrade.md', import.meta.url), 'utf8')
+  ])
+
+  for (const document of documents) {
+    for (const concept of [
+      '组织 Skills',
+      '本地 Skills',
+      'inherit',
+      'SKILL_CLI_ISOLATION_UNSUPPORTED',
+      '批量'
+    ]) assert.match(document, new RegExp(concept))
+  }
+})
+
 async function createReleaseFixture() {
   const rootDir = await mkdtemp(path.join(os.tmpdir(), 'ucli-release-'))
   const distDir = path.join(rootDir, 'dist')
