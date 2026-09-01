@@ -364,16 +364,19 @@ export function createSkillsService({
     }
   }
 
-  function removalRecoveryPath(packageId) {
-    return join(updateStagingRoot, `removal-recovery-${packageId}`)
-  }
-
-  function removalJournalPath(packageId) {
-    return join(updateStagingRoot, `removal-recovery-${encodeURIComponent(packageId)}.json`)
-  }
-
-  function committedRemovalTombstonePath(packageId) {
-    return join(updateStagingRoot, `removal-recovery-${encodeURIComponent(packageId)}.committed`)
+  function removalPaths(packageId) {
+    if (typeof packageId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(packageId)) return null
+    const packageParent = join(packagesRoot, packageId)
+    const canonical = join(packageParent, 'current')
+    const backup = join(updateStagingRoot, `removal-recovery-${packageId}`)
+    const journal = join(updateStagingRoot, `removal-recovery-${encodeURIComponent(packageId)}.json`)
+    const tombstone = join(updateStagingRoot, `removal-recovery-${encodeURIComponent(packageId)}.committed`)
+    if (normalizedPath(dirname(packageParent)) !== normalizedPath(packagesRoot) ||
+      normalizedPath(dirname(canonical)) !== normalizedPath(packageParent) ||
+      !pathIsWithin(packagesRoot, packageParent) || !pathIsWithin(packagesRoot, canonical) ||
+      !pathIsWithin(updateStagingRoot, backup) || !pathIsWithin(updateStagingRoot, journal) ||
+      !pathIsWithin(updateStagingRoot, tombstone)) return null
+    return { canonical, backup, journal, tombstone }
   }
 
   function removalSnapshot(pkg, installations, sourceIdentity, desiredStates, serverMapping) {
@@ -405,7 +408,7 @@ export function createSkillsService({
       (value.serverMapping !== null && (typeof value.serverMapping !== 'object' || Array.isArray(value.serverMapping)))) {
       throw new Error('invalid removal recovery record')
     }
-    if (!pathIsWithin(packagesRoot, packageDirectory(value.package.id))) throw new Error('invalid removal recovery record')
+    if (!removalPaths(value.package.id)) throw new Error('invalid removal recovery record')
     for (const item of value.installations) {
       if (!item || typeof item !== 'object' || Array.isArray(item) || item.packageId !== value.package.id ||
         !SKILL_ADAPTERS[item.targetAdapterId] || !['user', 'project'].includes(item.scopeType) ||
@@ -438,7 +441,8 @@ export function createSkillsService({
       const value = validatedRemovalSnapshot(snapshot)
       const json = JSON.stringify(value)
       if (Buffer.byteLength(json, 'utf8') > 262144) throw new Error('too large')
-      const path = removalJournalPath(value.package.id)
+      const path = removalPaths(value.package.id)?.journal
+      if (!path) throw new Error('invalid removal recovery record')
       if (existsSync(path)) throw new Error('already required')
       temporary = `${path}.${randomUUID()}.tmp`
       writeFileSync(temporary, json, { encoding: 'utf8', mode: 0o600 })
@@ -462,11 +466,9 @@ export function createSkillsService({
   function writeCommittedRemovalTombstone(packageId) {
     let temporary = null
     try {
-      if (typeof packageId !== 'string' || !packageId || packageId.length > 128 ||
-        !pathIsWithin(packagesRoot, packageDirectory(packageId))) {
-        throw new Error('invalid removal cleanup record')
-      }
-      const path = committedRemovalTombstonePath(packageId)
+      const paths = removalPaths(packageId)
+      if (!paths) throw new Error('invalid removal cleanup record')
+      const path = paths.tombstone
       if (existsSync(path)) return
       temporary = `${path}.${randomUUID()}.tmp`
       writeRemovalTombstone(temporary, JSON.stringify({ version: 1, phase: 'cleanup_only', packageId }), { encoding: 'utf8', mode: 0o600 })
@@ -482,7 +484,7 @@ export function createSkillsService({
       const value = JSON.parse(readFileSync(path, 'utf8'))
       if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 ||
         value.phase !== 'cleanup_only' || typeof value.packageId !== 'string' || !value.packageId ||
-        value.packageId.length > 128 || !pathIsWithin(packagesRoot, packageDirectory(value.packageId))) {
+        !removalPaths(value.packageId)) {
         throw new Error('invalid removal cleanup record')
       }
       return value.packageId
@@ -493,9 +495,9 @@ export function createSkillsService({
 
   function cleanupCommittedRemoval(packageId) {
     try {
-      const backup = removalRecoveryPath(packageId)
-      const journal = removalJournalPath(packageId)
-      const tombstone = committedRemovalTombstonePath(packageId)
+      const paths = removalPaths(packageId)
+      if (!paths) throw new Error('invalid removal cleanup record')
+      const { backup, journal, tombstone } = paths
       if (existsSync(backup)) removeRecoveryBackup(backup)
       if (existsSync(journal)) removeRecoveryJournal(journal)
       if (existsSync(tombstone)) rmSync(tombstone, { force: true })
@@ -530,14 +532,16 @@ export function createSkillsService({
   }
 
   async function recoverLegacyRemovalIfNeeded(packageId) {
-    const backup = removalRecoveryPath(packageId)
+    const paths = removalPaths(packageId)
+    if (!paths) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    const { backup, canonical } = paths
     const marked = db.listSkillCliDesiredStates({ packageId })
       .some((state) => state.enforcementStatus === 'recovery_required' && state.reasonCode === 'SKILL_REMOVAL_RECOVERY_REQUIRED')
     if (!marked && !existsSync(backup)) return
     const pkg = db.getSkillPackage(packageId)
     if (!pkg || !existsSync(backup)) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     try {
-      if (!existsSync(packageDirectory(packageId))) recoveryCopy(backup, packageDirectory(packageId))
+      if (!existsSync(canonical)) recoveryCopy(backup, canonical)
       for (const installation of db.listSkillInstallations({ packageId })) {
         if (installation.enabled && !existsSync(installation.targetPath)) recoveryCopy(backup, installation.targetPath)
       }
@@ -552,7 +556,9 @@ export function createSkillsService({
 
   async function recoverRemovalJournal(path) {
     const snapshot = readRemovalJournal(path)
-    const backup = removalRecoveryPath(snapshot.package.id)
+    const paths = removalPaths(snapshot.package.id)
+    if (!paths) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    const { backup, canonical } = paths
     if (!existsSync(backup)) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     try {
       await db.transaction(() => {
@@ -568,7 +574,7 @@ export function createSkillsService({
         db.deleteSkillCliDesiredStates(snapshot.package.id)
         for (const state of snapshot.desiredStates) db.upsertSkillCliDesiredState(state)
       })
-      if (!existsSync(packageDirectory(snapshot.package.id))) recoveryCopy(backup, packageDirectory(snapshot.package.id))
+      if (!existsSync(canonical)) recoveryCopy(backup, canonical)
       for (const installation of snapshot.installations) {
         if (installation.enabled && !existsSync(installation.targetPath)) recoveryCopy(backup, installation.targetPath)
       }
@@ -1562,8 +1568,9 @@ export function createSkillsService({
     const sourceIdentity = db.getSkillSourceIdentity(pkg.id)
     const desiredStates = db.listSkillCliDesiredStates({ packageId: pkg.id })
     const serverMapping = db.getServerSkillPackage(pkg.id)
-    const backup = removalRecoveryPath(pkg.id)
-    const journal = removalJournalPath(pkg.id)
+    const paths = removalPaths(pkg.id)
+    if (!paths) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    const { backup, journal, canonical } = paths
     let removed = false
     let recordRemoved = false
     let backupReady = false
@@ -1571,7 +1578,7 @@ export function createSkillsService({
     let recoveryRequired = false
     let committed = false
     try {
-      recoveryCopy(packageDirectory(pkg.id), backup)
+      recoveryCopy(canonical, backup)
       backupReady = true
       writeRemovalJournal(removalSnapshot(pkg, installations, sourceIdentity, desiredStates, serverMapping))
       journalWritten = true
@@ -1629,8 +1636,9 @@ export function createSkillsService({
     const sourceIdentity = db.getSkillSourceIdentity(packageId)
     const desiredStates = db.listSkillCliDesiredStates({ packageId })
     const serverMapping = db.getServerSkillPackage(packageId)
-    const backup = removalRecoveryPath(pkg.id)
-    const journal = removalJournalPath(pkg.id)
+    const paths = removalPaths(pkg.id)
+    if (!paths) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    const { backup, journal, canonical } = paths
     const removed = []
     let canonicalRemoved = false
     let recordsRemoved = false
@@ -1639,7 +1647,7 @@ export function createSkillsService({
     let recoveryRequired = false
     let committed = false
     try {
-      recoveryCopy(packageDirectory(pkg.id), backup)
+      recoveryCopy(canonical, backup)
       backupReady = true
       writeRemovalJournal(removalSnapshot(pkg, installations, sourceIdentity, desiredStates, serverMapping))
       journalWritten = true
@@ -1648,7 +1656,7 @@ export function createSkillsService({
         removed.push(installation)
         managedRemoval(installation.targetPath, installation.deployedSha256)
       }
-      managedRemoval(packageDirectory(pkg.id), pkg.contentSha256)
+      managedRemoval(canonical, pkg.contentSha256)
       canonicalRemoved = true
       await db.transaction(() => {
         for (const installation of installations) db.deleteSkillInstallation(installation.id)
@@ -1667,8 +1675,8 @@ export function createSkillsService({
       let recovered = true
       try {
         if (recordsRemoved) db.deleteSkillRemovalOperation(pkg.id)
-        if (canonicalRemoved && !existsSync(packageDirectory(pkg.id))) {
-          recoveryCopy(backup, packageDirectory(pkg.id))
+        if (canonicalRemoved && !existsSync(canonical)) {
+          recoveryCopy(backup, canonical)
         }
         for (const installation of removed.reverse()) {
           if (!existsSync(installation.targetPath)) recoveryCopy(backup, installation.targetPath)

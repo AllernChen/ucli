@@ -145,6 +145,25 @@ test('database retains a bounded removal operation after its skill records are d
   })
 })
 
+test('database rejects unsafe opaque removal operation package identifiers from writes and rows', async () => {
+  const unsafePackageIds = ['../outside', 'nested/child', 'nested\\child', 'C:\\outside']
+  await withDb(async (db) => {
+    for (const packageId of unsafePackageIds) {
+      assert.throws(
+        () => db.recordSkillRemovalOperation({ packageId, createdAt: 200 }),
+        { code: 'SKILL_REMOVAL_OPERATION_INVALID' }
+      )
+
+      db.sql.run(
+        'INSERT INTO skill_removal_operations (package_id, created_at) VALUES (?, ?)',
+        [packageId, 200]
+      )
+      assert.throws(() => db.listSkillRemovalOperations(), { code: 'SKILL_REMOVAL_OPERATION_INVALID' })
+      db.sql.run('DELETE FROM skill_removal_operations WHERE package_id = ?', [packageId])
+    }
+  })
+})
+
 test('database persists normalized source identities and CLI desired states', async () => {
   await withDb(async (db) => {
     db.insertSkillPackage(skillPackage())

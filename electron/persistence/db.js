@@ -3504,6 +3504,7 @@ const SKILL_ENFORCEMENT_STATUSES = new Set([
   'satisfied', 'migration_required', 'blocked', 'error', 'recovery_required'
 ])
 const SKILL_ARTIFACT_SHA256 = /^[a-f0-9]{64}$/
+const SKILL_REMOVAL_OPERATION_PACKAGE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 
 function skillMetadataError(code, message) {
   return Object.assign(new TypeError(message), { code })
@@ -3604,7 +3605,9 @@ function normalizeSkillRemovalOperation(value) {
     throw skillMetadataError(code, 'Skill removal operation is invalid')
   }
   const packageId = requireNonEmptyString(value.packageId, code, 'Skill removal operation is invalid')
-  if (packageId.length > 128) throw skillMetadataError(code, 'Skill removal operation is invalid')
+  if (!SKILL_REMOVAL_OPERATION_PACKAGE_ID.test(packageId)) {
+    throw skillMetadataError(code, 'Skill removal operation is invalid')
+  }
   return { packageId, createdAt: requireTimestamp(value.createdAt, code) }
 }
 
@@ -3643,7 +3646,7 @@ function rowToSkillCliDesiredState(row) {
 }
 
 function rowToSkillRemovalOperation(row) {
-  return { packageId: row.package_id, createdAt: row.created_at }
+  return normalizeSkillRemovalOperation({ packageId: row.package_id, createdAt: row.created_at })
 }
 
 function gatewaySessionRoute(row) {

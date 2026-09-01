@@ -341,6 +341,38 @@ test('committed package removal retries failed backup cleanup without restoring 
   })
 })
 
+test('fresh recovery rejects tampered removal identifiers without touching an external sentinel', async () => {
+  const unsafePackageIds = ['../outside', 'nested/child', 'nested\\child', 'C:\\outside']
+  await withService(async ({ root, db }) => {
+    const sentinel = join(root, 'user-data', 'skills', 'outside', 'current')
+    mkdirSync(sentinel, { recursive: true })
+    writeFileSync(join(sentinel, 'sentinel.txt'), 'must remain')
+
+    for (const packageId of unsafePackageIds) {
+      db.sql.run(
+        'INSERT INTO skill_removal_operations (package_id, created_at) VALUES (?, ?)',
+        [packageId, 200]
+      )
+      const fresh = createSkillsService({
+        db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+        sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }), flush: () => db.flush()
+      })
+
+      await assert.rejects(
+        fresh.getState(),
+        (error) => error.code === 'SKILL_PROJECTION_RECOVERY_REQUIRED' &&
+          error.message === 'Skill removal recovery is required'
+      )
+      assert.equal(readFileSync(join(sentinel, 'sentinel.txt'), 'utf8'), 'must remain')
+      assert.deepEqual(
+        db.sql.exec('SELECT package_id FROM skill_removal_operations')[0].values,
+        [[packageId]]
+      )
+      db.sql.run('DELETE FROM skill_removal_operations WHERE package_id = ?', [packageId])
+    }
+  })
+})
+
 test('committed installation removal never replays its journal when tombstone rename fails', async () => {
   await withService(async ({ root, db, service }) => {
     const source = join(root, 'source')
