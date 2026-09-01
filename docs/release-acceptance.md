@@ -2,6 +2,16 @@
 
 本清单用于 UCLI Windows x64 发布前和 GitHub Release 发布后的人工验收。自动化 `npm run verify:release` 只验证构建产物和更新元数据的一致性；以下交互行为必须在实际 Windows 环境中验证。
 
+## 0. 0.12.1 发布证据
+
+| 项目 | 当前证据 / 状态 |
+| --- | --- |
+| 发布候选源码 | PASS：应用、协议能力和 Skills 管理实现基线为 `d0f64c682af621a061b255f256f47d2840171d31`；`package.json`、lockfile、侧栏版本与安装产物版本均为 `0.12.1`。设备注册线缆继续使用已部署的 `clientVersion: 0.12.0` 协议合同，不将桌面补丁版本误作协议版本。 |
+| 干净依赖与审计 | PASS：2026-09-01（Asia/Shanghai）执行 `npm ci --registry=https://registry.npmjs.org`，安装 608 个包；`npm audit --registry=https://registry.npmjs.org` 为 0 vulnerabilities。构建依赖链中的 `glob@10.4.5` 已由受测 override 固定到 `10.5.0`。 |
+| 自动化与构建门 | PASS：干净依赖树上 `npm test` 共 2090 项，2078 通过、0 失败、12 个平台条件跳过；`npm run build`、`npm run dist:win`、`npm run verify:release` 和 `git diff --check` 均通过。 |
+| Windows 本地产物 | PASS：同一次 Windows x64 构建生成 Setup `UCLI-Setup-0.12.1-x64.exe`（134,253,682 bytes，SHA-256 `24842A2A62C670715E4ECA61FD067C90063FA0DE2B52D56C1205B3CA20D35846`）；blockmap（137,319 bytes，SHA-256 `6FB08D1EC5EF447BDE5718B464C269D93B198A5F9DFB8AD316C803EF8DE92570`）；Portable `UCLI-Portable-0.12.1-x64.exe`（133,998,192 bytes，SHA-256 `2B5131D4197CB1B1A282C10D34432A03D1ABDF107AE1329842CF3054E2C6027D`）；`latest.yml`（348 bytes，SHA-256 `D7807E7C72632BF21F643F4812FCC606A8AE6A1A8AF92397377E4C41E41033DF`）。证据文档不属于 `electron-builder.yml` 的打包输入。 |
+| GitHub 发布 | 待完成：推送不可变标签 `v0.12.1` 后，由 `.github/workflows/release.yml` 重新运行测试、平台构建和产物校验，再创建 GitHub Release 与 `SHA256SUMS.txt`。 |
+
 ## 0. 0.12.0 服务端接入发布矩阵
 
 本节记录 Task 11 的本地合同门与待完成的外部发布门。固定 fixtures、静态安装器检查和本机构建都不能替代原生平台、真实服务或旧二进制验证。
