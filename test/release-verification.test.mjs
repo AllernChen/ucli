@@ -162,34 +162,75 @@ test('Gateway release acceptance documents every required Feishu prerequisite', 
   }
 })
 
-test('Skills delivery documents retain their specific local management safety clauses', async () => {
+function extractMarkdownSection(document, heading) {
+  const start = document.indexOf(heading)
+  assert.notEqual(start, -1, `missing required heading: ${heading}`)
+
+  const nextSection = document.indexOf('\n## ', start + heading.length)
+  return document.slice(start, nextSection === -1 ? undefined : nextSection)
+}
+
+function assertRequiredSkillsClauses(section, clauses) {
+  for (const clause of clauses) {
+    assert.ok(section.includes(clause), `missing required Skills clause: ${clause}`)
+  }
+}
+
+const protocolSkillsClauses = [
+  '组织目录采用缓存优先：页面先读取缓存并立即展示，再非阻塞请求 `ensure-skills-fresh`；相同连接身份的请求合并，目录五分钟 TTL 内保持新鲜，超过 TTL 或用户明确同步才发起新的后台目录请求。',
+  '临时网络或目录同步失败必须保留最后成功缓存的组织目录和本地 Skills，只更新独立的 Skills 同步错误域。',
+  '显式断开则只移除未安装的在线目录与下载入口；已安装组织包保留其规范化服务端、组织、目录版本和 SHA-256 来源身份。',
+  '该持久来源身份是组织来源归属的唯一真相源，断网后仍显示在原组织，而不会按名称或当前连接猜测为本地来源。',
+  '无法以受支持配置可靠排除继承目录时，保持启用提供者而严格停用继承消费者必须返回 `SKILL_CLI_ISOLATION_UNSUPPORTED`，不得伪造成功。',
+  '普通单项失败不阻止其他项，但 `SKILL_PERSISTENCE_PENDING` 或投影恢复失败必须中止剩余项。',
+  '停用仅改变 CLI 期望与投影状态，移除投影只移除一个物理安装且不删除规范包；移除受管包是单独确认的危险操作，才删除规范包、来源身份和全部投影。'
+]
+
+const registrationSkillsClauses = [
+  '组织目录采用缓存优先：进入页面时读取本地缓存并后台调用 `ensure-skills-fresh`，五分钟 TTL 内不重复网络同步；同一连接身份的同步合并，匹配连接 revision 的目录变更事件通知页面重新读取。',
+  '临时网络失败保留最后成功缓存并只报告 Skills 同步错误；显式断开仅清理未安装在线目录和下载入口。',
+  '该持久来源身份是组织来源归属的唯一真相源，在断开、暂时离线或目录替换后仍然保留，因此已安装包继续显示在原组织，不会按名称、内容或当前连接误归为本地 Skills。',
+  '若消费者需要在提供者保持 enabled 时严格停用，但客户端没有可测试的继承排除能力，则返回 `SKILL_CLI_ISOLATION_UNSUPPORTED` 并阻止写入。',
+  '`SKILL_PERSISTENCE_PENDING` 或恢复一致性失败会中止余项，避免报告不可靠的成功。',
+  '停用不删除规范包，移除投影不删除规范包或来源身份；只有独立确认的“移除受管包”才删除规范副本、来源身份、期望状态、服务端映射和其余投影。'
+]
+
+const acceptanceSkillsClauses = [
+  '- [ ] “组织 Skills”和“本地 Skills”视图均可用；组织目录先显示缓存，随后五分钟外的后台刷新可由匹配目录事件更新页面，且不阻塞本地视图。',
+  '- [ ] 临时同步失败保留组织缓存和本地 Skills；显式断开仅清理未安装在线目录，已安装组织包仍显示其持久来源身份。',
+  '- [ ] CLI 矩阵显示 `enabled`、`disabled` 与 `inherit`。直接停用只影响目标投影；无法隔离的继承消费者显示 `SKILL_CLI_ISOLATION_UNSUPPORTED`，不显示成功确认。',
+  '- [ ] 批量部分失败后只保留失败或跳过项供重试；`SKILL_PERSISTENCE_PENDING` 或恢复失败停止剩余项并显示恢复边界。',
+  '- [ ] 停用不删除规范包，移除投影不删除规范包；“移除受管包”有单独危险确认。控制台没有新的未捕获错误或重复 warning 循环。'
+]
+
+test('Skills delivery documents retain section-scoped local management safety clauses', async () => {
   const [acceptance, protocol, registration] = await Promise.all([
     readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8'),
     readFile(new URL('../docs/ucli-client-protocol.md', import.meta.url), 'utf8'),
     readFile(new URL('../docs/ucli-client-registration-upgrade.md', import.meta.url), 'utf8')
   ])
 
-  for (const document of [acceptance, protocol, registration]) {
-    for (const concept of ['组织 Skills', '本地 Skills', 'inherit', 'SKILL_CLI_ISOLATION_UNSUPPORTED', '批量']) {
-      assert.match(document, new RegExp(concept))
-    }
-  }
+  const protocolSkills = extractMarkdownSection(protocol, '### 14.1 组织 Skills、本地 Skills 与投影管理')
+  const registrationSkills = extractMarkdownSection(registration, '### 13.1 组织 Skills、本地 Skills 与严格 CLI 状态')
+  const acceptanceSkills = extractMarkdownSection(acceptance, '### 0.12.0 Skills 本地管理 DEV 验收')
 
-  for (const document of [protocol, registration]) {
-    assert.match(document, /缓存优先.*五分钟.*TTL/s)
-    assert.match(document, /临时.*失败.*保留.*缓存.*显式断开.*清理/s)
-    assert.match(document, /持久.*来源身份.*唯一真相/s)
-    assert.match(document, /SKILL_CLI_ISOLATION_UNSUPPORTED.*阻止/s)
-    assert.match(document, /SKILL_PERSISTENCE_PENDING.*中止/s)
-    assert.match(document, /移除投影.*不删除规范包.*移除受管包.*删除/s)
-  }
+  assertRequiredSkillsClauses(protocolSkills, protocolSkillsClauses)
+  assertRequiredSkillsClauses(registrationSkills, registrationSkillsClauses)
+  assertRequiredSkillsClauses(acceptanceSkills, acceptanceSkillsClauses)
+})
 
-  assert.match(acceptance, /缓存.*五分钟.*事件/s)
-  assert.match(acceptance, /临时.*保留.*显式断开.*清理/s)
-  assert.match(acceptance, /持久来源身份/s)
-  assert.match(acceptance, /SKILL_CLI_ISOLATION_UNSUPPORTED/)
-  assert.match(acceptance, /SKILL_PERSISTENCE_PENDING.*停止/s)
-  assert.match(acceptance, /移除投影.*不删除规范包.*移除受管包/s)
+test('Skills delivery safety gate rejects a removed disconnect clause inside the protocol section', async () => {
+  const protocol = await readFile(new URL('../docs/ucli-client-protocol.md', import.meta.url), 'utf8')
+  const protocolSkills = extractMarkdownSection(protocol, '### 14.1 组织 Skills、本地 Skills 与投影管理')
+  const removedDisconnectClause = protocolSkills.replace(
+    '显式断开则只移除未安装的在线目录与下载入口；已安装组织包保留其规范化服务端、组织、目录版本和 SHA-256 来源身份。',
+    ''
+  )
+
+  assert.throws(
+    () => assertRequiredSkillsClauses(removedDisconnectClause, protocolSkillsClauses),
+    /显式断开则只移除未安装的在线目录与下载入口/
+  )
 })
 
 async function createReleaseFixture() {
