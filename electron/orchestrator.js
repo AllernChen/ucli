@@ -4104,7 +4104,9 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       await gatewayManager?.shutdown()
       await serverSkillsSyncCoordinator?.shutdown()
       serverSkillsSyncCoordinator = null
-      skillsBatchCoordinator?.shutdown()
+      const skillsBatchDrain = skillsBatchCoordinator?.shutdown()
+      await serverSkillsCatalog?.shutdown()
+      await skillsBatchDrain
       skillsBatchCoordinator = null
       serverSkillsCatalog = null
       await localGatewayProxy?.shutdown()

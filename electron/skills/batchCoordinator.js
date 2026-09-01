@@ -11,7 +11,8 @@ const ACTIONS = new Map([
 ])
 const STOP_CODES = new Set([
   'SKILL_PERSISTENCE_PENDING',
-  'SKILL_PROJECTION_RECOVERY_REQUIRED'
+  'SKILL_PROJECTION_RECOVERY_REQUIRED',
+  'SKILL_PROJECTION_PLAN_STALE'
 ])
 const NON_RETRYABLE_CODES = new Set([
   'SKILL_DRIFTED',
@@ -144,6 +145,13 @@ function catalogSnapshot(version) {
   }
 }
 
+function entryDigest(entry) {
+  return revision({
+    item: entry.item,
+    snapshot: entry.item.kind === 'package' ? packageSnapshot(entry.value) : catalogSnapshot(entry.value)
+  })
+}
+
 function installationFor(pkg, targets) {
   return (pkg.installations || []).find(item => item.targetAdapterId === targets.adapterId &&
     item.scopeType === targets.scopeType && item.scopeKey === targets.scopeKey) || null
@@ -179,13 +187,14 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
     const entries = request.items.map((item) => {
       const value = item.kind === 'package' ? packages.get(item.id) : versions.get(item.id)
       if (!value) throw batchError('SKILL_BATCH_CONTEXT_INVALID')
-      return { item, value, context: item.kind === 'package' ? identityOf(value) : `${value.serverOrigin?.toLowerCase()}:${value.organizationId}` }
+      const entry = { item, value, context: item.kind === 'package' ? identityOf(value) : `${value.serverOrigin?.toLowerCase()}:${value.organizationId}` }
+      return { ...entry, digest: entryDigest(entry) }
     })
     const contexts = new Set(entries.map(entry => entry.context || 'local'))
     if (contexts.size > 1) throw batchError('SKILL_BATCH_CONTEXT_INVALID')
     return { entries, revision: revision({ action: request.action, targets: request.targets, entries: entries.map(entry => ({
       item: entry.item,
-      snapshot: entry.item.kind === 'package' ? packageSnapshot(entry.value) : catalogSnapshot(entry.value)
+      digest: entry.digest
     })) }) }
   }
 
@@ -240,11 +249,13 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
       return { packageId, affectedAdapterIds: affectedAdapterIds.length ? affectedAdapterIds : [request.targets.adapterId] }
     }
     if (request.action === 'remove_projections') {
-      await skillsService.removeInstallation(installationFor(entry.value, request.targets).id)
+      if (await skillsService.removeInstallation(installationFor(entry.value, request.targets).id) === false) {
+        return { skipped: 'SKILL_PROJECTION_NOT_FOUND' }
+      }
       return { packageId, affectedAdapterIds: [request.targets.adapterId] }
     }
     if (request.action === 'remove_packages') {
-      await skillsService.removePackage(packageId)
+      if (await skillsService.removePackage(packageId) === false) return { skipped: 'SKILL_PACKAGE_NOT_FOUND' }
       return { packageId, affectedAdapterIds: [...new Set((entry.value.installations || []).map(item => item.targetAdapterId))].sort() }
     }
     if (request.action === 'update_packages') {
@@ -257,7 +268,7 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
     return { packageId: result?.id || null, affectedAdapterIds: [...request.targets.targetAdapterIds].sort() }
   }
 
-  async function apply(request) {
+  async function applyOnce(request) {
     if (closed) return { succeeded: [], failed: [], skipped: [], recoveryRequired: [], aborted: { code: 'SKILL_BATCH_SHUTDOWN', remainingItems: [] } }
     const input = validateRequest(request, { apply: true })
     const initial = await resolved(input)
@@ -265,6 +276,7 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
       throw Object.assign(new Error('Skill batch plan is stale'), { code: 'SKILL_PROJECTION_PLAN_STALE' })
     }
     const result = { succeeded: [], failed: [], skipped: [], recoveryRequired: [], aborted: null }
+    const initialDigests = new Map(initial.entries.map(entry => [itemKey(entry.item), entry.digest]))
     for (let index = 0; index < input.items.length; index += 1) {
       if (closed) {
         result.aborted = { code: 'SKILL_BATCH_SHUTDOWN', remainingItems: input.items.slice(index) }
@@ -276,12 +288,19 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
       try {
         const current = await resolved({ ...input, items: [item] })
         entry = current.entries[0]
+        if (entry.digest !== initialDigests.get(itemKey(item))) {
+          throw Object.assign(new Error('Skill batch plan is stale'), { code: 'SKILL_PROJECTION_PLAN_STALE' })
+        }
         plan = await planEntry(input, entry)
         if (plan.classification === 'blocked' || plan.classification === 'noop') {
           result.skipped.push({ item, reasonCode: plan.reasonCode || (plan.classification === 'noop' ? 'SKILL_BATCH_NOOP' : 'SKILL_BATCH_BLOCKED') })
           continue
         }
         const completed = await execute(input, entry, plan)
+        if (completed.skipped) {
+          result.skipped.push({ item, reasonCode: completed.skipped })
+          continue
+        }
         result.succeeded.push({ item, packageId: completed.packageId, action: input.action, affectedAdapterIds: completed.affectedAdapterIds })
       } catch (error) {
         const code = error?.code || 'SKILL_OPERATION_FAILED'
@@ -299,5 +318,16 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
     return result
   }
 
-  return { preview, apply, shutdown: () => { closed = true } }
+  const active = new Set()
+  function apply(request) {
+    const work = applyOnce(request)
+    active.add(work)
+    return work.finally(() => active.delete(work))
+  }
+  async function shutdown() {
+    closed = true
+    await Promise.allSettled([...active])
+  }
+
+  return { preview, apply, shutdown }
 }

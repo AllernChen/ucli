@@ -51,6 +51,13 @@ function request(action, items = [{ kind: 'package', id: 'a' }, { kind: 'package
   }
 }
 
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((complete, fail) => { resolve = complete; reject = fail })
+  return { promise, resolve, reject }
+}
+
 test('batch coordinator rejects incompatible item kinds before any operation', async () => {
   const skillService = services()
   const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: { list: () => [] } })
@@ -125,4 +132,96 @@ test('batch coordinator aborts and records recovery-required package operations'
     }],
     aborted: { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED', remainingItems: [{ kind: 'package', id: 'b' }] }
   })
+})
+
+test('batch coordinator aborts stale remaining items when a deferred earlier item changes their trusted snapshot', async () => {
+  const packages = [packageView('a'), packageView('b'), packageView('c')]
+  const skillService = services({ packages })
+  const firstApplied = deferred()
+  const releaseFirst = deferred()
+  skillService.applyCliStateChange = async ({ packageId }) => {
+    skillService.calls.push(['apply-state', packageId])
+    if (packageId === 'a') {
+      firstApplied.resolve()
+      await releaseFirst.promise
+    }
+    return { affectedInstallationIds: [`${packageId}-codex`] }
+  }
+  const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: { list: () => [] } })
+  const initial = request('set_cli_state', [
+    { kind: 'package', id: 'a' }, { kind: 'package', id: 'b' }, { kind: 'package', id: 'c' }
+  ])
+  const preview = await coordinator.preview(initial)
+  const applying = coordinator.apply({ ...initial, expectedRevision: preview.revision })
+  await firstApplied.promise
+  packages[1] = { ...packages[1], contentSha256: 'b'.repeat(64) }
+  releaseFirst.resolve()
+
+  assert.deepEqual(await applying, {
+    succeeded: [{
+      item: { kind: 'package', id: 'a' }, packageId: 'a', action: 'set_cli_state', affectedAdapterIds: ['codex']
+    }],
+    failed: [{ item: { kind: 'package', id: 'b' }, code: 'SKILL_PROJECTION_PLAN_STALE', retryable: false }],
+    skipped: [], recoveryRequired: [],
+    aborted: { code: 'SKILL_PROJECTION_PLAN_STALE', remainingItems: [{ kind: 'package', id: 'c' }] }
+  })
+  assert.equal(skillService.calls.some(call => call[0] === 'apply-state' && call[1] === 'b'), false)
+})
+
+test('batch coordinator treats interleaved false removals as skipped rather than succeeded', async () => {
+  for (const [action, operation, reasonCode] of [
+    ['remove_projections', 'removeInstallation', 'SKILL_PROJECTION_NOT_FOUND'],
+    ['remove_packages', 'removePackage', 'SKILL_PACKAGE_NOT_FOUND']
+  ]) {
+    const skillService = services({ packages: [packageView('a')] })
+    skillService[operation] = async () => false
+    const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: { list: () => [] } })
+    const initial = request(action, [{ kind: 'package', id: 'a' }])
+    const preview = await coordinator.preview(initial)
+    const result = await coordinator.apply({ ...initial, expectedRevision: preview.revision })
+    assert.deepEqual(result, {
+      succeeded: [], failed: [],
+      skipped: [{ item: { kind: 'package', id: 'a' }, reasonCode }],
+      recoveryRequired: [], aborted: null
+    })
+  }
+})
+
+test('batch coordinator closes admission and drains a deferred catalog operation before shutdown resolves', async () => {
+  const installing = deferred()
+  const installStarted = deferred()
+  const catalog = {
+    list: () => [
+      { versionId: 'a', serverOrigin: 'https://skills.example.test', organizationId: 'org-1', lifecycleStatus: 'ACTIVE' },
+      { versionId: 'b', serverOrigin: 'https://skills.example.test', organizationId: 'org-1', lifecycleStatus: 'ACTIVE' }
+    ],
+    async install(versionId) {
+      installStarted.resolve(versionId)
+      return installing.promise
+    }
+  }
+  const coordinator = createSkillsBatchCoordinator({ skillsService: services(), organizationCatalog: catalog })
+  const initial = {
+    action: 'install_organization',
+    items: [{ kind: 'organization_version', id: 'a' }, { kind: 'organization_version', id: 'b' }],
+    targets: { scopeType: 'user', scopeKey: '*', targetAdapterIds: ['codex'] }
+  }
+  const preview = await coordinator.preview(initial)
+  const applying = coordinator.apply({ ...initial, expectedRevision: preview.revision })
+  await installStarted.promise
+  let stopped = false
+  const stopping = coordinator.shutdown().then(() => { stopped = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(stopped, false)
+  installing.resolve({ id: 'package-a' })
+
+  assert.deepEqual(await applying, {
+    succeeded: [{
+      item: { kind: 'organization_version', id: 'a' }, packageId: 'package-a', action: 'install_organization', affectedAdapterIds: ['codex']
+    }],
+    failed: [], skipped: [], recoveryRequired: [],
+    aborted: { code: 'SKILL_BATCH_SHUTDOWN', remainingItems: [{ kind: 'organization_version', id: 'b' }] }
+  })
+  await stopping
+  await assert.rejects(coordinator.preview(initial), { code: 'SKILL_BATCH_SHUTDOWN' })
 })

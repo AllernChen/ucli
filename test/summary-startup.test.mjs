@@ -212,6 +212,23 @@ test('orchestrator stops summary catch-up before gateway and database shutdown',
   assert.ok(gatewayStop > compactWorkspaces && databaseFlush > gatewayStop)
 })
 
+test('orchestrator closes Skills batch admission, shuts down the catalog, and drains batches before discarding either', () => {
+  const source = readFileSync(
+    new URL('../electron/orchestrator.js', import.meta.url),
+    'utf8'
+  )
+  const shutdown = source.indexOf('function shutdown()')
+  const closeBatch = source.indexOf('const skillsBatchDrain = skillsBatchCoordinator?.shutdown()', shutdown)
+  const closeCatalog = source.indexOf('await serverSkillsCatalog?.shutdown()', closeBatch)
+  const drainBatch = source.indexOf('await skillsBatchDrain', closeCatalog)
+  const clearBatch = source.indexOf('skillsBatchCoordinator = null', drainBatch)
+  const clearCatalog = source.indexOf('serverSkillsCatalog = null', clearBatch)
+
+  assert.ok(shutdown >= 0 && closeBatch > shutdown)
+  assert.ok(closeCatalog > closeBatch && drainBatch > closeCatalog)
+  assert.ok(clearBatch > drainBatch && clearCatalog > clearBatch)
+})
+
 test('main stops update timers before asynchronous application shutdown', () => {
   const source = readFileSync(new URL('../electron/main.js', import.meta.url), 'utf8')
   const shutdown = source.indexOf("app.on('before-quit'")

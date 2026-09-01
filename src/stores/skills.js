@@ -39,6 +39,7 @@ export const useSkillsStore = defineStore('skills', {
     batchResult: null,
     batchRequest: null,
     batchSelection: [],
+    batchRetryableSelection: [],
     error: null
   }),
   actions: {
@@ -104,10 +105,14 @@ export const useSkillsStore = defineStore('skills', {
         this.batchResult = result
         const remaining = [
           ...(result.failed || []).map(entry => entry.item),
+          ...(result.skipped || []).map(entry => entry.item),
           ...(result.recoveryRequired || []).map(entry => entry.item),
           ...(result.aborted?.remainingItems || [])
         ].filter(Boolean)
         this.batchSelection = [...new Map(remaining.map(item => [`${item.kind}:${item.id}`, item])).values()]
+        this.batchRetryableSelection = (result.failed || [])
+          .filter(entry => entry.retryable)
+          .map(entry => entry.item)
         try { await this.load() } catch (error) {
           const refreshError = this.safeError(error, 'Skills 状态刷新失败')
           return { ...result, refreshError: { code: refreshError.code, message: refreshError.message } }
@@ -121,8 +126,8 @@ export const useSkillsStore = defineStore('skills', {
       }
     },
     async retryFailedBatch() {
-      if (!this.batchRequest || !this.batchSelection.length) return null
-      const request = { ...this.batchRequest, items: [...this.batchSelection] }
+      if (!this.batchRequest || !this.batchRetryableSelection.length) return null
+      const request = { ...this.batchRequest, items: [...this.batchRetryableSelection] }
       const preview = await this.previewBatchAction(request)
       return this.applyBatchAction({ ...request, expectedRevision: preview.revision })
     },

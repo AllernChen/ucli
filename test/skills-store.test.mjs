@@ -300,14 +300,14 @@ test('Skills store keeps a batch preview and retains failed plus remaining items
   resetStore()
   const request = {
     action: 'update_packages',
-    items: [{ kind: 'package', id: 'a' }, { kind: 'package', id: 'b' }, { kind: 'package', id: 'c' }],
+    items: [{ kind: 'package', id: 'a' }, { kind: 'package', id: 'b' }, { kind: 'package', id: 'c' }, { kind: 'package', id: 'd' }],
     targets: { scopeType: 'user', scopeKey: '*' }
   }
   applySkillsBatchAction = async () => ({
     succeeded: [{ item: request.items[0], packageId: 'a', action: 'update_packages', affectedAdapterIds: [] }],
-    failed: [{ item: request.items[1], code: 'SKILL_DRIFTED', retryable: false }],
-    skipped: [], recoveryRequired: [],
-    aborted: { code: 'SKILL_PERSISTENCE_PENDING', remainingItems: [request.items[2]] }
+    failed: [{ item: request.items[1], code: 'SKILL_OPERATION_FAILED', retryable: true }],
+    skipped: [{ item: request.items[2], reasonCode: 'SKILL_BATCH_NOOP' }], recoveryRequired: [],
+    aborted: { code: 'SKILL_PERSISTENCE_PENDING', remainingItems: [request.items[3]] }
   })
 
   const preview = await store.previewBatchAction(request)
@@ -317,7 +317,8 @@ test('Skills store keeps a batch preview and retains failed plus remaining items
   assert.deepEqual(result.failed.map(entry => entry.item), [request.items[1]])
   assert.equal(store.batchSaving, false)
   assert.deepEqual(store.batchResult, result)
-  assert.deepEqual(store.batchSelection, [request.items[1], request.items[2]])
+  assert.deepEqual(store.batchSelection, [request.items[1], request.items[2], request.items[3]])
+  assert.deepEqual(store.batchRetryableSelection, [request.items[1]])
   await store.retryFailedBatch()
   assert.equal(store.batchSaving, false)
 })
