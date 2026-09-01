@@ -18,6 +18,7 @@ import {
   inspectCodexProfileFile,
   removeCodexProfileFile,
   renderCodexProfileFile,
+  renderServerCodexProfileFile,
   resolveCodexProfilePath,
   resolveServerCodexProfilePath,
   serverCodexNativeProfileName,
@@ -89,6 +90,20 @@ test('reference Codex profiles contain no provider definition and omit empty fie
   assert.equal(rendered.includes('model_providers'), false)
   assert.equal(rendered.includes('base_url'), false)
   assert.equal(rendered.includes('model ='), false)
+})
+
+test('server Codex profiles target the fixed loopback v1 API prefix', () => {
+  const rendered = renderServerCodexProfileFile({
+    id: '0123456789abcdef0123456789abcdef',
+    name: 'Responses',
+    model: 'responses-a',
+    contextWindow: 128000
+  }, {
+    baseUrl: 'http://127.0.0.1:43123'
+  })
+
+  assert.match(rendered, /base_url = "http:\/\/127\.0\.0\.1:43123\/v1"/)
+  assert.doesNotMatch(rendered, /base_url = "http:\/\/127\.0\.0\.1:43123"\n/)
 })
 
 test('Codex profile paths are deterministic and reject names outside the UCLI namespace', () => {

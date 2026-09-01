@@ -150,6 +150,7 @@ async function fixture(t, {
   const order = []
   const operational = []
   const workspaceObservations = []
+  const pendingWorkspaceFailures = new Set()
   const repositoryCompleteSettled = deferred()
   const repositoryCanonicalCommitted = deferred()
   const preparationSettled = deferred()
@@ -233,11 +234,19 @@ async function fixture(t, {
       return value
     },
     async fail(...args) {
-      order.push(`workspace.fail:${args[2]?.status || 'failed'}:start`)
-      await workspaceFailGate?.promise
-      const value = await workspaceService.fail(...args)
-      order.push(`workspace.fail:${args[2]?.status || 'failed'}:end`)
-      return value
+      const operation = (async () => {
+        order.push(`workspace.fail:${args[2]?.status || 'failed'}:start`)
+        await workspaceFailGate?.promise
+        const value = await workspaceService.fail(...args)
+        order.push(`workspace.fail:${args[2]?.status || 'failed'}:end`)
+        return value
+      })()
+      pendingWorkspaceFailures.add(operation)
+      try {
+        return await operation
+      } finally {
+        pendingWorkspaceFailures.delete(operation)
+      }
     }
   }
   const service = createInteractiveSummaryJobService({
@@ -278,7 +287,8 @@ async function fixture(t, {
     }
   })
   t.after(async () => {
-    await watchdog(service.interruptAll('SUMMARY_APP_SHUTDOWN'), 100).catch(() => {})
+    await watchdog(service.interruptAll('SUMMARY_APP_SHUTDOWN'), 5_000)
+    await watchdog(Promise.allSettled([...pendingWorkspaceFailures]), 5_000)
     db.close()
     await rm(root, { recursive: true, force: true })
   })
