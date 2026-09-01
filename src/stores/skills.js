@@ -13,11 +13,21 @@ export const useSkillsStore = defineStore('skills', {
     projectPath: '',
     loading: false,
     saving: false,
+    stateSaving: false,
+    statePreview: null,
     checking: false,
     batchProgress: null,
     error: null
   }),
   actions: {
+    safeError(error, fallbackMessage) {
+      const safe = {
+        code: error?.code || 'SKILL_OPERATION_FAILED',
+        message: error?.message || fallbackMessage
+      }
+      if (error?.recoveryAction === 'retry_apply_codex') safe.recoveryAction = 'retry_apply_codex'
+      return safe
+    },
     async load(projectPath = this.projectPath) {
       this.projectPath = projectPath || ''
       this.loading = true
@@ -32,7 +42,7 @@ export const useSkillsStore = defineStore('skills', {
         this.lastCheckedAt = state.lastCheckedAt || null
         return state
       } catch (error) {
-        this.error = { code: error?.code || 'SKILL_OPERATION_FAILED', message: error?.message || '加载 Skills 失败' }
+        this.error = this.safeError(error, '加载 Skills 失败')
         throw error
       } finally {
         this.loading = false
@@ -42,13 +52,39 @@ export const useSkillsStore = defineStore('skills', {
       this.saving = true
       this.error = null
       try { return await work() } catch (error) {
-        this.error = { code: error?.code || 'SKILL_OPERATION_FAILED', message: error?.message || 'Skill 操作失败' }
+        this.error = this.safeError(error, 'Skill 操作失败')
         throw error
       } finally {
         this.saving = false
       }
     },
     inspectSource(source, context) { return ipc.inspectSkillSource(source, context) },
+    async previewCliStateChange(request) {
+      this.error = null
+      try {
+        const preview = await ipc.previewCliStateChange(request)
+        this.statePreview = preview
+        return preview
+      } catch (error) {
+        this.error = this.safeError(error, 'Skill 状态预览失败')
+        throw error
+      }
+    },
+    async applyCliStateChange(request) {
+      this.stateSaving = true
+      this.error = null
+      try {
+        const result = await ipc.applyCliStateChange(request)
+        await this.load()
+        this.statePreview = null
+        return result
+      } catch (error) {
+        this.error = this.safeError(error, 'Skill 状态保存失败')
+        throw error
+      } finally {
+        this.stateSaving = false
+      }
+    },
     install(request) {
       return this.runSaving(async () => {
         const result = await ipc.installSkill(request)
@@ -95,6 +131,13 @@ export const useSkillsStore = defineStore('skills', {
     removeInstallation(installationId) {
       return this.runSaving(async () => {
         const result = await ipc.removeSkillInstallation(installationId)
+        await this.load()
+        return result
+      })
+    },
+    removePackage(packageId) {
+      return this.runSaving(async () => {
+        const result = await ipc.removePackage(packageId)
         await this.load()
         return result
       })

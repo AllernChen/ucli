@@ -16,6 +16,7 @@ test('Skills IPC registers the complete management surface', () => {
   registerSkillsIpc({ ipcMain, service: {} })
   assert.deepEqual([...handlers.keys()].sort(), [
     'skills:adopt',
+    'skills:apply-cli-state-change',
     'skills:apply-to-adapter',
     'skills:check-updates',
     'skills:get-affected-sessions',
@@ -23,13 +24,104 @@ test('Skills IPC registers the complete management surface', () => {
     'skills:inspect-source',
     'skills:install',
     'skills:install-many',
+    'skills:preview-cli-state-change',
     'skills:preview-update',
     'skills:remove-installation',
+    'skills:remove-package',
     'skills:resolve-drift',
     'skills:restart-sessions',
     'skills:set-enabled',
     'skills:update'
   ])
+})
+
+test('Skills IPC rebuilds bounded CLI state requests without renderer-controlled targets or provenance', async () => {
+  const { handlers, ipcMain } = registry()
+  const calls = []
+  registerSkillsIpc({
+    ipcMain,
+    service: {
+      previewCliStateChange(request) { calls.push(request); return 'preview' },
+      applyCliStateChange(request) { calls.push(request); return 'applied' }
+    }
+  })
+  const request = {
+    packageId: 'package-1', scopeType: 'project', scopeKey: 'F:\\demo',
+    changes: [{ adapterId: 'codex', desiredState: 'disabled' }],
+    targetPath: 'F:\\attacker', serverOrigin: 'https://attacker.invalid',
+    organizationId: 'attacker-org', artifactSha256: 'f'.repeat(64)
+  }
+
+  assert.equal(await handlers.get('skills:preview-cli-state-change')({}, request), 'preview')
+  assert.equal(await handlers.get('skills:apply-cli-state-change')({}, {
+    ...request, expectedRevision: 'a'.repeat(64)
+  }), 'applied')
+  assert.deepEqual(calls, [
+    {
+      packageId: 'package-1', scopeType: 'project', scopeKey: 'F:\\demo',
+      changes: [{ adapterId: 'codex', desiredState: 'disabled' }]
+    },
+    {
+      packageId: 'package-1', scopeType: 'project', scopeKey: 'F:\\demo',
+      changes: [{ adapterId: 'codex', desiredState: 'disabled' }],
+      expectedRevision: 'a'.repeat(64)
+    }
+  ])
+})
+
+test('Skills IPC rejects invalid CLI state changes before invoking the service', async () => {
+  const { handlers, ipcMain } = registry()
+  let invoked = false
+  registerSkillsIpc({ ipcMain, service: { previewCliStateChange() { invoked = true } } })
+  const request = {
+    packageId: 'package-1', scopeType: 'user', scopeKey: '*',
+    changes: [{ adapterId: 'codex', desiredState: 'enabled' }]
+  }
+
+  for (const invalid of [
+    { ...request, scopeKey: 'F:\\not-user' },
+    { ...request, changes: [] },
+    { ...request, changes: Array.from({ length: 6 }, () => ({ adapterId: 'codex', desiredState: 'enabled' })) },
+    { ...request, changes: [{ adapterId: 'codex', desiredState: 'enabled' }, { adapterId: 'codex', desiredState: 'disabled' }] },
+    { ...request, changes: [{ adapterId: 'unknown', desiredState: 'enabled' }] },
+    { ...request, changes: [{ adapterId: 'codex', desiredState: 'toggle' }] }
+  ]) {
+    await assert.rejects(
+      handlers.get('skills:preview-cli-state-change')({}, invalid),
+      (error) => error.code === 'SKILL_IPC_INVALID'
+    )
+  }
+  await assert.rejects(
+    handlers.get('skills:apply-cli-state-change')({}, { ...request, expectedRevision: 'not-a-revision' }),
+    (error) => error.code === 'SKILL_IPC_INVALID'
+  )
+  assert.equal(invoked, false)
+})
+
+test('Skills IPC exposes package removal and only the trusted state recovery action', async () => {
+  const { handlers, ipcMain } = registry()
+  const removed = []
+  registerSkillsIpc({
+    ipcMain,
+    service: {
+      removePackage(packageId) { removed.push(packageId); return true },
+      applyCliStateChange() {
+        throw Object.assign(new Error('Migration recovery is required'), {
+          code: 'SKILL_PROJECTION_ROLLBACK_FAILED',
+          recoveryAction: 'retry_apply_codex', recoveryPath: 'F:\\secret\\projection'
+        })
+      }
+    }
+  })
+
+  assert.equal(await handlers.get('skills:remove-package')({}, 'package-1'), true)
+  assert.deepEqual(removed, ['package-1'])
+  const error = await handlers.get('skills:apply-cli-state-change')({}, {
+    packageId: 'package-1', scopeType: 'user', scopeKey: '*',
+    changes: [{ adapterId: 'codex', desiredState: 'disabled' }], expectedRevision: 'a'.repeat(64)
+  }).then(() => null, (caught) => caught)
+  assert.equal(error?.recoveryAction, 'retry_apply_codex')
+  assert.equal(error?.recoveryPath, undefined)
 })
 
 test('Skills IPC validates apply-to-adapter ids before invoking the service', async () => {

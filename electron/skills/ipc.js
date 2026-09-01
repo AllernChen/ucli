@@ -1,7 +1,10 @@
 import { sanitiseSkillError } from './contracts.js'
+import { isAbsolute } from 'node:path'
 
 const ADAPTER_IDS = new Set(['claude', 'codex', 'opencode', 'ucode', 'deepseek-harness'])
 const REF_TYPES = new Set(['default', 'branch', 'tag', 'commit'])
+const SCOPE_TYPES = new Set(['user', 'project'])
+const DESIRED_STATES = new Set(['enabled', 'disabled', 'inherit'])
 
 function ipcError(message) {
   return Object.assign(new TypeError(message), { code: 'SKILL_IPC_INVALID' })
@@ -74,6 +77,38 @@ function installRequests(value) {
   }))
 }
 
+function cliStateRequest(value, { apply = false } = {}) {
+  const input = object(value, 'request')
+  if (!SCOPE_TYPES.has(input.scopeType)) throw ipcError('scopeType is invalid')
+  const scopeKey = string(input.scopeKey, 'scopeKey')
+  if ((input.scopeType === 'user' && scopeKey !== '*') ||
+    (input.scopeType === 'project' && !isAbsolute(scopeKey))) {
+    throw ipcError('scopeKey is invalid')
+  }
+  if (!Array.isArray(input.changes) || !input.changes.length || input.changes.length > ADAPTER_IDS.size) {
+    throw ipcError('changes is invalid')
+  }
+  const adapterIds = new Set()
+  const changes = input.changes.map((change) => {
+    const item = object(change, 'change')
+    if (!ADAPTER_IDS.has(item.adapterId) || !DESIRED_STATES.has(item.desiredState) || adapterIds.has(item.adapterId)) {
+      throw ipcError('changes is invalid')
+    }
+    adapterIds.add(item.adapterId)
+    return { adapterId: item.adapterId, desiredState: item.desiredState }
+  })
+  const request = {
+    packageId: id(input.packageId, 'packageId'),
+    scopeType: input.scopeType,
+    scopeKey,
+    changes
+  }
+  if (!apply) return request
+  const expectedRevision = string(input.expectedRevision, 'expectedRevision', { max: 64 })
+  if (!/^[a-f0-9]{64}$/i.test(expectedRevision)) throw ipcError('expectedRevision is invalid')
+  return { ...request, expectedRevision }
+}
+
 function inspectionContext(value) {
   if (value == null) return {}
   const input = object(value, 'context')
@@ -111,6 +146,12 @@ export function registerSkillsIpc({ ipcMain, service }) {
   ))
   ipcMain.handle('skills:install', (_event, input) => safeCall(() => service.install(installRequest(input))))
   ipcMain.handle('skills:install-many', (_event, input) => safeCall(() => service.installMany(installRequests(input))))
+  ipcMain.handle('skills:preview-cli-state-change', (_event, request) => safeCall(() =>
+    service.previewCliStateChange(cliStateRequest(request))
+  ))
+  ipcMain.handle('skills:apply-cli-state-change', (_event, request) => safeCall(() =>
+    service.applyCliStateChange(cliStateRequest(request, { apply: true }))
+  ))
   ipcMain.handle('skills:apply-to-adapter', (_event, request) => safeCall(() => {
     const input = object(request, 'request')
     if (!ADAPTER_IDS.has(input.targetAdapterId)) throw ipcError('targetAdapterId is invalid')
@@ -134,6 +175,9 @@ export function registerSkillsIpc({ ipcMain, service }) {
   }))
   ipcMain.handle('skills:remove-installation', (_event, installationId) => safeCall(() =>
     service.removeInstallation(id(installationId, 'installationId'))
+  ))
+  ipcMain.handle('skills:remove-package', (_event, packageId) => safeCall(() =>
+    service.removePackage(id(packageId, 'packageId'))
   ))
   ipcMain.handle('skills:resolve-drift', (_event, installationId, resolution) => safeCall(() => {
     if (!['restore', 'adopt'].includes(resolution)) throw ipcError('resolution is invalid')

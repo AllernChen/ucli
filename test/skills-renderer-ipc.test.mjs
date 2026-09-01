@@ -20,6 +20,9 @@ test('renderer Skills API forwards management requests through the preload bridg
     assert.equal(ipc.installSkill({ scopeType: 'user' }), 'installSkill')
     assert.equal(ipc.installSkills([{ scopeType: 'user' }]), 'installSkills')
     assert.equal(ipc.applySkillToAdapter('package-1', 'claude'), 'applySkillToAdapter')
+    assert.equal(ipc.previewCliStateChange({ packageId: 'package-1' }), 'previewCliStateChange')
+    assert.equal(ipc.applyCliStateChange({ packageId: 'package-1', expectedRevision: 'a'.repeat(64) }), 'applyCliStateChange')
+    assert.equal(ipc.removePackage('package-1'), 'removePackage')
     assert.equal(ipc.setSkillEnabled('install-1', false), 'setSkillEnabled')
     assert.equal(ipc.resolveSkillDrift('install-1', 'restore'), 'resolveSkillDrift')
     assert.equal(ipc.pickSkillArchive(), 'pickSkillArchive')
@@ -29,6 +32,9 @@ test('renderer Skills API forwards management requests through the preload bridg
       ['installSkill', { scopeType: 'user' }],
       ['installSkills', [{ scopeType: 'user' }]],
       ['applySkillToAdapter', 'package-1', 'claude'],
+      ['previewCliStateChange', { packageId: 'package-1' }],
+      ['applyCliStateChange', { packageId: 'package-1', expectedRevision: 'a'.repeat(64) }],
+      ['removePackage', 'package-1'],
       ['setSkillEnabled', 'install-1', false],
       ['resolveSkillDrift', 'install-1', 'restore'],
       ['pickSkillArchive']
