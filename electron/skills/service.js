@@ -145,23 +145,33 @@ export function createSkillsService({
   const updateStagingRoot = join(skillsRoot, '.staging')
   // Canonical package content and package removal span every scope, so the
   // mutation boundary is deliberately package-wide rather than scope-local.
-  const packageMutationLocks = new Map()
+  const mutationLocks = new Map()
   let ucodeDiscoveryCache = { key: null, checkedAt: 0, items: [] }
   mkdirSync(packagesRoot, { recursive: true })
   mkdirSync(updateStagingRoot, { recursive: true })
   const packagesRootIdentity = captureDirectoryIdentity(packagesRoot)
   const updateStagingRootIdentity = captureDirectoryIdentity(updateStagingRoot)
 
-  function withPackageMutationLock(packageId, work) {
-    const key = typeof packageId === 'string' ? packageId : ''
-    const previous = packageMutationLocks.get(key) || Promise.resolve()
+  function withMutationLock(key, work) {
+    const previous = mutationLocks.get(key) || Promise.resolve()
     let release
     const current = new Promise((resolve) => { release = resolve })
-    packageMutationLocks.set(key, current)
+    mutationLocks.set(key, current)
     return previous.catch(() => undefined).then(work).finally(() => {
       release()
-      if (packageMutationLocks.get(key) === current) packageMutationLocks.delete(key)
+      if (mutationLocks.get(key) === current) mutationLocks.delete(key)
     })
+  }
+
+  function withPackageMutationLock(packageId, work) {
+    const id = typeof packageId === 'string' ? packageId : ''
+    return withMutationLock(`package:${id}`, work)
+  }
+
+  function withInstallScopeMutationLock(validated, work) {
+    const scopeType = validated?.scopeType || ''
+    const scopeKey = normalizedPath(validated?.scopeKey || '')
+    return withMutationLock(`install-scope:${scopeType}:${scopeKey}`, work)
   }
 
   function withInstallationMutationLock(installationId, work) {
@@ -935,6 +945,22 @@ export function createSkillsService({
     )
   }
 
+  function reusablePackageInScope(prepared, validated, serverMapping = null) {
+    const { scopeType, scopeKey } = validated
+    const contentSha256 = inspectSkillDirectory(prepared.workingDirectory).contentSha256
+    const packagesInScope = db.listSkillPackages().filter((pkg) => packageInScope(pkg, scopeType, scopeKey))
+    const reusable = packagesInScope
+      .filter((pkg) => {
+        if (!serverMapping) return true
+        const identity = db.getSkillSourceIdentity(pkg.id)
+        if (!identity) return pkg.sourceType !== 'server'
+        return identity.originKind !== 'organization' || sameOrganizationSource(identity, serverMapping)
+      })
+      .filter((pkg) => pkg.contentSha256 === contentSha256)
+      .sort((left, right) => Number(samePreparedSource(right, prepared.source)) - Number(samePreparedSource(left, prepared.source)))[0]
+    return { packagesInScope, reusable }
+  }
+
   async function reuseManagedPackage(pkg, targetAdapterIds, matchType, guard = null) {
     guard?.()
     const canonical = inspectSkillDirectory(packageDirectory(pkg.id))
@@ -1083,16 +1109,7 @@ export function createSkillsService({
       if (targetAdapterIds.some((adapterId) => compatibility[adapterId]?.compatible === false)) {
         throw serviceError('Skill name is incompatible with a selected CLI', 'SKILL_INCOMPATIBLE')
       }
-      const packagesInScope = db.listSkillPackages().filter((pkg) => packageInScope(pkg, scopeType, scopeKey))
-      const reusable = packagesInScope
-        .filter((pkg) => {
-          if (!serverMapping) return true
-          const identity = db.getSkillSourceIdentity(pkg.id)
-          if (!identity) return pkg.sourceType !== 'server'
-          return identity.originKind !== 'organization' || sameOrganizationSource(identity, serverMapping)
-        })
-        .filter((pkg) => pkg.contentSha256 === inspected.contentSha256)
-        .sort((left, right) => Number(samePreparedSource(right, prepared.source)) - Number(samePreparedSource(left, prepared.source)))[0]
+      const { packagesInScope, reusable } = reusablePackageInScope(prepared, validated, serverMapping)
       if (reusable) {
         const result = await reuseManagedPackage(
           reusable,
@@ -1235,9 +1252,30 @@ export function createSkillsService({
       }
   }
 
+  async function installPreparedWithLock(request, prepared, validated, serverMapping = null, guard = null) {
+    return withInstallScopeMutationLock(validated, async () => {
+      // Recheck after the package lock is acquired: package removal and CLI
+      // state changes can run while a source is being prepared. The internal
+      // install path deliberately does not acquire the same lock again.
+      while (true) {
+        const selected = reusablePackageInScope(prepared, validated, serverMapping).reusable
+        if (!selected) return installPrepared(request, prepared, validated, serverMapping, guard)
+
+        let installed = false
+        const result = await withPackageMutationLock(selected.id, async () => {
+          const current = reusablePackageInScope(prepared, validated, serverMapping).reusable
+          if (!current || current.id !== selected.id) return null
+          installed = true
+          return installPrepared(request, prepared, validated, serverMapping, guard)
+        })
+        if (installed) return result
+      }
+    })
+  }
+
   async function install(request = {}) {
     const validated = validateInstallRequest(request)
-    return sourceLoader.withPrepared(request.source, (prepared) => installPrepared(request, prepared, validated))
+    return sourceLoader.withPrepared(request.source, (prepared) => installPreparedWithLock(request, prepared, validated))
   }
 
   function validServerSource(source = {}) {
@@ -1265,7 +1303,7 @@ export function createSkillsService({
         source: { type: 'server', locator: serverSource.locator, ref: serverSource.versionId, subdir: '' },
         resolvedRevision: serverSource.sha256
       }
-      return installPrepared({ ...targets, source: serverPrepared.source }, serverPrepared, validated, serverSource, guard)
+      return installPreparedWithLock({ ...targets, source: serverPrepared.source }, serverPrepared, validated, serverSource, guard)
     })
   }
 
@@ -1374,7 +1412,7 @@ export function createSkillsService({
         try {
           installed.push({
             request: requests[index],
-            result: await installPrepared(requests[index], preparedItems[index], validated[index])
+            result: await installPreparedWithLock(requests[index], preparedItems[index], validated[index])
           })
         } catch (error) {
           const safeError = sanitiseSkillError(error)
@@ -2152,29 +2190,40 @@ export function createSkillsService({
   }
 
   async function checkUpdates(packageIds = null) {
-    const selected = db.listSkillPackages().filter((pkg) => !packageIds || packageIds.includes(pkg.id))
+    const selectedIds = db.listSkillPackages()
+      .filter((pkg) => !packageIds || packageIds.includes(pkg.id))
+      .map((pkg) => pkg.id)
     const results = []
-    for (const pkg of selected) {
-      if (pkg.sourceRefType === 'tag' || pkg.sourceRefType === 'commit' || pkg.sourceType === 'adopted') {
-        results.push({ packageId: pkg.id, checked: false, reason: 'fixed_source' })
-        continue
-      }
-      try {
-        const preview = await previewUpdate(pkg.id)
-        db.updateSkillPackage(pkg.id, { lastCheckedAt: now() })
-        for (const item of db.listSkillInstallations({ packageId: pkg.id })) {
-          if (!item.enabled || item.status === 'drifted') continue
-          db.updateSkillInstallation(item.id, {
-            status: preview.hasChanges ? 'update_available' : 'ready',
-            updatedAt: now()
-          })
+    for (const packageId of selectedIds) {
+      results.push(await withPackageMutationLock(packageId, async () => {
+        // The package could have been removed after selection but before this
+        // lock was acquired, so all checks and writes use the fresh record.
+        const pkg = db.getSkillPackage(packageId)
+        if (!pkg) return { packageId, checked: false, errorCode: 'SKILL_PACKAGE_NOT_FOUND' }
+        if (pkg.sourceRefType === 'tag' || pkg.sourceRefType === 'commit' || pkg.sourceType === 'adopted') {
+          return { packageId: pkg.id, checked: false, reason: 'fixed_source' }
         }
-        results.push({ packageId: pkg.id, checked: true, updateAvailable: preview.hasChanges })
-      } catch (error) {
-        results.push({ packageId: pkg.id, checked: false, errorCode: error.code || 'SKILL_UPDATE_CHECK_FAILED' })
-      }
+        try {
+          const preview = await previewUpdate(pkg.id)
+          if (!db.getSkillPackage(pkg.id)) {
+            return { packageId: pkg.id, checked: false, errorCode: 'SKILL_PACKAGE_NOT_FOUND' }
+          }
+          db.updateSkillPackage(pkg.id, { lastCheckedAt: now() })
+          for (const item of db.listSkillInstallations({ packageId: pkg.id })) {
+            if (!item.enabled || item.status === 'drifted') continue
+            db.updateSkillInstallation(item.id, {
+              status: preview.hasChanges ? 'update_available' : 'ready',
+              updatedAt: now()
+            })
+          }
+          await persistOrThrow()
+          return { packageId: pkg.id, checked: true, updateAvailable: preview.hasChanges }
+        } catch (error) {
+          if (error?.code === 'SKILL_PERSISTENCE_PENDING') throw error
+          return { packageId: pkg.id, checked: false, errorCode: error.code || 'SKILL_UPDATE_CHECK_FAILED' }
+        }
+      }))
     }
-    await persistOrThrow()
     return results
   }
 

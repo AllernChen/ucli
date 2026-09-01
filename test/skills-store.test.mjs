@@ -9,6 +9,7 @@ let failRefresh = false
 let batchResponse
 let statePreviewResponse
 let previewCliStateChange
+let applyCliStateChange
 let store
 
 globalThis.window = {
@@ -31,12 +32,7 @@ globalThis.window = {
       return previewCliStateChange(request)
     },
     async applyCliStateChange(request) {
-      if (request.expectedRevision === 'stale'.repeat(13).slice(0, 64)) {
-        throw Object.assign(new Error('Skill projection plan is stale'), {
-          code: 'SKILL_PROJECTION_PLAN_STALE', recoveryAction: 'unsafe-action', recoveryPath: 'F:\\secret'
-        })
-      }
-      return { package: { id: request.packageId } }
+      return applyCliStateChange(request)
     },
     async removePackage(packageId) {
       return packageId === 'package-1'
@@ -62,6 +58,14 @@ function resetStore() {
     revision: 'a'.repeat(64), classification: 'migration_required', impacts: ['codex']
   }
   previewCliStateChange = async (request) => ({ ...statePreviewResponse, receivedRequest: request })
+  applyCliStateChange = async (request) => {
+    if (request.expectedRevision === 'stale'.repeat(13).slice(0, 64)) {
+      throw Object.assign(new Error('Skill projection plan is stale'), {
+        code: 'SKILL_PROJECTION_PLAN_STALE', recoveryAction: 'unsafe-action', recoveryPath: 'F:\\secret'
+      })
+    }
+    return { package: { id: request.packageId } }
+  }
   setActivePinia(createPinia())
   store = useSkillsStore()
 }
@@ -95,8 +99,9 @@ test('Skills store sends one batch mutation and refreshes state once', async () 
 
 function deferred() {
   let resolve
-  const promise = new Promise((complete) => { resolve = complete })
-  return { promise, resolve }
+  let reject
+  const promise = new Promise((complete, fail) => { resolve = complete; reject = fail })
+  return { promise, resolve, reject }
 }
 
 test('Skills store ignores a late CLI state preview after a newer package request', async () => {
@@ -136,6 +141,64 @@ test('Skills store clears and fences a pending project preview when the project 
 
   assert.equal(store.statePreview, null)
   assert.equal(store.statePreviewIdentity, null)
+})
+
+test('Skills store ignores an error from a superseded CLI state preview', async () => {
+  resetStore()
+  const first = deferred()
+  const second = deferred()
+  let calls = 0
+  previewCliStateChange = () => (++calls === 1 ? first.promise : second.promise)
+  const requestA = { packageId: 'package-a', scopeType: 'user', scopeKey: '*', changes: [] }
+  const requestB = { packageId: 'package-b', scopeType: 'user', scopeKey: '*', changes: [] }
+
+  const pendingA = store.previewCliStateChange(requestA)
+  const pendingB = store.previewCliStateChange(requestB)
+  second.resolve({ revision: 'b'.repeat(64), classification: 'direct' })
+  await pendingB
+  first.reject(Object.assign(new Error('old preview failed'), { code: 'SKILL_OPERATION_FAILED' }))
+  await assert.rejects(pendingA, { code: 'SKILL_OPERATION_FAILED' })
+
+  assert.deepEqual(store.statePreview, { revision: 'b'.repeat(64), classification: 'direct' })
+  assert.equal(store.error, null)
+})
+
+test('a successful pending CLI state apply cannot clear a newer preview', async () => {
+  resetStore()
+  const applying = deferred()
+  applyCliStateChange = () => applying.promise
+  const requestA = { packageId: 'package-a', scopeType: 'user', scopeKey: '*', changes: [] }
+  const requestB = { packageId: 'package-b', scopeType: 'user', scopeKey: '*', changes: [] }
+  await store.previewCliStateChange(requestA)
+
+  const pendingApply = store.applyCliStateChange({ ...requestA, expectedRevision: 'a'.repeat(64) })
+  await store.previewCliStateChange(requestB)
+  applying.resolve({ package: { id: 'package-a' } })
+  await pendingApply
+
+  assert.deepEqual(store.statePreview, {
+    ...statePreviewResponse, receivedRequest: requestB
+  })
+  assert.equal(store.error, null)
+})
+
+test('a failed pending CLI state apply cannot overwrite a newer preview error state', async () => {
+  resetStore()
+  const applying = deferred()
+  applyCliStateChange = () => applying.promise
+  const requestA = { packageId: 'package-a', scopeType: 'user', scopeKey: '*', changes: [] }
+  const requestB = { packageId: 'package-b', scopeType: 'user', scopeKey: '*', changes: [] }
+  await store.previewCliStateChange(requestA)
+
+  const pendingApply = store.applyCliStateChange({ ...requestA, expectedRevision: 'a'.repeat(64) })
+  await store.previewCliStateChange(requestB)
+  applying.reject(Object.assign(new Error('old apply failed'), { code: 'SKILL_OPERATION_FAILED' }))
+  await assert.rejects(pendingApply, { code: 'SKILL_OPERATION_FAILED' })
+
+  assert.deepEqual(store.statePreview, {
+    ...statePreviewResponse, receivedRequest: requestB
+  })
+  assert.equal(store.error, null)
 })
 
 test('Skills store retains a CLI state preview and applies it with separate saving state', async () => {

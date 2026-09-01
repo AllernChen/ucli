@@ -98,21 +98,25 @@ export const useSkillsStore = defineStore('skills', {
         if (this.statePreviewToken === token && sameStatePreviewIdentity(this.statePreviewIdentity, identity)) {
           this.statePreview = null
           this.statePreviewIdentity = null
+          this.error = this.safeError(error, 'Skill 状态预览失败')
         }
-        this.error = this.safeError(error, 'Skill 状态预览失败')
         throw error
       }
     },
     async applyCliStateChange(request) {
+      const previewToken = this.statePreviewToken
+      const previewIdentity = this.statePreviewIdentity && { ...this.statePreviewIdentity }
+      const isCurrentPreview = () => this.statePreviewToken === previewToken &&
+        sameStatePreviewIdentity(this.statePreviewIdentity, previewIdentity)
       this.stateSaving = true
       this.error = null
       try {
         const result = await ipc.applyCliStateChange(request)
         await this.load()
-        this.clearStatePreview()
+        if (isCurrentPreview()) this.clearStatePreview()
         return result
       } catch (error) {
-        this.error = this.safeError(error, 'Skill 状态保存失败')
+        if (isCurrentPreview()) this.error = this.safeError(error, 'Skill 状态保存失败')
         throw error
       } finally {
         this.stateSaving = false

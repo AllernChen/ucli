@@ -57,8 +57,9 @@ async function withService(work, overrides = {}) {
 
 function deferred() {
   let resolve
-  const promise = new Promise((complete) => { resolve = complete })
-  return { promise, resolve }
+  let reject
+  const promise = new Promise((complete, fail) => { resolve = complete; reject = fail })
+  return { promise, resolve, reject }
 }
 
 test('local installations expose trusted provenance and preserve canonical metadata until package removal', async () => {
@@ -216,6 +217,152 @@ test('package removal waits for a same-package CLI state apply to finish', async
         await releaseFlush.promise
       }
       return db.flush()
+    }
+  })
+})
+
+test('a local install that reuses a package waits for its in-flight CLI state apply', async () => {
+  let holdFlush = false
+  const flushStarted = deferred()
+  const releaseFlush = deferred()
+  await withService(async ({ root, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    const request = {
+      packageId: installed.id, scopeType: 'user', scopeKey: '*',
+      changes: [{ adapterId: 'codex', desiredState: 'disabled' }]
+    }
+    const preview = service.previewCliStateChange(request)
+    holdFlush = true
+    const applying = service.applyCliStateChange({ ...request, expectedRevision: preview.revision })
+    await flushStarted.promise
+    const reusing = service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user'
+    })
+    let reuseSettled = false
+    void reusing.then(() => { reuseSettled = true }, () => { reuseSettled = true })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(reuseSettled, false)
+
+    releaseFlush.resolve()
+    assert.equal((await applying).package.id, installed.id)
+    assert.equal((await reusing).id, installed.id)
+  }, {
+    flushFactory: (db) => async () => {
+      if (holdFlush) {
+        holdFlush = false
+        flushStarted.resolve()
+        await releaseFlush.promise
+      }
+      return db.flush()
+    }
+  })
+})
+
+test('a verified archive that reuses a package waits for its in-flight CLI state apply', async () => {
+  let holdFlush = false
+  let sourceDirectory
+  const flushStarted = deferred()
+  const releaseFlush = deferred()
+  await withService(async ({ root, service }) => {
+    sourceDirectory = join(root, 'source')
+    createSkill(sourceDirectory)
+    const installed = await service.install({
+      source: { type: 'local', path: sourceDirectory }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    const request = {
+      packageId: installed.id, scopeType: 'user', scopeKey: '*',
+      changes: [{ adapterId: 'codex', desiredState: 'disabled' }]
+    }
+    const preview = service.previewCliStateChange(request)
+    holdFlush = true
+    const applying = service.applyCliStateChange({ ...request, expectedRevision: preview.revision })
+    await flushStarted.promise
+    const reusing = service.installVerifiedServerArchive({
+      archivePath: 'verified.zip', archiveIdentity: {},
+      source: {
+        locator: 'https://server.example.test/organizations/org-1/skills/release-notes',
+        versionId: 'version-1', serverOrigin: 'https://server.example.test', organizationId: 'org-1',
+        organizationName: 'Example Org', slug: 'release-notes', version: 'version-1', sha256: 'a'.repeat(64)
+      },
+      targets: { targetAdapterIds: ['claude'], scopeType: 'user' }
+    })
+    let reuseSettled = false
+    void reusing.then(() => { reuseSettled = true }, () => { reuseSettled = true })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(reuseSettled, false)
+
+    releaseFlush.resolve()
+    assert.equal((await applying).package.id, installed.id)
+    assert.equal((await reusing).id, installed.id)
+  }, {
+    sourceLoader: {
+      async withPrepared(_source, work) {
+        return work({
+          workingDirectory: sourceDirectory,
+          source: { type: 'local', locator: sourceDirectory, ref: '', subdir: '' },
+          resolvedRevision: null
+        })
+      },
+      async withVerifiedArchive(_archive, work) {
+        return work({
+          workingDirectory: sourceDirectory,
+          source: { type: 'zip', locator: 'verified.zip', ref: '', subdir: '' },
+          resolvedRevision: null
+        })
+      }
+    },
+    flushFactory: (db) => async () => {
+      if (holdFlush) {
+        holdFlush = false
+        flushStarted.resolve()
+        await releaseFlush.promise
+      }
+      return db.flush()
+    }
+  })
+})
+
+test('checkUpdates holds a package mutation lock while it writes update state', async () => {
+  let holdCheck = false
+  let sourceDirectory
+  const checkStarted = deferred()
+  const releaseCheck = deferred()
+  await withService(async ({ root, service }) => {
+    sourceDirectory = join(root, 'source')
+    createSkill(sourceDirectory)
+    const installed = await service.install({
+      source: { type: 'local', path: sourceDirectory }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    holdCheck = true
+    const checking = service.checkUpdates([installed.id])
+    await checkStarted.promise
+    const removing = service.removePackage(installed.id)
+    let removalSettled = false
+    void removing.then(() => { removalSettled = true }, () => { removalSettled = true })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(removalSettled, false)
+
+    releaseCheck.resolve()
+    assert.deepEqual(await checking, [{ packageId: installed.id, checked: true, updateAvailable: false }])
+    assert.equal(await removing, true)
+  }, {
+    sourceLoader: {
+      async withPrepared(_source, work) {
+        if (holdCheck) {
+          holdCheck = false
+          checkStarted.resolve()
+          await releaseCheck.promise
+        }
+        return work({
+          workingDirectory: sourceDirectory,
+          source: { type: 'local', locator: sourceDirectory, ref: '', subdir: '' },
+          resolvedRevision: null
+        })
+      }
     }
   })
 })
