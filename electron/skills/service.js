@@ -149,6 +149,7 @@ export function createSkillsService({
   const packagesRootIdentity = captureDirectoryIdentity(packagesRoot)
   const updateStagingRootIdentity = captureDirectoryIdentity(updateStagingRoot)
   const stateRecoveryPackages = new Set()
+  const stateRecoverySnapshots = new Map()
   let stateRecoveryUnsafe = false
   const migrationCopy = migrationFileOps.copy || copySkillDirectoryAtomic
   const migrationRemove = migrationFileOps.remove || removeManagedSkillDirectory
@@ -413,6 +414,52 @@ export function createSkillsService({
     return join(updateStagingRoot, `state-recovery-${packageId}.json`)
   }
 
+  function validatedStateRecoverySnapshot(value, packageName = null) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 ||
+      typeof value.packageId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.packageId) ||
+      !Array.isArray(value.desiredStates) || value.desiredStates.length > 256 ||
+      !Array.isArray(value.installations) || value.installations.length > 64) {
+      throw new Error('invalid state recovery journal')
+    }
+    const installationIds = new Set()
+    for (const item of value.installations) {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || item.packageId !== value.packageId ||
+        typeof item.id !== 'string' || !item.id || item.id.length > 128 || installationIds.has(item.id) ||
+        !SKILL_ADAPTERS[item.targetAdapterId] || !['user', 'project'].includes(item.scopeType) ||
+        typeof item.scopeKey !== 'string' || !item.scopeKey ||
+        (item.scopeType === 'user' ? item.scopeKey !== '*' : !isAbsolute(item.scopeKey)) || !isAbsolute(item.targetPath) ||
+        typeof item.enabled !== 'boolean' ||
+        (item.deployedSha256 !== null && (typeof item.deployedSha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(item.deployedSha256))) ||
+        (item.enabled && item.deployedSha256 === null) ||
+        !['ready', 'disabled', 'drifted', 'missing', 'invalid', 'update_available', 'cleanup_pending'].includes(item.status) ||
+        !Number.isFinite(item.createdAt) || !Number.isFinite(item.updatedAt)) {
+        throw new Error('invalid state recovery journal')
+      }
+      if (packageName && normalizedPath(item.targetPath) !== normalizedPath(join(resolveSkillRoot({
+        adapterId: item.targetAdapterId,
+        scopeType: item.scopeType,
+        projectPath: item.scopeType === 'project' ? item.scopeKey : undefined,
+        home: skillHome,
+        env
+      }), packageName))) throw new Error('invalid state recovery journal')
+      installationIds.add(item.id)
+    }
+    const desiredStateKeys = new Set()
+    for (const state of value.desiredStates) {
+      if (!state || typeof state !== 'object' || Array.isArray(state) || state.packageId !== value.packageId ||
+        !['user', 'project'].includes(state.scopeType) || typeof state.scopeKey !== 'string' || !state.scopeKey ||
+        (state.scopeType === 'user' ? state.scopeKey !== '*' : !isAbsolute(state.scopeKey)) ||
+        !SKILL_ADAPTERS[state.adapterId] || !['enabled', 'disabled', 'inherit'].includes(state.desiredState) ||
+        !['satisfied', 'recovery_required'].includes(state.enforcementStatus) ||
+        (state.reasonCode != null && (typeof state.reasonCode !== 'string' || !state.reasonCode.trim())) ||
+        !Number.isFinite(state.updatedAt)) throw new Error('invalid state recovery journal')
+      const key = `${state.scopeType}\u0000${state.scopeKey}\u0000${state.adapterId}`
+      if (desiredStateKeys.has(key)) throw new Error('invalid state recovery journal')
+      desiredStateKeys.add(key)
+    }
+    return value
+  }
+
   function loadStateRecoveryJournals() {
     try {
       if (!trustedStagingRoot()) throw new Error('unsafe staging root')
@@ -421,9 +468,13 @@ export function createSkillsService({
         const entry = lstatSync(path)
         const packageId = name.slice('state-recovery-'.length, -'.json'.length)
         const parsed = JSON.parse(readFileSync(path, 'utf8'))
-        if (!entry.isFile() || entry.isSymbolicLink() || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(packageId) ||
-          parsed?.packageId !== packageId) throw new Error('invalid state recovery journal')
+        const packageName = db.getSkillPackage(packageId)?.name || null
+        if (!entry.isFile() || entry.isSymbolicLink() || parsed?.packageId !== packageId || !packageName) {
+          throw new Error('invalid state recovery journal')
+        }
+        validatedStateRecoverySnapshot(parsed, packageName)
         stateRecoveryPackages.add(packageId)
+        stateRecoverySnapshots.set(packageId, parsed)
       }
     } catch {
       stateRecoveryUnsafe = true
@@ -442,8 +493,23 @@ export function createSkillsService({
     if (!trustedStagingRoot() || normalizedPath(dirname(path)) !== normalizedPath(updateStagingRoot)) {
       throw serviceError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     }
-    writeFileSync(path, JSON.stringify({ packageId }), { encoding: 'utf8', flag: 'w' })
+    const pkg = db.getSkillPackage(packageId)
+    if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    const desiredStates = db.listSkillCliDesiredStates({ packageId }).map((state) => ({
+      packageId: state.packageId, scopeType: state.scopeType, scopeKey: state.scopeKey, adapterId: state.adapterId,
+      desiredState: state.desiredState, enforcementStatus: state.enforcementStatus, reasonCode: state.reasonCode,
+      updatedAt: state.updatedAt
+    }))
+    const installations = db.listSkillInstallations({ packageId })
+    let snapshot
+    try {
+      snapshot = validatedStateRecoverySnapshot({ version: 1, packageId, desiredStates, installations }, pkg.name)
+    } catch {
+      throw serviceError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+    writeFileSync(path, JSON.stringify(snapshot), { encoding: 'utf8', flag: 'w' })
     stateRecoveryPackages.add(packageId)
+    stateRecoverySnapshots.set(packageId, snapshot)
   }
 
   function removeStateRecoveryJournal(packageId) {
@@ -452,6 +518,7 @@ export function createSkillsService({
     if (!entry.isFile() || entry.isSymbolicLink() || !trustedStagingRoot()) throw new Error('unsafe state recovery journal')
     rmSync(path, { force: true })
     stateRecoveryPackages.delete(packageId)
+    stateRecoverySnapshots.delete(packageId)
   }
 
   loadStateRecoveryJournals()
@@ -2174,6 +2241,7 @@ export function createSkillsService({
       adapterId,
       installationId: installation.id,
       created: !before,
+      activated: before?.enabled === false,
       sha256: installation.deployedSha256 || db.getSkillPackage(request.packageId).contentSha256
     }
   }
@@ -2202,6 +2270,11 @@ export function createSkillsService({
   async function restoreStateProjection({ installationId }) {
     if (!installationId) throw serviceError('Skill installation was not found', 'SKILL_INSTALLATION_NOT_FOUND')
     await setEnabled(installationId, true, { deferDesiredStateCommit: true, deferFlush: true })
+  }
+
+  async function revertActivatedStateProjection({ installationId }) {
+    if (!installationId) throw serviceError('Skill installation was not found', 'SKILL_INSTALLATION_NOT_FOUND')
+    await setEnabled(installationId, false, { deferDesiredStateCommit: true, deferFlush: true })
   }
 
   async function removeCreatedStateProjection({ installationId, expectedSha256 }) {
@@ -2264,17 +2337,44 @@ export function createSkillsService({
   }
 
   async function resolveCliStateRecovery(packageId) {
-    if (typeof packageId !== 'string' || !stateRecoveryPackages.has(packageId)) {
+    const legacyRecovery = typeof packageId === 'string' && db.listSkillCliDesiredStates({ packageId })
+      .some((state) => state.enforcementStatus === 'recovery_required')
+    if (typeof packageId !== 'string' || (!stateRecoveryPackages.has(packageId) && !legacyRecovery)) {
       throw serviceError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     }
+    if (!stateRecoveryPackages.has(packageId)) writeStateRecoveryJournal(packageId)
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    const snapshot = stateRecoverySnapshots.get(packageId)
+    if (!snapshot) throw serviceError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    try { validatedStateRecoverySnapshot(snapshot, pkg.name) } catch {
+      throw serviceError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+    await db.transaction(() => {
+      const snapshotInstallationIds = new Set(snapshot.installations.map((item) => item.id))
+      for (const existing of db.listSkillInstallations({ packageId })) {
+        if (!snapshotInstallationIds.has(existing.id)) db.deleteSkillInstallation(existing.id)
+      }
+      for (const item of snapshot.installations) {
+        const existing = db.getSkillInstallation(item.id)
+        if (!existing) db.insertSkillInstallation(item)
+        else db.updateSkillInstallation(item.id, {
+          enabled: item.enabled, deployedSha256: item.deployedSha256,
+          status: item.status, targetPath: item.targetPath, updatedAt: item.updatedAt
+        })
+      }
+    })
     const canonical = inspectSkillDirectory(packageDirectory(packageId))
     if (canonical.contentSha256 !== pkg.contentSha256) {
       throw serviceError('Managed package was modified outside UCLI', 'SKILL_DRIFTED')
     }
     for (const installation of db.listSkillInstallations({ packageId })) {
-      if (!installation.enabled) continue
+      if (!installation.enabled) {
+        if (existsSync(installation.targetPath)) {
+          throw serviceError('Disabled skill projection has drifted', 'SKILL_DRIFTED')
+        }
+        continue
+      }
       const inspected = inspectSkillDirectory(installation.targetPath)
       if (inspected.contentSha256 !== pkg.contentSha256 || installation.deployedSha256 !== pkg.contentSha256) {
         throw serviceError('Skill projection has drifted', 'SKILL_DRIFTED')
@@ -2304,6 +2404,7 @@ export function createSkillsService({
       return { affectedInstallationIds, affectedSessions: getAffectedSessions(affectedInstallationIds).map((item) => item.id) }
     },
     restoreDirect: restoreStateProjection,
+    revertActivatedDirect: revertActivatedStateProjection,
     removeCreatedDirect: removeCreatedStateProjection,
     markRecovery: markStateRecovery,
     packageView: async (packageId) => packageView(db.getSkillPackage(packageId))

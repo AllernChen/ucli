@@ -4,7 +4,7 @@ function assertOperations(operations) {
   const required = [
     'loadSnapshot', 'plan', 'ensureDirect', 'verifyDirect', 'disableDirect',
     'commitDesired', 'flush', 'rescan', 'restoreDirect', 'removeCreatedDirect',
-    'markRecovery', 'packageView'
+    'revertActivatedDirect', 'markRecovery', 'packageView'
   ]
   if (!operations || typeof operations !== 'object' || required.some((name) => typeof operations[name] !== 'function')) {
     throw new TypeError('Skill state coordinator operations are invalid')
@@ -30,7 +30,7 @@ export function createSkillStateCoordinator(operations) {
     return operations.plan(snapshot, input.changes)
   }
 
-  async function rollback(created, disabled) {
+  async function rollback(created, activated, disabled) {
     let failed = false
     for (const item of [...disabled].reverse()) {
       try { await operations.restoreDirect(item) } catch { failed = true }
@@ -42,6 +42,9 @@ export function createSkillStateCoordinator(operations) {
           expectedSha256: item.sha256
         })
       } catch { failed = true }
+    }
+    for (const item of [...activated].reverse()) {
+      try { await operations.revertActivatedDirect(item) } catch { failed = true }
     }
     return !failed
   }
@@ -71,6 +74,7 @@ export function createSkillStateCoordinator(operations) {
       }
 
       const created = []
+      const activated = []
       const disabled = []
       let committed = false
       try {
@@ -82,6 +86,7 @@ export function createSkillStateCoordinator(operations) {
               installationId: result.installationId,
               sha256: result.sha256
             })
+            if (result?.activated) activated.push({ adapterId: step.adapterId, installationId: result.installationId })
             const verified = await operations.verifyDirect({
               request: input,
               adapterId: step.adapterId,
@@ -115,7 +120,7 @@ export function createSkillStateCoordinator(operations) {
           try { await operations.markRecovery({ request: input, packageId: input.packageId }) } catch { /* recovery error is safely collapsed */ }
           throw skillError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
         }
-        if (!await rollback(created, disabled)) {
+        if (!await rollback(created, activated, disabled)) {
           try { await operations.markRecovery({ request: input, packageId: input.packageId }) } catch { /* recovery error is safely collapsed */ }
           throw skillError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
         }

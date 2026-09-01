@@ -81,6 +81,10 @@ function fakeOperations({ plan = migrationPlan(), failAt = null } = {}) {
       calls.push(['removeCreatedDirect', adapterId, expectedSha256])
       state.created = state.created.filter((item) => item !== adapterId)
     },
+    async revertActivatedDirect({ adapterId }) {
+      calls.push(['revertActivatedDirect', adapterId])
+      state.activated = false
+    },
     async markRecovery({ packageId }) {
       calls.push(['markRecovery', packageId])
       state.recovery = packageId
@@ -93,6 +97,22 @@ function fakeOperations({ plan = migrationPlan(), failAt = null } = {}) {
     }
   }
 }
+
+test('reverts a re-enabled direct projection when desired-state commit fails', async () => {
+  const operations = fakeOperations({ failAt: 'commit' })
+  operations.state.activated = true
+  operations.ensureDirect = async ({ adapterId }) => {
+    operations.calls.push(['ensureDirect', adapterId])
+    return { adapterId, created: false, activated: true, sha256: 'package-sha', installationId: `old-${adapterId}` }
+  }
+
+  await assert.rejects(
+    createSkillStateCoordinator(operations).apply({ ...request, expectedRevision: 'a'.repeat(64) }),
+    /injected commit failure/
+  )
+  assert.equal(operations.state.activated, false)
+  assert.ok(operations.calls.some(([name]) => name === 'revertActivatedDirect'))
+})
 
 test('applies migration steps in filesystem-safe order before committing desired state', async () => {
   const operations = fakeOperations()

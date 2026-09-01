@@ -253,7 +253,7 @@ test('CLI state reconciliation marks persistence uncertainty as recovery while r
   })
 })
 
-test('durable CLI recovery blocks legacy mutators after restart until verified reconciliation persists', async () => {
+test('durable CLI recovery survives closing and reopening the database before verified reconciliation', async () => {
   let failFlush = false
   await withService(async ({ root, db, service }) => {
     const source = join(root, 'source')
@@ -276,10 +276,13 @@ test('durable CLI recovery blocks legacy mutators after restart until verified r
       { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' }
     )
 
+    db.flush = () => false
+    db.close()
+    const reopened = await openDb(join(root, 'ucli.db'))
     const fresh = createSkillsService({
-      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      db: reopened, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
       sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }),
-      flush: () => failFlush ? false : db.flush()
+      flush: () => failFlush ? false : reopened.flush()
     })
     for (const mutation of [
       () => fresh.setEnabled(installation.id, false),
@@ -293,12 +296,50 @@ test('durable CLI recovery blocks legacy mutators after restart until verified r
     }
 
     failFlush = false
+    createSkill(join(root, 'home', '.agents', 'skills', 'release-notes'), 'External restored content')
+    await assert.rejects(fresh.resolveCliStateRecovery(installed.id), { code: 'SKILL_DRIFTED' })
+    await assert.rejects(() => fresh.setEnabled(installation.id, false), {
+      code: 'SKILL_PROJECTION_RECOVERY_REQUIRED'
+    })
+    rmSync(join(root, 'home', '.agents', 'skills', 'release-notes'), { recursive: true, force: true })
     await fresh.resolveCliStateRecovery(installed.id)
     await fresh.setEnabled(installation.id, false)
-    assert.equal(db.listSkillCliDesiredStates({ packageId: installed.id })
+    assert.equal(reopened.listSkillCliDesiredStates({ packageId: installed.id })
       .some((item) => item.enforcementStatus === 'recovery_required'), false)
+    reopened.close()
   }, {
     flushFactory: (db) => () => failFlush ? false : db.flush()
+  })
+})
+
+test('resolves a legacy database-only CLI recovery gate by first creating a durable recovery snapshot', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    for (const state of db.listSkillCliDesiredStates({ packageId: installed.id })) {
+      db.upsertSkillCliDesiredState({
+        ...state,
+        enforcementStatus: 'recovery_required',
+        reasonCode: 'SKILL_PROJECTION_RECOVERY_REQUIRED'
+      })
+    }
+    db.flush()
+
+    const fresh = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }),
+      flush: () => db.flush()
+    })
+    await assert.rejects(() => fresh.setEnabled(installed.installations[0].id, false), {
+      code: 'SKILL_PROJECTION_RECOVERY_REQUIRED'
+    })
+    await fresh.resolveCliStateRecovery(installed.id)
+    assert.equal(db.listSkillCliDesiredStates({ packageId: installed.id })
+      .some((state) => state.enforcementStatus === 'recovery_required'), false)
+    assert.equal(existsSync(join(root, 'user-data', 'skills', '.staging', `state-recovery-${installed.id}.json`)), false)
   })
 })
 
