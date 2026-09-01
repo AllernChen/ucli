@@ -48,6 +48,32 @@ const installation = (overrides = {}) => ({
   ...overrides
 })
 
+const sourceIdentity = (overrides = {}) => ({
+  packageId: 'skill-1',
+  originKind: 'organization',
+  serverOrigin: 'https://server.example.test',
+  organizationId: 'org-1',
+  organizationName: 'Engineering',
+  identityStatus: 'resolved',
+  catalogVersionId: 'version-1',
+  artifactSha256: 'a'.repeat(64),
+  createdAt: 100,
+  updatedAt: 100,
+  ...overrides
+})
+
+const desiredState = (overrides = {}) => ({
+  packageId: 'skill-1',
+  scopeType: 'project',
+  scopeKey: 'F:\\projects\\demo',
+  adapterId: 'codex',
+  desiredState: 'enabled',
+  enforcementStatus: 'satisfied',
+  reasonCode: null,
+  updatedAt: 100,
+  ...overrides
+})
+
 test('database persists skill packages without credential fields', async () => {
   await withDb(async (db) => {
     const tableNames = db.sql.exec("SELECT name FROM sqlite_master WHERE type='table'")[0].values.flat()
@@ -96,5 +122,71 @@ test('database persists projection installations and cascades explicit removal',
     assert.equal(db.deleteSkillInstallation('installation-1'), true)
     assert.equal(db.deleteSkillPackage('skill-1'), true)
     assert.equal(db.getSkillPackage('skill-1'), null)
+  })
+})
+
+test('database persists normalized source identities and CLI desired states', async () => {
+  await withDb(async (db) => {
+    db.insertSkillPackage(skillPackage())
+    const identity = sourceIdentity({ serverOrigin: 'https://server.example.test/catalog' })
+    const expectedIdentity = sourceIdentity()
+
+    db.upsertSkillSourceIdentity(identity)
+    assert.deepEqual(db.getSkillSourceIdentity('skill-1'), expectedIdentity)
+    assert.deepEqual(db.listSkillSourceIdentities(), [expectedIdentity])
+
+    db.upsertSkillCliDesiredState(desiredState())
+    assert.deepEqual(db.listSkillCliDesiredStates({ packageId: 'skill-1' }), [desiredState()])
+    assert.deepEqual(db.listSkillCliDesiredStates({
+      packageId: 'skill-1', scopeType: 'project', scopeKey: 'F:\\projects\\demo', adapterId: 'codex'
+    }), [desiredState()])
+
+    assert.equal(db.deleteSkillCliDesiredStates('skill-1'), true)
+    assert.equal(db.listSkillCliDesiredStates({ packageId: 'skill-1' }).length, 0)
+    assert.equal(db.deleteSkillSourceIdentity('skill-1'), true)
+    assert.equal(db.getSkillSourceIdentity('skill-1'), null)
+  })
+})
+
+test('database rejects invalid skill source identities', async () => {
+  await withDb(async (db) => {
+    db.insertSkillPackage(skillPackage())
+    const invalidIdentities = [
+      sourceIdentity({ organizationId: '' }),
+      sourceIdentity({ organizationName: '' }),
+      sourceIdentity({ catalogVersionId: '' }),
+      sourceIdentity({ artifactSha256: 'A'.repeat(64) }),
+      sourceIdentity({ originKind: 'invalid' }),
+      sourceIdentity({ identityStatus: 'invalid' }),
+      sourceIdentity({ serverOrigin: 'not a URL' }),
+      sourceIdentity({
+        originKind: 'local', serverOrigin: 'https://server.example.test', organizationId: 'org-1',
+        organizationName: 'Engineering', catalogVersionId: 'version-1', artifactSha256: 'a'.repeat(64)
+      }),
+      sourceIdentity({ packageId: 'missing-package' })
+    ]
+
+    for (const identity of invalidIdentities) {
+      assert.throws(() => db.upsertSkillSourceIdentity(identity), {
+        code: 'SKILL_SOURCE_IDENTITY_INVALID'
+      })
+    }
+  })
+})
+
+test('database rejects invalid desired-state enums and deletes skill metadata with the package', async () => {
+  await withDb(async (db) => {
+    db.insertSkillPackage(skillPackage())
+    for (const state of [
+      desiredState({ scopeType: 'invalid' }),
+      desiredState({ desiredState: 'invalid' }),
+      desiredState({ enforcementStatus: 'invalid' })
+    ]) assert.throws(() => db.upsertSkillCliDesiredState(state))
+
+    db.upsertSkillSourceIdentity(sourceIdentity())
+    db.upsertSkillCliDesiredState(desiredState())
+    assert.equal(db.deleteSkillPackage('skill-1'), true)
+    assert.equal(db.getSkillSourceIdentity('skill-1'), null)
+    assert.deepEqual(db.listSkillCliDesiredStates({ packageId: 'skill-1' }), [])
   })
 })

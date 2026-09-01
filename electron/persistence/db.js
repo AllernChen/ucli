@@ -505,6 +505,37 @@ class Db {
       )
     `)
     this.sql.run(`
+      CREATE TABLE IF NOT EXISTS skill_source_identities (
+        package_id          TEXT PRIMARY KEY,
+        origin_kind         TEXT NOT NULL CHECK (origin_kind IN (
+          'organization', 'local', 'github', 'gitlab', 'plugin', 'discovered'
+        )),
+        server_origin       TEXT,
+        organization_id     TEXT,
+        organization_name   TEXT,
+        identity_status     TEXT NOT NULL CHECK (identity_status IN ('resolved', 'name_pending')),
+        catalog_version_id  TEXT,
+        artifact_sha256     TEXT,
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL
+      )
+    `)
+    this.sql.run(`
+      CREATE TABLE IF NOT EXISTS skill_cli_desired_states (
+        package_id          TEXT NOT NULL,
+        scope_type          TEXT NOT NULL CHECK (scope_type IN ('user', 'project')),
+        scope_key           TEXT NOT NULL,
+        adapter_id          TEXT NOT NULL,
+        desired_state       TEXT NOT NULL CHECK (desired_state IN ('enabled', 'disabled', 'inherit')),
+        enforcement_status  TEXT NOT NULL CHECK (enforcement_status IN (
+          'satisfied', 'migration_required', 'blocked', 'error', 'recovery_required'
+        )),
+        reason_code         TEXT,
+        updated_at          INTEGER NOT NULL,
+        PRIMARY KEY (package_id, scope_type, scope_key, adapter_id)
+      )
+    `)
+    this.sql.run(`
       CREATE TABLE IF NOT EXISTS usage_checkpoints (
         session_id          TEXT NOT NULL,
         scope               TEXT NOT NULL CHECK (scope IN ('session', 'model')),
@@ -2305,9 +2336,13 @@ class Db {
   }
 
   deleteSkillPackage(packageId) {
-    this.removeServerSkillPackage(packageId)
-    this.sql.run('DELETE FROM skill_packages WHERE id = ?', [packageId])
-    return this.sql.getRowsModified() > 0
+    return this._runImmediateTransaction(() => {
+      this.removeServerSkillPackage(packageId)
+      this.deleteSkillSourceIdentity(packageId)
+      this.deleteSkillCliDesiredStates(packageId)
+      this.sql.run('DELETE FROM skill_packages WHERE id = ?', [packageId])
+      return this.sql.getRowsModified() > 0
+    })
   }
 
   listSkillInstallations({ packageId } = {}) {
@@ -2358,6 +2393,98 @@ class Db {
 
   deleteSkillInstallation(installationId) {
     this.sql.run('DELETE FROM skill_installations WHERE id = ?', [installationId])
+    return this.sql.getRowsModified() > 0
+  }
+
+  upsertSkillSourceIdentity(identity) {
+    const value = normalizeSkillSourceIdentity(identity)
+    assertSkillPackageExists(this, value.packageId, 'SKILL_SOURCE_IDENTITY_INVALID')
+    this.sql.run(
+      `INSERT INTO skill_source_identities (
+         package_id, origin_kind, server_origin, organization_id, organization_name,
+         identity_status, catalog_version_id, artifact_sha256, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(package_id) DO UPDATE SET
+         origin_kind = excluded.origin_kind,
+         server_origin = excluded.server_origin,
+         organization_id = excluded.organization_id,
+         organization_name = excluded.organization_name,
+         identity_status = excluded.identity_status,
+         catalog_version_id = excluded.catalog_version_id,
+         artifact_sha256 = excluded.artifact_sha256,
+         updated_at = excluded.updated_at`,
+      [
+        value.packageId, value.originKind, value.serverOrigin, value.organizationId,
+        value.organizationName, value.identityStatus, value.catalogVersionId, value.artifactSha256,
+        value.createdAt, value.updatedAt
+      ]
+    )
+    return this.getSkillSourceIdentity(value.packageId)
+  }
+
+  getSkillSourceIdentity(packageId) {
+    return rows(this.sql.exec(
+      'SELECT * FROM skill_source_identities WHERE package_id = ?', [packageId]
+    )).map(rowToSkillSourceIdentity)[0] || null
+  }
+
+  listSkillSourceIdentities() {
+    return rows(this.sql.exec('SELECT * FROM skill_source_identities ORDER BY package_id'))
+      .map(rowToSkillSourceIdentity)
+  }
+
+  deleteSkillSourceIdentity(packageId) {
+    this.sql.run('DELETE FROM skill_source_identities WHERE package_id = ?', [packageId])
+    return this.sql.getRowsModified() > 0
+  }
+
+  upsertSkillCliDesiredState(state) {
+    const value = normalizeSkillCliDesiredState(state)
+    assertSkillPackageExists(this, value.packageId, 'SKILL_CLI_DESIRED_STATE_INVALID')
+    this.sql.run(
+      `INSERT INTO skill_cli_desired_states (
+         package_id, scope_type, scope_key, adapter_id, desired_state,
+         enforcement_status, reason_code, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(package_id, scope_type, scope_key, adapter_id) DO UPDATE SET
+         desired_state = excluded.desired_state,
+         enforcement_status = excluded.enforcement_status,
+         reason_code = excluded.reason_code,
+         updated_at = excluded.updated_at`,
+      [
+        value.packageId, value.scopeType, value.scopeKey, value.adapterId, value.desiredState,
+        value.enforcementStatus, value.reasonCode, value.updatedAt
+      ]
+    )
+    return this.listSkillCliDesiredStates({
+      packageId: value.packageId,
+      scopeType: value.scopeType,
+      scopeKey: value.scopeKey,
+      adapterId: value.adapterId
+    })[0] || null
+  }
+
+  listSkillCliDesiredStates(filters = {}) {
+    const columns = {
+      packageId: 'package_id', scopeType: 'scope_type', scopeKey: 'scope_key', adapterId: 'adapter_id'
+    }
+    const clauses = []
+    const values = []
+    for (const [field, column] of Object.entries(columns)) {
+      if (filters[field] === undefined) continue
+      clauses.push(`${column} = ?`)
+      values.push(filters[field])
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''
+    return rows(this.sql.exec(
+      `SELECT * FROM skill_cli_desired_states${where}
+       ORDER BY package_id, scope_type, scope_key, adapter_id`,
+      values
+    )).map(rowToSkillCliDesiredState)
+  }
+
+  deleteSkillCliDesiredStates(packageId) {
+    this.sql.run('DELETE FROM skill_cli_desired_states WHERE package_id = ?', [packageId])
     return this.sql.getRowsModified() > 0
   }
 
@@ -3323,6 +3450,144 @@ function rowToSkillInstallation(row) {
     deployedSha256: row.deployed_sha256 || null,
     status: row.status,
     createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }
+}
+
+const SKILL_SOURCE_ORIGIN_KINDS = new Set([
+  'organization', 'local', 'github', 'gitlab', 'plugin', 'discovered'
+])
+const SKILL_IDENTITY_STATUSES = new Set(['resolved', 'name_pending'])
+const SKILL_SCOPE_TYPES = new Set(['user', 'project'])
+const SKILL_DESIRED_STATES = new Set(['enabled', 'disabled', 'inherit'])
+const SKILL_ENFORCEMENT_STATUSES = new Set([
+  'satisfied', 'migration_required', 'blocked', 'error', 'recovery_required'
+])
+const SKILL_ARTIFACT_SHA256 = /^[a-f0-9]{64}$/
+
+function skillMetadataError(code, message) {
+  return Object.assign(new TypeError(message), { code })
+}
+
+function requireNonEmptyString(value, code, message) {
+  if (typeof value !== 'string' || !value.trim()) throw skillMetadataError(code, message)
+  return value
+}
+
+function requireTimestamp(value, code) {
+  if (!Number.isInteger(value) || value < 0) {
+    throw skillMetadataError(code, 'Skill metadata timestamp is invalid')
+  }
+  return value
+}
+
+function normalizeSkillSourceIdentity(value) {
+  const code = 'SKILL_SOURCE_IDENTITY_INVALID'
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !SKILL_SOURCE_ORIGIN_KINDS.has(value.originKind)) {
+    throw skillMetadataError(code, 'Skill source identity is invalid')
+  }
+  const packageId = requireNonEmptyString(value.packageId, code, 'Skill source identity is invalid')
+  if (!SKILL_IDENTITY_STATUSES.has(value.identityStatus)) {
+    throw skillMetadataError(code, 'Skill source identity is invalid')
+  }
+  const organization = value.originKind === 'organization'
+  if (!organization) {
+    if (value.serverOrigin != null || value.organizationId != null || value.organizationName != null ||
+      value.catalogVersionId != null || value.artifactSha256 != null || value.identityStatus !== 'resolved') {
+      throw skillMetadataError(code, 'Skill source identity is invalid')
+    }
+    return {
+      packageId,
+      originKind: value.originKind,
+      serverOrigin: null,
+      organizationId: null,
+      organizationName: null,
+      identityStatus: 'resolved',
+      catalogVersionId: null,
+      artifactSha256: null,
+      createdAt: requireTimestamp(value.createdAt, code),
+      updatedAt: requireTimestamp(value.updatedAt, code)
+    }
+  }
+
+  let serverOrigin
+  try {
+    serverOrigin = new URL(requireNonEmptyString(value.serverOrigin, code, 'Skill source identity is invalid')).origin
+  } catch {
+    throw skillMetadataError(code, 'Skill source identity is invalid')
+  }
+  const organizationId = requireNonEmptyString(value.organizationId, code, 'Skill source identity is invalid')
+  const organizationName = requireNonEmptyString(value.organizationName, code, 'Skill source identity is invalid')
+  const catalogVersionId = requireNonEmptyString(value.catalogVersionId, code, 'Skill source identity is invalid')
+  if (typeof value.artifactSha256 !== 'string' || !SKILL_ARTIFACT_SHA256.test(value.artifactSha256)) {
+    throw skillMetadataError(code, 'Skill source identity is invalid')
+  }
+  return {
+    packageId,
+    originKind: 'organization',
+    serverOrigin,
+    organizationId,
+    organizationName,
+    identityStatus: value.identityStatus,
+    catalogVersionId,
+    artifactSha256: value.artifactSha256,
+    createdAt: requireTimestamp(value.createdAt, code),
+    updatedAt: requireTimestamp(value.updatedAt, code)
+  }
+}
+
+function normalizeSkillCliDesiredState(value) {
+  const code = 'SKILL_CLI_DESIRED_STATE_INVALID'
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    !SKILL_SCOPE_TYPES.has(value.scopeType) || !SKILL_DESIRED_STATES.has(value.desiredState) ||
+    !SKILL_ENFORCEMENT_STATUSES.has(value.enforcementStatus)) {
+    throw skillMetadataError(code, 'Skill CLI desired state is invalid')
+  }
+  if (value.reasonCode != null && (typeof value.reasonCode !== 'string' || !value.reasonCode.trim())) {
+    throw skillMetadataError(code, 'Skill CLI desired state is invalid')
+  }
+  return {
+    packageId: requireNonEmptyString(value.packageId, code, 'Skill CLI desired state is invalid'),
+    scopeType: value.scopeType,
+    scopeKey: requireNonEmptyString(value.scopeKey, code, 'Skill CLI desired state is invalid'),
+    adapterId: requireNonEmptyString(value.adapterId, code, 'Skill CLI desired state is invalid'),
+    desiredState: value.desiredState,
+    enforcementStatus: value.enforcementStatus,
+    reasonCode: value.reasonCode ?? null,
+    updatedAt: requireTimestamp(value.updatedAt, code)
+  }
+}
+
+function assertSkillPackageExists(db, packageId, code) {
+  if (!db.getSkillPackage(packageId)) {
+    throw skillMetadataError(code, 'Skill package is not available')
+  }
+}
+
+function rowToSkillSourceIdentity(row) {
+  return {
+    packageId: row.package_id,
+    originKind: row.origin_kind,
+    serverOrigin: row.server_origin ?? null,
+    organizationId: row.organization_id ?? null,
+    organizationName: row.organization_name ?? null,
+    identityStatus: row.identity_status,
+    catalogVersionId: row.catalog_version_id ?? null,
+    artifactSha256: row.artifact_sha256 ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }
+}
+
+function rowToSkillCliDesiredState(row) {
+  return {
+    packageId: row.package_id,
+    scopeType: row.scope_type,
+    scopeKey: row.scope_key,
+    adapterId: row.adapter_id,
+    desiredState: row.desired_state,
+    enforcementStatus: row.enforcement_status,
+    reasonCode: row.reason_code ?? null,
     updatedAt: row.updated_at
   }
 }
