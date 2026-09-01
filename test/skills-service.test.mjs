@@ -557,8 +557,65 @@ test('apply rolls back its projection and database record when persistence fails
 
     assert.equal(existsSync(join(project, '.claude', 'skills', 'release-notes')), false)
     assert.deepEqual(db.listSkillInstallations({ packageId: installed.id }).map((item) => item.targetAdapterId), ['codex'])
+    assert.equal(db.listSkillCliDesiredStates({ packageId: installed.id }).some((state) => state.adapterId === 'claude'), false)
   }, {
     flushFactory: (db) => () => failFlush ? false : db.flush()
+  })
+})
+
+test('adopt immediately persists local provenance and projection desired states', async () => {
+  await withService(async ({ root, db, service }) => {
+    const path = join(root, 'home', '.claude', 'skills', 'release-notes')
+    createSkill(path)
+
+    const adopted = await service.adopt({ path, targetAdapterId: 'claude', scopeType: 'user' })
+
+    assert.equal(adopted.sourceIdentity.originKind, 'local')
+    assert.deepEqual(adopted.cliDesiredStates.map(({ adapterId, desiredState }) => ({ adapterId, desiredState })), [
+      { adapterId: 'claude', desiredState: 'enabled' },
+      { adapterId: 'opencode', desiredState: 'inherit' },
+      { adapterId: 'ucode', desiredState: 'inherit' }
+    ])
+    assert.equal(db.getSkillSourceIdentity(adopted.id).originKind, 'local')
+  })
+})
+
+test('removal retains recovery material and blocks destructive work after double flush failure', async () => {
+  let flushes = 0
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user' })
+
+    await assert.rejects(service.removeInstallation(installed.installations[0].id), { code: 'SKILL_PERSISTENCE_PENDING' })
+    assert.equal(db.listSkillCliDesiredStates({ packageId: installed.id })[0].enforcementStatus, 'recovery_required')
+    await assert.rejects(service.removePackage(installed.id), { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' })
+  }, { flushFactory: (db) => () => (++flushes === 1 ? db.flush() : false) })
+})
+
+test('removal retains a bounded recovery record when projection restoration copy fails', async () => {
+  let copies = 0
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user' })
+
+    await assert.rejects(service.removeInstallation(installed.installations[0].id), { code: 'SKILL_PERSISTENCE_PENDING' })
+    assert.equal(db.listSkillCliDesiredStates({ packageId: installed.id })[0].enforcementStatus, 'recovery_required')
+  }, {
+    removalRecoveryFileOps: {
+      copy(source, target, options) {
+        copies += 1
+        if (copies === 2) throw new Error('copy failed')
+        return copySkillDirectoryAtomic(source, target, options)
+      }
+    },
+    removalFileOps: {
+      remove(path, sha256) {
+        removeManagedSkillDirectory(path, sha256)
+        throw new Error('remove failed')
+      }
+    }
   })
 })
 

@@ -130,6 +130,7 @@ export function createSkillsService({
   discoverUCodeSkills = () => [],
   migrationFileOps = {},
   removalFileOps = {},
+  removalRecoveryFileOps = {},
   uuid = randomUUID,
   now = Date.now
 }) {
@@ -144,6 +145,7 @@ export function createSkillsService({
   const migrationCopy = migrationFileOps.copy || copySkillDirectoryAtomic
   const migrationRemove = migrationFileOps.remove || removeManagedSkillDirectory
   const managedRemoval = removalFileOps.remove || removeManagedSkillDirectory
+  const recoveryCopy = removalRecoveryFileOps.copy || copySkillDirectoryAtomic
   backfillSkillManagementMetadata({ db, now })
 
   const projectionOptions = (scopeType, projectPath) => ({
@@ -353,6 +355,46 @@ export function createSkillsService({
     db.deleteSkillCliDesiredStates(packageId)
     for (const state of initialDesiredStates(db.listSkillInstallations({ packageId }), timestamp)) {
       db.upsertSkillCliDesiredState(state)
+    }
+  }
+
+  function removalRecoveryPath(packageId) {
+    return join(updateStagingRoot, `removal-recovery-${packageId}`)
+  }
+
+  function markRemovalRecovery(packageId) {
+    db._runImmediateTransaction(() => {
+      const states = db.listSkillCliDesiredStates({ packageId })
+      if (!states.length) recomputeDesiredStates(packageId, now())
+      for (const state of db.listSkillCliDesiredStates({ packageId })) {
+        db.upsertSkillCliDesiredState({
+          ...state,
+          enforcementStatus: 'recovery_required',
+          reasonCode: 'SKILL_REMOVAL_RECOVERY_REQUIRED',
+          updatedAt: now()
+        })
+      }
+    })
+  }
+
+  async function recoverRemovalIfNeeded(packageId) {
+    const backup = removalRecoveryPath(packageId)
+    const marked = db.listSkillCliDesiredStates({ packageId })
+      .some((state) => state.enforcementStatus === 'recovery_required' && state.reasonCode === 'SKILL_REMOVAL_RECOVERY_REQUIRED')
+    if (!marked && !existsSync(backup)) return
+    const pkg = db.getSkillPackage(packageId)
+    if (!pkg || !existsSync(backup)) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    try {
+      if (!existsSync(packageDirectory(packageId))) recoveryCopy(backup, packageDirectory(packageId))
+      for (const installation of db.listSkillInstallations({ packageId })) {
+        if (installation.enabled && !existsSync(installation.targetPath)) recoveryCopy(backup, installation.targetPath)
+      }
+      await db.transaction(() => recomputeDesiredStates(packageId, now()))
+      await persistOrThrow()
+      rmSync(backup, { recursive: true, force: true })
+    } catch {
+      markRemovalRecovery(packageId)
+      throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     }
   }
 
@@ -1124,7 +1166,12 @@ export function createSkillsService({
       const requiresDurableCompensation = error?.code === 'SKILL_PERSISTENCE_PENDING' || error?.code === 'SERVER_SKILL_STALE'
       let compensationPending = false
       try {
-        if (db.getSkillInstallation(installationId)) db.deleteSkillInstallation(installationId)
+        if (db.getSkillInstallation(installationId)) {
+          await db.transaction(() => {
+            db.deleteSkillInstallation(installationId)
+            recomputeDesiredStates(packageId, now())
+          })
+        }
         if (requiresDurableCompensation) {
           const result = await flush()
           if (result === false) throw new Error('flush failed')
@@ -1291,16 +1338,20 @@ export function createSkillsService({
   async function removeInstallation(installationId) {
     const item = db.getSkillInstallation(installationId)
     if (!item) return false
+    await recoverRemovalIfNeeded(item.packageId)
     const pkg = db.getSkillPackage(item.packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
-    const backup = join(updateStagingRoot, `${pkg.id}-remove-${uuid()}`)
+    const backup = removalRecoveryPath(pkg.id)
     let removed = false
     let recordRemoved = false
+    let backupReady = false
+    let recoveryRequired = false
     try {
-      copySkillDirectoryAtomic(packageDirectory(pkg.id), backup)
+      recoveryCopy(packageDirectory(pkg.id), backup)
+      backupReady = true
       if (item.enabled && existsSync(item.targetPath)) {
-        managedRemoval(item.targetPath, item.deployedSha256)
         removed = true
+        managedRemoval(item.targetPath, item.deployedSha256)
       }
       await db.transaction(() => {
         db.deleteSkillInstallation(item.id)
@@ -1314,7 +1365,7 @@ export function createSkillsService({
         if (recordRemoved && !db.getSkillInstallation(item.id)) {
           await db.transaction(() => db.insertSkillInstallation(item))
         }
-        if (removed && !existsSync(item.targetPath)) copySkillDirectoryAtomic(backup, item.targetPath)
+        if (removed && !existsSync(item.targetPath)) recoveryCopy(backup, item.targetPath)
         if (recordRemoved || removed) {
           const result = await flush()
           if (result === false) throw new Error('flush failed')
@@ -1322,30 +1373,38 @@ export function createSkillsService({
       } catch {
         recovered = false
       }
+      if (!recovered && backupReady) {
+        markRemovalRecovery(item.packageId)
+        recoveryRequired = true
+      }
       if (!recovered) throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
       throw error
     } finally {
-      if (existsSync(backup)) rmSync(backup, { recursive: true, force: true })
+      if (!recoveryRequired && existsSync(backup)) rmSync(backup, { recursive: true, force: true })
     }
   }
 
   async function removePackage(packageId) {
+    await recoverRemovalIfNeeded(packageId)
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) return false
     const installations = db.listSkillInstallations({ packageId })
     const sourceIdentity = db.getSkillSourceIdentity(packageId)
     const desiredStates = db.listSkillCliDesiredStates({ packageId })
     const serverMapping = db.getServerSkillPackage(packageId)
-    const backup = join(updateStagingRoot, `${pkg.id}-remove-${uuid()}`)
+    const backup = removalRecoveryPath(pkg.id)
     const removed = []
     let canonicalRemoved = false
     let recordsRemoved = false
+    let backupReady = false
+    let recoveryRequired = false
     try {
-      copySkillDirectoryAtomic(packageDirectory(pkg.id), backup)
+      recoveryCopy(packageDirectory(pkg.id), backup)
+      backupReady = true
       for (const installation of installations) {
         if (!installation.enabled || !existsSync(installation.targetPath)) continue
-        managedRemoval(installation.targetPath, installation.deployedSha256)
         removed.push(installation)
+        managedRemoval(installation.targetPath, installation.deployedSha256)
       }
       managedRemoval(packageDirectory(pkg.id), pkg.contentSha256)
       canonicalRemoved = true
@@ -1361,10 +1420,10 @@ export function createSkillsService({
       let recovered = true
       try {
         if (canonicalRemoved && !existsSync(packageDirectory(pkg.id))) {
-          copySkillDirectoryAtomic(backup, packageDirectory(pkg.id))
+          recoveryCopy(backup, packageDirectory(pkg.id))
         }
         for (const installation of removed.reverse()) {
-          if (!existsSync(installation.targetPath)) copySkillDirectoryAtomic(backup, installation.targetPath)
+          if (!existsSync(installation.targetPath)) recoveryCopy(backup, installation.targetPath)
         }
         if (recordsRemoved) {
           await db.transaction(() => {
@@ -1384,10 +1443,14 @@ export function createSkillsService({
       } catch {
         recovered = false
       }
+      if (!recovered && backupReady) {
+        markRemovalRecovery(packageId)
+        recoveryRequired = true
+      }
       if (!recovered) throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
       throw error
     } finally {
-      if (existsSync(backup)) rmSync(backup, { recursive: true, force: true })
+      if (!recoveryRequired && existsSync(backup)) rmSync(backup, { recursive: true, force: true })
     }
   }
 
@@ -1463,6 +1526,8 @@ export function createSkillsService({
           lastCheckedAt: timestamp, createdAt: timestamp, updatedAt: timestamp
         })
         for (const installation of installations) db.insertSkillInstallation(installation)
+        db.upsertSkillSourceIdentity(sourceIdentityFor(packageId, { type: 'local' }, timestamp))
+        for (const state of initialDesiredStates(installations, timestamp)) db.upsertSkillCliDesiredState(state)
       })
       await persistOrThrow()
       return packageView(db.getSkillPackage(packageId))
