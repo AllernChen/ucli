@@ -134,7 +134,7 @@ test('batch coordinator aborts and records recovery-required package operations'
   })
 })
 
-test('batch coordinator aborts stale remaining items when a deferred earlier item changes their trusted snapshot', async () => {
+test('batch coordinator records a stale item and continues independently revalidated later items', async () => {
   const packages = [packageView('a'), packageView('b'), packageView('c')]
   const skillService = services({ packages })
   const firstApplied = deferred()
@@ -158,14 +158,15 @@ test('batch coordinator aborts stale remaining items when a deferred earlier ite
   releaseFirst.resolve()
 
   assert.deepEqual(await applying, {
-    succeeded: [{
-      item: { kind: 'package', id: 'a' }, packageId: 'a', action: 'set_cli_state', affectedAdapterIds: ['codex']
-    }],
+    succeeded: [
+      { item: { kind: 'package', id: 'a' }, packageId: 'a', action: 'set_cli_state', affectedAdapterIds: ['codex'] },
+      { item: { kind: 'package', id: 'c' }, packageId: 'c', action: 'set_cli_state', affectedAdapterIds: ['codex'] }
+    ],
     failed: [{ item: { kind: 'package', id: 'b' }, code: 'SKILL_PROJECTION_PLAN_STALE', retryable: false }],
-    skipped: [], recoveryRequired: [],
-    aborted: { code: 'SKILL_PROJECTION_PLAN_STALE', remainingItems: [{ kind: 'package', id: 'c' }] }
+    skipped: [], recoveryRequired: [], aborted: null
   })
   assert.equal(skillService.calls.some(call => call[0] === 'apply-state' && call[1] === 'b'), false)
+  assert.equal(skillService.calls.some(call => call[0] === 'apply-state' && call[1] === 'c'), true)
 })
 
 test('batch coordinator treats interleaved false removals as skipped rather than succeeded', async () => {
