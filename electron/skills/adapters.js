@@ -96,6 +96,14 @@ function codexProjectionCoversDsh(options = {}) {
   return normalizedPath(codexRoot) === normalizedPath(dshAgentsRoot)
 }
 
+function effectiveProjectionCoverage(adapterId, options = {}) {
+  const coverage = PROJECTION_COVERAGE[adapterId]
+  if (!coverage) throw Object.assign(new Error('Skill adapter is unavailable'), { code: 'SKILL_ADAPTER_UNAVAILABLE' })
+  return adapterId === 'codex' && !codexProjectionCoversDsh(options)
+    ? coverage.filter((id) => id !== 'deepseek-harness')
+    : [...coverage]
+}
+
 export function resolveSkillRoot({ adapterId, scopeType, projectPath, home = homedir(), env = process.env }) {
   const adapter = SKILL_ADAPTERS[adapterId]
   if (!adapter) throw Object.assign(new Error('Skill adapter is unavailable'), { code: 'SKILL_ADAPTER_UNAVAILABLE' })
@@ -131,6 +139,16 @@ export function buildSkillVisibility(projectionAdapterIds, { scopeType } = {}) {
   return visibility
 }
 
+export function listSkillProjectionCapabilities(options = {}) {
+  return Object.keys(SKILL_ADAPTERS).map((adapterId) => ({
+    adapterId,
+    directRoot: resolveSkillRoot({ adapterId, ...options }),
+    covers: effectiveProjectionCoverage(adapterId, options),
+    canExcludeInherited: false,
+    isolationReasonCode: 'SKILL_CLI_ISOLATION_UNSUPPORTED'
+  }))
+}
+
 export function planSkillProjections(targetAdapterIds, options = {}) {
   const adapterOrder = Object.keys(SKILL_ADAPTERS)
   const remaining = new Set(targetAdapterIds.filter((id) => SKILL_ADAPTERS[id]))
@@ -139,9 +157,7 @@ export function planSkillProjections(targetAdapterIds, options = {}) {
     let best = null
     let bestCoverage = []
     for (const adapterId of adapterOrder) {
-      const adapterCoverage = adapterId === 'codex' && !codexProjectionCoversDsh(options)
-        ? PROJECTION_COVERAGE[adapterId].filter((id) => id !== 'deepseek-harness')
-        : PROJECTION_COVERAGE[adapterId]
+      const adapterCoverage = effectiveProjectionCoverage(adapterId, options)
       const coverage = adapterCoverage.filter((id) => remaining.has(id))
       if (coverage.length > bestCoverage.length || (coverage.length === bestCoverage.length && remaining.has(adapterId))) {
         best = adapterId
