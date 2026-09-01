@@ -125,6 +125,26 @@ test('database persists projection installations and cascades explicit removal',
   })
 })
 
+test('database retains a bounded removal operation after its skill records are deleted', async () => {
+  await withDb(async (db) => {
+    const tableNames = db.sql.exec("SELECT name FROM sqlite_master WHERE type='table'")[0].values.flat()
+    assert.equal(tableNames.includes('skill_removal_operations'), true)
+    db.insertSkillPackage(skillPackage())
+    db.insertSkillInstallation(installation())
+
+    await db.transaction(() => {
+      db.deleteSkillInstallation('installation-1')
+      db.deleteSkillPackage('skill-1')
+      db.recordSkillRemovalOperation({ packageId: 'skill-1', createdAt: 200 })
+    })
+
+    assert.equal(db.getSkillPackage('skill-1'), null)
+    assert.deepEqual(db.listSkillRemovalOperations(), [{ packageId: 'skill-1', createdAt: 200 }])
+    assert.equal(db.deleteSkillRemovalOperation('skill-1'), true)
+    assert.deepEqual(db.listSkillRemovalOperations(), [])
+  })
+})
+
 test('database persists normalized source identities and CLI desired states', async () => {
   await withDb(async (db) => {
     db.insertSkillPackage(skillPackage())

@@ -132,6 +132,7 @@ export function createSkillsService({
   removalFileOps = {},
   removalRecoveryFileOps = {},
   removalCleanupFileOps = {},
+  removalTombstoneFileOps = {},
   uuid = randomUUID,
   now = Date.now
 }) {
@@ -149,6 +150,8 @@ export function createSkillsService({
   const recoveryCopy = removalRecoveryFileOps.copy || copySkillDirectoryAtomic
   const removeRecoveryJournal = removalCleanupFileOps.removeJournal || (path => rmSync(path, { force: true }))
   const removeRecoveryBackup = removalCleanupFileOps.removeBackup || (path => rmSync(path, { recursive: true, force: true }))
+  const writeRemovalTombstone = removalTombstoneFileOps.write || writeFileSync
+  const renameRemovalTombstone = removalTombstoneFileOps.rename || renameSync
   backfillSkillManagementMetadata({ db, now })
 
   const projectionOptions = (scopeType, projectPath) => ({
@@ -466,8 +469,8 @@ export function createSkillsService({
       const path = committedRemovalTombstonePath(packageId)
       if (existsSync(path)) return
       temporary = `${path}.${randomUUID()}.tmp`
-      writeFileSync(temporary, JSON.stringify({ version: 1, phase: 'cleanup_only', packageId }), { encoding: 'utf8', mode: 0o600 })
-      renameSync(temporary, path)
+      writeRemovalTombstone(temporary, JSON.stringify({ version: 1, phase: 'cleanup_only', packageId }), { encoding: 'utf8', mode: 0o600 })
+      renameRemovalTombstone(temporary, path)
     } catch {
       try { if (temporary && existsSync(temporary)) rmSync(temporary, { force: true }) } catch {}
       throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
@@ -503,6 +506,12 @@ export function createSkillsService({
 
   async function recoverCommittedRemoval(tombstone) {
     cleanupCommittedRemoval(readCommittedRemovalTombstone(tombstone))
+  }
+
+  async function recoverCommittedRemovalOperation(operation) {
+    cleanupCommittedRemoval(operation.packageId)
+    await db.transaction(() => db.deleteSkillRemovalOperation(operation.packageId))
+    await persistOrThrow()
   }
 
   function markRemovalRecovery(packageId) {
@@ -577,6 +586,9 @@ export function createSkillsService({
   async function recoverRemovalIfNeeded(packageId = null) {
     let entries
     try {
+      for (const operation of db.listSkillRemovalOperations()) {
+        await recoverCommittedRemovalOperation(operation)
+      }
       entries = readdirSync(updateStagingRoot)
       for (const name of entries.filter((name) => name.startsWith('removal-recovery-') && name.endsWith('.committed'))) {
         await recoverCommittedRemoval(join(updateStagingRoot, name))
@@ -1569,6 +1581,7 @@ export function createSkillsService({
       }
       await db.transaction(() => {
         db.deleteSkillInstallation(item.id)
+        db.recordSkillRemovalOperation({ packageId: pkg.id, createdAt: now() })
         recordRemoved = true
       })
       await persistOrThrow()
@@ -1580,8 +1593,11 @@ export function createSkillsService({
       if (committed) throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
       let recovered = true
       try {
-        if (recordRemoved && !db.getSkillInstallation(item.id)) {
-          await db.transaction(() => db.insertSkillInstallation(item))
+        if (recordRemoved) db.deleteSkillRemovalOperation(pkg.id)
+        if (recordRemoved) {
+          await db.transaction(() => {
+            if (!db.getSkillInstallation(item.id)) db.insertSkillInstallation(item)
+          })
         }
         if (removed && !existsSync(item.targetPath)) recoveryCopy(backup, item.targetPath)
         if (recordRemoved || removed) {
@@ -1637,6 +1653,7 @@ export function createSkillsService({
       await db.transaction(() => {
         for (const installation of installations) db.deleteSkillInstallation(installation.id)
         db.deleteSkillPackage(pkg.id)
+        db.recordSkillRemovalOperation({ packageId: pkg.id, createdAt: now() })
         recordsRemoved = true
       })
       await persistOrThrow()
@@ -1649,6 +1666,7 @@ export function createSkillsService({
       if (committed) throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
       let recovered = true
       try {
+        if (recordsRemoved) db.deleteSkillRemovalOperation(pkg.id)
         if (canonicalRemoved && !existsSync(packageDirectory(pkg.id))) {
           recoveryCopy(backup, packageDirectory(pkg.id))
         }

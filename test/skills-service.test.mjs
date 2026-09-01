@@ -287,6 +287,7 @@ test('committed installation removal retries failed journal cleanup without repl
       (error) => error.code === 'SKILL_REMOVAL_CLEANUP_PENDING' && error.message === 'Skill removal cleanup is pending'
     )
     assert.equal(db.getSkillInstallation(installation.id), null)
+    assert.equal(db.getSkillRemovalOperation(installed.id)?.packageId, installed.id)
 
     const fresh = createSkillsService({
       db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
@@ -336,6 +337,67 @@ test('committed package removal retries failed backup cleanup without restoring 
         if (backupCleanupAttempts === 1) throw new Error(`backup cleanup failed: ${path}`)
         rmSync(path, { recursive: true, force: true })
       }
+    }
+  })
+})
+
+test('committed installation removal never replays its journal when tombstone rename fails', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user' })
+    const installation = installed.installations[0]
+
+    await assert.rejects(
+      service.removeInstallation(installation.id),
+      (error) => error.code === 'SKILL_REMOVAL_CLEANUP_PENDING' &&
+        error.message === 'Skill removal cleanup is pending' &&
+        !error.message.includes('tombstone rename failed')
+    )
+    assert.equal(db.getSkillInstallation(installation.id), null)
+
+    const fresh = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }), flush: () => db.flush()
+    })
+    const state = await fresh.getState()
+    assert.equal(state.packages.find((item) => item.id === installed.id).installations.length, 0)
+    assert.equal(db.getSkillInstallation(installation.id), null)
+    assert.equal(db.getSkillRemovalOperation(installed.id), null)
+    assert.deepEqual(readdirSync(join(root, 'user-data', 'skills', '.staging')), [])
+  }, {
+    removalTombstoneFileOps: {
+      rename() { throw new Error('tombstone rename failed: internal staging path') }
+    }
+  })
+})
+
+test('committed package removal never replays its journal when tombstone rename fails', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user' })
+
+    await assert.rejects(
+      service.removePackage(installed.id),
+      (error) => error.code === 'SKILL_REMOVAL_CLEANUP_PENDING' &&
+        error.message === 'Skill removal cleanup is pending' &&
+        !error.message.includes('tombstone rename failed')
+    )
+    assert.equal(db.getSkillPackage(installed.id), null)
+    assert.equal(db.getSkillRemovalOperation(installed.id)?.packageId, installed.id)
+
+    const fresh = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }), flush: () => db.flush()
+    })
+    assert.equal((await fresh.getState()).packages.some((item) => item.id === installed.id), false)
+    assert.equal(db.getSkillPackage(installed.id), null)
+    assert.equal(db.getSkillRemovalOperation(installed.id), null)
+    assert.deepEqual(readdirSync(join(root, 'user-data', 'skills', '.staging')), [])
+  }, {
+    removalTombstoneFileOps: {
+      rename() { throw new Error('tombstone rename failed: internal staging path') }
     }
   })
 })

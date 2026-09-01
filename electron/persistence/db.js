@@ -541,6 +541,12 @@ class Db {
       )
     `)
     this.sql.run(`
+      CREATE TABLE IF NOT EXISTS skill_removal_operations (
+        package_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      )
+    `)
+    this.sql.run(`
       CREATE TABLE IF NOT EXISTS usage_checkpoints (
         session_id          TEXT NOT NULL,
         scope               TEXT NOT NULL CHECK (scope IN ('session', 'model')),
@@ -2493,6 +2499,34 @@ class Db {
     return this.sql.getRowsModified() > 0
   }
 
+  recordSkillRemovalOperation(operation) {
+    const value = normalizeSkillRemovalOperation(operation)
+    this.sql.run(
+      `INSERT INTO skill_removal_operations (package_id, created_at)
+       VALUES (?, ?)
+       ON CONFLICT(package_id) DO UPDATE SET created_at = excluded.created_at`,
+      [value.packageId, value.createdAt]
+    )
+    return this.getSkillRemovalOperation(value.packageId)
+  }
+
+  getSkillRemovalOperation(packageId) {
+    return rows(this.sql.exec(
+      'SELECT * FROM skill_removal_operations WHERE package_id = ?', [packageId]
+    )).map(rowToSkillRemovalOperation)[0] || null
+  }
+
+  listSkillRemovalOperations() {
+    return rows(this.sql.exec(
+      'SELECT * FROM skill_removal_operations ORDER BY created_at, package_id'
+    )).map(rowToSkillRemovalOperation)
+  }
+
+  deleteSkillRemovalOperation(packageId) {
+    this.sql.run('DELETE FROM skill_removal_operations WHERE package_id = ?', [packageId])
+    return this.sql.getRowsModified() > 0
+  }
+
   getAiCliProfileUsage(profileId) {
     const result = this.sql.exec(
       `SELECT
@@ -3564,6 +3598,16 @@ function normalizeSkillCliDesiredState(value) {
   }
 }
 
+function normalizeSkillRemovalOperation(value) {
+  const code = 'SKILL_REMOVAL_OPERATION_INVALID'
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw skillMetadataError(code, 'Skill removal operation is invalid')
+  }
+  const packageId = requireNonEmptyString(value.packageId, code, 'Skill removal operation is invalid')
+  if (packageId.length > 128) throw skillMetadataError(code, 'Skill removal operation is invalid')
+  return { packageId, createdAt: requireTimestamp(value.createdAt, code) }
+}
+
 function assertSkillPackageExists(db, packageId, code) {
   if (!db.getSkillPackage(packageId)) {
     throw skillMetadataError(code, 'Skill package is not available')
@@ -3596,6 +3640,10 @@ function rowToSkillCliDesiredState(row) {
     reasonCode: row.reason_code ?? null,
     updatedAt: row.updated_at
   }
+}
+
+function rowToSkillRemovalOperation(row) {
+  return { packageId: row.package_id, createdAt: row.created_at }
 }
 
 function gatewaySessionRoute(row) {
