@@ -14,10 +14,11 @@ const bridgePackage = JSON.parse(readFileSync(
 ))
 
 test('app metadata retains the quarantined 0.11.0 bridge package', () => {
-  assert.equal(packageJson.version, '0.12.0')
-  assert.equal(packageLock.version, '0.12.0')
-  assert.equal(packageLock.packages[''].version, '0.12.0')
+  assert.equal(packageJson.version, '0.12.1')
+  assert.equal(packageLock.version, '0.12.1')
+  assert.equal(packageLock.packages[''].version, '0.12.1')
   assert.equal(bridgePackage.version, '0.11.0')
+  assert.equal(packageJson.overrides['glob@10.4.5'], '10.5.0')
 })
 
 test('sidebar version is injected from the package version during renderer build', () => {
