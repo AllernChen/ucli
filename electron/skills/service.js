@@ -1439,7 +1439,7 @@ export function createSkillsService({
     }
   }
 
-  async function migrateDshInstallationToCodex({ pkg, installation, targetPath, canonical }) {
+  async function migrateDshInstallationToCodex({ pkg, installation, targetPath, canonical, deferFlush = false }) {
     const oldTarget = dshProjectionPath(pkg, installation)
     const current = inspectInstallation(installation)
     if (!current.enabled || !['ready', 'update_available'].includes(current.status)) {
@@ -1474,7 +1474,7 @@ export function createSkillsService({
         db.insertSkillInstallation(migrated)
       })
       recordMigrated = true
-      await persistOrThrow()
+      if (!deferFlush) await persistOrThrow()
     } catch (error) {
       const rollbackFailures = []
       if (recordMigrated) {
@@ -1509,7 +1509,7 @@ export function createSkillsService({
       throw migrationRecoveryError('Codex migration committed; retry apply to finish old projection cleanup')
     }
     db.updateSkillInstallation(installation.id, { status: 'ready', updatedAt: now() })
-    await persistOrThrow()
+    if (!deferFlush) await persistOrThrow()
     return packageView(db.getSkillPackage(pkg.id))
   }
 
@@ -1585,7 +1585,7 @@ export function createSkillsService({
       projectionOptions(scope.scopeType, scope.scopeType === 'project' ? scope.scopeKey : undefined)
     ).length === 1
     if (targetAdapterId === 'codex' && dshInstallation && sharedCodexDshRoot) {
-      return migrateDshInstallationToCodex({ pkg, installation: dshInstallation, targetPath, canonical })
+      return migrateDshInstallationToCodex({ pkg, installation: dshInstallation, targetPath, canonical, deferFlush })
     }
 
     let deployed = canonical
@@ -2351,18 +2351,10 @@ export function createSkillsService({
       throw serviceError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     }
     await db.transaction(() => {
-      const snapshotInstallationIds = new Set(snapshot.installations.map((item) => item.id))
       for (const existing of db.listSkillInstallations({ packageId })) {
-        if (!snapshotInstallationIds.has(existing.id)) db.deleteSkillInstallation(existing.id)
+        db.deleteSkillInstallation(existing.id)
       }
-      for (const item of snapshot.installations) {
-        const existing = db.getSkillInstallation(item.id)
-        if (!existing) db.insertSkillInstallation(item)
-        else db.updateSkillInstallation(item.id, {
-          enabled: item.enabled, deployedSha256: item.deployedSha256,
-          status: item.status, targetPath: item.targetPath, updatedAt: item.updatedAt
-        })
-      }
+      for (const item of snapshot.installations) db.insertSkillInstallation(item)
     })
     const canonical = inspectSkillDirectory(packageDirectory(packageId))
     if (canonical.contentSha256 !== pkg.contentSha256) {
@@ -2380,7 +2372,16 @@ export function createSkillsService({
         throw serviceError('Skill projection has drifted', 'SKILL_DRIFTED')
       }
     }
-    await db.transaction(() => recomputeDesiredStates(packageId, now(), { resolveRecovery: true }))
+    await db.transaction(() => {
+      db.deleteSkillCliDesiredStates(packageId)
+      for (const state of snapshot.desiredStates) {
+        db.upsertSkillCliDesiredState({
+          ...state,
+          enforcementStatus: state.enforcementStatus === 'recovery_required' ? 'satisfied' : state.enforcementStatus,
+          reasonCode: state.enforcementStatus === 'recovery_required' ? null : state.reasonCode
+        })
+      }
+    })
     await persistOrThrow()
     try { removeStateRecoveryJournal(packageId) } catch {
       throw serviceError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')

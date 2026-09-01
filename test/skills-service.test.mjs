@@ -343,6 +343,78 @@ test('resolves a legacy database-only CLI recovery gate by first creating a dura
   })
 })
 
+test('replays a deferred DSH-to-Codex migration with its original identity and explicit desired intent', async () => {
+  let failFlush = false
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    const project = join(root, 'project')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['deepseek-harness'],
+      scopeType: 'project', projectPath: project
+    })
+    const original = db.listSkillInstallations({ packageId: installed.id })[0]
+    const request = {
+      packageId: installed.id, scopeType: 'project', scopeKey: original.scopeKey,
+      changes: [{ adapterId: 'codex', desiredState: 'enabled' }]
+    }
+    const preview = service.previewCliStateChange(request)
+    failFlush = true
+    await assert.rejects(
+      service.applyCliStateChange({ ...request, expectedRevision: preview.revision }),
+      { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' }
+    )
+
+    const journal = JSON.parse(readFileSync(
+      join(root, 'user-data', 'skills', '.staging', `state-recovery-${installed.id}.json`), 'utf8'
+    ))
+    const expectedInstallation = journal.installations.find((item) => item.id === original.id)
+    const expectedDshIntent = journal.desiredStates.find((state) => state.adapterId === 'deepseek-harness')
+    assert.equal(expectedInstallation?.targetAdapterId, 'codex')
+    assert.equal(expectedDshIntent?.desiredState, 'enabled')
+
+    db.flush = () => false
+    db.close()
+    const reopened = await openDb(join(root, 'ucli.db'))
+    const fresh = createSkillsService({
+      db: reopened, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }),
+      flush: () => failFlush ? false : reopened.flush()
+    })
+    failFlush = false
+    await fresh.resolveCliStateRecovery(installed.id)
+
+    const recovered = reopened.getSkillInstallation(original.id)
+    assert.deepEqual({
+      id: recovered.id,
+      targetAdapterId: recovered.targetAdapterId,
+      scopeType: recovered.scopeType,
+      scopeKey: recovered.scopeKey,
+      targetPath: recovered.targetPath
+    }, {
+      id: expectedInstallation.id,
+      targetAdapterId: expectedInstallation.targetAdapterId,
+      scopeType: expectedInstallation.scopeType,
+      scopeKey: expectedInstallation.scopeKey,
+      targetPath: expectedInstallation.targetPath
+    })
+    const dshIntent = reopened.listSkillCliDesiredStates({ packageId: installed.id })
+      .find((state) => state.adapterId === 'deepseek-harness')
+    assert.deepEqual({
+      desiredState: dshIntent.desiredState,
+      enforcementStatus: dshIntent.enforcementStatus,
+      reasonCode: dshIntent.reasonCode
+    }, {
+      desiredState: expectedDshIntent.desiredState,
+      enforcementStatus: 'satisfied',
+      reasonCode: null
+    })
+    reopened.close()
+  }, {
+    flushFactory: (db) => () => failFlush ? false : db.flush()
+  })
+})
+
 test('CLI state reconciliation migrates a DSH projection to Codex while retaining DeepSeek Harness visibility', async () => {
   await withService(async ({ root, db, service }) => {
     const source = join(root, 'source')
