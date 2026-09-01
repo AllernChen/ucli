@@ -151,11 +151,11 @@ test('prepareRuntime rejects a missing model and an adapter-incompatible model',
   }), { code: 'PROFILE_MODEL_PROTOCOL_UNAVAILABLE' })
 })
 
-test('launches explicitly selected Codex and Claude models using their adapter protocols', async () => {
+test('launches explicitly selected Codex and Claude models using their adapter capabilities', async () => {
   const context = harness()
   await context.sync(catalog([
     { id: 'responses', displayName: 'Responses', contextSize: 128000, protocols: ['openai_responses'] },
-    { id: 'claude', displayName: 'Claude', contextSize: 200000, protocols: ['anthropic_messages'] }
+    { id: 'claude', displayName: 'Claude', contextSize: 1048576, protocols: ['anthropic_messages'] }
   ]))
   const serviceProfileId = context.projection.listProfiles()[0].id
   const codex = context.projection.prepareRuntime({
@@ -172,6 +172,7 @@ test('launches explicitly selected Codex and Claude models using their adapter p
   assert.deepEqual(claude.args, ['--model', 'claude'])
   assert.equal(claude.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:43210/anthropic')
   assert.equal(claude.env.ANTHROPIC_AUTH_TOKEN, 'session-bearer')
+  assert.equal(claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '1048576')
 })
 
 test('reconciliation keeps only authorities whose profile, model, protocol, and revision remain valid', async () => {

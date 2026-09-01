@@ -34,6 +34,10 @@ function unavailableStatus(generation) {
   return 'unreachable'
 }
 
+function isTransientConnectionStatus(status) {
+  return status === 'connecting' || status === 'unreachable'
+}
+
 /** Serializes catalog projections and makes every side effect conditional on the
  * exact connection generation that requested it.  Callers receive the task's
  * own result; the internal tail always recovers so a failure cannot deadlock a
@@ -71,6 +75,10 @@ export function createServerModelProjectionSynchronizer({
       // with a newer runtime identity.
       const generation = connectionGeneration(manager)
       if (!generation.online) {
+        if (isTransientConnectionStatus(generation.status)) {
+          publishIfCurrent(generation)
+          return projection.listProfiles?.() || []
+        }
         if (await clearIfCurrent(generation, unavailableStatus(generation))) publishIfCurrent(generation)
         return []
       }

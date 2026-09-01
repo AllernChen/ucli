@@ -310,6 +310,7 @@ export function createServerModelProjection({
           env: {
             ANTHROPIC_AUTH_TOKEN: issued.bearer,
             ANTHROPIC_BASE_URL: `${issued.baseUrl.replace(/\/$/, '')}/anthropic`,
+            CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(model.contextSize),
             CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
           },
           settingSources: ['project', 'local'],
