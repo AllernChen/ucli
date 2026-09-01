@@ -1,6 +1,6 @@
 # UCLI Skills 组织、本地与 CLI 状态管理设计
 
-**状态：** 已确认，待用户复核
+**状态：** 已确认，待实施
 
 **日期：** 2026-09-01
 
@@ -374,6 +374,14 @@ Skill 卡片直接展示全部 CLI，不要求打开两层详情：
 
 ### 预览和结果
 
+批量选择项使用统一稳定身份：
+
+```js
+{ kind: 'package' | 'organization_version', id }
+```
+
+已安装管理动作只接受 `package`；组织安装和组织更新接受当前目录中的 `organization_version`。主进程根据该身份查找来源、版本、组织和目标，渲染进程不得提交这些派生字段。
+
 批量预览按以下类别展示：
 
 - 可直接执行；
@@ -388,11 +396,11 @@ Skill 卡片直接展示全部 CLI，不要求打开两层详情：
 
 ```js
 {
-  succeeded: [{ packageId, action, affectedAdapterIds }],
-  failed: [{ packageId, code, retryable }],
-  skipped: [{ packageId, reasonCode }],
-  recoveryRequired: [{ packageId, recoveryAction }],
-  aborted: null | { code, remainingPackageIds }
+  succeeded: [{ item: { kind, id }, packageId, action, affectedAdapterIds }],
+  failed: [{ item: { kind, id }, code, retryable }],
+  skipped: [{ item: { kind, id }, reasonCode }],
+  recoveryRequired: [{ item: { kind, id }, packageId, recoveryAction }],
+  aborted: null | { code, remainingItems: [{ kind, id }] }
 }
 ```
 
