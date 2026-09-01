@@ -38,3 +38,9 @@
 - RED: the new IPC, renderer bridge, store, and presentation recovery contracts failed before the recovery surface was added.
 - GREEN: `node --test test/skills-ipc.test.mjs test/skills-renderer-ipc.test.mjs test/skills-store.test.mjs test/skills-presentation.test.mjs` — 93 passed, 0 failed.
 - `npm run build` and `git diff --check` are run for this follow-up before commit.
+
+## Recovery refresh follow-up
+
+- A completed recovery now clears its obsolete CLI-state preview before the follow-up state refresh. If that refresh fails, the store returns the successful recovery result with a bounded `{ code, message }` `refreshError`; it leaves the load error visible without reclassifying the recovery as failed.
+- RED: the store rejected a successful recovery when `getSkillsState` failed after the mutation.
+- GREEN: `node --test test/skills-ipc.test.mjs test/skills-renderer-ipc.test.mjs test/skills-store.test.mjs test/skills-presentation.test.mjs` — 94 passed, 0 failed. `npm run build` and `git diff --check` are run before commit.

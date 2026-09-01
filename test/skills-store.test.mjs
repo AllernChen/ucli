@@ -240,6 +240,24 @@ test('Skills store resolves guarded CLI-state recovery once and refreshes state'
   assert.equal(store.recoverySaving, false)
 })
 
+test('Skills store preserves a successful recovery when its follow-up refresh fails', async () => {
+  resetStore()
+  failRefresh = true
+  store.statePreview = { revision: 'a'.repeat(64) }
+  store.statePreviewIdentity = { packageId: 'package-1', scopeType: 'user', scopeKey: '' }
+
+  const result = await store.resolveCliStateRecovery('package-1')
+
+  assert.deepEqual(result, {
+    package: { id: 'package-1' },
+    refreshError: { code: 'SKILL_REFRESH_FAILED', message: 'Refresh failed' }
+  })
+  assert.equal(stateLoads, 1)
+  assert.equal(store.statePreview, null)
+  assert.deepEqual(store.error, { code: 'SKILL_REFRESH_FAILED', message: 'Refresh failed' })
+  assert.equal(store.recoverySaving, false)
+})
+
 test('Skills store preserves a preview after a stale plan and exposes no unsafe recovery details', async () => {
   resetStore()
   const request = {

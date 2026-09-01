@@ -131,8 +131,13 @@ export const useSkillsStore = defineStore('skills', {
       this.error = null
       try {
         const result = await ipc.resolveCliStateRecovery(packageId)
-        await this.load()
         this.clearStatePreview()
+        try {
+          await this.load()
+        } catch (error) {
+          const refreshError = this.safeError(error, 'Skills 状态刷新失败')
+          return { ...result, refreshError: { code: refreshError.code, message: refreshError.message } }
+        }
         return result
       } catch (error) {
         this.error = this.safeError(error, 'Skill 投放恢复失败')
