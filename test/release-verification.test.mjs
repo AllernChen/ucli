@@ -162,22 +162,34 @@ test('Gateway release acceptance documents every required Feishu prerequisite', 
   }
 })
 
-test('Skills delivery documents retain the local management safety contract', async () => {
-  const documents = await Promise.all([
+test('Skills delivery documents retain their specific local management safety clauses', async () => {
+  const [acceptance, protocol, registration] = await Promise.all([
     readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8'),
     readFile(new URL('../docs/ucli-client-protocol.md', import.meta.url), 'utf8'),
     readFile(new URL('../docs/ucli-client-registration-upgrade.md', import.meta.url), 'utf8')
   ])
 
-  for (const document of documents) {
-    for (const concept of [
-      '组织 Skills',
-      '本地 Skills',
-      'inherit',
-      'SKILL_CLI_ISOLATION_UNSUPPORTED',
-      '批量'
-    ]) assert.match(document, new RegExp(concept))
+  for (const document of [acceptance, protocol, registration]) {
+    for (const concept of ['组织 Skills', '本地 Skills', 'inherit', 'SKILL_CLI_ISOLATION_UNSUPPORTED', '批量']) {
+      assert.match(document, new RegExp(concept))
+    }
   }
+
+  for (const document of [protocol, registration]) {
+    assert.match(document, /缓存优先.*五分钟.*TTL/s)
+    assert.match(document, /临时.*失败.*保留.*缓存.*显式断开.*清理/s)
+    assert.match(document, /持久.*来源身份.*唯一真相/s)
+    assert.match(document, /SKILL_CLI_ISOLATION_UNSUPPORTED.*阻止/s)
+    assert.match(document, /SKILL_PERSISTENCE_PENDING.*中止/s)
+    assert.match(document, /移除投影.*不删除规范包.*移除受管包.*删除/s)
+  }
+
+  assert.match(acceptance, /缓存.*五分钟.*事件/s)
+  assert.match(acceptance, /临时.*保留.*显式断开.*清理/s)
+  assert.match(acceptance, /持久来源身份/s)
+  assert.match(acceptance, /SKILL_CLI_ISOLATION_UNSUPPORTED/)
+  assert.match(acceptance, /SKILL_PERSISTENCE_PENDING.*停止/s)
+  assert.match(acceptance, /移除投影.*不删除规范包.*移除受管包/s)
 })
 
 async function createReleaseFixture() {

@@ -327,7 +327,7 @@ Codex 仅可选择声明 `openai_responses` 的模型，Claude 仅可选择声�
 
 客户端分别聚合“组织 Skills”和“本地 Skills”。组织目录采用缓存优先：进入页面时读取本地缓存并后台调用 `ensure-skills-fresh`，五分钟 TTL 内不重复网络同步；同一连接身份的同步合并，匹配连接 revision 的目录变更事件通知页面重新读取。临时网络失败保留最后成功缓存并只报告 Skills 同步错误；显式断开仅清理未安装在线目录和下载入口。
 
-安装组织 Skill 后，`skill_source_identities` 保存规范化服务端、组织、目录版本和制品摘要。该来源身份在断开、暂时离线或目录替换后仍然保留，因此已安装包继续显示在原组织，不会按名称、内容或当前连接误归为本地 Skills。
+安装组织 Skill 后，`skill_source_identities` 保存规范化服务端、组织、目录版本和制品摘要。该持久来源身份是组织来源归属的唯一真相源，在断开、暂时离线或目录替换后仍然保留，因此已安装包继续显示在原组织，不会按名称、内容或当前连接误归为本地 Skills。
 
 `skill_cli_desired_states` 使用 `enabled`、`disabled` 和 `inherit` 表示用户对每个 CLI 的期望。`inherit` 只表示通过另一健康物理投影可见，用户尚未请求独立管理。提供者停用而消费者仍为 enabled 时，协调器先创建并校验消费者投影；若消费者需要在提供者保持 enabled 时严格停用，但客户端没有可测试的继承排除能力，则返回 `SKILL_CLI_ISOLATION_UNSUPPORTED` 并阻止写入。
 
