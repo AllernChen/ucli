@@ -1464,3 +1464,110 @@ test('recovery-required CLI cells expose only the guarded repair control', () =>
   assert.match(page, /skills\.resolveCliStateRecovery\(packageId\)/)
   assert.match(page, /恢复投放/)
 })
+
+test('management selection uses only visible available package identities in deterministic order', () => {
+  const selection = skillsPresentation.resolveSkillManagementSelection({
+    visibleEntries: [
+      { key: 'b', packages: [{ id: 'b' }], installations: [], organizationVersions: [] },
+      { key: 'hidden', packages: [{ id: 'hidden' }], installations: [], organizationVersions: [], selectable: false },
+      { key: 'a', packages: [{ id: 'a' }], installations: [], organizationVersions: [] },
+      { key: 'discovered', packages: [], installations: [], organizationVersions: [] }
+    ],
+    selectedItems: [{ kind: 'package', id: 'hidden' }, { kind: 'package', id: 'b' }],
+    view: 'local', organizationKey: null, scopeKey: '*'
+  })
+
+  assert.deepEqual(selection.selectAllItems, [
+    { kind: 'package', id: 'a' }, { kind: 'package', id: 'b' }
+  ])
+  assert.deepEqual(selection.selectedItems, [{ kind: 'package', id: 'b' }])
+  assert.equal(selection.allSelected, false)
+  assert.equal(selection.partiallySelected, true)
+})
+
+test('management selection clears an out-of-context view, organization, or scope selection', () => {
+  const selectedItems = [{ kind: 'package', id: 'a' }]
+  const base = {
+    visibleEntries: [{ key: 'a', packages: [{ id: 'a' }], installations: [], organizationVersions: [] }],
+    selectedItems, view: 'organization', organizationKey: 'organization:https://example.test:one', scopeKey: '*'
+  }
+  const initial = skillsPresentation.resolveSkillManagementSelection(base)
+  const reset = skillsPresentation.resolveSkillManagementSelection({
+    ...base,
+    selectionContext: initial.context,
+    organizationKey: 'organization:https://example.test:two',
+    scopeKey: 'F:/project'
+  })
+
+  assert.equal(reset.contextChanged, true)
+  assert.deepEqual(reset.selectedItems, [])
+  assert.equal(reset.context.view, 'organization')
+})
+
+test('management selection uses an organization version only when no managed package is available', () => {
+  const selection = skillsPresentation.resolveSkillManagementSelection({
+    visibleEntries: [
+      { key: 'installed', packages: [{ id: 'package-1' }], installations: [], organizationVersions: [{ versionId: 'version-1', lifecycleStatus: 'ACTIVE' }] },
+      { key: 'catalog', packages: [], installations: [], organizationVersions: [{ versionId: 'version-2', lifecycleStatus: 'ACTIVE' }] },
+      { key: 'revoked', packages: [], installations: [], organizationVersions: [{ versionId: 'version-3', lifecycleStatus: 'REVOKED' }] }
+    ],
+    selectedItems: [], view: 'organization', organizationKey: 'organization:https://example.test:one', scopeKey: '*'
+  })
+
+  assert.deepEqual(selection.selectAllItems, [
+    { kind: 'package', id: 'package-1' }, { kind: 'organization_version', id: 'version-2' }
+  ])
+})
+
+test('batch request builder accepts only homogeneous action-compatible stable identities', () => {
+  const packages = skillsPresentation.resolveSkillManagementSelection({
+    visibleEntries: [
+      { key: 'b', packages: [{ id: 'b' }], installations: [], organizationVersions: [] },
+      { key: 'a', packages: [{ id: 'a' }], installations: [], organizationVersions: [] }
+    ],
+    selectedItems: [{ kind: 'package', id: 'b' }, { kind: 'package', id: 'a' }],
+    view: 'local', organizationKey: null, scopeKey: '*'
+  })
+  assert.deepEqual(skillsPresentation.buildSkillsBatchRequest({
+    action: 'set_cli_state', selection: packages, adapterId: 'codex', desiredState: 'disabled',
+    targets: { scopeType: 'user', scopeKey: '*', targetPath: 'must-not-forward' }
+  }), {
+    action: 'set_cli_state',
+    items: [{ kind: 'package', id: 'a' }, { kind: 'package', id: 'b' }],
+    targets: { scopeType: 'user', scopeKey: '*', adapterId: 'codex', desiredState: 'disabled' }
+  })
+
+  const organization = skillsPresentation.resolveSkillManagementSelection({
+    visibleEntries: [{ key: 'catalog', packages: [], installations: [], organizationVersions: [{ versionId: 'version-1', lifecycleStatus: 'ACTIVE' }] }],
+    selectedItems: [{ kind: 'organization_version', id: 'version-1' }],
+    view: 'organization', organizationKey: 'organization:https://example.test:one', scopeKey: '*'
+  })
+  assert.equal(skillsPresentation.buildSkillsBatchRequest({
+    action: 'remove_packages', selection: organization, targets: { scopeType: 'user', scopeKey: '*' }
+  }), null)
+  assert.deepEqual(skillsPresentation.buildSkillsBatchRequest({
+    action: 'install_organization', selection: organization,
+    targets: { scopeType: 'project', scopeKey: 'F:/project', targetAdapterIds: ['codex', 'claude', 'codex'], serverOrigin: 'must-not-forward' }
+  }), {
+    action: 'install_organization', items: [{ kind: 'organization_version', id: 'version-1' }],
+    targets: { scopeType: 'project', scopeKey: 'F:/project', targetAdapterIds: ['claude', 'codex'] }
+  })
+})
+
+test('batch management UI has accessible selection, preview, retry and separate destructive confirmation controls', () => {
+  const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
+  const actionBarPath = new URL('../src/components/skills/SkillsBatchActionBar.vue', import.meta.url)
+  assert.equal(existsSync(actionBarPath), true)
+  const actionBar = readFileSync(actionBarPath, 'utf8')
+
+  assert.match(page, /SkillsBatchActionBar/)
+  assert.match(page, /全选当前筛选结果/)
+  assert.match(page, /a-checkbox/)
+  for (const label of ['可直接执行', '需要迁移', '无法隔离', '存在冲突', '无需变化', '仅重试失败项', '确认移除受管包', '成功', '失败', '跳过']) {
+    assert.match(actionBar, new RegExp(label))
+  }
+  assert.match(actionBar, /aria-label/)
+  assert.match(actionBar, /:disabled=.*saving/)
+  for (const event of ['preview', 'apply', 'clear', 'retry']) assert.match(actionBar, new RegExp(`emit\\('${event}'|\\$emit\\('${event}'`))
+  assert.doesNotMatch(actionBar, /targetPath|serverOrigin|organizationId|artifactSha256/)
+})

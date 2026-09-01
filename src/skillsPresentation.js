@@ -787,6 +787,103 @@ export function groupSkillCatalogByOrigin(entries = [], { view = 'all', status =
     })
 }
 
+const BATCH_ACTION_ITEM_KIND = Object.freeze({
+  install_organization: 'organization_version',
+  update_organization: 'organization_version',
+  update_packages: 'package',
+  set_cli_state: 'package',
+  remove_projections: 'package',
+  remove_packages: 'package'
+})
+
+function stableManagementItems(items = []) {
+  const byKey = new Map()
+  for (const item of items) {
+    if (!item || !['package', 'organization_version'].includes(item.kind) || typeof item.id !== 'string' || !item.id) continue
+    byKey.set(`${item.kind}:${item.id}`, { kind: item.kind, id: item.id })
+  }
+  return [...byKey.values()].sort((left, right) => left.id.localeCompare(right.id) || left.kind.localeCompare(right.kind))
+}
+
+function managementItemForEntry(entry = {}) {
+  if (entry.selectable === false) return null
+  const packageId = (entry.packages || [])
+    .map((pkg) => pkg?.id)
+    .filter((id) => typeof id === 'string' && id)
+    .sort()[0]
+  if (packageId) return { kind: 'package', id: packageId }
+  const versionId = (entry.organizationVersions || [])
+    .filter((version) => version?.lifecycleStatus !== 'REVOKED')
+    .map((version) => version?.versionId)
+    .filter((id) => typeof id === 'string' && id)
+    .sort()[0]
+  return versionId ? { kind: 'organization_version', id: versionId } : null
+}
+
+function managementSelectionContext({ view = 'all', organizationKey = null, scopeKey = '*' } = {}) {
+  return {
+    view: ['all', 'organization', 'local'].includes(view) ? view : 'all',
+    organizationKey: typeof organizationKey === 'string' && organizationKey ? organizationKey : null,
+    scopeKey: typeof scopeKey === 'string' && scopeKey ? scopeKey : '*'
+  }
+}
+
+function sameManagementSelectionContext(left, right) {
+  return left?.view === right?.view &&
+    left?.organizationKey === right?.organizationKey &&
+    left?.scopeKey === right?.scopeKey
+}
+
+// Selection is derived only from the cards currently rendered. This prevents a
+// stale filter result, another organization, or an unavailable catalog item from
+// silently entering a batch mutation.
+export function resolveSkillManagementSelection({
+  visibleEntries = [], selectedItems = [], view = 'all', organizationKey = null, scopeKey = '*', selectionContext = null
+} = {}) {
+  const context = managementSelectionContext({ view, organizationKey, scopeKey })
+  const contextChanged = Boolean(selectionContext && !sameManagementSelectionContext(selectionContext, context))
+  const selectAllItems = stableManagementItems((visibleEntries || []).map(managementItemForEntry).filter(Boolean))
+  const available = new Set(selectAllItems.map((item) => `${item.kind}:${item.id}`))
+  const selected = contextChanged ? [] : stableManagementItems(selectedItems)
+    .filter((item) => available.has(`${item.kind}:${item.id}`))
+  const selectedItemsInContext = stableManagementItems(selected)
+  return {
+    context,
+    contextChanged,
+    selectAllItems,
+    selectedItems: selectedItemsInContext,
+    allSelected: selectAllItems.length > 0 && selectedItemsInContext.length === selectAllItems.length,
+    partiallySelected: selectedItemsInContext.length > 0 && selectedItemsInContext.length < selectAllItems.length
+  }
+}
+
+export function buildSkillsBatchRequest({ action, selection, adapterId, desiredState, targets = {} } = {}) {
+  const expectedKind = BATCH_ACTION_ITEM_KIND[action]
+  const selectedItems = stableManagementItems(Array.isArray(selection)
+    ? selection
+    : selection?.selectedItems || selection?.items || [])
+  if (!expectedKind || !selectedItems.length || selectedItems.some((item) => item.kind !== expectedKind)) return null
+  const scopeType = targets.scopeType
+  const scopeKey = targets.scopeKey
+  if (!((scopeType === 'user' && scopeKey === '*') || (scopeType === 'project' && typeof scopeKey === 'string' && scopeKey))) return null
+  const safeTargets = { scopeType, scopeKey }
+  if (action === 'set_cli_state') {
+    if (typeof adapterId !== 'string' || !adapterId || !['enabled', 'disabled'].includes(desiredState)) return null
+    safeTargets.adapterId = adapterId
+    safeTargets.desiredState = desiredState
+  }
+  if (action === 'remove_projections') {
+    if (typeof adapterId !== 'string' || !adapterId) return null
+    safeTargets.adapterId = adapterId
+  }
+  if (action === 'install_organization' || action === 'update_organization') {
+    const targetAdapterIds = [...new Set((targets.targetAdapterIds || []).filter((id) => typeof id === 'string' && id))].sort()
+    if (!targetAdapterIds.length) return null
+    safeTargets.targetAdapterIds = targetAdapterIds
+  }
+  return { action, items: selectedItems, targets: safeTargets }
+}
+
 const CLI_STATE_INSTALLATION_ORDER = ['drifted', 'broken_link', 'invalid', 'missing', 'conflict', 'disabled', 'ready', 'update_available']
 const ABNORMAL_CLI_STATES = new Set(['drifted', 'broken_link', 'invalid', 'missing', 'conflict'])
 

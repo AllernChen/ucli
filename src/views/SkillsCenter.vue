@@ -128,6 +128,21 @@
       </div>
     </a-card>
 
+    <SkillsBatchActionBar
+      :selected-count="managementSelection.selectedItems.length"
+      :actions="batchActions"
+      :adapters="skills.adapters"
+      :preview="skills.batchPreview"
+      :result="skills.batchResult"
+      :retry-available="skills.batchRetryableSelection.length > 0"
+      :saving="skills.batchSaving"
+      @preview="previewBatchAction"
+      @apply="applyBatchAction"
+      @clear="clearBatchSelection"
+      @retry="retryFailedBatch"
+      @close-preview="closeBatchPreview"
+    />
+
     <a-spin :spinning="skills.loading">
       <div class="skills-catalog-heading">
         <div>
@@ -158,6 +173,14 @@
               size="small"
               @click.stop="openSourceProject(sourceProject)"
             >打开项目</a-button>
+            <a-checkbox
+              :checked="groupManagementSelection(sourceProject).allSelected"
+              :indeterminate="groupManagementSelection(sourceProject).partiallySelected"
+              :disabled="skills.batchSaving || !groupManagementSelection(sourceProject).selectAllItems.length"
+              :aria-label="`全选 ${sourceProject.label} 当前筛选结果`"
+              @click.stop
+              @change.stop="toggleGroupSelection(sourceProject, $event.target.checked)"
+            >全选当前筛选结果</a-checkbox>
           </div>
 
           <div class="skill-aggregate-cli-summary">
@@ -206,6 +229,13 @@
             >
           <template #title>
             <div class="skill-card-title">
+              <a-checkbox
+                :checked="entrySelected(sourceProject, entry)"
+                :disabled="skills.batchSaving || !entryManagementItem(entry)"
+                :aria-label="`选择 Skill ${entry.name}`"
+                @click.stop
+                @change.stop="toggleEntrySelection(sourceProject, entry, $event.target.checked)"
+              >选择</a-checkbox>
               <span>{{ entry.name }}</span>
               <a-tag :color="skillStatusPresentation(entry.status).color">{{ skillStatusPresentation(entry.status).label }}</a-tag>
               <a-tag v-if="entry.builtinOnly">CLI 内置</a-tag>
@@ -597,11 +627,12 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 
 import { ipc } from '../ipc.js'
 import SkillCliStateMatrix from '../components/skills/SkillCliStateMatrix.vue'
+import SkillsBatchActionBar from '../components/skills/SkillsBatchActionBar.vue'
 import {
   aggregateSkillCatalog,
   buildPluginCopyInstallRequest,
@@ -610,12 +641,14 @@ import {
   buildSkillsManagementCatalog,
   buildSourceProjectCliSummary,
   buildSkillCliMatrix,
+  buildSkillsBatchRequest,
   canConfirmSkillInstall,
   createLatestRequestGuard,
   dshSkillSourcePresentation,
   filterSkillCatalog,
   groupSkillCatalogByOrigin,
   resolveSkillCollectionInstallSelection,
+  resolveSkillManagementSelection,
   resolveSkillInstallPreflight,
   skillCliName,
   skillInstallAffectedInstallationIds,
@@ -647,6 +680,8 @@ const inspecting = ref(false)
 const collectionSelectedSubdirs = ref([])
 const batchInstallResult = ref(null)
 const inspectionGuard = createLatestRequestGuard()
+const batchSelectionContext = ref(null)
+const activeBatchRequest = ref(null)
 
 const installDraft = reactive({
   sourceType: 'local', localPath: '', gitUrl: '', refType: 'default', ref: '', subdir: '',
@@ -679,6 +714,31 @@ const visibleCatalog = computed(() => {
 const sourceProjects = computed(() => groupSkillCatalogByOrigin(visibleCatalog.value, {
   view: activeView.value, status: statusFilter.value
 }))
+const batchScope = computed(() => projectPath.value
+  ? { scopeType: 'project', scopeKey: projectPath.value }
+  : { scopeType: 'user', scopeKey: '*' })
+const batchSelectionEntries = computed(() => {
+  const organizationKey = batchSelectionContext.value?.organizationKey
+  const groups = organizationKey
+    ? sourceProjects.value.filter((group) => group.key === organizationKey)
+    : sourceProjects.value
+  return groups.flatMap((group) => group.entries)
+})
+const managementSelection = computed(() => resolveSkillManagementSelection({
+  visibleEntries: batchSelectionEntries.value,
+  selectedItems: skills.batchSelection,
+  selectionContext: batchSelectionContext.value,
+  view: activeView.value,
+  organizationKey: batchSelectionContext.value?.organizationKey || null,
+  scopeKey: batchScope.value.scopeKey
+}))
+const batchActions = computed(() => {
+  const kinds = new Set(managementSelection.value.selectedItems.map((item) => item.kind))
+  if (kinds.size !== 1) return []
+  return kinds.has('organization_version')
+    ? ['install_organization', 'update_organization']
+    : ['update_packages', 'set_cli_state', 'remove_projections', 'remove_packages']
+})
 const detailSourceProject = computed(() =>
   sourceProjects.value.find(item => item.key === sourceProjectDetailKey.value) || null
 )
@@ -765,6 +825,136 @@ const collectionBlockedDescription = computed(() => collectionSelectionState.val
     return `${skill.name}：${label}`
   })
   .join('；'))
+
+watch([activeView, () => batchScope.value.scopeKey], () => clearBatchSelection())
+watch(sourceProjects, (groups) => {
+  const organizationKey = batchSelectionContext.value?.organizationKey
+  if (organizationKey && !groups.some((group) => group.key === organizationKey)) clearBatchSelection()
+})
+
+function managementContextForGroup(sourceProject) {
+  return {
+    view: activeView.value,
+    organizationKey: sourceProject.kind === 'organization' ? sourceProject.key : null,
+    scopeKey: batchScope.value.scopeKey
+  }
+}
+function groupManagementSelection(sourceProject) {
+  return resolveSkillManagementSelection({
+    visibleEntries: sourceProject.entries,
+    selectedItems: skills.batchSelection,
+    selectionContext: batchSelectionContext.value,
+    ...managementContextForGroup(sourceProject)
+  })
+}
+function entryManagementItem(entry) {
+  return resolveSkillManagementSelection({
+    visibleEntries: [entry], selectedItems: [], view: activeView.value,
+    organizationKey: batchSelectionContext.value?.organizationKey || null,
+    scopeKey: batchScope.value.scopeKey
+  }).selectAllItems[0] || null
+}
+function entrySelected(sourceProject, entry) {
+  const item = entryManagementItem(entry)
+  if (!item) return false
+  return groupManagementSelection(sourceProject).selectedItems
+    .some((selected) => selected.kind === item.kind && selected.id === item.id)
+}
+function setBatchSelection(items, context) {
+  skills.batchSelection = [...new Map(items.map((item) => [`${item.kind}:${item.id}`, item])).values()]
+  batchSelectionContext.value = context
+}
+function clearBatchSelection() {
+  skills.batchSelection = []
+  batchSelectionContext.value = null
+  activeBatchRequest.value = null
+  skills.batchPreview = null
+}
+function toggleEntrySelection(sourceProject, entry, checked) {
+  const item = entryManagementItem(entry)
+  if (!item) return
+  const selection = groupManagementSelection(sourceProject)
+  const items = selection.contextChanged ? [] : [...skills.batchSelection]
+  const key = `${item.kind}:${item.id}`
+  const next = checked
+    ? [...items.filter((selected) => `${selected.kind}:${selected.id}` !== key), item]
+    : items.filter((selected) => `${selected.kind}:${selected.id}` !== key)
+  setBatchSelection(next, selection.context)
+}
+function toggleGroupSelection(sourceProject, checked) {
+  const selection = groupManagementSelection(sourceProject)
+  setBatchSelection(checked ? selection.selectAllItems : [], selection.context)
+}
+function closeBatchPreview() {
+  skills.batchPreview = null
+  activeBatchRequest.value = null
+}
+function batchAffectedInstallationIds(result, packages, request) {
+  const byId = new Map((packages || []).map((pkg) => [pkg.id, pkg]))
+  const ids = new Set()
+  for (const success of result?.succeeded || []) {
+    const pkg = byId.get(success.packageId)
+    if (!pkg) continue
+    for (const installation of pkg.installations || []) {
+      if (installation.scopeType !== request.targets.scopeType || installation.scopeKey !== request.targets.scopeKey) continue
+      if (success.affectedAdapterIds?.length && !success.affectedAdapterIds.includes(installation.targetAdapterId)) continue
+      ids.add(installation.id)
+    }
+  }
+  return [...ids]
+}
+async function previewBatchAction(payload) {
+  const request = buildSkillsBatchRequest({
+    action: payload.action,
+    selection: managementSelection.value,
+    adapterId: payload.adapterId,
+    desiredState: payload.desiredState,
+    targets: { ...batchScope.value, ...payload.targets }
+  })
+  if (!request) {
+    message.warning('当前选择与批量操作不兼容，请仅选择同一类型且可管理的 Skill。')
+    return
+  }
+  try {
+    activeBatchRequest.value = request
+    await skills.previewBatchAction(request)
+  } catch (error) {
+    activeBatchRequest.value = null
+    message.error(error?.message || '无法预览批量操作')
+  }
+}
+async function applyBatchAction() {
+  const request = activeBatchRequest.value
+  const preview = skills.batchPreview
+  if (!request || !preview?.revision) return
+  const previousPackages = skills.packages.map((pkg) => ({ ...pkg, installations: [...(pkg.installations || [])] }))
+  try {
+    const result = await skills.applyBatchAction({ ...request, expectedRevision: preview.revision })
+    skills.batchPreview = null
+    activeBatchRequest.value = null
+    const affectedIds = batchAffectedInstallationIds(result, previousPackages, request)
+    if (result.failed?.length || result.skipped?.length || result.aborted) {
+      message.warning(`已完成 ${result.succeeded?.length || 0} 项；失败 ${result.failed?.length || 0} 项，跳过 ${result.skipped?.length || 0} 项。未完成项已保留选择。`)
+    } else message.success(`已完成 ${result.succeeded?.length || 0} 项批量操作`)
+    await promptRestart(affectedIds)
+  } catch (error) {
+    message.error(error?.message || '批量操作失败')
+  }
+}
+async function retryFailedBatch() {
+  const previousPackages = skills.packages.map((pkg) => ({ ...pkg, installations: [...(pkg.installations || [])] }))
+  const request = skills.batchRequest
+  if (!request) return
+  try {
+    const result = await skills.retryFailedBatch()
+    if (!result) return
+    const affectedIds = batchAffectedInstallationIds(result, previousPackages, request)
+    message.success(`已重试 ${result.succeeded?.length || 0} 项失败 Skill`)
+    await promptRestart(affectedIds)
+  } catch (error) {
+    message.error(error?.message || '重试失败项失败')
+  }
+}
 
 const sourceReady = computed(() => installDraft.sourceType === 'local' ? Boolean(installDraft.localPath) : Boolean(installDraft.gitUrl))
 const installPreflight = computed(() => resolveSkillInstallPreflight(sourcePreview.value || {}, {
