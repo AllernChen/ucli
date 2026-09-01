@@ -357,3 +357,33 @@ test('batch coordinator associates an organization update by persisted slug when
 
   assert.deepEqual(result.succeeded[0].affectedSessionIds, ['session-a-codex'])
 })
+
+test('batch coordinator captures every same-slug organization package session before updating', async () => {
+  const first = packageView('first', { organization: 'org-1' })
+  const second = packageView('second', { organization: 'org-1' })
+  first.sourceIdentity.catalogVersionId = 'old-first-version'
+  second.sourceIdentity.catalogVersionId = 'old-second-version'
+  first.server = { slug: 'release-notes' }
+  second.server = { slug: 'release-notes' }
+  first.installations.push({ id: 'first-project', targetAdapterId: 'codex', scopeType: 'project', scopeKey: 'F:\\project', enabled: true, status: 'ready' })
+  second.installations.push({ id: 'second-claude', targetAdapterId: 'claude', scopeType: 'user', scopeKey: '*', enabled: true, status: 'ready' })
+  const skillService = services({ packages: [first, second] })
+  skillService.getAffectedSessions = async (installationIds) => {
+    skillService.calls.push(['sessions', ...installationIds])
+    return installationIds.map((id) => ({ id: `session-${id}` }))
+  }
+  const catalog = {
+    list: () => [{ versionId: 'new-version', serverOrigin: 'https://skills.example.test', organizationId: 'org-1', slug: 'release-notes', lifecycleStatus: 'ACTIVE' }],
+    async update(versionId) { skillService.calls.push(['update-organization', versionId]); return { id: 'first' } }
+  }
+  const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: catalog })
+  const initial = { action: 'update_organization', items: [{ kind: 'organization_version', id: 'new-version' }], targets: { scopeType: 'user', scopeKey: '*', targetAdapterIds: ['codex'] } }
+  const preview = await coordinator.preview(initial)
+  const result = await coordinator.apply({ ...initial, expectedRevision: preview.revision })
+
+  assert.deepEqual(result.succeeded[0].affectedSessionIds, ['session-first-codex', 'session-second-codex'])
+  assert.deepEqual(skillService.calls, [
+    ['sessions', 'first-codex', 'second-codex'],
+    ['update-organization', 'new-version']
+  ])
+})

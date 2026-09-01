@@ -58,15 +58,19 @@ function identityOf(value) {
   return `${source.serverOrigin.toLowerCase()}:${source.organizationId}`
 }
 
-function packageForOrganizationVersion(packages, version) {
+function packagesForOrganizationVersion(packages, version) {
   const candidates = [...packages].filter((pkg) => {
     const identity = pkg?.sourceIdentity
     return identity?.originKind === 'organization' &&
       identity.serverOrigin?.toLowerCase() === version.serverOrigin?.toLowerCase() &&
       identity.organizationId === version.organizationId
   })
-  return candidates.find((pkg) => pkg.sourceIdentity.catalogVersionId === version.versionId) ||
-    candidates.find((pkg) => pkg.server?.slug && pkg.server.slug === version.slug) || null
+  const exactVersion = candidates.filter((pkg) => pkg.sourceIdentity.catalogVersionId === version.versionId)
+  const matchingSlug = typeof version.slug === 'string' && version.slug
+    ? candidates.filter((pkg) => pkg.server?.slug === version.slug)
+    : []
+  return [...new Map([...exactVersion, ...matchingSlug].map((pkg) => [pkg.id, pkg])).values()]
+    .sort((left, right) => left.id.localeCompare(right.id))
 }
 
 function safeSessionIds(sessions) {
@@ -166,7 +170,10 @@ function catalogSnapshot(version) {
 function entryDigest(entry) {
   return revision({
     item: entry.item,
-    snapshot: entry.item.kind === 'package' ? packageSnapshot(entry.value) : catalogSnapshot(entry.value)
+    snapshot: entry.item.kind === 'package' ? packageSnapshot(entry.value) : catalogSnapshot(entry.value),
+    associatedPackages: entry.item.kind === 'organization_version'
+      ? entry.associatedPackages.map(packageSnapshot)
+      : null
   })
 }
 
@@ -217,9 +224,11 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
     const entries = request.items.map((item) => {
       const value = item.kind === 'package' ? packages.get(item.id) : versions.get(item.id)
       if (!value) throw batchError('SKILL_BATCH_CONTEXT_INVALID')
-      const associatedPackage = item.kind === 'organization_version' ? packageForOrganizationVersion(packages.values(), value) : value
+      const associatedPackages = item.kind === 'organization_version'
+        ? packagesForOrganizationVersion(packages.values(), value)
+        : [value]
       const entry = {
-        item, value, associatedPackage,
+        item, value, associatedPackages,
         context: item.kind === 'package' ? identityOf(value) : `${value.serverOrigin?.toLowerCase()}:${value.organizationId}`
       }
       return { ...entry, digest: entryDigest(entry) }
@@ -307,20 +316,20 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
   }
 
   function affectedInstallationIdsBefore(request, entry, plan) {
-    const pkg = entry.item.kind === 'organization_version' ? entry.associatedPackage : entry.value
-    if (!pkg) return []
     if (request.action === 'remove_projections') {
       const installation = installationFor(entry.value, request.targets)
       return installation?.id ? [installation.id] : []
     }
     if (request.action === 'set_cli_state') {
       const adapterIds = new Set([request.targets.adapterId, ...(plan.plan?.impacts || []).map((impact) => impact.adapterId)])
-      return installationsForScope(pkg, request.targets, adapterIds).map((item) => item.id)
+      return installationsForScope(entry.value, request.targets, adapterIds).map((item) => item.id)
     }
     if (request.action === 'update_organization') {
-      return installationsForScope(pkg, request.targets, request.targets.targetAdapterIds).map((item) => item.id)
+      return [...new Set(entry.associatedPackages.flatMap((pkg) =>
+        installationsForScope(pkg, request.targets, request.targets.targetAdapterIds).map((item) => item.id)
+      ))].sort()
     }
-    return (pkg.installations || []).map((item) => item.id)
+    return (entry.value.installations || []).map((item) => item.id)
   }
 
   async function affectedSessionIdsFor(installationIds) {
