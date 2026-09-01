@@ -1780,6 +1780,8 @@ export function createSkillsService({
       committed = true
       writeCommittedRemovalTombstone(pkg.id)
       cleanupCommittedRemoval(pkg.id)
+      await db.transaction(() => db.deleteSkillRemovalOperation(pkg.id))
+      await persistOrThrow()
       removeEmptyPackageParent(pkg.id)
       return true
     } catch (error) {

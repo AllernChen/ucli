@@ -274,6 +274,26 @@ test('removePackage restores every projection when a later file removal fails', 
   })
 })
 
+test('successful package removal clears its recovery operation before a fresh state load', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user'
+    })
+
+    assert.equal(await service.removePackage(installed.id), true)
+
+    const fresh = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }), flush: () => db.flush()
+    })
+    const state = await fresh.getState()
+    assert.equal(state.packages.some((item) => item.id === installed.id), false)
+    assert.equal(db.getSkillRemovalOperation(installed.id), null)
+  })
+})
+
 test('committed installation removal retries failed journal cleanup without replaying the installation', async () => {
   let journalCleanupAttempts = 0
   await withService(async ({ root, db, service }) => {
