@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto'
 
+import { hasCanonicalSkillProjectionCapabilities } from './adapters.js'
+
 const DESIRED_STATES = new Set(['enabled', 'disabled', 'inherit'])
 const REQUESTED_DESIRED_STATES = new Set(['enabled', 'disabled'])
 const ENFORCEMENT_STATUSES = new Set([
   'satisfied', 'migration_required', 'blocked', 'error', 'recovery_required'
 ])
 const REASON_CODES = new Set([
+  'SKILL_CLI_DESIRED_STATE_INVALID',
   'SKILL_CLI_ISOLATION_UNSUPPORTED',
   'SKILL_INCOMPATIBLE',
   'SKILL_DRIFTED',
@@ -50,6 +53,9 @@ function validateSnapshot(snapshot) {
   }
 
   const capabilities = new Map()
+  if (!hasCanonicalSkillProjectionCapabilities(snapshot.capabilities)) {
+    throw plannerError('SKILL_PROJECTION_PLAN_INVALID')
+  }
   for (const capability of snapshot.capabilities) {
     if (!capability || typeof capability !== 'object' || Array.isArray(capability) ||
       typeof capability.adapterId !== 'string' || !capability.adapterId || capabilities.has(capability.adapterId) ||
@@ -189,6 +195,10 @@ export function planSkillCliStateChange(snapshot, requestedChanges) {
   const finalDesired = new Map([...state.desiredStates.entries()].map(([adapterId, item]) => [adapterId, item.desiredState]))
   for (const [adapterId, desiredState] of requested) finalDesired.set(adapterId, desiredState)
   const activeInstallations = activeDirectInstallations(state.installations, snapshot.package.contentSha256)
+  if (activeInstallations.some((installation) => state.capabilities.get(installation.targetAdapterId).covers
+    .some((adapterId) => !state.desiredStates.has(adapterId)))) {
+    return blocked(revision, 'SKILL_CLI_DESIRED_STATE_INVALID')
+  }
   const activeDirect = new Set(activeInstallations.map((item) => item.targetAdapterId))
   const ensureDirect = new Set()
   const disableDirect = new Set()

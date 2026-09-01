@@ -104,6 +104,25 @@ function effectiveProjectionCoverage(adapterId, options = {}) {
     : [...coverage]
 }
 
+function sameAdapterList(left, right) {
+  return Array.isArray(left) && left.length === right.length && left.every((item, index) => item === right[index])
+}
+
+export function hasCanonicalSkillProjectionCapabilities(capabilities) {
+  const adapterIds = Object.keys(SKILL_ADAPTERS)
+  if (!Array.isArray(capabilities) || capabilities.length !== adapterIds.length) return false
+  return capabilities.every((capability, index) => {
+    const adapterId = adapterIds[index]
+    if (!capability || capability.adapterId !== adapterId ||
+      typeof capability.directRoot !== 'string' || !capability.directRoot ||
+      capability.canExcludeInherited !== false ||
+      capability.isolationReasonCode !== 'SKILL_CLI_ISOLATION_UNSUPPORTED') return false
+    if (adapterId !== 'codex') return sameAdapterList(capability.covers, PROJECTION_COVERAGE[adapterId])
+    return sameAdapterList(capability.covers, PROJECTION_COVERAGE.codex) ||
+      sameAdapterList(capability.covers, PROJECTION_COVERAGE.codex.filter((id) => id !== 'deepseek-harness'))
+  })
+}
+
 export function resolveSkillRoot({ adapterId, scopeType, projectPath, home = homedir(), env = process.env }) {
   const adapter = SKILL_ADAPTERS[adapterId]
   if (!adapter) throw Object.assign(new Error('Skill adapter is unavailable'), { code: 'SKILL_ADAPTER_UNAVAILABLE' })

@@ -78,7 +78,7 @@ test('plans strict CLI state changes from trusted snapshots', () => {
       name: 'direct disable removes a direct projection and records the explicit intent',
       state: snapshot({
         installations: [direct('opencode')],
-        desiredStates: [desired('opencode', 'enabled')]
+        desiredStates: [desired('opencode', 'enabled'), desired('ucode', 'inherit')]
       }),
       changes: [{ adapterId: 'opencode', desiredState: 'disabled' }],
       classification: 'direct',
@@ -88,7 +88,10 @@ test('plans strict CLI state changes from trusted snapshots', () => {
       name: 'provider disable creates a direct projection for an enabled consumer before disabling the provider',
       state: snapshot({
         installations: [direct('codex')],
-        desiredStates: [desired('codex', 'enabled'), desired('opencode', 'enabled')]
+        desiredStates: [
+          desired('codex', 'enabled'), desired('opencode', 'enabled'),
+          desired('ucode', 'inherit'), desired('deepseek-harness', 'inherit')
+        ]
       }),
       changes: [{ adapterId: 'codex', desiredState: 'disabled' }],
       classification: 'migration_required',
@@ -102,7 +105,10 @@ test('plans strict CLI state changes from trusted snapshots', () => {
       name: 'provider and consumer disable removes the provider without creating a replacement',
       state: snapshot({
         installations: [direct('codex')],
-        desiredStates: [desired('codex', 'enabled'), desired('opencode', 'enabled')]
+        desiredStates: [
+          desired('codex', 'enabled'), desired('opencode', 'enabled'),
+          desired('ucode', 'inherit'), desired('deepseek-harness', 'inherit')
+        ]
       }),
       changes: [
         { adapterId: 'codex', desiredState: 'disabled' },
@@ -119,7 +125,10 @@ test('plans strict CLI state changes from trusted snapshots', () => {
       name: 'inherited consumer disable remains blocked while its provider stays enabled',
       state: snapshot({
         installations: [direct('codex')],
-        desiredStates: [desired('codex', 'enabled'), desired('opencode', 'inherit')]
+        desiredStates: [
+          desired('codex', 'enabled'), desired('opencode', 'inherit'),
+          desired('ucode', 'inherit'), desired('deepseek-harness', 'inherit')
+        ]
       }),
       changes: [{ adapterId: 'opencode', desiredState: 'disabled' }],
       classification: 'blocked',
@@ -130,7 +139,10 @@ test('plans strict CLI state changes from trusted snapshots', () => {
       name: 'an already satisfied direct state is a noop',
       state: snapshot({
         installations: [direct('codex')],
-        desiredStates: [desired('codex', 'enabled')]
+        desiredStates: [
+          desired('codex', 'enabled'), desired('opencode', 'inherit'),
+          desired('ucode', 'inherit'), desired('deepseek-harness', 'inherit')
+        ]
       }),
       changes: [{ adapterId: 'codex', desiredState: 'enabled' }],
       classification: 'noop',
@@ -182,6 +194,55 @@ test('plans strict CLI state changes from trusted snapshots', () => {
   }
 })
 
+test('incomplete desired-state coverage blocks provider disable before an inherited consumer can be lost', () => {
+  const plan = planSkillCliStateChange(snapshot({
+    installations: [direct('codex')],
+    desiredStates: [desired('codex', 'enabled')]
+  }), [{ adapterId: 'codex', desiredState: 'disabled' }])
+
+  assert.equal(plan.classification, 'blocked')
+  assert.equal(plan.reasonCode, 'SKILL_CLI_DESIRED_STATE_INVALID')
+  assert.deepEqual(plan.steps, [])
+})
+
+test('projection planner rejects forged capability contracts instead of trusting caller claims', () => {
+  const base = snapshot()
+  const invalidCapabilities = [
+    {
+      name: 'unknown adapter',
+      state: snapshot({
+        compatibility: { ...base.compatibility, untrusted: { compatible: true } },
+        capabilities: [...base.capabilities, {
+          adapterId: 'untrusted', directRoot: 'F:\\untrusted', covers: ['untrusted'],
+          canExcludeInherited: false, isolationReasonCode: 'SKILL_CLI_ISOLATION_UNSUPPORTED'
+        }]
+      })
+    },
+    {
+      name: 'mismatched coverage',
+      state: snapshot({
+        capabilities: base.capabilities.map((item) => item.adapterId === 'codex'
+          ? { ...item, covers: ['codex'] }
+          : item)
+      })
+    },
+    {
+      name: 'forged inherited exclusion',
+      state: snapshot({
+        capabilities: base.capabilities.map((item) => item.adapterId === 'opencode'
+          ? { ...item, canExcludeInherited: true, isolationReasonCode: null }
+          : item)
+      })
+    }
+  ]
+
+  for (const item of invalidCapabilities) {
+    assert.throws(() => projectionStateRevision(item.state), {
+      code: 'SKILL_PROJECTION_PLAN_INVALID'
+    }, item.name)
+  }
+})
+
 test('projection revisions include trusted semantic state and exclude timestamps and paths', () => {
   const original = snapshot({
     installations: [direct('codex')],
@@ -197,14 +258,7 @@ test('projection revisions include trusted semantic state and exclude timestamps
     ...original,
     desiredStates: [desired('codex', 'disabled')]
   })
-  const changedCapability = snapshot({
-    ...original,
-    capabilities: original.capabilities.map((item) => item.adapterId === 'codex'
-      ? { ...item, covers: ['codex'] }
-      : item)
-  })
 
   assert.equal(projectionStateRevision(nonSemanticChanges), projectionStateRevision(original))
   assert.notEqual(projectionStateRevision(semanticChange), projectionStateRevision(original))
-  assert.notEqual(projectionStateRevision(changedCapability), projectionStateRevision(original))
 })
