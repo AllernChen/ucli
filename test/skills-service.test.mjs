@@ -274,6 +274,72 @@ test('removePackage restores every projection when a later file removal fails', 
   })
 })
 
+test('committed installation removal retries failed journal cleanup without replaying the installation', async () => {
+  let journalCleanupAttempts = 0
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user' })
+    const installation = installed.installations[0]
+
+    await assert.rejects(
+      service.removeInstallation(installation.id),
+      (error) => error.code === 'SKILL_REMOVAL_CLEANUP_PENDING' && error.message === 'Skill removal cleanup is pending'
+    )
+    assert.equal(db.getSkillInstallation(installation.id), null)
+
+    const fresh = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }), flush: () => db.flush()
+    })
+    const state = await fresh.getState()
+    assert.equal(state.packages.find((item) => item.id === installed.id).installations.length, 0)
+    assert.equal(await fresh.removePackage(installed.id), true)
+    assert.deepEqual(readdirSync(join(root, 'user-data', 'skills', '.staging')), [])
+    assert.equal(journalCleanupAttempts, 1)
+  }, {
+    removalCleanupFileOps: {
+      removeJournal(path) {
+        journalCleanupAttempts += 1
+        if (journalCleanupAttempts === 1) throw new Error(`journal cleanup failed: ${path}`)
+        rmSync(path, { force: true })
+      }
+    }
+  })
+})
+
+test('committed package removal retries failed backup cleanup without restoring the package', async () => {
+  let backupCleanupAttempts = 0
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user' })
+
+    await assert.rejects(
+      service.removePackage(installed.id),
+      (error) => error.code === 'SKILL_REMOVAL_CLEANUP_PENDING' && error.message === 'Skill removal cleanup is pending'
+    )
+    assert.equal(db.getSkillPackage(installed.id), null)
+
+    const fresh = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }), flush: () => db.flush()
+    })
+    assert.equal((await fresh.getState()).packages.some((item) => item.id === installed.id), false)
+    assert.equal(await fresh.removePackage(installed.id), false)
+    assert.deepEqual(readdirSync(join(root, 'user-data', 'skills', '.staging')), [])
+    assert.equal(backupCleanupAttempts, 1)
+  }, {
+    removalCleanupFileOps: {
+      removeBackup(path) {
+        backupCleanupAttempts += 1
+        if (backupCleanupAttempts === 1) throw new Error(`backup cleanup failed: ${path}`)
+        rmSync(path, { recursive: true, force: true })
+      }
+    }
+  })
+})
+
 test('install stores one managed package and the minimum projections for four CLIs', async () => {
   await withService(async ({ root, db, service }) => {
     const source = join(root, 'source')

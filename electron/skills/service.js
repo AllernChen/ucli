@@ -131,6 +131,7 @@ export function createSkillsService({
   migrationFileOps = {},
   removalFileOps = {},
   removalRecoveryFileOps = {},
+  removalCleanupFileOps = {},
   uuid = randomUUID,
   now = Date.now
 }) {
@@ -146,6 +147,8 @@ export function createSkillsService({
   const migrationRemove = migrationFileOps.remove || removeManagedSkillDirectory
   const managedRemoval = removalFileOps.remove || removeManagedSkillDirectory
   const recoveryCopy = removalRecoveryFileOps.copy || copySkillDirectoryAtomic
+  const removeRecoveryJournal = removalCleanupFileOps.removeJournal || (path => rmSync(path, { force: true }))
+  const removeRecoveryBackup = removalCleanupFileOps.removeBackup || (path => rmSync(path, { recursive: true, force: true }))
   backfillSkillManagementMetadata({ db, now })
 
   const projectionOptions = (scopeType, projectPath) => ({
@@ -366,6 +369,10 @@ export function createSkillsService({
     return join(updateStagingRoot, `removal-recovery-${encodeURIComponent(packageId)}.json`)
   }
 
+  function committedRemovalTombstonePath(packageId) {
+    return join(updateStagingRoot, `removal-recovery-${encodeURIComponent(packageId)}.committed`)
+  }
+
   function removalSnapshot(pkg, installations, sourceIdentity, desiredStates, serverMapping) {
     return {
       version: 1,
@@ -449,6 +456,55 @@ export function createSkillsService({
     }
   }
 
+  function writeCommittedRemovalTombstone(packageId) {
+    let temporary = null
+    try {
+      if (typeof packageId !== 'string' || !packageId || packageId.length > 128 ||
+        !pathIsWithin(packagesRoot, packageDirectory(packageId))) {
+        throw new Error('invalid removal cleanup record')
+      }
+      const path = committedRemovalTombstonePath(packageId)
+      if (existsSync(path)) return
+      temporary = `${path}.${randomUUID()}.tmp`
+      writeFileSync(temporary, JSON.stringify({ version: 1, phase: 'cleanup_only', packageId }), { encoding: 'utf8', mode: 0o600 })
+      renameSync(temporary, path)
+    } catch {
+      try { if (temporary && existsSync(temporary)) rmSync(temporary, { force: true }) } catch {}
+      throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
+    }
+  }
+
+  function readCommittedRemovalTombstone(path) {
+    try {
+      const value = JSON.parse(readFileSync(path, 'utf8'))
+      if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 ||
+        value.phase !== 'cleanup_only' || typeof value.packageId !== 'string' || !value.packageId ||
+        value.packageId.length > 128 || !pathIsWithin(packagesRoot, packageDirectory(value.packageId))) {
+        throw new Error('invalid removal cleanup record')
+      }
+      return value.packageId
+    } catch {
+      throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
+    }
+  }
+
+  function cleanupCommittedRemoval(packageId) {
+    try {
+      const backup = removalRecoveryPath(packageId)
+      const journal = removalJournalPath(packageId)
+      const tombstone = committedRemovalTombstonePath(packageId)
+      if (existsSync(backup)) removeRecoveryBackup(backup)
+      if (existsSync(journal)) removeRecoveryJournal(journal)
+      if (existsSync(tombstone)) rmSync(tombstone, { force: true })
+    } catch {
+      throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
+    }
+  }
+
+  async function recoverCommittedRemoval(tombstone) {
+    cleanupCommittedRemoval(readCommittedRemovalTombstone(tombstone))
+  }
+
   function markRemovalRecovery(packageId) {
     db._runImmediateTransaction(() => {
       const states = db.listSkillCliDesiredStates({ packageId })
@@ -519,15 +575,20 @@ export function createSkillsService({
   }
 
   async function recoverRemovalIfNeeded(packageId = null) {
-    let journals
+    let entries
     try {
-      journals = readdirSync(updateStagingRoot)
+      entries = readdirSync(updateStagingRoot)
+      for (const name of entries.filter((name) => name.startsWith('removal-recovery-') && name.endsWith('.committed'))) {
+        await recoverCommittedRemoval(join(updateStagingRoot, name))
+      }
+      entries = readdirSync(updateStagingRoot)
+      const journals = entries
         .filter((name) => name.startsWith('removal-recovery-') && name.endsWith('.json'))
         .map((name) => join(updateStagingRoot, name))
+      for (const journal of journals) await recoverRemovalJournal(journal)
     } catch {
       throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     }
-    for (const journal of journals) await recoverRemovalJournal(journal)
     const packageIds = new Set(packageId ? [packageId] : [])
     for (const pkg of db.listSkillPackages()) {
       if (db.listSkillCliDesiredStates({ packageId: pkg.id })
@@ -1496,6 +1557,7 @@ export function createSkillsService({
     let backupReady = false
     let journalWritten = false
     let recoveryRequired = false
+    let committed = false
     try {
       recoveryCopy(packageDirectory(pkg.id), backup)
       backupReady = true
@@ -1510,8 +1572,12 @@ export function createSkillsService({
         recordRemoved = true
       })
       await persistOrThrow()
+      committed = true
+      writeCommittedRemovalTombstone(pkg.id)
+      cleanupCommittedRemoval(pkg.id)
       return true
     } catch (error) {
+      if (committed) throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
       let recovered = true
       try {
         if (recordRemoved && !db.getSkillInstallation(item.id)) {
@@ -1532,8 +1598,10 @@ export function createSkillsService({
       if (!recovered) throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
       throw error
     } finally {
-      if (!recoveryRequired && existsSync(journal)) rmSync(journal, { force: true })
-      if (!recoveryRequired && existsSync(backup)) rmSync(backup, { recursive: true, force: true })
+      if (!committed && !recoveryRequired) {
+        try { if (existsSync(journal)) rmSync(journal, { force: true }) } catch {}
+        try { if (existsSync(backup)) rmSync(backup, { recursive: true, force: true }) } catch {}
+      }
     }
   }
 
@@ -1553,6 +1621,7 @@ export function createSkillsService({
     let backupReady = false
     let journalWritten = false
     let recoveryRequired = false
+    let committed = false
     try {
       recoveryCopy(packageDirectory(pkg.id), backup)
       backupReady = true
@@ -1571,9 +1640,13 @@ export function createSkillsService({
         recordsRemoved = true
       })
       await persistOrThrow()
+      committed = true
+      writeCommittedRemovalTombstone(pkg.id)
+      cleanupCommittedRemoval(pkg.id)
       removeEmptyPackageParent(pkg.id)
       return true
     } catch (error) {
+      if (committed) throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
       let recovered = true
       try {
         if (canonicalRemoved && !existsSync(packageDirectory(pkg.id))) {
@@ -1607,8 +1680,10 @@ export function createSkillsService({
       if (!recovered) throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
       throw error
     } finally {
-      if (!recoveryRequired && existsSync(journal)) rmSync(journal, { force: true })
-      if (!recoveryRequired && existsSync(backup)) rmSync(backup, { recursive: true, force: true })
+      if (!committed && !recoveryRequired) {
+        try { if (existsSync(journal)) rmSync(journal, { force: true }) } catch {}
+        try { if (existsSync(backup)) rmSync(backup, { recursive: true, force: true }) } catch {}
+      }
     }
   }
 
