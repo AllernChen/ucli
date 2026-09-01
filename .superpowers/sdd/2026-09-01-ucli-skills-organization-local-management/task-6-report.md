@@ -17,3 +17,9 @@
 - `node --test test/server-settings-template.test.mjs test/skills-presentation.test.mjs`
 - `npm run build`
 - `git diff --check`
+
+## Review follow-up
+
+- A stale catalog flight inherited by a replacement connection now schedules one forced retry after the old adapter flight releases, so the new organization synchronizes without a page focus or manual action.
+- Explicit-disconnect clearing is now serialized and tracked. A failed flush remains pending, is retried before a later sync or shutdown completes, and shutdown propagates a final failure instead of silently allowing the prior catalog to reappear.
+- Added real-adapter replacement synchronization, shutdown-during-clear, and failed-flush/reopen regression coverage.

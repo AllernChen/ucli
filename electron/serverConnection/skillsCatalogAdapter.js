@@ -115,6 +115,8 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
   const ownedFiles = new Map()
   let closing = false
   let syncFlight = null
+  let clearFlight = null
+  let clearPending = false
   const activeWork = new Set()
   const track = (promise) => {
     activeWork.add(promise)
@@ -215,10 +217,28 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
       transfer.release()
     }
   }
-  const clearOnline = async () => {
-    if (!db.clearServerSkillVersions) return
-    await db.transaction(() => db.clearServerSkillVersions())
-    if (db.flush && await db.flush() === false) throw adapterError('SERVER_SKILL_PERSISTENCE_PENDING')
+  const clearOnline = () => {
+    if (!db.clearServerSkillVersions) return Promise.resolve()
+    if (clearFlight) return clearFlight
+    clearPending = true
+    const work = (async () => {
+      await db.transaction(() => db.clearServerSkillVersions())
+      if (db.flush && await db.flush() === false) throw adapterError('SERVER_SKILL_PERSISTENCE_PENDING')
+      clearPending = false
+    })()
+    const flight = work.finally(() => {
+      if (clearFlight === flight) clearFlight = null
+    })
+    clearFlight = flight
+    return flight
+  }
+  const settlePendingClear = async () => {
+    try {
+      if (clearFlight) await clearFlight
+    } catch {
+      // A failed durable clear remains pending and is retried below.
+    }
+    if (clearPending) await clearOnline()
   }
   const catalogUrl = (bootstrap, identity, cursor = null) => {
     const base = strictUrl(bootstrap.skillsCatalogUrl, identity.serverOrigin, '/api/v1/skills/catalog')
@@ -260,9 +280,13 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
   async function sync() {
     if (syncFlight) return syncFlight
     const work = (async () => {
+      await settlePendingClear()
       assertOpen()
       const identity = identityOf(connectionManager)
-      if (!identity) { await clearOnline(); return [] }
+      if (!identity) {
+        if (connectionManager.getState?.().status === 'disconnected') await clearOnline()
+        return []
+      }
       const bootstrap = await getBootstrap(identity)
       const versions = []
       const versionIds = new Set()
@@ -475,7 +499,8 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
   async function shutdown() {
     closing = true
     for (const controller of activeControllers) controller.abort()
-    await Promise.allSettled([syncFlight, ...activeWork].filter(Boolean))
+    await Promise.allSettled([syncFlight, clearFlight, ...activeWork].filter(Boolean))
+    if (clearPending) await clearOnline()
     for (const file of [...ownedFiles.keys()]) await removeStaged(file)
     try {
       await assertPrivateRoot()

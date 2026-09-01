@@ -100,6 +100,7 @@ export function createOrganizationSkillsSyncCoordinator({
     const expectedGeneration = generation
     state.status = 'syncing'
     state.error = null
+    let retryCurrentIdentity = false
     const work = (async () => {
       try {
         await catalog.sync()
@@ -115,16 +116,24 @@ export function createOrganizationSkillsSyncCoordinator({
           lastSyncedAt: state.lastSyncedAt,
           status: 'ready'
         })
-      } catch {
+      } catch (error) {
         if (isCurrent(identity, expectedGeneration)) {
-          state.status = 'error'
-          state.error = safeError()
+          if (error?.code === 'SERVER_SKILL_STALE') {
+            state.status = 'stale'
+            retryCurrentIdentity = true
+          } else {
+            state.status = 'error'
+            state.error = safeError()
+          }
         }
       }
       return getState()
     })()
     const flight = work.finally(() => {
       if (flights.get(key) === flight) flights.delete(key)
+      if (retryCurrentIdentity && isCurrent(identity, expectedGeneration)) {
+        void ensureFresh({ force: true }).catch(() => {})
+      }
     })
     flights.set(key, flight)
     return flight

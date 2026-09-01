@@ -9,6 +9,16 @@ import { openDb } from '../electron/persistence/db.js'
 import { ConnectionManager } from '../electron/serverConnection/connectionManager.js'
 import { RegistrationAttemptStore } from '../electron/serverConnection/registrationAttempts.js'
 
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((nextResolve, nextReject) => {
+    resolve = nextResolve
+    reject = nextReject
+  })
+  return { promise, resolve, reject }
+}
+
 test('retains the durable catalog during a transient unreachable state and clears it only after explicit disconnect', async () => {
   let runtimeIdentity = { connectionId: 'connection-1', connectionRevision: 1 }
   let state = {
@@ -42,6 +52,123 @@ test('retains the durable catalog during a transient unreachable state and clear
   await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(db.versions, [])
   await adapter.shutdown()
+})
+
+test('shutdown waits for an explicit-disconnect catalog clear already in progress', async () => {
+  const clearing = deferred()
+  const clearStarted = deferred()
+  let state = { status: 'disconnected', serverOrigin: null, organization: null, connection: null }
+  let listener
+  const db = {
+    versions: [{ versionId: 'old' }],
+    transaction: async work => { clearStarted.resolve(); await clearing.promise; work() },
+    clearServerSkillVersions: () => { db.versions = [] },
+    listServerSkillVersions: () => db.versions,
+    flush: async () => true
+  }
+  const adapter = createSkillsCatalogAdapter({
+    connectionManager: {
+      getRuntimeConnectionIdentity: () => null,
+      getState: () => state,
+      subscribe: nextListener => { listener = nextListener; return () => {} }
+    },
+    db, stagingRoot: '.ucli-test-staging', sourceLoader: {}, skillsService: {}, fetchImpl: async () => assert.fail('must not fetch')
+  })
+
+  listener(state)
+  await clearStarted.promise
+  let stopped = false
+  const shutdown = adapter.shutdown().then(() => { stopped = true })
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(stopped, false)
+  clearing.resolve()
+  await shutdown
+  assert.deepEqual(db.versions, [])
+})
+
+test('a failed explicit-disconnect flush is retried before shutdown so the catalog stays cleared after reopening', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ucli-skills-clear-reopen-'))
+  const databasePath = join(root, 'ucli.db')
+  const persisted = {
+    versionId: 'old-version', serverOrigin: 'https://server.example.test', organizationId: 'org-1', organizationName: 'Example',
+    slug: 'old', version: '1.0.0', name: 'Old', description: 'Old Skill', sha256: 'a'.repeat(64), sizeBytes: 1,
+    publishedAt: '2026-09-01T00:00:00.000Z', createdAt: '2026-09-01T00:00:00.000Z',
+    downloadUrl: 'https://server.example.test/api/v1/skills/old-version/download', lifecycleStatus: 'ACTIVE'
+  }
+  const db = await openDb(databasePath)
+  db.replaceServerSkillVersions({ connectionRevision: 1, versions: [persisted] })
+  assert.equal(db.flush(), true)
+  let flushes = 0
+  const wrappedDb = Object.create(db)
+  wrappedDb.flush = async () => (++flushes === 1 ? false : db.flush())
+  let listener
+  const adapter = createSkillsCatalogAdapter({
+    connectionManager: {
+      getRuntimeConnectionIdentity: () => null,
+      getState: () => ({ status: 'disconnected', serverOrigin: null, organization: null, connection: null }),
+      subscribe: nextListener => { listener = nextListener; return () => {} }
+    },
+    db: wrappedDb, stagingRoot: join(root, 'staging'), sourceLoader: {}, skillsService: {}, fetchImpl: async () => assert.fail('must not fetch')
+  })
+
+  try {
+    listener({ status: 'disconnected' })
+    await adapter.shutdown()
+    assert.equal(flushes, 2)
+    db.close()
+    const reopened = await openDb(databasePath)
+    try { assert.deepEqual(reopened.listServerSkillVersions(), []) } finally { reopened.close() }
+  } finally {
+    try { db.close() } catch { /* closed for reopen verification */ }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a replacement sync retries an in-flight failed disconnect clear before fetching its catalog', async () => {
+  const releaseClear = deferred()
+  const clearStarted = deferred()
+  let state = { status: 'disconnected', serverOrigin: null, organization: null, connection: null }
+  let listener
+  let flushes = 0
+  let requests = 0
+  const db = {
+    versions: [{ versionId: 'old' }],
+    transaction: async work => { clearStarted.resolve(); await releaseClear.promise; work() },
+    clearServerSkillVersions: () => { db.versions = [] },
+    replaceServerSkillVersions: ({ versions }) => { db.versions = versions },
+    listServerSkillVersions: () => db.versions,
+    flush: async () => (++flushes === 1 ? false : true)
+  }
+  const adapter = createSkillsCatalogAdapter({
+    connectionManager: {
+      getRuntimeConnectionIdentity: () => state.connection ? { connectionId: state.connection.id, connectionRevision: state.connection.connectionRevision } : null,
+      getState: () => state,
+      getBootstrap: async () => ({ organization: { id: 'org-2' }, skillsCatalogUrl: 'https://server.example.test/api/v1/skills/catalog' }),
+      getAccessToken: async () => 'access-token',
+      subscribe: nextListener => { listener = nextListener; return () => {} }
+    },
+    db, stagingRoot: '.ucli-test-staging', sourceLoader: {}, skillsService: {},
+    fetchImpl: async url => {
+      requests += 1
+      return new Response(JSON.stringify(url.endsWith('/revocations') ? [] : []), { headers: { 'content-type': 'application/json' } })
+    }
+  })
+
+  try {
+    listener(state)
+    await clearStarted.promise
+    state = {
+      status: 'connected', serverOrigin: 'https://server.example.test', organization: { id: 'org-2' },
+      connection: { id: 'connection-2', connectionRevision: 2 }
+    }
+    const sync = adapter.sync()
+    releaseClear.resolve()
+    await sync
+    assert.equal(flushes, 3)
+    assert.equal(requests, 2)
+  } finally {
+    await adapter.shutdown()
+  }
 })
 
 test('sync requests the catalog without a cursor, then advances from the final createdAt value', async () => {
