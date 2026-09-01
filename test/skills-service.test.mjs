@@ -96,10 +96,69 @@ test('local installations expose trusted provenance and preserve canonical metad
     assert.ok(db.getSkillPackage(installed.id))
     assert.ok(db.getSkillSourceIdentity(installed.id))
     assert.equal(db.listSkillInstallations({ packageId: installed.id }).length, 0)
+    assert.equal(db.getSkillRemovalOperation(installed.id), null)
 
     await service.removePackage(installed.id)
     assert.equal(db.getSkillPackage(installed.id), null)
     assert.equal(db.getSkillSourceIdentity(installed.id), null)
+  })
+})
+
+test('removing the final projection retains complete desired state for safe direct recreation', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    const original = installed.installations[0]
+
+    assert.equal(await service.removeInstallation(original.id), true)
+    assert.equal(db.getSkillPackage(installed.id)?.id, installed.id)
+    assert.equal(db.getSkillSourceIdentity(installed.id)?.originKind, 'local')
+    assert.equal(db.getSkillRemovalOperation(installed.id), null)
+    assert.equal(db.listSkillInstallations({ packageId: installed.id }).length, 0)
+
+    const request = {
+      packageId: installed.id, scopeType: 'user', scopeKey: '*',
+      changes: [{ adapterId: 'codex', desiredState: 'enabled' }]
+    }
+    const preview = service.previewCliStateChange(request)
+    assert.equal(preview.classification, 'direct')
+    assert.deepEqual(preview.steps, [{ type: 'ensure_direct', adapterId: 'codex' }])
+
+    await service.applyCliStateChange({ ...request, expectedRevision: preview.revision })
+
+    const recreated = db.listSkillInstallations({ packageId: installed.id })
+    assert.equal(recreated.length, 1)
+    assert.equal(recreated[0].targetAdapterId, 'codex')
+    assert.equal(recreated[0].enabled, true)
+    assert.equal(existsSync(join(root, 'home', '.agents', 'skills', 'release-notes', 'SKILL.md')), true)
+    assert.equal(db.getSkillSourceIdentity(installed.id)?.originKind, 'local')
+  })
+})
+
+test('empty projection scopes fail closed when desired state coverage is incomplete', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    const original = installed.installations[0]
+
+    assert.equal(await service.removeInstallation(original.id), true)
+    db.deleteSkillCliDesiredStates(installed.id)
+    const [codexState] = installed.cliDesiredStates.filter((state) => state.adapterId === 'codex')
+    db.upsertSkillCliDesiredState(codexState)
+
+    assert.throws(
+      () => service.previewCliStateChange({
+        packageId: installed.id, scopeType: 'user', scopeKey: '*',
+        changes: [{ adapterId: 'codex', desiredState: 'enabled' }]
+      }),
+      { code: 'SKILL_SCOPE_INVALID' }
+    )
   })
 })
 
@@ -719,6 +778,54 @@ test('verified server installation and update atomically retain organization pro
       async withVerifiedArchive(_archive, work) {
         return work({
           workingDirectory: sources.shift(),
+          source: { type: 'zip', locator: 'verified.zip', ref: '', subdir: '' },
+          resolvedRevision: null,
+          cleanup() {}
+        })
+      }
+    }
+  })
+})
+
+test('removing the final organization projection retains its package identity for direct recreation', async () => {
+  let organizationSource
+  await withService(async ({ root, db, service }) => {
+    organizationSource = join(root, 'organization-source')
+    createSkill(organizationSource)
+    const installed = await service.installVerifiedServerArchive({
+      archivePath: 'verified.zip',
+      archiveIdentity: {},
+      source: {
+        locator: 'https://server.example.test/organizations/org-1/skills/release-notes',
+        versionId: 'version-1', serverOrigin: 'https://server.example.test', organizationId: 'org-1',
+        organizationName: 'Example Org', slug: 'release-notes', version: 'version-1', sha256: 'a'.repeat(64)
+      },
+      targets: { targetAdapterIds: ['codex'], scopeType: 'user' }
+    })
+    const original = installed.installations[0]
+
+    assert.equal(await service.removeInstallation(original.id), true)
+    assert.equal(db.getSkillPackage(installed.id)?.id, installed.id)
+    assert.equal(db.getSkillSourceIdentity(installed.id)?.organizationId, 'org-1')
+    assert.equal(db.getServerSkillPackage(installed.id)?.versionId, 'version-1')
+    assert.equal(db.getSkillRemovalOperation(installed.id), null)
+
+    const request = {
+      packageId: installed.id, scopeType: 'user', scopeKey: '*',
+      changes: [{ adapterId: 'codex', desiredState: 'enabled' }]
+    }
+    const preview = service.previewCliStateChange(request)
+    assert.deepEqual(preview.steps, [{ type: 'ensure_direct', adapterId: 'codex' }])
+    await service.applyCliStateChange({ ...request, expectedRevision: preview.revision })
+
+    assert.equal(db.listSkillInstallations({ packageId: installed.id })[0]?.targetAdapterId, 'codex')
+    assert.equal(db.getSkillSourceIdentity(installed.id)?.organizationId, 'org-1')
+    assert.equal(db.getServerSkillPackage(installed.id)?.versionId, 'version-1')
+  }, {
+    sourceLoader: {
+      async withVerifiedArchive(_archive, work) {
+        return work({
+          workingDirectory: organizationSource,
           source: { type: 'zip', locator: 'verified.zip', ref: '', subdir: '' },
           resolvedRevision: null,
           cleanup() {}

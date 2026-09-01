@@ -1574,7 +1574,8 @@ export function createSkillsService({
   async function applyToAdapter(packageId, targetAdapterId, {
     guard = null,
     deferDesiredStateCommit = false,
-    deferFlush = false
+    deferFlush = false,
+    stateScope: requestedScope = null
   } = {}) {
     guard?.()
     const pkg = db.getSkillPackage(packageId)
@@ -1587,7 +1588,10 @@ export function createSkillsService({
     }
 
     const installations = db.listSkillInstallations({ packageId })
-    if (!installations.length) throw serviceError('Skill package has no installation scope', 'SKILL_SCOPE_INVALID')
+    if (!installations.length && (!requestedScope || !['user', 'project'].includes(requestedScope.type) ||
+      typeof requestedScope.key !== 'string' || !requestedScope.key)) {
+      throw serviceError('Skill package has no installation scope', 'SKILL_SCOPE_INVALID')
+    }
     if (targetAdapterId === 'codex') {
       const codexInstallation = installations.find((item) => item.targetAdapterId === 'codex')
       if (codexInstallation) {
@@ -1610,8 +1614,8 @@ export function createSkillsService({
       throw serviceError('Skill is already applied to this CLI', 'SKILL_TARGET_EXISTS')
     }
     const scopes = new Set(installations.map((item) => `${item.scopeType}:${item.scopeKey}`))
-    if (scopes.size !== 1) throw serviceError('Skill package has multiple installation scopes', 'SKILL_SCOPE_AMBIGUOUS')
-    const scope = installations[0]
+    if (scopes.size > 1) throw serviceError('Skill package has multiple installation scopes', 'SKILL_SCOPE_AMBIGUOUS')
+    const scope = installations[0] || { scopeType: requestedScope.type, scopeKey: requestedScope.key }
     if (!['user', 'project'].includes(scope.scopeType)) throw serviceError('Skill scope is invalid', 'SKILL_SCOPE_INVALID')
     const targetScopeKey = projectionScopeKey(
       targetAdapterId,
@@ -1895,6 +1899,9 @@ export function createSkillsService({
       committed = true
       writeCommittedRemovalTombstone(pkg.id)
       cleanupCommittedRemoval(pkg.id)
+      await db.transaction(() => db.deleteSkillRemovalOperation(pkg.id))
+      await persistOrThrow()
+      removeEmptyPackageParent(pkg.id)
       return true
     } catch (error) {
       if (committed) throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
@@ -2271,20 +2278,33 @@ export function createSkillsService({
       })
     const desiredStates = db.listSkillCliDesiredStates({ packageId: pkg.id })
       .filter((item) => item.scopeType === scope.type && normalizedPath(item.scopeKey) === normalizedPath(scope.key))
-    if (!installations.length || !desiredStates.length) {
-      throw serviceError('Skill package has no installation scope', 'SKILL_SCOPE_INVALID')
-    }
     const capabilityOptions = scope.type === 'user'
       ? { scopeType: 'user', home: skillHome, env }
       : null
+    const capabilities = listSkillProjectionCapabilities(scope.type === 'user'
+      ? capabilityOptions
+      : { scopeType: 'project', projectPath: scope.key, home: skillHome, env })
+    const desiredStatesByAdapter = new Map(desiredStates.map((item) => [item.adapterId, item]))
+    const completeTrustedDesiredStates = desiredStates.length > 0 &&
+      desiredStates.every((item) => item.packageId === pkg.id && item.scopeType === scope.type &&
+        normalizedPath(item.scopeKey) === normalizedPath(scope.key) && item.enforcementStatus === 'satisfied' &&
+        item.reasonCode === null) &&
+      desiredStatesByAdapter.size === desiredStates.length &&
+      desiredStates.filter((item) => item.desiredState === 'enabled').some((item) =>
+        capabilities.some((capability) => capability.adapterId === item.adapterId)) &&
+      desiredStates.filter((item) => item.desiredState === 'enabled').every((item) => {
+        const capability = capabilities.find((candidate) => candidate.adapterId === item.adapterId)
+        return capability && capability.covers.every((adapterId) => desiredStatesByAdapter.has(adapterId))
+      })
+    if ((!installations.length && !completeTrustedDesiredStates) || (installations.length && !desiredStates.length)) {
+      throw serviceError('Skill package has no installation scope', 'SKILL_SCOPE_INVALID')
+    }
     return {
       package: pkg,
       scope,
       compatibility: validateSkillCompatibility(pkg.name),
       capabilityOptions,
-      capabilities: listSkillProjectionCapabilities(scope.type === 'user'
-        ? capabilityOptions
-        : { scopeType: 'project', projectPath: scope.key, home: skillHome, env }),
+      capabilities,
       installations,
       desiredStates
     }
@@ -2299,7 +2319,8 @@ export function createSkillsService({
     } else {
       await applyToAdapter(request.packageId, adapterId, {
         deferDesiredStateCommit: true,
-        deferFlush: true
+        deferFlush: true,
+        stateScope: stateScope(request)
       })
     }
     const installation = db.listSkillInstallations({ packageId: request.packageId })
