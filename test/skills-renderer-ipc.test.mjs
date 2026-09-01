@@ -22,6 +22,8 @@ test('renderer Skills API forwards management requests through the preload bridg
     assert.equal(ipc.applySkillToAdapter('package-1', 'claude'), 'applySkillToAdapter')
     assert.equal(ipc.previewCliStateChange({ packageId: 'package-1' }), 'previewCliStateChange')
     assert.equal(ipc.applyCliStateChange({ packageId: 'package-1', expectedRevision: 'a'.repeat(64) }), 'applyCliStateChange')
+    assert.equal(ipc.previewSkillsBatchAction({ action: 'update_packages' }), 'previewSkillsBatchAction')
+    assert.equal(ipc.applySkillsBatchAction({ action: 'update_packages', expectedRevision: 'a'.repeat(64) }), 'applySkillsBatchAction')
     assert.equal(ipc.resolveCliStateRecovery('package-1'), 'resolveCliStateRecovery')
     assert.equal(ipc.removePackage('package-1'), 'removePackage')
     assert.equal(ipc.setSkillEnabled('install-1', false), 'setSkillEnabled')
@@ -35,6 +37,8 @@ test('renderer Skills API forwards management requests through the preload bridg
       ['applySkillToAdapter', 'package-1', 'claude'],
       ['previewCliStateChange', { packageId: 'package-1' }],
       ['applyCliStateChange', { packageId: 'package-1', expectedRevision: 'a'.repeat(64) }],
+      ['previewSkillsBatchAction', { action: 'update_packages' }],
+      ['applySkillsBatchAction', { action: 'update_packages', expectedRevision: 'a'.repeat(64) }],
       ['resolveCliStateRecovery', 'package-1'],
       ['removePackage', 'package-1'],
       ['setSkillEnabled', 'install-1', false],

@@ -11,6 +11,8 @@ let statePreviewResponse
 let previewCliStateChange
 let applyCliStateChange
 let resolveCliStateRecovery
+let previewSkillsBatchAction
+let applySkillsBatchAction
 let store
 
 globalThis.window = {
@@ -37,6 +39,12 @@ globalThis.window = {
     },
     async resolveCliStateRecovery(packageId) {
       return resolveCliStateRecovery(packageId)
+    },
+    async previewSkillsBatchAction(request) {
+      return previewSkillsBatchAction(request)
+    },
+    async applySkillsBatchAction(request) {
+      return applySkillsBatchAction(request)
     },
     async removePackage(packageId) {
       return packageId === 'package-1'
@@ -71,6 +79,8 @@ function resetStore() {
     return { package: { id: request.packageId } }
   }
   resolveCliStateRecovery = async (packageId) => ({ package: { id: packageId } })
+  previewSkillsBatchAction = async request => ({ revision: 'a'.repeat(64), items: request.items })
+  applySkillsBatchAction = async () => ({ succeeded: [], failed: [], skipped: [], recoveryRequired: [], aborted: null })
   setActivePinia(createPinia())
   store = useSkillsStore()
 }
@@ -284,6 +294,32 @@ test('Skills store removes a managed package and refreshes local state', async (
   resetStore()
   assert.equal(await store.removePackage('package-1'), true)
   assert.equal(stateLoads, 1)
+})
+
+test('Skills store keeps a batch preview and retains failed plus remaining items for retry', async () => {
+  resetStore()
+  const request = {
+    action: 'update_packages',
+    items: [{ kind: 'package', id: 'a' }, { kind: 'package', id: 'b' }, { kind: 'package', id: 'c' }],
+    targets: { scopeType: 'user', scopeKey: '*' }
+  }
+  applySkillsBatchAction = async () => ({
+    succeeded: [{ item: request.items[0], packageId: 'a', action: 'update_packages', affectedAdapterIds: [] }],
+    failed: [{ item: request.items[1], code: 'SKILL_DRIFTED', retryable: false }],
+    skipped: [], recoveryRequired: [],
+    aborted: { code: 'SKILL_PERSISTENCE_PENDING', remainingItems: [request.items[2]] }
+  })
+
+  const preview = await store.previewBatchAction(request)
+  assert.equal(store.batchPreview.revision, preview.revision)
+  const result = await store.applyBatchAction({ ...request, expectedRevision: preview.revision })
+
+  assert.deepEqual(result.failed.map(entry => entry.item), [request.items[1]])
+  assert.equal(store.batchSaving, false)
+  assert.deepEqual(store.batchResult, result)
+  assert.deepEqual(store.batchSelection, [request.items[1], request.items[2]])
+  await store.retryFailedBatch()
+  assert.equal(store.batchSaving, false)
 })
 
 test('Skills store preserves mutation results when the final refresh fails', async () => {

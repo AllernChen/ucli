@@ -13,9 +13,10 @@ function registry() {
 
 test('Skills IPC registers the complete management surface', () => {
   const { handlers, ipcMain } = registry()
-  registerSkillsIpc({ ipcMain, service: {} })
+  registerSkillsIpc({ ipcMain, service: {}, batchCoordinator: { preview() {}, apply() {} } })
   assert.deepEqual([...handlers.keys()].sort(), [
     'skills:adopt',
+    'skills:apply-batch-action',
     'skills:apply-cli-state-change',
     'skills:apply-to-adapter',
     'skills:check-updates',
@@ -24,6 +25,7 @@ test('Skills IPC registers the complete management surface', () => {
     'skills:inspect-source',
     'skills:install',
     'skills:install-many',
+    'skills:preview-batch-action',
     'skills:preview-cli-state-change',
     'skills:preview-update',
     'skills:remove-installation',
@@ -34,6 +36,43 @@ test('Skills IPC registers the complete management surface', () => {
     'skills:set-enabled',
     'skills:update'
   ])
+})
+
+test('Skills IPC rebuilds a bounded batch request without renderer provenance', async () => {
+  const { handlers, ipcMain } = registry()
+  const calls = []
+  registerSkillsIpc({
+    ipcMain,
+    service: {},
+    batchCoordinator: {
+      preview(request) { calls.push(['preview', request]); return { revision: 'a'.repeat(64) } },
+      apply(request) { calls.push(['apply', request]); return { succeeded: [] } }
+    }
+  })
+  const request = {
+    action: 'set_cli_state',
+    items: [{ kind: 'package', id: 'package-2' }, { kind: 'package', id: 'package-1' }],
+    targets: { scopeType: 'user', scopeKey: '*', adapterId: 'codex', desiredState: 'disabled' },
+    serverOrigin: 'https://attacker.invalid', downloadUrl: 'https://attacker.invalid/archive.zip',
+    artifactSha256: 'f'.repeat(64), targetPath: 'F:\\attacker'
+  }
+
+  await handlers.get('skills:preview-batch-action')({}, request)
+  await handlers.get('skills:apply-batch-action')({}, { ...request, expectedRevision: 'a'.repeat(64) })
+  assert.deepEqual(calls, [
+    ['preview', {
+      action: 'set_cli_state', items: request.items,
+      targets: { scopeType: 'user', scopeKey: '*', adapterId: 'codex', desiredState: 'disabled' }
+    }],
+    ['apply', {
+      action: 'set_cli_state', items: request.items,
+      targets: { scopeType: 'user', scopeKey: '*', adapterId: 'codex', desiredState: 'disabled' }, expectedRevision: 'a'.repeat(64)
+    }]
+  ])
+  await assert.rejects(
+    handlers.get('skills:apply-batch-action')({}, { ...request, items: [], expectedRevision: 'invalid' }),
+    (error) => error.code === 'SKILL_IPC_INVALID'
+  )
 })
 
 test('Skills IPC accepts only a package id for guarded CLI-state recovery and sanitizes failures', async () => {

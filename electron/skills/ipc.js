@@ -109,6 +109,60 @@ function cliStateRequest(value, { apply = false } = {}) {
   return { ...request, expectedRevision }
 }
 
+const BATCH_ACTIONS = new Map([
+  ['install_organization', 'organization_version'], ['update_organization', 'organization_version'],
+  ['update_packages', 'package'], ['set_cli_state', 'package'],
+  ['remove_projections', 'package'], ['remove_packages', 'package']
+])
+
+function batchRequest(value, { apply = false } = {}) {
+  const input = object(value, 'request')
+  const expectedKind = BATCH_ACTIONS.get(input.action)
+  if (!expectedKind || !Array.isArray(input.items) || !input.items.length || input.items.length > 200) {
+    throw ipcError('batch request is invalid')
+  }
+  const seen = new Set()
+  const items = input.items.map((item) => {
+    const value = object(item, 'item')
+    if (value.kind !== expectedKind) throw ipcError('batch items are invalid')
+    const itemId = id(value.id, 'item.id')
+    const key = `${value.kind}:${itemId}`
+    if (seen.has(key)) throw ipcError('batch items are invalid')
+    seen.add(key)
+    return { kind: value.kind, id: itemId }
+  })
+  const rawTargets = object(input.targets, 'targets')
+  if (!SCOPE_TYPES.has(rawTargets.scopeType)) throw ipcError('scopeType is invalid')
+  const scopeKey = string(rawTargets.scopeKey, 'scopeKey')
+  if ((rawTargets.scopeType === 'user' && scopeKey !== '*') ||
+    (rawTargets.scopeType === 'project' && !isAbsolute(scopeKey))) throw ipcError('scopeKey is invalid')
+  const targets = { scopeType: rawTargets.scopeType, scopeKey }
+  if (input.action === 'set_cli_state') {
+    if (!ADAPTER_IDS.has(rawTargets.adapterId) || !['enabled', 'disabled'].includes(rawTargets.desiredState)) {
+      throw ipcError('batch targets are invalid')
+    }
+    targets.adapterId = rawTargets.adapterId
+    targets.desiredState = rawTargets.desiredState
+  }
+  if (input.action === 'remove_projections') {
+    if (!ADAPTER_IDS.has(rawTargets.adapterId)) throw ipcError('batch targets are invalid')
+    targets.adapterId = rawTargets.adapterId
+  }
+  if (input.action === 'install_organization' || input.action === 'update_organization') {
+    if (!Array.isArray(rawTargets.targetAdapterIds) || !rawTargets.targetAdapterIds.length || rawTargets.targetAdapterIds.length > ADAPTER_IDS.size) {
+      throw ipcError('batch targets are invalid')
+    }
+    targets.targetAdapterIds = [...new Set(rawTargets.targetAdapterIds.map(adapterId => {
+      if (!ADAPTER_IDS.has(adapterId)) throw ipcError('batch targets are invalid')
+      return adapterId
+    }))]
+  }
+  if (!apply) return { action: input.action, items, targets }
+  const expectedRevision = string(input.expectedRevision, 'expectedRevision', { max: 64 })
+  if (!/^[a-f0-9]{64}$/i.test(expectedRevision)) throw ipcError('expectedRevision is invalid')
+  return { action: input.action, items, targets, expectedRevision }
+}
+
 function inspectionContext(value) {
   if (value == null) return {}
   const input = object(value, 'context')
@@ -134,7 +188,7 @@ async function safeCall(work) {
   }
 }
 
-export function registerSkillsIpc({ ipcMain, service }) {
+export function registerSkillsIpc({ ipcMain, service, batchCoordinator = null }) {
   ipcMain.handle('skills:get-state', (_event, options = {}) => safeCall(() => {
     const input = options && typeof options === 'object' && !Array.isArray(options) ? options : {}
     return service.getState({
@@ -146,6 +200,14 @@ export function registerSkillsIpc({ ipcMain, service }) {
   ))
   ipcMain.handle('skills:install', (_event, input) => safeCall(() => service.install(installRequest(input))))
   ipcMain.handle('skills:install-many', (_event, input) => safeCall(() => service.installMany(installRequests(input))))
+  if (batchCoordinator) {
+    ipcMain.handle('skills:preview-batch-action', (_event, request) => safeCall(() =>
+      batchCoordinator.preview(batchRequest(request))
+    ))
+    ipcMain.handle('skills:apply-batch-action', (_event, request) => safeCall(() =>
+      batchCoordinator.apply(batchRequest(request, { apply: true }))
+    ))
+  }
   ipcMain.handle('skills:preview-cli-state-change', (_event, request) => safeCall(() =>
     service.previewCliStateChange(cliStateRequest(request))
   ))

@@ -60,6 +60,7 @@ import {
 import { registerAiCliProfileIpc } from './aiCliProfiles/ipc.js'
 import { createSkillSourceLoader } from './skills/sourceLoader.js'
 import { createSkillsService } from './skills/service.js'
+import { createSkillsBatchCoordinator } from './skills/batchCoordinator.js'
 import { registerSkillsIpc } from './skills/ipc.js'
 import { listUCodeSkills } from './skills/ucodeDiscovery.js'
 import { exportOpenCodeSession } from './openCodeStats.js'
@@ -874,6 +875,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   let localGatewayProxy = null
   let serverModelProjection = null
   let serverSkillsCatalog = null
+  let skillsBatchCoordinator = null
   let serverSkillsSyncCoordinator = null
   let syncServerModelProjection = () => Promise.resolve([])
   const approvalNotifications = new Map()
@@ -1760,6 +1762,10 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       stagingRoot: join(app.getPath('userData'), 'server-skills', '.staging'),
       sourceLoader: skillsSourceLoader,
       skillsService
+    })
+    skillsBatchCoordinator = createSkillsBatchCoordinator({
+      skillsService,
+      organizationCatalog: serverSkillsCatalog
     })
     serverSkillsSyncCoordinator = createOrganizationSkillsSyncCoordinator({
       connectionManager: serverConnectionManager,
@@ -3549,7 +3555,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       getCodexRuntime: () => codexConfigWatcher?.getSnapshot() || readCodexRuntimeSnapshot(getCodexHome()),
       getClaudeRuntime: () => readClaudeRuntimeSnapshot({ env: process.env })
     })
-    if (skillsService) registerSkillsIpc({ ipcMain, service: skillsService })
+    if (skillsService) registerSkillsIpc({ ipcMain, service: skillsService, batchCoordinator: skillsBatchCoordinator })
     if (serverConnectionManager) {
       registerServerConnectionIpc({
         ipcMain,
@@ -4098,6 +4104,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       await gatewayManager?.shutdown()
       await serverSkillsSyncCoordinator?.shutdown()
       serverSkillsSyncCoordinator = null
+      skillsBatchCoordinator?.shutdown()
+      skillsBatchCoordinator = null
       serverSkillsCatalog = null
       await localGatewayProxy?.shutdown()
       localGatewayProxy = null

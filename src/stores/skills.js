@@ -34,6 +34,11 @@ export const useSkillsStore = defineStore('skills', {
     statePreviewToken: 0,
     checking: false,
     batchProgress: null,
+    batchSaving: false,
+    batchPreview: null,
+    batchResult: null,
+    batchRequest: null,
+    batchSelection: [],
     error: null
   }),
   actions: {
@@ -83,6 +88,44 @@ export const useSkillsStore = defineStore('skills', {
       }
     },
     inspectSource(source, context) { return ipc.inspectSkillSource(source, context) },
+    async previewBatchAction(request) {
+      this.error = null
+      const preview = await ipc.previewSkillsBatchAction(request)
+      this.batchPreview = preview
+      this.batchRequest = { ...request, items: [...(request.items || [])] }
+      return preview
+    },
+    async applyBatchAction(request) {
+      if (this.batchSaving) throw Object.assign(new Error('Skill batch operation is already in progress'), { code: 'SKILL_OPERATION_IN_PROGRESS' })
+      this.batchSaving = true
+      this.error = null
+      try {
+        const result = await ipc.applySkillsBatchAction(request)
+        this.batchResult = result
+        const remaining = [
+          ...(result.failed || []).map(entry => entry.item),
+          ...(result.recoveryRequired || []).map(entry => entry.item),
+          ...(result.aborted?.remainingItems || [])
+        ].filter(Boolean)
+        this.batchSelection = [...new Map(remaining.map(item => [`${item.kind}:${item.id}`, item])).values()]
+        try { await this.load() } catch (error) {
+          const refreshError = this.safeError(error, 'Skills 状态刷新失败')
+          return { ...result, refreshError: { code: refreshError.code, message: refreshError.message } }
+        }
+        return result
+      } catch (error) {
+        this.error = this.safeError(error, 'Skill 批量操作失败')
+        throw error
+      } finally {
+        this.batchSaving = false
+      }
+    },
+    async retryFailedBatch() {
+      if (!this.batchRequest || !this.batchSelection.length) return null
+      const request = { ...this.batchRequest, items: [...this.batchSelection] }
+      const preview = await this.previewBatchAction(request)
+      return this.applyBatchAction({ ...request, expectedRevision: preview.revision })
+    },
     async previewCliStateChange(request) {
       this.error = null
       const identity = statePreviewIdentity(request)

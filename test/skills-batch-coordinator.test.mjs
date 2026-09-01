@@ -1,0 +1,128 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { createSkillsBatchCoordinator } from '../electron/skills/batchCoordinator.js'
+
+const revision = 'a'.repeat(64)
+
+function packageView(id, { organization = null } = {}) {
+  return {
+    id,
+    resolvedRevision: revision,
+    contentSha256: revision,
+    sourceIdentity: organization && {
+      originKind: 'organization',
+      serverOrigin: 'https://skills.example.test',
+      organizationId: organization,
+      catalogVersionId: `${id}-version`
+    },
+    installations: [{
+      id: `${id}-codex`, targetAdapterId: 'codex', scopeType: 'user', scopeKey: '*',
+      enabled: true, status: 'ready'
+    }]
+  }
+}
+
+function services({ packages = [packageView('a'), packageView('b')], fail = null } = {}) {
+  const calls = []
+  return {
+    calls,
+    async getState() { return { packages } },
+    async previewCliStateChange(request) {
+      calls.push(['preview', request.packageId])
+      return { revision: `${request.packageId}`.padEnd(64, '0'), classification: 'direct', impacts: [{ adapterId: 'codex' }] }
+    },
+    async applyCliStateChange(request) {
+      calls.push(['apply-state', request.packageId])
+      if (fail === request.packageId) throw Object.assign(new Error('drifted'), { code: 'SKILL_DRIFTED' })
+      return { affectedInstallationIds: [`${request.packageId}-codex`] }
+    },
+    async update(packageId) { calls.push(['update', packageId]); return { id: packageId } },
+    async removeInstallation(installationId) { calls.push(['remove-projection', installationId]); return true },
+    async removePackage(packageId) { calls.push(['remove-package', packageId]); return true }
+  }
+}
+
+function request(action, items = [{ kind: 'package', id: 'a' }, { kind: 'package', id: 'b' }]) {
+  return {
+    action,
+    items,
+    targets: { scopeType: 'user', scopeKey: '*', adapterId: 'codex', desiredState: 'disabled' }
+  }
+}
+
+test('batch coordinator rejects incompatible item kinds before any operation', async () => {
+  const skillService = services()
+  const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: { list: () => [] } })
+
+  await assert.rejects(
+    coordinator.preview(request('install_organization', [{ kind: 'package', id: 'a' }])),
+    { code: 'SKILL_BATCH_CONTEXT_INVALID' }
+  )
+  assert.deepEqual(skillService.calls, [])
+})
+
+test('batch coordinator executes package operations in stable order and preserves ordinary partial failures', async () => {
+  const skillService = services({ fail: 'b' })
+  const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: { list: () => [] } })
+  const initial = request('set_cli_state', [{ kind: 'package', id: 'b' }, { kind: 'package', id: 'a' }])
+  const preview = await coordinator.preview(initial)
+
+  const result = await coordinator.apply({ ...initial, expectedRevision: preview.revision })
+
+  assert.deepEqual(result, {
+    succeeded: [{
+      item: { kind: 'package', id: 'a' }, packageId: 'a', action: 'set_cli_state', affectedAdapterIds: ['codex']
+    }],
+    failed: [{ item: { kind: 'package', id: 'b' }, code: 'SKILL_DRIFTED', retryable: false }],
+    skipped: [],
+    recoveryRequired: [],
+    aborted: null
+  })
+  assert.deepEqual(skillService.calls, [
+    ['preview', 'a'], ['preview', 'b'], ['preview', 'a'], ['apply-state', 'a'], ['preview', 'b'], ['apply-state', 'b']
+  ])
+})
+
+test('batch coordinator aborts remaining items when persistence becomes uncertain', async () => {
+  const skillService = services()
+  skillService.update = async packageId => {
+    skillService.calls.push(['update', packageId])
+    if (packageId === 'a') throw Object.assign(new Error('pending'), { code: 'SKILL_PERSISTENCE_PENDING' })
+  }
+  const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: { list: () => [] } })
+  const initial = request('update_packages')
+  const preview = await coordinator.preview(initial)
+
+  const result = await coordinator.apply({ ...initial, expectedRevision: preview.revision })
+
+  assert.deepEqual(result, {
+    succeeded: [],
+    failed: [{ item: { kind: 'package', id: 'a' }, code: 'SKILL_PERSISTENCE_PENDING', retryable: false }],
+    skipped: [],
+    recoveryRequired: [],
+    aborted: { code: 'SKILL_PERSISTENCE_PENDING', remainingItems: [{ kind: 'package', id: 'b' }] }
+  })
+  assert.deepEqual(skillService.calls, [['update', 'a']])
+})
+
+test('batch coordinator aborts and records recovery-required package operations', async () => {
+  const skillService = services()
+  skillService.removePackage = async packageId => {
+    skillService.calls.push(['remove-package', packageId])
+    throw Object.assign(new Error('recovery'), { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED', recoveryAction: 'retry_apply_codex' })
+  }
+  const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: { list: () => [] } })
+  const initial = request('remove_packages')
+  const preview = await coordinator.preview(initial)
+
+  const result = await coordinator.apply({ ...initial, expectedRevision: preview.revision })
+
+  assert.deepEqual(result, {
+    succeeded: [], failed: [], skipped: [],
+    recoveryRequired: [{
+      item: { kind: 'package', id: 'a' }, packageId: 'a', recoveryAction: 'retry_apply_codex'
+    }],
+    aborted: { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED', remainingItems: [{ kind: 'package', id: 'b' }] }
+  })
+})
