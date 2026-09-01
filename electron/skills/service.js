@@ -148,6 +148,8 @@ export function createSkillsService({
   mkdirSync(updateStagingRoot, { recursive: true })
   const packagesRootIdentity = captureDirectoryIdentity(packagesRoot)
   const updateStagingRootIdentity = captureDirectoryIdentity(updateStagingRoot)
+  const stateRecoveryPackages = new Set()
+  let stateRecoveryUnsafe = false
   const migrationCopy = migrationFileOps.copy || copySkillDirectoryAtomic
   const migrationRemove = migrationFileOps.remove || removeManagedSkillDirectory
   const managedRemoval = removalFileOps.remove || removeManagedSkillDirectory
@@ -398,12 +400,61 @@ export function createSkillsService({
     return [...states.values()]
   }
 
-  function recomputeDesiredStates(packageId, timestamp) {
+  function recomputeDesiredStates(packageId, timestamp, { resolveRecovery = false } = {}) {
+    if (!resolveRecovery && db.listSkillCliDesiredStates({ packageId })
+      .some((state) => state.enforcementStatus === 'recovery_required')) return
     db.deleteSkillCliDesiredStates(packageId)
     for (const state of initialDesiredStates(db.listSkillInstallations({ packageId }), timestamp)) {
       db.upsertSkillCliDesiredState(state)
     }
   }
+
+  function stateRecoveryJournalPath(packageId) {
+    return join(updateStagingRoot, `state-recovery-${packageId}.json`)
+  }
+
+  function loadStateRecoveryJournals() {
+    try {
+      if (!trustedStagingRoot()) throw new Error('unsafe staging root')
+      for (const name of readdirSync(updateStagingRoot).filter((item) => item.startsWith('state-recovery-') && item.endsWith('.json'))) {
+        const path = join(updateStagingRoot, name)
+        const entry = lstatSync(path)
+        const packageId = name.slice('state-recovery-'.length, -'.json'.length)
+        const parsed = JSON.parse(readFileSync(path, 'utf8'))
+        if (!entry.isFile() || entry.isSymbolicLink() || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(packageId) ||
+          parsed?.packageId !== packageId) throw new Error('invalid state recovery journal')
+        stateRecoveryPackages.add(packageId)
+      }
+    } catch {
+      stateRecoveryUnsafe = true
+    }
+  }
+
+  function assertStateRecoveryClear(packageId) {
+    if (stateRecoveryUnsafe || stateRecoveryPackages.has(packageId) ||
+      db.listSkillCliDesiredStates({ packageId }).some((state) => state.enforcementStatus === 'recovery_required')) {
+      throw serviceError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+  }
+
+  function writeStateRecoveryJournal(packageId) {
+    const path = stateRecoveryJournalPath(packageId)
+    if (!trustedStagingRoot() || normalizedPath(dirname(path)) !== normalizedPath(updateStagingRoot)) {
+      throw serviceError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+    writeFileSync(path, JSON.stringify({ packageId }), { encoding: 'utf8', flag: 'w' })
+    stateRecoveryPackages.add(packageId)
+  }
+
+  function removeStateRecoveryJournal(packageId) {
+    const path = stateRecoveryJournalPath(packageId)
+    const entry = lstatSync(path)
+    if (!entry.isFile() || entry.isSymbolicLink() || !trustedStagingRoot()) throw new Error('unsafe state recovery journal')
+    rmSync(path, { force: true })
+    stateRecoveryPackages.delete(packageId)
+  }
+
+  loadStateRecoveryJournals()
 
   function removalPaths(packageId) {
     if (typeof packageId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(packageId)) return null
@@ -1136,6 +1187,7 @@ export function createSkillsService({
     const pkg = db.getSkillPackage(packageId)
     if (!pkg || pkg.sourceType !== 'server') throw serviceError('Server Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
     await recoverRemovalIfNeeded()
+    assertStateRecoveryClear(packageId)
     const validated = validateInstallRequest(targets)
     if (!db.listSkillInstallations({ packageId }).some(item => item.scopeType === validated.scopeType &&
       normalizedPath(item.scopeKey) === normalizedPath(validated.scopeKey) && validated.projectionIds.includes(item.targetAdapterId))) {
@@ -1403,6 +1455,7 @@ export function createSkillsService({
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
     await recoverRemovalIfNeeded()
+    assertStateRecoveryClear(packageId)
     if (!SKILL_ADAPTERS[targetAdapterId]) throw serviceError('Skill adapter is unavailable', 'SKILL_ADAPTER_UNAVAILABLE')
     if (validateSkillCompatibility(pkg.name)[targetAdapterId]?.compatible === false) {
       throw serviceError('Skill name is incompatible with this CLI', 'SKILL_INCOMPATIBLE')
@@ -1535,8 +1588,9 @@ export function createSkillsService({
     if (!item) throw serviceError('Skill installation was not found', 'SKILL_INSTALLATION_NOT_FOUND')
     const pkg = db.getSkillPackage(item.packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
-    if (Boolean(enabled) === item.enabled) return inspectInstallation(item)
     await recoverRemovalIfNeeded()
+    assertStateRecoveryClear(item.packageId)
+    if (Boolean(enabled) === item.enabled) return inspectInstallation(item)
     let changed = false
     try {
       if (enabled) {
@@ -1595,6 +1649,7 @@ export function createSkillsService({
     const pkg = db.getSkillPackage(item.packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
     await recoverRemovalIfNeeded()
+    assertStateRecoveryClear(item.packageId)
     if (!existsSync(item.targetPath)) throw serviceError('Drifted projection is missing', 'SKILL_TARGET_MISSING')
     const target = inspectSkillDirectory(item.targetPath)
     if (target.contentSha256 === item.deployedSha256) return resolution === 'restore' ? inspectInstallation(item) : packageView(pkg)
@@ -1681,6 +1736,7 @@ export function createSkillsService({
     const item = db.getSkillInstallation(installationId)
     if (!item) return false
     await recoverRemovalIfNeeded()
+    assertStateRecoveryClear(item.packageId)
     const pkg = db.getSkillPackage(item.packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
     const installations = db.listSkillInstallations({ packageId: pkg.id })
@@ -1749,6 +1805,7 @@ export function createSkillsService({
 
   async function removePackage(packageId) {
     await recoverRemovalIfNeeded()
+    assertStateRecoveryClear(packageId)
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) return false
     const installations = db.listSkillInstallations({ packageId })
@@ -1949,6 +2006,7 @@ export function createSkillsService({
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
     await recoverRemovalIfNeeded()
+    assertStateRecoveryClear(packageId)
     if (expectedRevision && pkg.resolvedRevision !== expectedRevision) {
       throw serviceError('Skill source revision changed', 'SKILL_UPDATE_STALE')
     }
@@ -2060,6 +2118,7 @@ export function createSkillsService({
   function stateSnapshot(request) {
     const pkg = db.getSkillPackage(request.packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    assertStateRecoveryClear(pkg.id)
     const scope = stateScope(request)
     const canonical = inspectSkillDirectory(packageDirectory(pkg.id))
     if (canonical.contentSha256 !== pkg.contentSha256) {
@@ -2099,10 +2158,14 @@ export function createSkillsService({
     const before = db.listSkillInstallations({ packageId: request.packageId })
       .find((item) => item.targetAdapterId === adapterId && item.scopeType === request.scopeType &&
         normalizedPath(item.scopeKey) === normalizedPath(request.scopeKey)) || null
-    await applyToAdapter(request.packageId, adapterId, {
-      deferDesiredStateCommit: true,
-      deferFlush: true
-    })
+    if (before?.enabled === false) {
+      await setEnabled(before.id, true, { deferDesiredStateCommit: true, deferFlush: true })
+    } else {
+      await applyToAdapter(request.packageId, adapterId, {
+        deferDesiredStateCommit: true,
+        deferFlush: true
+      })
+    }
     const installation = db.listSkillInstallations({ packageId: request.packageId })
       .find((item) => item.targetAdapterId === adapterId && item.scopeType === request.scopeType &&
         normalizedPath(item.scopeKey) === normalizedPath(request.scopeKey))
@@ -2182,6 +2245,7 @@ export function createSkillsService({
 
   async function markStateRecovery({ request }) {
     const scope = stateScope(request)
+    writeStateRecoveryJournal(request.packageId)
     await db.transaction(() => {
       for (const current of db.listSkillCliDesiredStates({
         packageId: request.packageId,
@@ -2197,6 +2261,31 @@ export function createSkillsService({
       }
     })
     try { await persistOrThrow() } catch { /* the in-memory recovery gate remains authoritative for this process */ }
+  }
+
+  async function resolveCliStateRecovery(packageId) {
+    if (typeof packageId !== 'string' || !stateRecoveryPackages.has(packageId)) {
+      throw serviceError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+    const pkg = db.getSkillPackage(packageId)
+    if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    const canonical = inspectSkillDirectory(packageDirectory(packageId))
+    if (canonical.contentSha256 !== pkg.contentSha256) {
+      throw serviceError('Managed package was modified outside UCLI', 'SKILL_DRIFTED')
+    }
+    for (const installation of db.listSkillInstallations({ packageId })) {
+      if (!installation.enabled) continue
+      const inspected = inspectSkillDirectory(installation.targetPath)
+      if (inspected.contentSha256 !== pkg.contentSha256 || installation.deployedSha256 !== pkg.contentSha256) {
+        throw serviceError('Skill projection has drifted', 'SKILL_DRIFTED')
+      }
+    }
+    await db.transaction(() => recomputeDesiredStates(packageId, now(), { resolveRecovery: true }))
+    await persistOrThrow()
+    try { removeStateRecoveryJournal(packageId) } catch {
+      throw serviceError('Skill projection recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+    return packageView(db.getSkillPackage(packageId))
   }
 
   const stateCoordinator = createSkillStateCoordinator({
@@ -2245,6 +2334,7 @@ export function createSkillsService({
     updateVerifiedServerArchive,
     previewCliStateChange: stateCoordinator.preview,
     applyCliStateChange: stateCoordinator.apply,
+    resolveCliStateRecovery,
     applyToAdapter,
     setEnabled,
     resolveDrift,

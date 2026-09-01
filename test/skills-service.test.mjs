@@ -133,6 +133,29 @@ test('CLI state reconciliation creates OpenCode before disabling Codex and commi
   })
 })
 
+test('CLI state reconciliation re-enables an existing disabled direct projection', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    const original = installed.installations[0]
+    await service.setEnabled(original.id, false)
+    const request = {
+      packageId: installed.id, scopeType: 'user', scopeKey: '*',
+      changes: [{ adapterId: 'codex', desiredState: 'enabled' }]
+    }
+    const preview = service.previewCliStateChange(request)
+
+    await service.applyCliStateChange({ ...request, expectedRevision: preview.revision })
+
+    const restored = db.getSkillInstallation(original.id)
+    assert.equal(restored.enabled, true)
+    assert.equal(existsSync(join(root, 'home', '.agents', 'skills', 'release-notes', 'SKILL.md')), true)
+  })
+})
+
 test('CLI state reconciliation blocks inherited OpenCode disable while Codex remains enabled without mutation', async () => {
   await withService(async ({ root, db, service }) => {
     const source = join(root, 'source')
@@ -221,11 +244,59 @@ test('CLI state reconciliation marks persistence uncertainty as recovery while r
     assert.equal(existsSync(join(root, 'home', '.config', 'opencode', 'skills', 'release-notes', 'SKILL.md')), true)
     assert.equal(db.listSkillCliDesiredStates({ packageId: installed.id })
       .every((item) => item.enforcementStatus === 'recovery_required'), true)
-    const blockedPreview = service.previewCliStateChange(request)
-    await assert.rejects(
-      service.applyCliStateChange({ ...request, expectedRevision: blockedPreview.revision }),
+    await assert.throws(
+      () => service.previewCliStateChange(request),
       { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' }
     )
+  }, {
+    flushFactory: (db) => () => failFlush ? false : db.flush()
+  })
+})
+
+test('durable CLI recovery blocks legacy mutators after restart until verified reconciliation persists', async () => {
+  let failFlush = false
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    const installation = installed.installations[0]
+    const request = {
+      packageId: installed.id, scopeType: 'user', scopeKey: '*',
+      changes: [
+        { adapterId: 'codex', desiredState: 'disabled' },
+        { adapterId: 'opencode', desiredState: 'enabled' }
+      ]
+    }
+    const preview = service.previewCliStateChange(request)
+    failFlush = true
+    await assert.rejects(
+      service.applyCliStateChange({ ...request, expectedRevision: preview.revision }),
+      { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' }
+    )
+
+    const fresh = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }),
+      flush: () => failFlush ? false : db.flush()
+    })
+    for (const mutation of [
+      () => fresh.setEnabled(installation.id, false),
+      () => fresh.applyToAdapter(installed.id, 'claude'),
+      () => fresh.update(installed.id),
+      () => fresh.resolveDrift(installation.id, 'restore'),
+      () => fresh.removeInstallation(installation.id),
+      () => fresh.removePackage(installed.id)
+    ]) {
+      await assert.rejects(mutation(), { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' })
+    }
+
+    failFlush = false
+    await fresh.resolveCliStateRecovery(installed.id)
+    await fresh.setEnabled(installation.id, false)
+    assert.equal(db.listSkillCliDesiredStates({ packageId: installed.id })
+      .some((item) => item.enforcementStatus === 'recovery_required'), false)
   }, {
     flushFactory: (db) => () => failFlush ? false : db.flush()
   })
