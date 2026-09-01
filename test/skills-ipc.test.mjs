@@ -28,11 +28,38 @@ test('Skills IPC registers the complete management surface', () => {
     'skills:preview-update',
     'skills:remove-installation',
     'skills:remove-package',
+    'skills:resolve-cli-state-recovery',
     'skills:resolve-drift',
     'skills:restart-sessions',
     'skills:set-enabled',
     'skills:update'
   ])
+})
+
+test('Skills IPC accepts only a package id for guarded CLI-state recovery and sanitizes failures', async () => {
+  const { handlers, ipcMain } = registry()
+  const calls = []
+  registerSkillsIpc({
+    ipcMain,
+    service: {
+      resolveCliStateRecovery(packageId) {
+        calls.push(packageId)
+        if (packageId === 'throws') throw Object.assign(new Error('recovery F:\\private\\journal'), { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED', recoveryPath: 'F:\\private\\journal' })
+        return { id: packageId }
+      }
+    }
+  })
+
+  assert.deepEqual(await handlers.get('skills:resolve-cli-state-recovery')({}, 'package-1'), { id: 'package-1' })
+  await assert.rejects(
+    handlers.get('skills:resolve-cli-state-recovery')({}, { packageId: 'package-2', targetPath: 'F:\\attacker' }),
+    (error) => error.code === 'SKILL_IPC_INVALID'
+  )
+  const error = await handlers.get('skills:resolve-cli-state-recovery')({}, 'throws').then(() => null, (caught) => caught)
+  assert.equal(error?.code, 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+  assert.equal(error?.recoveryPath, undefined)
+  assert.equal(error?.message.includes('private'), false)
+  assert.deepEqual(calls, ['package-1', 'throws'])
 })
 
 test('Skills IPC rebuilds bounded CLI state requests without renderer-controlled targets or provenance', async () => {

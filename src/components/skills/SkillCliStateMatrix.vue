@@ -20,6 +20,15 @@
         :aria-label="`${cell.displayName} ${scopeLabel(cell)}：独立启用 Skill`"
         @click="$emit('preview-change', { packageId: cell.packageId, scopeType: cell.scopeType, scopeKey: cell.scopeKey, adapterId: cell.adapterId, desiredState: 'enabled' })"
       >独立启用</a-button>
+      <a-button
+        v-if="repairMode && cell.enforcementStatus === 'recovery_required'"
+        size="small"
+        danger
+        :loading="saving"
+        :disabled="saving || !cell.packageId"
+        :aria-label="`${cell.displayName} ${scopeLabel(cell)}：恢复投放`"
+        @click="$emit('recover', cell.packageId)"
+      >恢复投放</a-button>
     </div>
   </div>
 </template>
@@ -29,8 +38,8 @@ import { computed } from 'vue'
 
 import { buildSkillCliStateCells } from '../../skillsPresentation.js'
 
-const props = defineProps({ entry: { type: Object, required: true }, adapters: { type: Array, default: () => [] }, saving: Boolean })
-defineEmits(['preview-change'])
+const props = defineProps({ entry: { type: Object, required: true }, adapters: { type: Array, default: () => [] }, saving: Boolean, repairMode: Boolean })
+defineEmits(['preview-change', 'recover'])
 const cells = computed(() => buildSkillCliStateCells(props.entry, props.adapters))
 function scopeLabel(cell) { return cell.scopeType === 'project' ? `项目 · ${cell.scopeKey}` : '用户级' }
 function desiredLabel(value) { return { enabled: '已启用', disabled: '已停用', inherit: '继承' }[value] || value }

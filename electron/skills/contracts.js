@@ -115,7 +115,10 @@ export function sanitiseSkillError(error) {
   const code = typeof error?.code === 'string' && error.code.startsWith('SKILL_')
     ? error.code
     : 'SKILL_OPERATION_FAILED'
-  const safe = Object.assign(new Error(code === 'SKILL_OPERATION_FAILED' ? 'Skill operation failed' : error.message), { code })
+  const safeMessage = code === 'SKILL_PROJECTION_RECOVERY_REQUIRED'
+    ? 'Skill projection recovery is required'
+    : code === 'SKILL_OPERATION_FAILED' ? 'Skill operation failed' : error.message
+  const safe = Object.assign(new Error(safeMessage), { code })
   if (code === 'SKILL_PROJECTION_ROLLBACK_FAILED' && error?.recoveryAction === 'retry_apply_codex') {
     safe.recoveryAction = 'retry_apply_codex'
   }

@@ -10,6 +10,7 @@ let batchResponse
 let statePreviewResponse
 let previewCliStateChange
 let applyCliStateChange
+let resolveCliStateRecovery
 let store
 
 globalThis.window = {
@@ -33,6 +34,9 @@ globalThis.window = {
     },
     async applyCliStateChange(request) {
       return applyCliStateChange(request)
+    },
+    async resolveCliStateRecovery(packageId) {
+      return resolveCliStateRecovery(packageId)
     },
     async removePackage(packageId) {
       return packageId === 'package-1'
@@ -66,6 +70,7 @@ function resetStore() {
     }
     return { package: { id: request.packageId } }
   }
+  resolveCliStateRecovery = async (packageId) => ({ package: { id: packageId } })
   setActivePinia(createPinia())
   store = useSkillsStore()
 }
@@ -219,6 +224,20 @@ test('Skills store retains a CLI state preview and applies it with separate savi
   assert.equal(stateLoads, 1)
   assert.equal(store.stateSaving, false)
   assert.equal(store.saving, false)
+})
+
+test('Skills store resolves guarded CLI-state recovery once and refreshes state', async () => {
+  resetStore()
+  const pending = deferred()
+  resolveCliStateRecovery = () => pending.promise
+  const recovery = store.resolveCliStateRecovery('package-1')
+
+  assert.equal(store.recoverySaving, true)
+  assert.equal(store.stateSaving, false)
+  pending.resolve({ package: { id: 'package-1' } })
+  assert.deepEqual(await recovery, { package: { id: 'package-1' } })
+  assert.equal(stateLoads, 1)
+  assert.equal(store.recoverySaving, false)
 })
 
 test('Skills store preserves a preview after a stale plan and exposes no unsafe recovery details', async () => {

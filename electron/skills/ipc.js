@@ -152,6 +152,9 @@ export function registerSkillsIpc({ ipcMain, service }) {
   ipcMain.handle('skills:apply-cli-state-change', (_event, request) => safeCall(() =>
     service.applyCliStateChange(cliStateRequest(request, { apply: true }))
   ))
+  ipcMain.handle('skills:resolve-cli-state-recovery', (_event, packageId) => safeCall(() =>
+    service.resolveCliStateRecovery(id(packageId, 'packageId'))
+  ))
   ipcMain.handle('skills:apply-to-adapter', (_event, request) => safeCall(() => {
     const input = object(request, 'request')
     if (!ADAPTER_IDS.has(input.targetAdapterId)) throw ipcError('targetAdapterId is invalid')

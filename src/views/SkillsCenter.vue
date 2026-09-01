@@ -339,7 +339,7 @@
               <strong>AI CLI 期望与实际状态</strong>
               <span class="skills-muted">直接切换会先预览影响；兼容继承无法可靠隔离时会被阻止。旧位置可继续用于直接应用、纳入管理与修复。</span>
             </div>
-            <SkillCliStateMatrix :entry="entry" :adapters="skills.adapters" :saving="skills.stateSaving" @preview-change="previewCliStateChange" />
+            <SkillCliStateMatrix :entry="entry" :adapters="skills.adapters" :saving="skills.stateSaving || skills.recoverySaving" :repair-mode="true" @preview-change="previewCliStateChange" @recover="confirmCliStateRecovery" />
           </div>
 
           <div v-if="entry.packages.length" class="skill-package-actions">
@@ -877,6 +877,17 @@ async function previewCliStateChange(change) {
   } catch (error) {
     message.error(error?.message || '无法预览 CLI 状态变更')
   }
+}
+function confirmCliStateRecovery(packageId) {
+  Modal.confirm({
+    title: '恢复投放？',
+    content: 'UCLI 会使用已保存的受管快照校验并恢复投放；恢复完成前不会执行其他 CLI 状态变更。',
+    okText: '恢复投放', cancelText: '取消',
+    async onOk() {
+      await skills.resolveCliStateRecovery(packageId)
+      message.success('投放已恢复')
+    }
+  })
 }
 async function chooseServerSkillProject() {
   const selected = await ipc.pickDirectory()

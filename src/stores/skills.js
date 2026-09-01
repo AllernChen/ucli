@@ -28,6 +28,7 @@ export const useSkillsStore = defineStore('skills', {
     loading: false,
     saving: false,
     stateSaving: false,
+    recoverySaving: false,
     statePreview: null,
     statePreviewIdentity: null,
     statePreviewToken: 0,
@@ -120,6 +121,24 @@ export const useSkillsStore = defineStore('skills', {
         throw error
       } finally {
         this.stateSaving = false
+      }
+    },
+    async resolveCliStateRecovery(packageId) {
+      if (this.recoverySaving || this.stateSaving) {
+        throw Object.assign(new Error('Skill state operation is already in progress'), { code: 'SKILL_OPERATION_IN_PROGRESS' })
+      }
+      this.recoverySaving = true
+      this.error = null
+      try {
+        const result = await ipc.resolveCliStateRecovery(packageId)
+        await this.load()
+        this.clearStatePreview()
+        return result
+      } catch (error) {
+        this.error = this.safeError(error, 'Skill 投放恢复失败')
+        throw error
+      } finally {
+        this.recoverySaving = false
       }
     },
     install(request) {

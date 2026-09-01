@@ -95,6 +95,7 @@ const api = {
   applySkillToAdapter: (packageId, targetAdapterId) => ipcRenderer.invoke('skills:apply-to-adapter', { packageId, targetAdapterId }),
   previewCliStateChange: (request) => ipcRenderer.invoke('skills:preview-cli-state-change', request),
   applyCliStateChange: (request) => ipcRenderer.invoke('skills:apply-cli-state-change', request),
+  resolveCliStateRecovery: (packageId) => ipcRenderer.invoke('skills:resolve-cli-state-recovery', packageId),
   checkSkillUpdates: (packageIds) => ipcRenderer.invoke('skills:check-updates', packageIds ?? null),
   previewSkillUpdate: (packageId) => ipcRenderer.invoke('skills:preview-update', packageId),
   updateSkill: (packageId, expectedRevision) => ipcRenderer.invoke('skills:update', packageId, expectedRevision ?? null),

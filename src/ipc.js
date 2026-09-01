@@ -69,6 +69,7 @@ export const ipc = {
   applySkillToAdapter: (packageId, targetAdapterId) => u.applySkillToAdapter(packageId, targetAdapterId),
   previewCliStateChange: (request) => u.previewCliStateChange(request),
   applyCliStateChange: (request) => u.applyCliStateChange(request),
+  resolveCliStateRecovery: (packageId) => u.resolveCliStateRecovery(packageId),
   checkSkillUpdates: (packageIds) => u.checkSkillUpdates(packageIds),
   previewSkillUpdate: (packageId) => u.previewSkillUpdate(packageId),
   updateSkill: (packageId, expectedRevision) => u.updateSkill(packageId, expectedRevision),

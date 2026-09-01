@@ -1452,3 +1452,15 @@ test('Skills state matrix exposes accessible scope, desired, actual, enforcement
   for (const label of ['期望状态', '实际状态', '执行状态', '独立启用', 'aria-label']) assert.match(matrix, new RegExp(label))
   assert.match(matrix, /desiredState: 'enabled'/)
 })
+
+test('recovery-required CLI cells expose only the guarded repair control', () => {
+  const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
+  const matrix = readFileSync(new URL('../src/components/skills/SkillCliStateMatrix.vue', import.meta.url), 'utf8')
+
+  assert.match(matrix, /repairMode && cell\.enforcementStatus === 'recovery_required'/)
+  assert.match(matrix, />恢复投放</)
+  assert.match(matrix, /aria-label/)
+  assert.match(page, /@recover="confirmCliStateRecovery"/)
+  assert.match(page, /skills\.resolveCliStateRecovery\(packageId\)/)
+  assert.match(page, /恢复投放/)
+})

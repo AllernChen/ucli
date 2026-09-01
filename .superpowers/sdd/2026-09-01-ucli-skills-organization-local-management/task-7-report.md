@@ -26,3 +26,15 @@
 - The organization header now exposes syncing, stale, error, and last-successful-sync states independently. New controls have accessible labels.
 - Review RED: the focused presentation test failed for scope tuples, abnormal/mismatch state, multi-organization grouping, and sync/matrix rendering before these changes.
 - Review GREEN: `node --test test/skills-presentation.test.mjs test/skills-store.test.mjs` — 76 passed, 0 failed; `npm run build` and `git diff --check` passed.
+
+## Guarded recovery follow-up
+
+- Added a package-ID-only `resolveCliStateRecovery` path through main-process IPC, preload, renderer IPC, and the Skills store. The IPC boundary rejects renderer-controlled paths, scopes, and other recovery inputs; recovery-required errors now expose a stable sanitized message.
+- Recovery-required matrix cells expose an accessible `恢复投放` action only in repair mode. It confirms the guarded recovery, disables duplicate state operations while pending, then refreshes the catalog after success.
+- Added IPC, renderer bridge, store, and presentation contracts for the recovery path.
+
+## Guarded recovery verification
+
+- RED: the new IPC, renderer bridge, store, and presentation recovery contracts failed before the recovery surface was added.
+- GREEN: `node --test test/skills-ipc.test.mjs test/skills-renderer-ipc.test.mjs test/skills-store.test.mjs test/skills-presentation.test.mjs` — 93 passed, 0 failed.
+- `npm run build` and `git diff --check` are run for this follow-up before commit.
