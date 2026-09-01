@@ -142,3 +142,89 @@ test('legacy metadata backfill uses organization IDs only as pending-name fallba
     })
   })
 })
+
+test('legacy metadata backfill skips malformed organization mappings', async () => {
+  await withDb(async (db) => {
+    for (const [id, versionId, serverOrigin] of [
+      ['blank-version', '', 'https://server.example.test'],
+      ['opaque-origin', 'version-opaque', 'file:///server-catalog'],
+      ['non-http-origin', 'version-ftp', 'ftp://server.example.test']
+    ]) {
+      db.insertSkillPackage(packageRecord({ id, sourceRef: versionId }))
+      db.linkServerSkillPackage({
+        packageId: id, versionId, serverOrigin, organizationId: 'org-1', slug: 'release-notes', version: '1.0.0'
+      })
+    }
+
+    backfillSkillManagementMetadata({ db, now: () => 100 })
+
+    assert.equal(db.getSkillSourceIdentity('blank-version'), null)
+    assert.equal(db.getSkillSourceIdentity('opaque-origin'), null)
+    assert.equal(db.getSkillSourceIdentity('non-http-origin'), null)
+  })
+})
+
+test('legacy metadata backfill ignores orphan and malformed installations without blocking valid state', async () => {
+  await withDb(async (db) => {
+    db.insertSkillPackage(packageRecord())
+    db.insertSkillInstallation(installation())
+    db.sql.run(`INSERT INTO skill_installations (
+      id, package_id, target_adapter_id, scope_type, scope_key, target_path,
+      enabled, deployed_sha256, status, created_at, updated_at
+    ) VALUES
+      ('orphan', 'missing-package', 'codex', 'project', 'F:\\projects\\demo', 'F:\\orphan', 1, NULL, 'ready', 100, 100),
+      ('bad-scope', 'server-package', 'codex', 'invalid', 'F:\\projects\\demo', 'F:\\bad-scope', 1, NULL, 'ready', 100, 100),
+      ('blank-target', 'server-package', '', 'project', '', 'F:\\blank-target', 1, NULL, 'ready', 100, 100)`)
+
+    backfillSkillManagementMetadata({ db, now: () => 100 })
+
+    assert.deepEqual(db.listSkillCliDesiredStates({ packageId: 'server-package' })
+      .find((item) => item.adapterId === 'codex'), {
+        packageId: 'server-package', scopeType: 'project', scopeKey: 'F:\\projects\\demo',
+        adapterId: 'codex', desiredState: 'enabled', enforcementStatus: 'satisfied',
+        reasonCode: null, updatedAt: 100
+      })
+    assert.deepEqual(db.listSkillCliDesiredStates({ packageId: 'missing-package' }), [])
+    assert.equal(db.listSkillCliDesiredStates().some((item) => item.scopeType === 'invalid' || !item.scopeKey || !item.adapterId), false)
+  })
+})
+
+test('legacy metadata backfill uses exact service-profile names and preserves explicit records', async () => {
+  await withDb(async (db) => {
+    db.insertSkillPackage(packageRecord())
+    db.linkServerSkillPackage({
+      packageId: 'server-package', versionId: 'version-1', serverOrigin: 'https://server.example.test',
+      organizationId: 'org-1', slug: 'release-notes', version: '1.0.0'
+    })
+    db.replaceServerServiceCatalog({
+      profile: {
+        id: 'https://server.example.test::org-1', serverOrigin: 'https://server.example.test',
+        organization: { id: 'org-1', name: 'Profile Engineering' }, connectionRevision: 1, availabilityStatus: 'ready'
+      },
+      models: []
+    })
+
+    backfillSkillManagementMetadata({ db, now: () => 100 })
+    assert.equal(db.getSkillSourceIdentity('server-package').organizationName, 'Profile Engineering')
+
+    db.upsertSkillSourceIdentity({
+      packageId: 'server-package', originKind: 'organization', serverOrigin: 'https://other.example.test',
+      organizationId: 'org-existing', organizationName: 'Existing Organization', identityStatus: 'resolved',
+      catalogVersionId: 'version-existing', artifactSha256: 'c'.repeat(64), createdAt: 50, updatedAt: 50
+    })
+    db.upsertSkillCliDesiredState({
+      packageId: 'server-package', scopeType: 'project', scopeKey: 'F:\\projects\\demo', adapterId: 'codex',
+      desiredState: 'disabled', enforcementStatus: 'satisfied', reasonCode: null, updatedAt: 50
+    })
+
+    backfillSkillManagementMetadata({ db, now: () => 200 })
+
+    assert.deepEqual(db.getSkillSourceIdentity('server-package'), {
+      packageId: 'server-package', originKind: 'organization', serverOrigin: 'https://other.example.test',
+      organizationId: 'org-existing', organizationName: 'Existing Organization', identityStatus: 'resolved',
+      catalogVersionId: 'version-existing', artifactSha256: 'c'.repeat(64), createdAt: 100, updatedAt: 50
+    })
+    assert.equal(db.listSkillCliDesiredStates({ packageId: 'server-package' })
+      .find((item) => item.adapterId === 'codex').desiredState, 'disabled')
+  })
+})

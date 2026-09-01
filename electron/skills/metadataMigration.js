@@ -2,6 +2,11 @@ import { buildSkillVisibility } from './adapters.js'
 
 const SHA256 = /^[a-f0-9]{64}$/
 const LOCAL_ORIGIN_KINDS = new Set(['github', 'gitlab', 'plugin', 'discovered'])
+const SCOPE_TYPES = new Set(['user', 'project'])
+const DESIRED_STATES = new Set(['enabled', 'disabled', 'inherit'])
+const ENFORCEMENT_STATUSES = new Set([
+  'satisfied', 'migration_required', 'blocked', 'error', 'recovery_required'
+])
 
 export function backfillSkillManagementMetadata({ db, now = Date.now } = {}) {
   if (!db || typeof db._runImmediateTransaction !== 'function' || typeof now !== 'function') {
@@ -12,6 +17,7 @@ export function backfillSkillManagementMetadata({ db, now = Date.now } = {}) {
     const mappings = new Map(db.listServerSkillPackages().map((mapping) => [mapping.packageId, mapping]))
     const connections = [db.getServerConnection('current')].filter(Boolean)
     const serviceProfiles = db.listServerServiceProfiles()
+    const packageIds = new Set(packages.map((pkg) => pkg.id))
 
     for (const pkg of packages) {
       if (db.getSkillSourceIdentity(pkg.id)) continue
@@ -22,10 +28,12 @@ export function backfillSkillManagementMetadata({ db, now = Date.now } = {}) {
       if (identity) insertSourceIdentityIfAbsent(db, identity)
     }
 
-    const installations = db.listSkillInstallations()
+    const installations = db.listSkillInstallations().filter((installation) =>
+      packageIds.has(installation.packageId) && validInstallation(installation)
+    )
     const directTargets = new Set(installations.map((installation) => stateKey(installation)))
     for (const installation of installations) {
-      insertDesiredStateIfAbsent(db, {
+      const state = {
         packageId: installation.packageId,
         scopeType: installation.scopeType,
         scopeKey: installation.scopeKey,
@@ -34,7 +42,8 @@ export function backfillSkillManagementMetadata({ db, now = Date.now } = {}) {
         enforcementStatus: 'satisfied',
         reasonCode: null,
         updatedAt: now()
-      })
+      }
+      if (validDesiredState(state)) insertDesiredStateIfAbsent(db, state)
     }
     for (const installation of installations) {
       const visibility = buildSkillVisibility([installation.targetAdapterId], {
@@ -42,7 +51,7 @@ export function backfillSkillManagementMetadata({ db, now = Date.now } = {}) {
       })
       for (const [adapterId, state] of Object.entries(visibility)) {
         if (!state.visible || state.direct || directTargets.has(stateKey({ ...installation, targetAdapterId: adapterId }))) continue
-        insertDesiredStateIfAbsent(db, {
+        const desiredState = {
           packageId: installation.packageId,
           scopeType: installation.scopeType,
           scopeKey: installation.scopeKey,
@@ -51,15 +60,16 @@ export function backfillSkillManagementMetadata({ db, now = Date.now } = {}) {
           enforcementStatus: 'satisfied',
           reasonCode: null,
           updatedAt: now()
-        })
+        }
+        if (validDesiredState(desiredState)) insertDesiredStateIfAbsent(db, desiredState)
       }
     }
   })
 }
 
 function organizationIdentityFor({ db, pkg, mapping, connections, serviceProfiles, now }) {
-  const serverOrigin = normalizedOrigin(mapping.serverOrigin)
-  if (!serverOrigin || typeof mapping.organizationId !== 'string' || !mapping.organizationId.trim()) return null
+  const serverOrigin = normalizedHttpOrigin(mapping.serverOrigin)
+  if (!serverOrigin || !nonEmptyString(mapping.organizationId) || !nonEmptyString(mapping.versionId)) return null
   const artifactSha256 = artifactShaFor({ db, pkg, mapping, serverOrigin })
   if (!artifactSha256) return null
   const organizationName = organizationNameFor({
@@ -125,6 +135,7 @@ function localIdentityFor(pkg, now) {
 }
 
 function insertSourceIdentityIfAbsent(db, identity) {
+  if (!validSourceIdentity(identity)) return false
   db.sql.run(
     `INSERT INTO skill_source_identities (
        package_id, origin_kind, server_origin, organization_id, organization_name,
@@ -137,6 +148,7 @@ function insertSourceIdentityIfAbsent(db, identity) {
       identity.artifactSha256, identity.createdAt, identity.updatedAt
     ]
   )
+  return true
 }
 
 function insertDesiredStateIfAbsent(db, state) {
@@ -159,4 +171,44 @@ function stateKey({ packageId, scopeType, scopeKey, targetAdapterId }) {
 
 function normalizedOrigin(value) {
   try { return new URL(value).origin } catch { return null }
+}
+
+function normalizedHttpOrigin(value) {
+  try {
+    const url = new URL(value)
+    if (!['http:', 'https:'].includes(url.protocol) || url.origin === 'null') return null
+    return url.origin
+  } catch {
+    return null
+  }
+}
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && Boolean(value.trim())
+}
+
+function validInstallation(installation) {
+  return nonEmptyString(installation.scopeKey) && nonEmptyString(installation.targetAdapterId) &&
+    SCOPE_TYPES.has(installation.scopeType) && typeof installation.enabled === 'boolean'
+}
+
+function validDesiredState(state) {
+  return nonEmptyString(state.packageId) && nonEmptyString(state.scopeKey) && nonEmptyString(state.adapterId) &&
+    SCOPE_TYPES.has(state.scopeType) && DESIRED_STATES.has(state.desiredState) &&
+    ENFORCEMENT_STATUSES.has(state.enforcementStatus) && (state.reasonCode == null || nonEmptyString(state.reasonCode)) &&
+    Number.isInteger(state.updatedAt) && state.updatedAt >= 0
+}
+
+function validSourceIdentity(identity) {
+  if (!identity || !nonEmptyString(identity.packageId) ||
+    !Number.isInteger(identity.createdAt) || identity.createdAt < 0 ||
+    !Number.isInteger(identity.updatedAt) || identity.updatedAt < 0) return false
+  if (identity.originKind !== 'organization') {
+    if (!LOCAL_ORIGIN_KINDS.has(identity.originKind) && identity.originKind !== 'local') return false
+    return identity.serverOrigin == null && identity.organizationId == null && identity.organizationName == null &&
+      identity.identityStatus === 'resolved' && identity.catalogVersionId == null && identity.artifactSha256 == null
+  }
+  return normalizedHttpOrigin(identity.serverOrigin) === identity.serverOrigin && nonEmptyString(identity.organizationId) &&
+    nonEmptyString(identity.organizationName) && ['resolved', 'name_pending'].includes(identity.identityStatus) &&
+    nonEmptyString(identity.catalogVersionId) && SHA256.test(identity.artifactSha256 || '')
 }
