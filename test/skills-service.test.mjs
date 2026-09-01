@@ -589,8 +589,85 @@ test('removal retains recovery material and blocks destructive work after double
 
     await assert.rejects(service.removeInstallation(installed.installations[0].id), { code: 'SKILL_PERSISTENCE_PENDING' })
     assert.equal(db.listSkillCliDesiredStates({ packageId: installed.id })[0].enforcementStatus, 'recovery_required')
+    await assert.rejects(service.setEnabled(installed.installations[0].id, false), { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' })
+    await assert.rejects(service.update(installed.id), { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' })
+    await assert.rejects(service.resolveDrift(installed.installations[0].id, 'restore'), { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' })
     await assert.rejects(service.removePackage(installed.id), { code: 'SKILL_PROJECTION_RECOVERY_REQUIRED' })
   }, { flushFactory: (db) => () => (++flushes === 1 ? db.flush() : false) })
+})
+
+test('fresh service reconstructs records and files from a retained private removal journal', async () => {
+  let failRecordRestore = false
+  await withService(async ({ root, db }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const initial = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }), flush: () => db.flush()
+    })
+    const installed = await initial.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user'
+    })
+    const insertSkillPackage = db.insertSkillPackage.bind(db)
+    const flush = db.flush.bind(db)
+    db.insertSkillPackage = (pkg) => {
+      if (failRecordRestore) throw new Error('record restore failed')
+      return insertSkillPackage(pkg)
+    }
+    failRecordRestore = true
+    db.flush = () => false
+
+    await assert.rejects(initial.removePackage(installed.id), { code: 'SKILL_PERSISTENCE_PENDING' })
+    assert.equal(db.getSkillPackage(installed.id), null)
+
+    failRecordRestore = false
+    db.flush = flush
+    const fresh = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }), flush: () => db.flush()
+    })
+    const state = await fresh.getState()
+    assert.equal(state.packages[0].id, installed.id)
+    assert.equal(existsSync(join(state.packages[0].installations[0].targetPath, 'SKILL.md')), true)
+    db.insertSkillPackage = insertSkillPackage
+  })
+})
+
+test('fresh service restores an installation record from retained removal recovery material', async () => {
+  let failRecordRestore = false
+  await withService(async ({ root, db }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const initial = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }), flush: () => db.flush()
+    })
+    const installed = await initial.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user'
+    })
+    const insertSkillInstallation = db.insertSkillInstallation.bind(db)
+    const flush = db.flush.bind(db)
+    db.insertSkillInstallation = (item) => {
+      if (failRecordRestore) throw new Error('installation restore failed')
+      return insertSkillInstallation(item)
+    }
+    failRecordRestore = true
+    db.flush = () => false
+
+    await assert.rejects(initial.removeInstallation(installed.installations[0].id), { code: 'SKILL_PERSISTENCE_PENDING' })
+    assert.equal(db.getSkillInstallation(installed.installations[0].id), null)
+
+    failRecordRestore = false
+    db.flush = flush
+    const fresh = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }), flush: () => db.flush()
+    })
+    const state = await fresh.getState()
+    assert.equal(state.packages[0].installations[0].id, installed.installations[0].id)
+    assert.equal(existsSync(join(state.packages[0].installations[0].targetPath, 'SKILL.md')), true)
+    db.insertSkillInstallation = insertSkillInstallation
+  })
 })
 
 test('removal retains a bounded recovery record when projection restoration copy fails', async () => {

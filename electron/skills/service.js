@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, rmdirSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
@@ -362,6 +362,93 @@ export function createSkillsService({
     return join(updateStagingRoot, `removal-recovery-${packageId}`)
   }
 
+  function removalJournalPath(packageId) {
+    return join(updateStagingRoot, `removal-recovery-${encodeURIComponent(packageId)}.json`)
+  }
+
+  function removalSnapshot(pkg, installations, sourceIdentity, desiredStates, serverMapping) {
+    return {
+      version: 1,
+      package: {
+        id: pkg.id, name: pkg.name, description: pkg.description,
+        sourceType: pkg.sourceType, sourceLocator: pkg.sourceLocator,
+        sourceRef: pkg.sourceRef, sourceRefType: pkg.sourceRefType,
+        sourceSubdir: pkg.sourceSubdir, resolvedRevision: pkg.resolvedRevision,
+        manifest: pkg.manifest, contentSha256: pkg.contentSha256,
+        lastCheckedAt: pkg.lastCheckedAt, createdAt: pkg.createdAt, updatedAt: pkg.updatedAt
+      },
+      installations: installations.map((item) => ({ ...item })),
+      sourceIdentity: sourceIdentity ? { ...sourceIdentity } : null,
+      desiredStates: desiredStates.map((state) => ({ ...state })),
+      serverMapping: serverMapping ? { ...serverMapping } : null
+    }
+  }
+
+  function validatedRemovalSnapshot(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 ||
+      !value.package || typeof value.package !== 'object' || Array.isArray(value.package) ||
+      typeof value.package.id !== 'string' || !value.package.id || value.package.id.length > 128 ||
+      typeof value.package.name !== 'string' || !value.package.name || value.package.name.length > 128 ||
+      !Array.isArray(value.installations) || value.installations.length > 64 ||
+      !Array.isArray(value.desiredStates) || value.desiredStates.length > 256 ||
+      (value.sourceIdentity !== null && (typeof value.sourceIdentity !== 'object' || Array.isArray(value.sourceIdentity))) ||
+      (value.serverMapping !== null && (typeof value.serverMapping !== 'object' || Array.isArray(value.serverMapping)))) {
+      throw new Error('invalid removal recovery record')
+    }
+    if (!pathIsWithin(packagesRoot, packageDirectory(value.package.id))) throw new Error('invalid removal recovery record')
+    for (const item of value.installations) {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || item.packageId !== value.package.id ||
+        !SKILL_ADAPTERS[item.targetAdapterId] || !['user', 'project'].includes(item.scopeType) ||
+        typeof item.scopeKey !== 'string' || !isAbsolute(item.targetPath) ||
+        normalizedPath(item.targetPath) !== normalizedPath(join(resolveSkillRoot({
+          adapterId: item.targetAdapterId,
+          scopeType: item.scopeType,
+          projectPath: item.scopeType === 'project' ? item.scopeKey : undefined,
+          home: skillHome,
+          env
+        }), value.package.name))) {
+        throw new Error('invalid removal recovery record')
+      }
+    }
+    for (const state of value.desiredStates) {
+      if (!state || typeof state !== 'object' || Array.isArray(state) || state.packageId !== value.package.id) {
+        throw new Error('invalid removal recovery record')
+      }
+    }
+    if ((value.sourceIdentity && value.sourceIdentity.packageId !== value.package.id) ||
+      (value.serverMapping && value.serverMapping.packageId !== value.package.id)) {
+      throw new Error('invalid removal recovery record')
+    }
+    return value
+  }
+
+  function writeRemovalJournal(snapshot) {
+    let temporary = null
+    try {
+      const value = validatedRemovalSnapshot(snapshot)
+      const json = JSON.stringify(value)
+      if (Buffer.byteLength(json, 'utf8') > 262144) throw new Error('too large')
+      const path = removalJournalPath(value.package.id)
+      if (existsSync(path)) throw new Error('already required')
+      temporary = `${path}.${randomUUID()}.tmp`
+      writeFileSync(temporary, json, { encoding: 'utf8', mode: 0o600 })
+      renameSync(temporary, path)
+    } catch (error) {
+      try { if (temporary && existsSync(temporary)) rmSync(temporary, { force: true }) } catch {}
+      throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+  }
+
+  function readRemovalJournal(path) {
+    try {
+      const content = readFileSync(path, 'utf8')
+      if (Buffer.byteLength(content, 'utf8') > 262144) throw new Error('too large')
+      return validatedRemovalSnapshot(JSON.parse(content))
+    } catch {
+      throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+  }
+
   function markRemovalRecovery(packageId) {
     db._runImmediateTransaction(() => {
       const states = db.listSkillCliDesiredStates({ packageId })
@@ -377,7 +464,7 @@ export function createSkillsService({
     })
   }
 
-  async function recoverRemovalIfNeeded(packageId) {
+  async function recoverLegacyRemovalIfNeeded(packageId) {
     const backup = removalRecoveryPath(packageId)
     const marked = db.listSkillCliDesiredStates({ packageId })
       .some((state) => state.enforcementStatus === 'recovery_required' && state.reasonCode === 'SKILL_REMOVAL_RECOVERY_REQUIRED')
@@ -396,6 +483,59 @@ export function createSkillsService({
       markRemovalRecovery(packageId)
       throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     }
+  }
+
+  async function recoverRemovalJournal(path) {
+    const snapshot = readRemovalJournal(path)
+    const backup = removalRecoveryPath(snapshot.package.id)
+    if (!existsSync(backup)) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    try {
+      await db.transaction(() => {
+        const current = db.getSkillPackage(snapshot.package.id)
+        if (!current) db.insertSkillPackage(snapshot.package)
+        for (const installation of snapshot.installations) {
+          const existing = db.getSkillInstallation(installation.id)
+          if (!existing) db.insertSkillInstallation(installation)
+          else if (existing.packageId !== snapshot.package.id) throw new Error('installation recovery conflict')
+        }
+        if (snapshot.serverMapping) db.linkServerSkillPackage(snapshot.serverMapping)
+        if (snapshot.sourceIdentity) db.upsertSkillSourceIdentity(snapshot.sourceIdentity)
+        db.deleteSkillCliDesiredStates(snapshot.package.id)
+        for (const state of snapshot.desiredStates) db.upsertSkillCliDesiredState(state)
+      })
+      if (!existsSync(packageDirectory(snapshot.package.id))) recoveryCopy(backup, packageDirectory(snapshot.package.id))
+      for (const installation of snapshot.installations) {
+        if (installation.enabled && !existsSync(installation.targetPath)) recoveryCopy(backup, installation.targetPath)
+      }
+      await persistOrThrow()
+      try { rmSync(path, { force: true }) } catch { return }
+      try { rmSync(backup, { recursive: true, force: true }) } catch {}
+    } catch {
+      if (db.getSkillPackage(snapshot.package.id)) {
+        try { markRemovalRecovery(snapshot.package.id) } catch {}
+      }
+      throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+  }
+
+  async function recoverRemovalIfNeeded(packageId = null) {
+    let journals
+    try {
+      journals = readdirSync(updateStagingRoot)
+        .filter((name) => name.startsWith('removal-recovery-') && name.endsWith('.json'))
+        .map((name) => join(updateStagingRoot, name))
+    } catch {
+      throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+    for (const journal of journals) await recoverRemovalJournal(journal)
+    const packageIds = new Set(packageId ? [packageId] : [])
+    for (const pkg of db.listSkillPackages()) {
+      if (db.listSkillCliDesiredStates({ packageId: pkg.id })
+        .some((state) => state.enforcementStatus === 'recovery_required' && state.reasonCode === 'SKILL_REMOVAL_RECOVERY_REQUIRED')) {
+        packageIds.add(pkg.id)
+      }
+    }
+    for (const id of packageIds) await recoverLegacyRemovalIfNeeded(id)
   }
 
   function sameOrganizationSource(identity, source) {
@@ -805,6 +945,7 @@ export function createSkillsService({
     const serverSource = validServerSource(source)
     const pkg = db.getSkillPackage(packageId)
     if (!pkg || pkg.sourceType !== 'server') throw serviceError('Server Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    await recoverRemovalIfNeeded()
     const validated = validateInstallRequest(targets)
     if (!db.listSkillInstallations({ packageId }).some(item => item.scopeType === validated.scopeType &&
       normalizedPath(item.scopeKey) === normalizedPath(validated.scopeKey) && validated.projectionIds.includes(item.targetAdapterId))) {
@@ -1067,6 +1208,7 @@ export function createSkillsService({
     guard?.()
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    await recoverRemovalIfNeeded()
     if (!SKILL_ADAPTERS[targetAdapterId]) throw serviceError('Skill adapter is unavailable', 'SKILL_ADAPTER_UNAVAILABLE')
     if (validateSkillCompatibility(pkg.name)[targetAdapterId]?.compatible === false) {
       throw serviceError('Skill name is incompatible with this CLI', 'SKILL_INCOMPATIBLE')
@@ -1196,6 +1338,7 @@ export function createSkillsService({
     const pkg = db.getSkillPackage(item.packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
     if (Boolean(enabled) === item.enabled) return inspectInstallation(item)
+    await recoverRemovalIfNeeded()
     let changed = false
     try {
       if (enabled) {
@@ -1253,6 +1396,7 @@ export function createSkillsService({
     if (!['restore', 'adopt'].includes(resolution)) throw serviceError('Drift resolution is invalid', 'SKILL_DRIFT_RESOLUTION_INVALID')
     const pkg = db.getSkillPackage(item.packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    await recoverRemovalIfNeeded()
     if (!existsSync(item.targetPath)) throw serviceError('Drifted projection is missing', 'SKILL_TARGET_MISSING')
     const target = inspectSkillDirectory(item.targetPath)
     if (target.contentSha256 === item.deployedSha256) return resolution === 'restore' ? inspectInstallation(item) : packageView(pkg)
@@ -1338,17 +1482,25 @@ export function createSkillsService({
   async function removeInstallation(installationId) {
     const item = db.getSkillInstallation(installationId)
     if (!item) return false
-    await recoverRemovalIfNeeded(item.packageId)
+    await recoverRemovalIfNeeded()
     const pkg = db.getSkillPackage(item.packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    const installations = db.listSkillInstallations({ packageId: pkg.id })
+    const sourceIdentity = db.getSkillSourceIdentity(pkg.id)
+    const desiredStates = db.listSkillCliDesiredStates({ packageId: pkg.id })
+    const serverMapping = db.getServerSkillPackage(pkg.id)
     const backup = removalRecoveryPath(pkg.id)
+    const journal = removalJournalPath(pkg.id)
     let removed = false
     let recordRemoved = false
     let backupReady = false
+    let journalWritten = false
     let recoveryRequired = false
     try {
       recoveryCopy(packageDirectory(pkg.id), backup)
       backupReady = true
+      writeRemovalJournal(removalSnapshot(pkg, installations, sourceIdentity, desiredStates, serverMapping))
+      journalWritten = true
       if (item.enabled && existsSync(item.targetPath)) {
         removed = true
         managedRemoval(item.targetPath, item.deployedSha256)
@@ -1373,19 +1525,20 @@ export function createSkillsService({
       } catch {
         recovered = false
       }
-      if (!recovered && backupReady) {
-        markRemovalRecovery(item.packageId)
+      if (!recovered && backupReady && journalWritten) {
+        try { markRemovalRecovery(item.packageId) } catch {}
         recoveryRequired = true
       }
       if (!recovered) throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
       throw error
     } finally {
+      if (!recoveryRequired && existsSync(journal)) rmSync(journal, { force: true })
       if (!recoveryRequired && existsSync(backup)) rmSync(backup, { recursive: true, force: true })
     }
   }
 
   async function removePackage(packageId) {
-    await recoverRemovalIfNeeded(packageId)
+    await recoverRemovalIfNeeded()
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) return false
     const installations = db.listSkillInstallations({ packageId })
@@ -1393,14 +1546,18 @@ export function createSkillsService({
     const desiredStates = db.listSkillCliDesiredStates({ packageId })
     const serverMapping = db.getServerSkillPackage(packageId)
     const backup = removalRecoveryPath(pkg.id)
+    const journal = removalJournalPath(pkg.id)
     const removed = []
     let canonicalRemoved = false
     let recordsRemoved = false
     let backupReady = false
+    let journalWritten = false
     let recoveryRequired = false
     try {
       recoveryCopy(packageDirectory(pkg.id), backup)
       backupReady = true
+      writeRemovalJournal(removalSnapshot(pkg, installations, sourceIdentity, desiredStates, serverMapping))
+      journalWritten = true
       for (const installation of installations) {
         if (!installation.enabled || !existsSync(installation.targetPath)) continue
         removed.push(installation)
@@ -1443,13 +1600,14 @@ export function createSkillsService({
       } catch {
         recovered = false
       }
-      if (!recovered && backupReady) {
-        markRemovalRecovery(packageId)
+      if (!recovered && backupReady && journalWritten) {
+        try { markRemovalRecovery(packageId) } catch {}
         recoveryRequired = true
       }
       if (!recovered) throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
       throw error
     } finally {
+      if (!recoveryRequired && existsSync(journal)) rmSync(journal, { force: true })
       if (!recoveryRequired && existsSync(backup)) rmSync(backup, { recursive: true, force: true })
     }
   }
@@ -1564,6 +1722,7 @@ export function createSkillsService({
   async function update(packageId, expectedRevision = null) {
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    await recoverRemovalIfNeeded()
     if (expectedRevision && pkg.resolvedRevision !== expectedRevision) {
       throw serviceError('Skill source revision changed', 'SKILL_UPDATE_STALE')
     }
@@ -1703,6 +1862,7 @@ export function createSkillsService({
       return results
     },
     async getState({ projectPath } = {}) {
+      await recoverRemovalIfNeeded()
       const sourceProjects = userSourceProjects()
       const packages = db.listSkillPackages().map((pkg) => {
         const view = packageView(pkg)
