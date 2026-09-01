@@ -136,7 +136,7 @@ test('forwards only allowlisted traffic under the gateway root with sanitized he
   assert.equal(requests.length, 1)
 })
 
-test('forwards Claude Anthropic messages from the proxy Anthropic base path', async t => {
+test('normalizes Claude beta messages requests to the fixed Anthropic gateway route', async t => {
   const manager = createManager()
   const upstreamUrls = []
   const proxy = await startedProxy({
@@ -148,13 +148,26 @@ test('forwards Claude Anthropic messages from the proxy Anthropic base path', as
   })
   t.after(() => proxy.shutdown())
   const session = proxy.createSession({ sessionId: 'claude-session', ...identity })
-  const response = await fetch(`${session.baseUrl}/anthropic/v1/messages`, {
+  for (const path of ['/anthropic/v1/messages', '/anthropic/v1/messages?beta=true']) {
+    const response = await fetch(`${session.baseUrl}${path}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${session.bearer}`, 'content-type': 'application/json' },
+      body: '{}'
+    })
+    assert.equal(response.status, 200)
+  }
+  assert.deepEqual(upstreamUrls, [
+    'https://gateway.example.test/gateway/anthropic/v1/messages',
+    'https://gateway.example.test/gateway/anthropic/v1/messages'
+  ])
+
+  const rejected = await fetch(`${session.baseUrl}/anthropic/v1/messages?beta=false`, {
     method: 'POST',
     headers: { authorization: `Bearer ${session.bearer}`, 'content-type': 'application/json' },
     body: '{}'
   })
-  assert.equal(response.status, 200)
-  assert.deepEqual(upstreamUrls, ['https://gateway.example.test/gateway/anthropic/v1/messages'])
+  assert.equal(rejected.status, 404)
+  assert.equal(upstreamUrls.length, 2)
 })
 
 test('does not call upstream when the connection becomes stale while resolving gateway state', async t => {

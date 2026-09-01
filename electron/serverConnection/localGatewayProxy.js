@@ -9,6 +9,7 @@ const ALLOWED_ROUTES = new Map([
   ['POST /v1/chat/completions', 'chat-completions'],
   ['POST /anthropic/v1/messages', 'anthropic-messages']
 ])
+const CLAUDE_BETA_MESSAGES_URL = '/anthropic/v1/messages?beta=true'
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
@@ -36,8 +37,13 @@ function sessionFingerprint(sessionId) {
 }
 
 function routeFor(request) {
-  if (typeof request.url !== 'string' || request.url.includes('?') || request.url.includes('#')) return null
-  return ALLOWED_ROUTES.get(`${request.method} ${request.url}`) || null
+  if (typeof request.url !== 'string') return null
+  const path = request.method === 'POST' && request.url === CLAUDE_BETA_MESSAGES_URL
+    ? '/anthropic/v1/messages'
+    : request.url
+  if (path.includes('?') || path.includes('#')) return null
+  const name = ALLOWED_ROUTES.get(`${request.method} ${path}`)
+  return name ? { name, path } : null
 }
 
 function authorizationBearer(request) {
@@ -113,7 +119,8 @@ export function createLocalGatewayProxy({ connectionManager, fetchImpl = fetch, 
     const startedAt = Date.now()
     const bearer = authorizationBearer(request)
     const session = bearer ? sessions.get(bearer) : null
-    const route = routeFor(request)
+    const matchedRoute = routeFor(request)
+    const route = matchedRoute?.name || null
     const sessionIsCurrent = () => !closed && sameIdentity(connectionManager.getRuntimeConnectionIdentity(), session?.identity)
     if (!session || !sessionIsCurrent()) {
       reject(response, 401, { route: route || 'unknown', startedAt, sessionId: session?.sessionId })
@@ -139,7 +146,7 @@ export function createLocalGatewayProxy({ connectionManager, fetchImpl = fetch, 
         reject(response, 401, { route, startedAt, sessionId: session.sessionId })
         return
       }
-      const upstreamUrl = gatewayUrl(bootstrap?.gateway?.baseUrl, request.url)
+      const upstreamUrl = gatewayUrl(bootstrap?.gateway?.baseUrl, matchedRoute.path)
       origin = upstreamUrl.origin
       let accessToken = await connectionManager.getAccessToken()
       if (!sessionIsCurrent()) {
