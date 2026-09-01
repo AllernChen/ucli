@@ -129,6 +129,7 @@ export function createSkillsService({
   restartSession = async () => true,
   discoverUCodeSkills = () => [],
   migrationFileOps = {},
+  removalFileOps = {},
   uuid = randomUUID,
   now = Date.now
 }) {
@@ -142,6 +143,7 @@ export function createSkillsService({
   const packagesRootIdentity = captureDirectoryIdentity(packagesRoot)
   const migrationCopy = migrationFileOps.copy || copySkillDirectoryAtomic
   const migrationRemove = migrationFileOps.remove || removeManagedSkillDirectory
+  const managedRemoval = removalFileOps.remove || removeManagedSkillDirectory
   backfillSkillManagementMetadata({ db, now })
 
   const projectionOptions = (scopeType, projectPath) => ({
@@ -328,6 +330,7 @@ export function createSkillsService({
         reasonCode: null,
         updatedAt: timestamp
       })
+      if (!installation.enabled) continue
       const visibility = serviceVisibility([installation.targetAdapterId], installation.scopeType)
       for (const [adapterId, visibilityState] of Object.entries(visibility)) {
         if (!visibilityState.visible || visibilityState.direct || directTargets.has(adapterId)) continue
@@ -344,6 +347,23 @@ export function createSkillsService({
       }
     }
     return [...states.values()]
+  }
+
+  function recomputeDesiredStates(packageId, timestamp) {
+    db.deleteSkillCliDesiredStates(packageId)
+    for (const state of initialDesiredStates(db.listSkillInstallations({ packageId }), timestamp)) {
+      db.upsertSkillCliDesiredState(state)
+    }
+  }
+
+  function sameOrganizationSource(identity, source) {
+    if (identity?.originKind !== 'organization') return false
+    try {
+      return new URL(identity.serverOrigin).origin === new URL(source.serverOrigin).origin &&
+        identity.organizationId === source.organizationId
+    } catch {
+      return false
+    }
   }
 
   function installedMatches(preview) {
@@ -555,7 +575,12 @@ export function createSkillsService({
       }
       const packagesInScope = db.listSkillPackages().filter((pkg) => packageInScope(pkg, scopeType, scopeKey))
       const reusable = packagesInScope
-        .filter(pkg => !serverMapping || pkg.sourceType === 'server')
+        .filter((pkg) => {
+          if (!serverMapping) return true
+          const identity = db.getSkillSourceIdentity(pkg.id)
+          if (!identity) return pkg.sourceType !== 'server'
+          return identity.originKind !== 'organization' || sameOrganizationSource(identity, serverMapping)
+        })
         .filter((pkg) => pkg.contentSha256 === inspected.contentSha256)
         .sort((left, right) => Number(samePreparedSource(right, prepared.source)) - Number(samePreparedSource(left, prepared.source)))[0]
       if (reusable) {
@@ -1090,6 +1115,7 @@ export function createSkillsService({
           enabled: true, deployedSha256: deployed.contentSha256, status: 'ready',
           createdAt: timestamp, updatedAt: timestamp
         })
+        recomputeDesiredStates(packageId, timestamp)
         guard?.()
       })
       await persistOrThrow(guard)
@@ -1129,15 +1155,23 @@ export function createSkillsService({
         guard?.()
         const deployed = copySkillDirectoryAtomic(packageDirectory(pkg.id), item.targetPath)
         changed = true
-        db.updateSkillInstallation(item.id, {
-          enabled: true, deployedSha256: deployed.contentSha256, status: 'ready', updatedAt: now()
+        const timestamp = now()
+        await db.transaction(() => {
+          db.updateSkillInstallation(item.id, {
+            enabled: true, deployedSha256: deployed.contentSha256, status: 'ready', updatedAt: timestamp
+          })
+          recomputeDesiredStates(item.packageId, timestamp)
         })
       } else {
         guard?.()
         removeManagedSkillDirectory(item.targetPath, item.deployedSha256)
         changed = true
-        db.updateSkillInstallation(item.id, {
-          enabled: false, deployedSha256: null, status: 'disabled', updatedAt: now()
+        const timestamp = now()
+        await db.transaction(() => {
+          db.updateSkillInstallation(item.id, {
+            enabled: false, deployedSha256: null, status: 'disabled', updatedAt: timestamp
+          })
+          recomputeDesiredStates(item.packageId, timestamp)
         })
       }
       await persistOrThrow(guard)
@@ -1151,8 +1185,11 @@ export function createSkillsService({
           const changedItem = db.getSkillInstallation(item.id)
           removeManagedSkillDirectory(item.targetPath, changedItem?.deployedSha256)
         }
-        db.updateSkillInstallation(item.id, {
-          enabled: item.enabled, deployedSha256: item.deployedSha256, status: item.status, updatedAt: item.updatedAt
+        await db.transaction(() => {
+          db.updateSkillInstallation(item.id, {
+            enabled: item.enabled, deployedSha256: item.deployedSha256, status: item.status, updatedAt: item.updatedAt
+          })
+          recomputeDesiredStates(item.packageId, item.updatedAt)
         })
         const result = await flush()
         if (result === false) throw new Error('flush failed')
@@ -1254,26 +1291,104 @@ export function createSkillsService({
   async function removeInstallation(installationId) {
     const item = db.getSkillInstallation(installationId)
     if (!item) return false
-    if (item.enabled && existsSync(item.targetPath)) removeManagedSkillDirectory(item.targetPath, item.deployedSha256)
-    db.deleteSkillInstallation(item.id)
-    await persistOrThrow()
-    return true
+    const pkg = db.getSkillPackage(item.packageId)
+    if (!pkg) throw serviceError('Skill package was not found', 'SKILL_PACKAGE_NOT_FOUND')
+    const backup = join(updateStagingRoot, `${pkg.id}-remove-${uuid()}`)
+    let removed = false
+    let recordRemoved = false
+    try {
+      copySkillDirectoryAtomic(packageDirectory(pkg.id), backup)
+      if (item.enabled && existsSync(item.targetPath)) {
+        managedRemoval(item.targetPath, item.deployedSha256)
+        removed = true
+      }
+      await db.transaction(() => {
+        db.deleteSkillInstallation(item.id)
+        recordRemoved = true
+      })
+      await persistOrThrow()
+      return true
+    } catch (error) {
+      let recovered = true
+      try {
+        if (recordRemoved && !db.getSkillInstallation(item.id)) {
+          await db.transaction(() => db.insertSkillInstallation(item))
+        }
+        if (removed && !existsSync(item.targetPath)) copySkillDirectoryAtomic(backup, item.targetPath)
+        if (recordRemoved || removed) {
+          const result = await flush()
+          if (result === false) throw new Error('flush failed')
+        }
+      } catch {
+        recovered = false
+      }
+      if (!recovered) throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
+      throw error
+    } finally {
+      if (existsSync(backup)) rmSync(backup, { recursive: true, force: true })
+    }
   }
 
   async function removePackage(packageId) {
     const pkg = db.getSkillPackage(packageId)
     if (!pkg) return false
-    for (const installation of db.listSkillInstallations({ packageId })) {
-      if (installation.enabled && existsSync(installation.targetPath)) {
-        removeManagedSkillDirectory(installation.targetPath, installation.deployedSha256)
+    const installations = db.listSkillInstallations({ packageId })
+    const sourceIdentity = db.getSkillSourceIdentity(packageId)
+    const desiredStates = db.listSkillCliDesiredStates({ packageId })
+    const serverMapping = db.getServerSkillPackage(packageId)
+    const backup = join(updateStagingRoot, `${pkg.id}-remove-${uuid()}`)
+    const removed = []
+    let canonicalRemoved = false
+    let recordsRemoved = false
+    try {
+      copySkillDirectoryAtomic(packageDirectory(pkg.id), backup)
+      for (const installation of installations) {
+        if (!installation.enabled || !existsSync(installation.targetPath)) continue
+        managedRemoval(installation.targetPath, installation.deployedSha256)
+        removed.push(installation)
       }
-      db.deleteSkillInstallation(installation.id)
+      managedRemoval(packageDirectory(pkg.id), pkg.contentSha256)
+      canonicalRemoved = true
+      await db.transaction(() => {
+        for (const installation of installations) db.deleteSkillInstallation(installation.id)
+        db.deleteSkillPackage(pkg.id)
+        recordsRemoved = true
+      })
+      await persistOrThrow()
+      removeEmptyPackageParent(pkg.id)
+      return true
+    } catch (error) {
+      let recovered = true
+      try {
+        if (canonicalRemoved && !existsSync(packageDirectory(pkg.id))) {
+          copySkillDirectoryAtomic(backup, packageDirectory(pkg.id))
+        }
+        for (const installation of removed.reverse()) {
+          if (!existsSync(installation.targetPath)) copySkillDirectoryAtomic(backup, installation.targetPath)
+        }
+        if (recordsRemoved) {
+          await db.transaction(() => {
+            if (!db.getSkillPackage(pkg.id)) db.insertSkillPackage(pkg)
+            for (const installation of installations) {
+              if (!db.getSkillInstallation(installation.id)) db.insertSkillInstallation(installation)
+            }
+            if (serverMapping) db.linkServerSkillPackage(serverMapping)
+            if (sourceIdentity) db.upsertSkillSourceIdentity(sourceIdentity)
+            for (const state of desiredStates) db.upsertSkillCliDesiredState(state)
+          })
+        }
+        if (recordsRemoved || canonicalRemoved || removed.length) {
+          const result = await flush()
+          if (result === false) throw new Error('flush failed')
+        }
+      } catch {
+        recovered = false
+      }
+      if (!recovered) throw serviceError('Skill changes are pending persistence', 'SKILL_PERSISTENCE_PENDING')
+      throw error
+    } finally {
+      if (existsSync(backup)) rmSync(backup, { recursive: true, force: true })
     }
-    removeManagedSkillDirectory(packageDirectory(pkg.id), pkg.contentSha256)
-    db.deleteSkillPackage(pkg.id)
-    removeEmptyPackageParent(pkg.id)
-    await persistOrThrow()
-    return true
   }
 
   async function adopt(request = {}) {

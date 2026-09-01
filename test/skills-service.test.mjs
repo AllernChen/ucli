@@ -154,6 +154,126 @@ test('verified server installation and update atomically retain organization pro
   })
 })
 
+test('identical verified archives from different organizations keep distinct trusted packages', async () => {
+  const sources = []
+  await withService(async ({ root, db, service }) => {
+    const first = join(root, 'org-a')
+    const second = join(root, 'org-b')
+    createSkill(first)
+    createSkill(second)
+    sources.push(first, second)
+    const source = ({ organizationId, organizationName, versionId, sha256 }) => ({
+      locator: `https://server.example.test/organizations/${organizationId}/skills/release-notes`,
+      versionId, serverOrigin: 'https://server.example.test', organizationId, organizationName,
+      slug: 'release-notes', version: versionId, sha256
+    })
+    const orgA = await service.installVerifiedServerArchive({
+      archivePath: 'org-a.zip', archiveIdentity: {},
+      source: source({ organizationId: 'org-a', organizationName: 'Organization A', versionId: 'a-1', sha256: 'a'.repeat(64) }),
+      targets: { targetAdapterIds: ['codex'], scopeType: 'user' }
+    })
+    const orgB = await service.installVerifiedServerArchive({
+      archivePath: 'org-b.zip', archiveIdentity: {},
+      source: source({ organizationId: 'org-b', organizationName: 'Organization B', versionId: 'b-1', sha256: 'b'.repeat(64) }),
+      targets: { targetAdapterIds: ['claude'], scopeType: 'user' }
+    })
+
+    assert.notEqual(orgA.id, orgB.id)
+    assert.equal(db.getSkillSourceIdentity(orgA.id).organizationId, 'org-a')
+    assert.equal(db.getSkillSourceIdentity(orgB.id).organizationId, 'org-b')
+  }, {
+    sourceLoader: {
+      async withVerifiedArchive(_archive, work) {
+        return work({ workingDirectory: sources.shift(), source: { type: 'zip', locator: 'verified.zip', ref: '', subdir: '' }, resolvedRevision: null, cleanup() {} })
+      }
+    }
+  })
+})
+
+test('reuse and enablement operations recompute direct and inherited desired states', async () => {
+  await withService(async ({ root, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    const reused = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user'
+    })
+    const claude = reused.installations.find((installation) => installation.targetAdapterId === 'claude')
+    assert.equal(reused.cliDesiredStates.find((state) => state.adapterId === 'claude').desiredState, 'enabled')
+
+    await service.setEnabled(claude.id, false)
+    assert.equal((await service.getState()).packages[0].cliDesiredStates.find((state) => state.adapterId === 'claude').desiredState, 'disabled')
+
+    await service.setEnabled(claude.id, true)
+    assert.equal((await service.getState()).packages[0].cliDesiredStates.find((state) => state.adapterId === 'claude').desiredState, 'enabled')
+  })
+})
+
+test('removeInstallation restores projection and record when persistence fails', async () => {
+  let flushes = 0
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user' })
+    const installation = installed.installations[0]
+
+    await assert.rejects(service.removeInstallation(installation.id), (error) => error.code === 'SKILL_PERSISTENCE_PENDING')
+    assert.ok(db.getSkillInstallation(installation.id))
+    assert.equal(existsSync(join(installation.targetPath, 'SKILL.md')), true)
+  }, { flushFactory: (db) => () => (++flushes === 2 ? false : db.flush()) })
+})
+
+test('removeInstallation leaves projection and record unchanged when removal fails', async () => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user' })
+    const installation = installed.installations[0]
+
+    await assert.rejects(service.removeInstallation(installation.id), /remove failed/)
+    assert.ok(db.getSkillInstallation(installation.id))
+    assert.equal(existsSync(join(installation.targetPath, 'SKILL.md')), true)
+  }, { removalFileOps: { remove() { throw new Error('remove failed') } } })
+})
+
+test('removePackage restores canonical package, projections, and records when persistence fails', async () => {
+  let flushes = 0
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude', 'codex'], scopeType: 'user' })
+
+    await assert.rejects(service.removePackage(installed.id), (error) => error.code === 'SKILL_PERSISTENCE_PENDING')
+    assert.ok(db.getSkillPackage(installed.id))
+    assert.equal(db.listSkillInstallations({ packageId: installed.id }).length, 2)
+    assert.equal(installed.installations.every((installation) => existsSync(join(installation.targetPath, 'SKILL.md'))), true)
+  }, { flushFactory: (db) => () => (++flushes === 2 ? false : db.flush()) })
+})
+
+test('removePackage restores every projection when a later file removal fails', async () => {
+  let removals = 0
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude', 'codex'], scopeType: 'user' })
+
+    await assert.rejects(service.removePackage(installed.id), /remove failed/)
+    assert.ok(db.getSkillPackage(installed.id))
+    assert.equal(db.listSkillInstallations({ packageId: installed.id }).length, 2)
+    assert.equal(installed.installations.every((installation) => existsSync(join(installation.targetPath, 'SKILL.md'))), true)
+  }, {
+    removalFileOps: {
+      remove(path, sha256) {
+        removals += 1
+        if (removals === 2) throw new Error('remove failed')
+        return removeManagedSkillDirectory(path, sha256)
+      }
+    }
+  })
+})
+
 test('install stores one managed package and the minimum projections for four CLIs', async () => {
   await withService(async ({ root, db, service }) => {
     const source = join(root, 'source')
