@@ -108,19 +108,47 @@ function sameAdapterList(left, right) {
   return Array.isArray(left) && left.length === right.length && left.every((item, index) => item === right[index])
 }
 
-export function hasCanonicalSkillProjectionCapabilities(capabilities) {
+function capabilityDescriptor(adapterId, options = {}) {
+  return {
+    adapterId,
+    covers: effectiveProjectionCoverage(adapterId, options),
+    canExcludeInherited: false,
+    isolationReasonCode: 'SKILL_CLI_ISOLATION_UNSUPPORTED'
+  }
+}
+
+function hasCapabilityDescriptor(capability, expected, { checkDirectRoot = false } = {}) {
+  return !!capability && capability.adapterId === expected.adapterId &&
+    (!checkDirectRoot || capability.directRoot === expected.directRoot) &&
+    sameAdapterList(capability.covers, expected.covers) &&
+    capability.canExcludeInherited === expected.canExcludeInherited &&
+    capability.isolationReasonCode === expected.isolationReasonCode
+}
+
+function hasAuthoritativeUserCapabilityOptions(options) {
+  return !!options && typeof options === 'object' && !Array.isArray(options) &&
+    options.scopeType === 'user' && typeof options.home === 'string' && options.home &&
+    !!options.env && typeof options.env === 'object' && !Array.isArray(options.env)
+}
+
+export function hasCanonicalSkillProjectionCapabilities(capabilities, {
+  scopeType,
+  capabilityOptions = null
+} = {}) {
   const adapterIds = Object.keys(SKILL_ADAPTERS)
-  if (!Array.isArray(capabilities) || capabilities.length !== adapterIds.length) return false
-  return capabilities.every((capability, index) => {
-    const adapterId = adapterIds[index]
-    if (!capability || capability.adapterId !== adapterId ||
-      typeof capability.directRoot !== 'string' || !capability.directRoot ||
-      capability.canExcludeInherited !== false ||
-      capability.isolationReasonCode !== 'SKILL_CLI_ISOLATION_UNSUPPORTED') return false
-    if (adapterId !== 'codex') return sameAdapterList(capability.covers, PROJECTION_COVERAGE[adapterId])
-    return sameAdapterList(capability.covers, PROJECTION_COVERAGE.codex) ||
-      sameAdapterList(capability.covers, PROJECTION_COVERAGE.codex.filter((id) => id !== 'deepseek-harness'))
-  })
+  if (!['project', 'user'].includes(scopeType) || !Array.isArray(capabilities) || capabilities.length !== adapterIds.length) return false
+  if (scopeType === 'project') {
+    return capabilityOptions === null && capabilities.every((capability, index) =>
+      typeof capability?.directRoot === 'string' && !!capability.directRoot &&
+      hasCapabilityDescriptor(capability, capabilityDescriptor(adapterIds[index], { scopeType: 'project' })))
+  }
+  if (!hasAuthoritativeUserCapabilityOptions(capabilityOptions)) return false
+  try {
+    const canonical = listSkillProjectionCapabilities(capabilityOptions)
+    return capabilities.every((capability, index) => hasCapabilityDescriptor(capability, canonical[index], { checkDirectRoot: true }))
+  } catch {
+    return false
+  }
 }
 
 export function resolveSkillRoot({ adapterId, scopeType, projectPath, home = homedir(), env = process.env }) {
@@ -160,11 +188,8 @@ export function buildSkillVisibility(projectionAdapterIds, { scopeType } = {}) {
 
 export function listSkillProjectionCapabilities(options = {}) {
   return Object.keys(SKILL_ADAPTERS).map((adapterId) => ({
-    adapterId,
     directRoot: resolveSkillRoot({ adapterId, ...options }),
-    covers: effectiveProjectionCoverage(adapterId, options),
-    canExcludeInherited: false,
-    isolationReasonCode: 'SKILL_CLI_ISOLATION_UNSUPPORTED'
+    ...capabilityDescriptor(adapterId, options)
   }))
 }
 

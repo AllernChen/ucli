@@ -219,10 +219,10 @@ test('projection planner rejects forged capability contracts instead of trusting
       })
     },
     {
-      name: 'mismatched coverage',
+      name: 'project Codex capability omits DSH coverage',
       state: snapshot({
         capabilities: base.capabilities.map((item) => item.adapterId === 'codex'
-          ? { ...item, covers: ['codex'] }
+          ? { ...item, covers: ['codex', 'opencode', 'ucode'] }
           : item)
       })
     },
@@ -241,6 +241,27 @@ test('projection planner rejects forged capability contracts instead of trusting
       code: 'SKILL_PROJECTION_PLAN_INVALID'
     }, item.name)
   }
+})
+
+test('user custom DSH agents configuration is the only supported Codex capability list without DSH coverage', () => {
+  const capabilityOptions = {
+    scopeType: 'user',
+    home: 'F:\\fixtures\\home',
+    env: { DSH_AGENTS_HOME: 'F:\\fixtures\\custom-agents' }
+  }
+  const customCapabilities = listSkillProjectionCapabilities(capabilityOptions)
+  const userState = snapshot({
+    scope: { type: 'user', key: '*' },
+    capabilityOptions,
+    capabilities: customCapabilities
+  })
+
+  assert.deepEqual(customCapabilities.find((item) => item.adapterId === 'codex').covers, ['codex', 'opencode', 'ucode'])
+  assert.doesNotThrow(() => projectionStateRevision(userState))
+  assert.throws(() => projectionStateRevision({
+    ...userState,
+    capabilityOptions: undefined
+  }), { code: 'SKILL_PROJECTION_PLAN_INVALID' })
 })
 
 test('projection revisions include trusted semantic state and exclude timestamps and paths', () => {

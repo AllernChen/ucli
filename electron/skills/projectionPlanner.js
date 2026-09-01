@@ -53,7 +53,10 @@ function validateSnapshot(snapshot) {
   }
 
   const capabilities = new Map()
-  if (!hasCanonicalSkillProjectionCapabilities(snapshot.capabilities)) {
+  if (!hasCanonicalSkillProjectionCapabilities(snapshot.capabilities, {
+    scopeType: snapshot.scope.type,
+    capabilityOptions: snapshot.capabilityOptions === undefined ? null : snapshot.capabilityOptions
+  })) {
     throw plannerError('SKILL_PROJECTION_PLAN_INVALID')
   }
   for (const capability of snapshot.capabilities) {
