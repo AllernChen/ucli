@@ -28,7 +28,7 @@ function deferred() {
   return { promise, resolve, reject }
 }
 
-function setup({ client = {}, credentials = {}, skillsCatalog = null, serverModelProjection = null, syncModelProjection = null } = {}) {
+function setup({ client = {}, credentials = {}, skillsCatalog = null, skillsSyncCoordinator = null, serverModelProjection = null, syncModelProjection = null } = {}) {
   const handlers = new Map()
   const events = []
   const current = {
@@ -51,7 +51,7 @@ function setup({ client = {}, credentials = {}, skillsCatalog = null, serverMode
   })
   registerServerConnectionIpc({
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) }, manager,
-    skillsCatalog, serverModelProjection, syncModelProjection, send: (channel, payload) => events.push({ channel, payload })
+    skillsCatalog, skillsSyncCoordinator, serverModelProjection, syncModelProjection, send: (channel, payload) => events.push({ channel, payload })
   })
   return { handlers, manager, current, events }
 }
@@ -112,6 +112,26 @@ test('server Skills IPC exposes only catalog-backed list, sync, install and upda
   assert.deepEqual(calls, [
     ['sync'], ['install', 'version-1', { targetAdapterIds: ['codex'], scopeType: 'project', projectPath: 'C:/project' }]
   ])
+})
+
+test('Skills sync IPC exposes coordinator state and accepts only an optional force flag', async () => {
+  const calls = []
+  const syncState = { status: 'ready', lastSyncedAt: 100, catalogRevision: 2, error: null }
+  const { handlers } = setup({
+    skillsCatalog: { list: () => [{ versionId: 'cached-version' }] },
+    skillsSyncCoordinator: {
+      getState: () => syncState,
+      ensureFresh: async options => { calls.push(options); return syncState }
+    }
+  })
+
+  assert.deepEqual(await handlers.get('server-connection:get-skills-sync-state')({}), syncState)
+  assert.deepEqual(await handlers.get('server-connection:ensure-skills-fresh')({}, { force: true }), syncState)
+  assert.deepEqual(await handlers.get('server-connection:sync-skills')({}), [{ versionId: 'cached-version' }])
+  await assert.rejects(handlers.get('server-connection:ensure-skills-fresh')({}, { force: true, leaked: 'secret' }), {
+    code: 'INVALID_SERVER_CONNECTION_IPC'
+  })
+  assert.deepEqual(calls, [{ force: true }, { force: true }])
 })
 
 test('IPC returns only a sanitized preview and rejects extra confirm parameters', async () => {

@@ -35,7 +35,10 @@
 
     <a-card v-if="serverConnection.status !== 'disconnected'" title="组织 Skills" class="skills-project-card server-skills-catalog" :bordered="false">
       <template #extra>
-        <a-button size="small" :loading="serverConnection.busy" @click="syncOrganizationSkills">同步组织目录</a-button>
+        <a-space>
+          <span v-if="serverConnection.skillsSyncState.lastSyncedAt" class="skills-muted">目录已同步</span>
+          <a-button size="small" :loading="serverConnection.skillsSyncState.status === 'syncing'" @click="syncOrganizationSkills">同步组织目录</a-button>
+        </a-space>
       </template>
       <a-alert
         v-if="serverConnection.skillsCatalogError"
@@ -608,7 +611,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 
 import { ipc } from '../ipc.js'
@@ -840,7 +843,8 @@ async function openSourceProject(sourceProject) {
 async function reload() { await skills.load(projectPath.value) }
 async function syncOrganizationSkills() {
   try {
-    await serverConnection.syncSkills()
+    await serverConnection.ensureSkillsFresh({ force: true })
+    await serverConnection.loadCachedSkills()
     await skills.load(projectPath.value)
   } catch { message.error(serverConnection.skillsCatalogError?.message || '无法同步组织 Skills') }
 }
@@ -1168,12 +1172,20 @@ async function previewAndUpdate(pkg) {
 }
 function openDetail(pkg) { detailPackage.value = pkg; detailOpen.value = true }
 
+function refreshOrganizationSkillsOnFocus() {
+  void serverConnection.ensureSkillsFresh().catch(() => {})
+}
+
 onMounted(async () => {
   await reload()
+  refreshOrganizationSkillsOnFocus()
+  window.addEventListener('focus', refreshOrganizationSkillsOnFocus)
   if (!skills.lastCheckedAt || Date.now() - skills.lastCheckedAt > 24 * 60 * 60 * 1000) {
     skills.checkUpdates().catch(() => {})
   }
 })
+
+onUnmounted(() => window.removeEventListener('focus', refreshOrganizationSkillsOnFocus))
 </script>
 
 <style scoped>

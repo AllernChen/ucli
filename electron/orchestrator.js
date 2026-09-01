@@ -109,6 +109,7 @@ import { createServerModelProjection } from './serverConnection/modelProjection.
 import { createServerModelProjectionSynchronizer } from './serverConnection/projectionSynchronizer.js'
 import { buildServiceProfileCatalog } from './serverConnection/serviceProfileCatalog.js'
 import { createSkillsCatalogAdapter } from './serverConnection/skillsCatalogAdapter.js'
+import { createOrganizationSkillsSyncCoordinator } from './serverConnection/skillsSyncCoordinator.js'
 import { registerServerConnectionIpc } from './serverConnection/ipc.js'
 import { serviceRuntimeRevision } from './serverConnection/serviceProfileCatalog.js'
 import { resolveUcliStorageRoots, STORAGE_CATEGORY_IDS } from './storage/storageCatalog.js'
@@ -873,6 +874,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
   let localGatewayProxy = null
   let serverModelProjection = null
   let serverSkillsCatalog = null
+  let serverSkillsSyncCoordinator = null
   let syncServerModelProjection = () => Promise.resolve([])
   const approvalNotifications = new Map()
   const completionNotifications = new Set()
@@ -1759,6 +1761,11 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       sourceLoader: skillsSourceLoader,
       skillsService
     })
+    serverSkillsSyncCoordinator = createOrganizationSkillsSyncCoordinator({
+      connectionManager: serverConnectionManager,
+      catalog: serverSkillsCatalog,
+      onChanged: event => send('server-connection:skills-catalog-changed', event)
+    })
     const projectionSynchronizer = createServerModelProjectionSynchronizer({
       manager: serverConnectionManager,
       projection: serverModelProjection,
@@ -1769,11 +1776,11 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
     syncServerModelProjection = () => projectionSynchronizer.sync()
     serverConnectionManager.subscribe(state => {
       void syncServerModelProjection().catch(() => {})
-      if (['connected', 'expiring'].includes(state.status)) void serverSkillsCatalog?.sync().catch(() => {})
+      serverSkillsSyncCoordinator?.handleConnectionState(state)
     })
     void serverConnectionManager.start()
     void syncServerModelProjection().catch(() => {})
-    void serverSkillsCatalog.sync().catch(() => {})
+    serverSkillsSyncCoordinator.handleConnectionState(serverConnectionManager.getState())
     try {
       await profileService.reconcileCodexProfiles()
     } catch (error) {
@@ -3548,6 +3555,7 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
         ipcMain,
         manager: serverConnectionManager,
         skillsCatalog: serverSkillsCatalog,
+        skillsSyncCoordinator: serverSkillsSyncCoordinator,
         serverModelProjection,
         syncModelProjection: syncServerModelProjection,
         send
@@ -4088,7 +4096,8 @@ export function createOrchestrator({ summaryStartup = {}, hookReady: hookReadyOv
       for (const notification of completionNotifications) notification.close()
       completionNotifications.clear()
       await gatewayManager?.shutdown()
-      await serverSkillsCatalog?.shutdown()
+      await serverSkillsSyncCoordinator?.shutdown()
+      serverSkillsSyncCoordinator = null
       serverSkillsCatalog = null
       await localGatewayProxy?.shutdown()
       localGatewayProxy = null

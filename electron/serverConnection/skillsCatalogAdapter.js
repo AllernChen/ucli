@@ -77,21 +77,32 @@ function samePath(left, right) {
   return normalize(left) === normalize(right)
 }
 
-function identityOf(connectionManager) {
-  const identity = connectionManager.getRuntimeConnectionIdentity?.()
+function cachedIdentityOf(connectionManager) {
   const state = connectionManager.getState?.() || {}
+  const identity = state.connection || connectionManager.getRuntimeConnectionIdentity?.()
+  const connectionId = identity?.connectionId || identity?.id
+  const connectionRevision = identity?.connectionRevision
   const serverOrigin = state.serverOrigin
   const organizationId = state.organization?.id
-  if (!identity || typeof identity.connectionId !== 'string' || !Number.isSafeInteger(identity.connectionRevision) ||
+  if (typeof connectionId !== 'string' || !Number.isSafeInteger(connectionRevision) ||
     typeof serverOrigin !== 'string' || typeof organizationId !== 'string' || !organizationId) return null
   return Object.freeze({
-    ...identity,
+    connectionId,
+    connectionRevision,
     serverOrigin,
     organizationId,
     ...(typeof state.organization?.name === 'string' && state.organization.name.trim()
       ? { organizationName: state.organization.name.trim() }
       : {})
   })
+}
+
+function identityOf(connectionManager) {
+  const runtimeIdentity = connectionManager.getRuntimeConnectionIdentity?.()
+  const cachedIdentity = cachedIdentityOf(connectionManager)
+  if (!runtimeIdentity || !cachedIdentity || runtimeIdentity.connectionId !== cachedIdentity.connectionId ||
+    runtimeIdentity.connectionRevision !== cachedIdentity.connectionRevision) return null
+  return cachedIdentity
 }
 
 export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = globalThis.fetch, stagingRoot, sourceLoader, skillsService, onStagingOpen = null }) {
@@ -304,7 +315,7 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
   }
 
   function list() {
-    const identity = identityOf(connectionManager)
+    const identity = cachedIdentityOf(connectionManager)
     if (!identity || !db.listServerSkillVersions) return []
     return db.listServerSkillVersions().filter(item => item.serverOrigin === identity.serverOrigin &&
       item.organizationId === identity.organizationId && item.connectionRevision === identity.connectionRevision)
@@ -474,8 +485,8 @@ export function createSkillsCatalogAdapter({ connectionManager, db, fetchImpl = 
     } catch { /* never follow a substituted staging root during shutdown */ }
   }
 
-  const unsubscribe = connectionManager.subscribe?.(() => {
-    if (!identityOf(connectionManager)) void clearOnline().catch(() => {})
+  const unsubscribe = connectionManager.subscribe?.(state => {
+    if (state?.status === 'disconnected') void clearOnline().catch(() => {})
   })
   return { sync, list, install, update, shutdown: async () => { unsubscribe?.(); await shutdown() } }
 }

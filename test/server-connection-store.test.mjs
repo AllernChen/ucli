@@ -6,6 +6,7 @@ import { createServerConnectionRegistrationController } from '../src/serverConne
 
 let stateListener
 let registrationListener
+let skillsCatalogListener
 let unsubscribed = 0
 let confirmationCalls = 0
 let cancelled = []
@@ -44,6 +45,7 @@ globalThis.window = {
   ucli: {
     onServerConnectionState(listener) { stateListener = listener; return () => { unsubscribed += 1 } },
     onServerConnectionRegistrationRequested(listener) { registrationListener = listener; return () => { unsubscribed += 1 } },
+    onServerConnectionSkillsCatalogChanged(listener) { skillsCatalogListener = listener; return () => { unsubscribed += 1 } },
     async getServerConnectionState() { return initialState },
     async submitServerConnectionLink() { return { attemptId: 'attempt-1' } },
     async getPendingServerConnectionAttempt() { return null },
@@ -71,6 +73,8 @@ globalThis.window = {
     },
     async listServerConnectionSkills() { listedSkills += 1; return [{ id: 'version-1', lifecycleStatus: 'AVAILABLE' }] },
     async syncServerConnectionSkills() { listedSkills += 1; return [{ id: 'version-1', lifecycleStatus: 'AVAILABLE' }] },
+    async getServerConnectionSkillsSyncState() { return { status: 'ready', lastSyncedAt: 1, catalogRevision: 1, error: null } },
+    async ensureServerConnectionSkillsFresh() { return { status: 'ready', lastSyncedAt: 1, catalogRevision: 1, error: null } },
     async installServerConnectionSkill() { return { id: 'installed-1' } },
     async updateServerConnectionSkill() { return { id: 'updated-1' } }
   }
@@ -101,7 +105,76 @@ test('initializes subscriptions before its snapshot and ignores stale state', as
   stateListener({ ...initialState, revision: 1, status: 'connected' })
   assert.equal(connection.status, 'unreachable')
   connection.dispose()
-  assert.equal(unsubscribed, 2)
+  assert.equal(unsubscribed, 3)
+})
+
+test('initializes cached Skills before a non-blocking refresh and reloads only matching catalog events', async () => {
+  const connection = store()
+  const refreshing = deferred()
+  const calls = []
+  let catalogReads = 0
+  window.ucli.onServerConnectionState = listener => { stateListener = listener; calls.push('state-listener'); return () => {} }
+  window.ucli.onServerConnectionRegistrationRequested = listener => { registrationListener = listener; calls.push('registration-listener'); return () => {} }
+  window.ucli.onServerConnectionSkillsCatalogChanged = listener => { skillsCatalogListener = listener; calls.push('skills-listener'); return () => {} }
+  window.ucli.getServerConnectionState = async () => { calls.push('state-snapshot'); return initialState }
+  window.ucli.getPendingServerConnectionAttempt = async () => null
+  window.ucli.listServerConnectionSkills = async () => [{ versionId: catalogReads++ ? 'fresh-version' : 'cached-version' }]
+  window.ucli.ensureServerConnectionSkillsFresh = async () => { calls.push('ensure'); return refreshing.promise }
+
+  await connection.initialize()
+  assert.deepEqual(connection.skills, [{ versionId: 'cached-version' }])
+  assert.equal(calls.indexOf('skills-listener') < calls.indexOf('state-snapshot'), true)
+  assert.equal(calls.includes('ensure'), true)
+
+  skillsCatalogListener({
+    connectionId: 'connection-1', connectionRevision: 1, catalogRevision: 2,
+    lastSyncedAt: 2, status: 'ready'
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(connection.skills, [{ versionId: 'fresh-version' }])
+
+  skillsCatalogListener({
+    connectionId: 'connection-old', connectionRevision: 1, catalogRevision: 3,
+    lastSyncedAt: 3, status: 'ready'
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(connection.skills, [{ versionId: 'fresh-version' }])
+  refreshing.resolve({ status: 'ready', lastSyncedAt: 4, catalogRevision: 4, error: null })
+})
+
+test('a transient unreachable state retains cached organization Skills but explicit disconnect clears them', () => {
+  const connection = store()
+  connection.applyState(initialState)
+  connection.skills = [{ versionId: 'cached-version' }]
+
+  connection.applyState({ ...initialState, revision: 2, status: 'unreachable' })
+  assert.deepEqual(connection.skills, [{ versionId: 'cached-version' }])
+
+  connection.applyState({ revision: 3, status: 'disconnected', connection: null })
+  assert.deepEqual(connection.skills, [])
+})
+
+test('catalog refresh failure retains cached Skills in its own sync state without changing global busy', async () => {
+  const connection = store()
+  const previousEnsure = window.ucli.ensureServerConnectionSkillsFresh
+  connection.applyState(initialState)
+  connection.skills = [{ versionId: 'cached-version' }]
+  connection.busy = true
+  window.ucli.ensureServerConnectionSkillsFresh = async () => ({
+    status: 'error', lastSyncedAt: 10, catalogRevision: 1,
+    error: { code: 'raw-secret', message: 'Authorization: Bearer secret', retryable: true }
+  })
+
+  try {
+    await connection.ensureSkillsFresh()
+    assert.deepEqual(connection.skills, [{ versionId: 'cached-version' }])
+    assert.equal(connection.busy, true)
+    assert.equal(connection.skillsSyncState.status, 'error')
+    assert.equal(JSON.stringify(connection.skillsSyncState).includes('secret'), false)
+    assert.equal(connection.modelCatalogError, null)
+  } finally {
+    window.ucli.ensureServerConnectionSkillsFresh = previousEnsure
+  }
 })
 
 test('initialization replays a Preview completed before renderer subscription', async () => {

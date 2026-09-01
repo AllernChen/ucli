@@ -9,6 +9,41 @@ import { openDb } from '../electron/persistence/db.js'
 import { ConnectionManager } from '../electron/serverConnection/connectionManager.js'
 import { RegistrationAttemptStore } from '../electron/serverConnection/registrationAttempts.js'
 
+test('retains the durable catalog during a transient unreachable state and clears it only after explicit disconnect', async () => {
+  let runtimeIdentity = { connectionId: 'connection-1', connectionRevision: 1 }
+  let state = {
+    status: 'connected', serverOrigin: 'https://server.example.test', organization: { id: 'org-1' },
+    connection: { id: 'connection-1', connectionRevision: 1 }
+  }
+  let listener
+  const db = {
+    versions: [{ versionId: 'cached-version', serverOrigin: state.serverOrigin, organizationId: 'org-1', connectionRevision: 1 }],
+    transaction: async work => work(),
+    listServerSkillVersions: () => db.versions,
+    clearServerSkillVersions: () => { db.versions = [] }
+  }
+  const adapter = createSkillsCatalogAdapter({
+    connectionManager: {
+      getRuntimeConnectionIdentity: () => runtimeIdentity,
+      getState: () => state,
+      subscribe: nextListener => { listener = nextListener; return () => {} }
+    },
+    db, stagingRoot: '.ucli-test-staging', sourceLoader: {}, skillsService: {}, fetchImpl: async () => assert.fail('must not fetch')
+  })
+
+  runtimeIdentity = null
+  state = { ...state, status: 'unreachable' }
+  listener(state)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(adapter.list(), [{ versionId: 'cached-version', serverOrigin: 'https://server.example.test', organizationId: 'org-1', connectionRevision: 1 }])
+
+  state = { status: 'disconnected', serverOrigin: null, organization: null, connection: null }
+  listener(state)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(db.versions, [])
+  await adapter.shutdown()
+})
+
 test('sync requests the catalog without a cursor, then advances from the final createdAt value', async () => {
   const requests = []
   const connectionManager = {

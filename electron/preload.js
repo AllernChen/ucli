@@ -255,6 +255,10 @@ const api = {
   listServerConnectionModels: () => ipcRenderer.invoke('server-connection:list-models'),
   listServerConnectionSkills: () => ipcRenderer.invoke('server-connection:list-skills'),
   syncServerConnectionSkills: () => ipcRenderer.invoke('server-connection:sync-skills'),
+  getServerConnectionSkillsSyncState: () => ipcRenderer.invoke('server-connection:get-skills-sync-state'),
+  ensureServerConnectionSkillsFresh: (options) => options === undefined
+    ? ipcRenderer.invoke('server-connection:ensure-skills-fresh')
+    : ipcRenderer.invoke('server-connection:ensure-skills-fresh', options),
   installServerConnectionSkill: (versionId, targets) => ipcRenderer.invoke('server-connection:install-skill', versionId, targets),
   updateServerConnectionSkill: (versionId, targets) => ipcRenderer.invoke('server-connection:update-skill', versionId, targets),
   onServerConnectionState: (handler) => {
@@ -266,6 +270,11 @@ const api = {
     const wrapped = (_event, payload) => handler(payload)
     ipcRenderer.on('server-connection:registration-requested', wrapped)
     return () => ipcRenderer.removeListener('server-connection:registration-requested', wrapped)
+  },
+  onServerConnectionSkillsCatalogChanged: (handler) => {
+    const wrapped = (_event, payload) => handler(payload)
+    ipcRenderer.on('server-connection:skills-catalog-changed', wrapped)
+    return () => ipcRenderer.removeListener('server-connection:skills-catalog-changed', wrapped)
   },
 
   // ---- workbench ----

@@ -35,7 +35,7 @@ function isCurrentState(value, revision) {
 }
 
 function catalogIdentity(state) {
-  if (!['connected', 'expiring'].includes(state?.status) || typeof state.serverOrigin !== 'string' ||
+  if (!['connected', 'expiring', 'unreachable'].includes(state?.status) || typeof state.serverOrigin !== 'string' ||
     typeof state.organization?.id !== 'string' || typeof state.connectionId !== 'string' ||
     !Number.isSafeInteger(state.connectionRevision)) return null
   return `${state.serverOrigin}\u0000${state.organization.id}\u0000${state.connectionId}\u0000${state.connectionRevision}`
@@ -73,6 +73,7 @@ export const useServerConnectionStore = defineStore('server-connection', {
     connectionError: null,
     modelCatalogError: null,
     skillsCatalogError: null,
+    skillsSyncState: { status: 'idle', lastSyncedAt: null, catalogRevision: 0, error: null },
     busy: false,
     initialized: false,
     _initializePromise: null,
@@ -80,12 +81,14 @@ export const useServerConnectionStore = defineStore('server-connection', {
     _redeemPromise: null,
     _unsubscribeState: null,
     _unsubscribeRegistration: null,
+    _unsubscribeSkillsCatalog: null,
     _lifecycle: 0,
     _attemptRequest: 0,
     _registrationGeneration: 0,
     _catalogRequest: 0,
     _modelRequest: 0,
     _skillActionRequest: 0,
+    _skillsSyncRequest: 0,
     _connectionIdentity: null
   }),
   getters: {
@@ -116,6 +119,7 @@ export const useServerConnectionStore = defineStore('server-connection', {
         this.skills = []
         this.modelCatalogError = null
         this.skillsCatalogError = null
+        this.skillsSyncState = { status: 'idle', lastSyncedAt: null, catalogRevision: 0, error: null }
         this._connectionIdentity = nextIdentity
       }
       return true
@@ -125,8 +129,19 @@ export const useServerConnectionStore = defineStore('server-connection', {
       const applied = this.applyState(value)
       if (applied && this._lifecycle === lifecycle && this._connectionIdentity && this._connectionIdentity !== previousIdentity) {
         void Promise.allSettled([this.syncModels(), this.loadCachedSkills(lifecycle, this._connectionIdentity)])
+        void this.ensureSkillsFresh().catch(() => {})
       }
       return applied
+    },
+    handleSkillsCatalogChanged(value, lifecycle = this._lifecycle) {
+      if (this._lifecycle !== lifecycle || !this._connectionIdentity || value?.connectionId !== this.connectionId ||
+        value?.connectionRevision !== this.connectionRevision || !Number.isSafeInteger(value?.catalogRevision) ||
+        !Number.isSafeInteger(value?.lastSyncedAt) || value?.status !== 'ready') return false
+      this.skillsSyncState = {
+        status: 'ready', lastSyncedAt: value.lastSyncedAt, catalogRevision: value.catalogRevision, error: null
+      }
+      void this.loadCachedSkills(lifecycle, this._connectionIdentity).catch(() => {})
+      return true
     },
     async initialize() {
       if (this.initialized) return this
@@ -144,6 +159,9 @@ export const useServerConnectionStore = defineStore('server-connection', {
               void this.loadAttempt(attemptId, lifecycle).catch(() => {})
             }
           })
+          this._unsubscribeSkillsCatalog = api.onSkillsCatalogChanged((value) => {
+            this.handleSkillsCatalogChanged(value, lifecycle)
+          })
           const pendingBaseline = this._registrationGeneration
           const [state, pendingAttempt] = await Promise.all([api.getState(), api.getPendingAttempt()])
           if (this._lifecycle !== lifecycle) return this
@@ -153,6 +171,8 @@ export const useServerConnectionStore = defineStore('server-connection', {
             await this.loadAttempt(pendingAttempt.attemptId, lifecycle)
           }
           if (this._connectionIdentity) {
+            void this.loadSkillsSyncState(lifecycle, this._connectionIdentity).catch(() => {})
+            void this.ensureSkillsFresh().catch(() => {})
             await Promise.allSettled([this.syncModels(), this.loadCachedSkills(lifecycle, this._connectionIdentity)])
           }
           return this
@@ -171,6 +191,7 @@ export const useServerConnectionStore = defineStore('server-connection', {
     dispose() {
       this._lifecycle += 1
       this._attemptRequest += 1
+      this._skillsSyncRequest += 1
       this.unsubscribe()
       this.initialized = false
       this._initializePromise = null
@@ -178,8 +199,10 @@ export const useServerConnectionStore = defineStore('server-connection', {
     unsubscribe() {
       this._unsubscribeState?.()
       this._unsubscribeRegistration?.()
+      this._unsubscribeSkillsCatalog?.()
       this._unsubscribeState = null
       this._unsubscribeRegistration = null
+      this._unsubscribeSkillsCatalog = null
     },
     async loadAttempt(attemptId, expectedLifecycle = this._lifecycle) {
       const request = ++this._attemptRequest
@@ -315,6 +338,56 @@ export const useServerConnectionStore = defineStore('server-connection', {
       } catch (error) {
         if (this._lifecycle === lifecycle && identity === this._connectionIdentity && request === this._catalogRequest) {
           this.skillsCatalogError = publicError(error)
+        }
+        throw error
+      }
+    },
+    async loadSkillsSyncState(expectedLifecycle = this._lifecycle, expectedIdentity = this._connectionIdentity) {
+      if (!expectedIdentity) return this.skillsSyncState
+      const request = ++this._skillsSyncRequest
+      try {
+        const syncState = await ipc.serverConnection.getSkillsSyncState()
+        if (this._lifecycle === expectedLifecycle && expectedIdentity === this._connectionIdentity && request === this._skillsSyncRequest && syncState) {
+          this.skillsSyncState = {
+            status: typeof syncState.status === 'string' ? syncState.status : 'idle',
+            lastSyncedAt: Number.isSafeInteger(syncState.lastSyncedAt) ? syncState.lastSyncedAt : null,
+            catalogRevision: Number.isSafeInteger(syncState.catalogRevision) ? syncState.catalogRevision : 0,
+            error: syncState.error ? publicError(syncState.error) : null
+          }
+        }
+        return this.skillsSyncState
+      } catch (error) {
+        if (this._lifecycle === expectedLifecycle && expectedIdentity === this._connectionIdentity && request === this._skillsSyncRequest) {
+          const safe = publicError(error)
+          this.skillsSyncState = { ...this.skillsSyncState, status: 'error', error: safe }
+          this.skillsCatalogError = safe
+        }
+        throw error
+      }
+    },
+    async ensureSkillsFresh({ force = false } = {}) {
+      const lifecycle = this._lifecycle
+      const identity = this._connectionIdentity
+      if (!identity || !['connected', 'expiring'].includes(this.status)) return this.skillsSyncState
+      const request = ++this._skillsSyncRequest
+      this.skillsSyncState = { ...this.skillsSyncState, status: 'syncing', error: null }
+      try {
+        const syncState = await ipc.serverConnection.ensureSkillsFresh({ force: force === true })
+        if (this._lifecycle === lifecycle && identity === this._connectionIdentity && request === this._skillsSyncRequest && syncState) {
+          this.skillsSyncState = {
+            status: typeof syncState.status === 'string' ? syncState.status : 'ready',
+            lastSyncedAt: Number.isSafeInteger(syncState.lastSyncedAt) ? syncState.lastSyncedAt : null,
+            catalogRevision: Number.isSafeInteger(syncState.catalogRevision) ? syncState.catalogRevision : 0,
+            error: syncState.error ? publicError(syncState.error) : null
+          }
+          if (this.skillsSyncState.error) this.skillsCatalogError = this.skillsSyncState.error
+        }
+        return this.skillsSyncState
+      } catch (error) {
+        if (this._lifecycle === lifecycle && identity === this._connectionIdentity && request === this._skillsSyncRequest) {
+          const safe = publicError(error)
+          this.skillsSyncState = { ...this.skillsSyncState, status: 'error', error: safe }
+          this.skillsCatalogError = safe
         }
         throw error
       }

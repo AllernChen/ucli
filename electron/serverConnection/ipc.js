@@ -72,7 +72,16 @@ function exact(args, count) {
   if (args.length !== count) throw invalidIpc()
 }
 
-export function registerServerConnectionIpc({ ipcMain, manager, skillsCatalog = null, serverModelProjection = null, syncModelProjection = null, send = () => {} } = {}) {
+function skillsFreshOptions(args) {
+  if (args.length === 0) return { force: false }
+  if (args.length !== 1 || !args[0] || typeof args[0] !== 'object' || Array.isArray(args[0]) ||
+    Object.keys(args[0]).length !== 1 || !Object.hasOwn(args[0], 'force') || typeof args[0].force !== 'boolean') {
+    throw invalidIpc()
+  }
+  return { force: args[0].force }
+}
+
+export function registerServerConnectionIpc({ ipcMain, manager, skillsCatalog = null, skillsSyncCoordinator = null, serverModelProjection = null, syncModelProjection = null, send = () => {} } = {}) {
   if (!ipcMain?.handle || !manager) throw new TypeError('IPC dependencies are required')
   ipcMain.handle('server-connection:submit-link', invoke((_event, ...args) => {
     exact(args, 1)
@@ -116,10 +125,23 @@ export function registerServerConnectionIpc({ ipcMain, manager, skillsCatalog = 
     exact(args, 0)
     return skillsCatalog?.list() || []
   }))
-  ipcMain.handle('server-connection:sync-skills', invoke((_event, ...args) => {
+  ipcMain.handle('server-connection:sync-skills', invoke(async (_event, ...args) => {
     exact(args, 0)
+    if (skillsSyncCoordinator) {
+      await skillsSyncCoordinator.ensureFresh({ force: true })
+      return skillsCatalog?.list?.() || []
+    }
     if (!skillsCatalog) throw Object.assign(new Error(), { code: 'SERVER_SKILL_UNAVAILABLE' })
     return skillsCatalog.sync()
+  }))
+  ipcMain.handle('server-connection:get-skills-sync-state', invoke((_event, ...args) => {
+    exact(args, 0)
+    if (!skillsSyncCoordinator) throw Object.assign(new Error(), { code: 'SERVER_SKILL_UNAVAILABLE' })
+    return skillsSyncCoordinator.getState()
+  }))
+  ipcMain.handle('server-connection:ensure-skills-fresh', invoke((_event, ...args) => {
+    if (!skillsSyncCoordinator) throw Object.assign(new Error(), { code: 'SERVER_SKILL_UNAVAILABLE' })
+    return skillsSyncCoordinator.ensureFresh(skillsFreshOptions(args))
   }))
   for (const [channel, method] of [
     ['server-connection:install-skill', 'install'],

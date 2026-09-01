@@ -171,10 +171,13 @@ export const ipc = {
     listModels: () => u.listServerConnectionModels(),
     listSkills: () => u.listServerConnectionSkills(),
     syncSkills: () => u.syncServerConnectionSkills(),
+    getSkillsSyncState: () => u.getServerConnectionSkillsSyncState(),
+    ensureSkillsFresh: (options) => u.ensureServerConnectionSkillsFresh(options),
     installSkill: (versionId, targets) => u.installServerConnectionSkill(versionId, targets),
     updateSkill: (versionId, targets) => u.updateServerConnectionSkill(versionId, targets),
     onStateChanged: (handler) => u.onServerConnectionState(handler),
-    onRegistrationRequested: (handler) => u.onServerConnectionRegistrationRequested(handler)
+    onRegistrationRequested: (handler) => u.onServerConnectionRegistrationRequested(handler),
+    onSkillsCatalogChanged: (handler) => u.onServerConnectionSkillsCatalogChanged(handler)
   },
   // workbench
   getWorkbench: () => u.getWorkbench(),
