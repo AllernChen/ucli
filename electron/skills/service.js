@@ -144,6 +144,7 @@ export function createSkillsService({
   mkdirSync(packagesRoot, { recursive: true })
   mkdirSync(updateStagingRoot, { recursive: true })
   const packagesRootIdentity = captureDirectoryIdentity(packagesRoot)
+  const updateStagingRootIdentity = captureDirectoryIdentity(updateStagingRoot)
   const migrationCopy = migrationFileOps.copy || copySkillDirectoryAtomic
   const migrationRemove = migrationFileOps.remove || removeManagedSkillDirectory
   const managedRemoval = removalFileOps.remove || removeManagedSkillDirectory
@@ -184,17 +185,54 @@ export function createSkillsService({
 
   const packageDirectory = (packageId) => join(packagesRoot, packageId, 'current')
 
-  function containedNewPackageDirectory(packageId) {
+  function trustedStagingRoot() {
+    return directoryMatchesIdentity(updateStagingRoot, updateStagingRootIdentity)
+      ? updateStagingRootIdentity
+      : null
+  }
+
+  function trustedStagingDirectory(path) {
+    const root = trustedStagingRoot()
+    if (!root || normalizedPath(dirname(path)) !== normalizedPath(updateStagingRoot) ||
+      !pathIsWithin(updateStagingRoot, path)) return null
+    const identity = captureDirectoryIdentity(path)
+    if (!identity || identity.realPath !== normalizedPath(path) ||
+      !pathIsWithin(root.realPath, identity.realPath) || identity.realPath === root.realPath ||
+      !directoryMatchesIdentity(updateStagingRoot, root)) return null
+    return identity
+  }
+
+  function trustedStagingFile(path) {
+    const root = trustedStagingRoot()
+    if (!root || normalizedPath(dirname(path)) !== normalizedPath(updateStagingRoot) ||
+      !pathIsWithin(updateStagingRoot, path)) return false
+    try {
+      const inspected = lstatSync(path)
+      return inspected.isFile() && !inspected.isSymbolicLink() && directoryMatchesIdentity(updateStagingRoot, root)
+    } catch {
+      return false
+    }
+  }
+
+  function trustedPackageParent(packageId) {
     if (!directoryMatchesIdentity(packagesRoot, packagesRootIdentity)) return null
     const packageParent = join(packagesRoot, packageId)
     if (!pathIsWithin(packagesRoot, packageParent) || normalizedPath(dirname(packageParent)) !== normalizedPath(packagesRoot)) return null
-    const parentIdentity = captureDirectoryIdentity(packageParent)
-    if (!parentIdentity || !pathIsWithin(packagesRootIdentity.realPath, parentIdentity.realPath) || parentIdentity.realPath === packagesRootIdentity.realPath) {
-      return null
-    }
+    const identity = captureDirectoryIdentity(packageParent)
+    if (!identity || identity.realPath !== normalizedPath(packageParent) ||
+      !pathIsWithin(packagesRootIdentity.realPath, identity.realPath) || identity.realPath === packagesRootIdentity.realPath ||
+      !directoryMatchesIdentity(packagesRoot, packagesRootIdentity)) return null
+    return { path: packageParent, identity }
+  }
+
+  function containedNewPackageDirectory(packageId) {
+    const parent = trustedPackageParent(packageId)
+    if (!parent) return null
+    const { path: packageParent, identity: parentIdentity } = parent
     const current = join(packageParent, 'current')
     const currentIdentity = captureDirectoryIdentity(current)
-    if (!currentIdentity || !pathIsWithin(parentIdentity.realPath, currentIdentity.realPath) || currentIdentity.realPath === parentIdentity.realPath) {
+    if (!currentIdentity || currentIdentity.realPath !== normalizedPath(current) ||
+      !pathIsWithin(parentIdentity.realPath, currentIdentity.realPath) || currentIdentity.realPath === parentIdentity.realPath) {
       return null
     }
     if (!directoryMatchesIdentity(packagesRoot, packagesRootIdentity) || !directoryMatchesIdentity(packageParent, parentIdentity)) return null
@@ -379,6 +417,72 @@ export function createSkillsService({
     return { canonical, backup, journal, tombstone }
   }
 
+  function trustedRemovalPaths(packageId, { canonical = false, backup = false } = {}) {
+    const paths = removalPaths(packageId)
+    if (!paths || !trustedStagingRoot() || !trustedPackageParent(packageId)) return null
+    if (canonical && (!existsSync(paths.canonical) || normalizedPath(containedNewPackageDirectory(packageId) || '') !== normalizedPath(paths.canonical))) {
+      return null
+    }
+    if (backup && (!existsSync(paths.backup) || !trustedStagingDirectory(paths.backup))) return null
+    return paths
+  }
+
+  function copyCanonicalToRecoveryBackup(packageId) {
+    const paths = trustedRemovalPaths(packageId, { canonical: true })
+    if (!paths || (existsSync(paths.backup) && !trustedStagingDirectory(paths.backup))) {
+      throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+    recoveryCopy(paths.canonical, paths.backup)
+    if (!trustedRemovalPaths(packageId, { canonical: true, backup: true })) {
+      throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+    return paths
+  }
+
+  function copyRecoveryBackupToCanonical(packageId) {
+    const paths = trustedRemovalPaths(packageId, { backup: true })
+    if (!paths || (existsSync(paths.canonical) && normalizedPath(containedNewPackageDirectory(packageId) || '') !== normalizedPath(paths.canonical))) {
+      throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+    recoveryCopy(paths.backup, paths.canonical)
+    if (!trustedRemovalPaths(packageId, { canonical: true, backup: true })) {
+      throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+  }
+
+  function copyRecoveryBackupToProjection(packageId, target) {
+    const paths = trustedRemovalPaths(packageId, { backup: true })
+    if (!paths) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    recoveryCopy(paths.backup, target)
+    if (!trustedRemovalPaths(packageId, { backup: true })) {
+      throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+    }
+  }
+
+  function removeTrustedRecoveryBackup(path) {
+    const expected = trustedStagingDirectory(path)
+    if (!expected) throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
+    const isolated = join(updateStagingRoot, `.removal-cleanup-${uuid()}`)
+    try {
+      renameSync(path, isolated)
+      const current = trustedStagingDirectory(isolated)
+      if (!current || current.dev !== expected.dev || current.ino !== expected.ino) {
+        throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
+      }
+      removeRecoveryBackup(isolated)
+    } catch (error) {
+      try {
+        if (!existsSync(path) && trustedStagingDirectory(isolated)) renameSync(isolated, path)
+      } catch {}
+      throw error
+    }
+  }
+
+  function removeTrustedRecoveryFile(path, remove) {
+    if (!trustedStagingFile(path)) throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
+    remove(path)
+  }
+
   function removalSnapshot(pkg, installations, sourceIdentity, desiredStates, serverMapping) {
     return {
       version: 1,
@@ -442,7 +546,7 @@ export function createSkillsService({
       const json = JSON.stringify(value)
       if (Buffer.byteLength(json, 'utf8') > 262144) throw new Error('too large')
       const path = removalPaths(value.package.id)?.journal
-      if (!path) throw new Error('invalid removal recovery record')
+      if (!path || !trustedRemovalPaths(value.package.id)) throw new Error('invalid removal recovery record')
       if (existsSync(path)) throw new Error('already required')
       temporary = `${path}.${randomUUID()}.tmp`
       writeFileSync(temporary, json, { encoding: 'utf8', mode: 0o600 })
@@ -455,6 +559,7 @@ export function createSkillsService({
 
   function readRemovalJournal(path) {
     try {
+      if (!trustedStagingFile(path)) throw new Error('invalid removal recovery record')
       const content = readFileSync(path, 'utf8')
       if (Buffer.byteLength(content, 'utf8') > 262144) throw new Error('too large')
       return validatedRemovalSnapshot(JSON.parse(content))
@@ -467,7 +572,7 @@ export function createSkillsService({
     let temporary = null
     try {
       const paths = removalPaths(packageId)
-      if (!paths) throw new Error('invalid removal cleanup record')
+      if (!paths || !trustedRemovalPaths(packageId)) throw new Error('invalid removal cleanup record')
       const path = paths.tombstone
       if (existsSync(path)) return
       temporary = `${path}.${randomUUID()}.tmp`
@@ -481,6 +586,7 @@ export function createSkillsService({
 
   function readCommittedRemovalTombstone(path) {
     try {
+      if (!trustedStagingFile(path)) throw new Error('invalid removal cleanup record')
       const value = JSON.parse(readFileSync(path, 'utf8'))
       if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 ||
         value.phase !== 'cleanup_only' || typeof value.packageId !== 'string' || !value.packageId ||
@@ -495,12 +601,12 @@ export function createSkillsService({
 
   function cleanupCommittedRemoval(packageId) {
     try {
-      const paths = removalPaths(packageId)
+      const paths = trustedRemovalPaths(packageId)
       if (!paths) throw new Error('invalid removal cleanup record')
       const { backup, journal, tombstone } = paths
-      if (existsSync(backup)) removeRecoveryBackup(backup)
-      if (existsSync(journal)) removeRecoveryJournal(journal)
-      if (existsSync(tombstone)) rmSync(tombstone, { force: true })
+      if (existsSync(backup)) removeTrustedRecoveryBackup(backup)
+      if (existsSync(journal)) removeTrustedRecoveryFile(journal, removeRecoveryJournal)
+      if (existsSync(tombstone)) removeTrustedRecoveryFile(tombstone, path => rmSync(path, { force: true }))
     } catch {
       throw serviceError('Skill removal cleanup is pending', 'SKILL_REMOVAL_CLEANUP_PENDING')
     }
@@ -532,7 +638,7 @@ export function createSkillsService({
   }
 
   async function recoverLegacyRemovalIfNeeded(packageId) {
-    const paths = removalPaths(packageId)
+    const paths = trustedRemovalPaths(packageId)
     if (!paths) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     const { backup, canonical } = paths
     const marked = db.listSkillCliDesiredStates({ packageId })
@@ -541,13 +647,14 @@ export function createSkillsService({
     const pkg = db.getSkillPackage(packageId)
     if (!pkg || !existsSync(backup)) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     try {
-      if (!existsSync(canonical)) recoveryCopy(backup, canonical)
+      if (!trustedRemovalPaths(packageId, { backup: true })) throw new Error('unsafe recovery backup')
+      if (!existsSync(canonical)) copyRecoveryBackupToCanonical(packageId)
       for (const installation of db.listSkillInstallations({ packageId })) {
-        if (installation.enabled && !existsSync(installation.targetPath)) recoveryCopy(backup, installation.targetPath)
+        if (installation.enabled && !existsSync(installation.targetPath)) copyRecoveryBackupToProjection(packageId, installation.targetPath)
       }
       await db.transaction(() => recomputeDesiredStates(packageId, now()))
       await persistOrThrow()
-      rmSync(backup, { recursive: true, force: true })
+      removeTrustedRecoveryBackup(backup)
     } catch {
       markRemovalRecovery(packageId)
       throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
@@ -556,10 +663,9 @@ export function createSkillsService({
 
   async function recoverRemovalJournal(path) {
     const snapshot = readRemovalJournal(path)
-    const paths = removalPaths(snapshot.package.id)
+    const paths = trustedRemovalPaths(snapshot.package.id, { backup: true })
     if (!paths) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     const { backup, canonical } = paths
-    if (!existsSync(backup)) throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
     try {
       await db.transaction(() => {
         const current = db.getSkillPackage(snapshot.package.id)
@@ -574,13 +680,13 @@ export function createSkillsService({
         db.deleteSkillCliDesiredStates(snapshot.package.id)
         for (const state of snapshot.desiredStates) db.upsertSkillCliDesiredState(state)
       })
-      if (!existsSync(canonical)) recoveryCopy(backup, canonical)
+      if (!existsSync(canonical)) copyRecoveryBackupToCanonical(snapshot.package.id)
       for (const installation of snapshot.installations) {
-        if (installation.enabled && !existsSync(installation.targetPath)) recoveryCopy(backup, installation.targetPath)
+        if (installation.enabled && !existsSync(installation.targetPath)) copyRecoveryBackupToProjection(snapshot.package.id, installation.targetPath)
       }
       await persistOrThrow()
-      try { rmSync(path, { force: true }) } catch { return }
-      try { rmSync(backup, { recursive: true, force: true }) } catch {}
+      try { removeTrustedRecoveryFile(path, file => rmSync(file, { force: true })) } catch { return }
+      try { removeTrustedRecoveryBackup(backup) } catch {}
     } catch {
       if (db.getSkillPackage(snapshot.package.id)) {
         try { markRemovalRecovery(snapshot.package.id) } catch {}
@@ -595,10 +701,12 @@ export function createSkillsService({
       for (const operation of db.listSkillRemovalOperations()) {
         await recoverCommittedRemovalOperation(operation)
       }
+      if (!trustedStagingRoot()) throw new Error('unsafe staging root')
       entries = readdirSync(updateStagingRoot)
       for (const name of entries.filter((name) => name.startsWith('removal-recovery-') && name.endsWith('.committed'))) {
         await recoverCommittedRemoval(join(updateStagingRoot, name))
       }
+      if (!trustedStagingRoot()) throw new Error('unsafe staging root')
       entries = readdirSync(updateStagingRoot)
       const journals = entries
         .filter((name) => name.startsWith('removal-recovery-') && name.endsWith('.json'))
@@ -1578,7 +1686,7 @@ export function createSkillsService({
     let recoveryRequired = false
     let committed = false
     try {
-      recoveryCopy(canonical, backup)
+      copyCanonicalToRecoveryBackup(pkg.id)
       backupReady = true
       writeRemovalJournal(removalSnapshot(pkg, installations, sourceIdentity, desiredStates, serverMapping))
       journalWritten = true
@@ -1606,7 +1714,7 @@ export function createSkillsService({
             if (!db.getSkillInstallation(item.id)) db.insertSkillInstallation(item)
           })
         }
-        if (removed && !existsSync(item.targetPath)) recoveryCopy(backup, item.targetPath)
+        if (removed && !existsSync(item.targetPath)) copyRecoveryBackupToProjection(pkg.id, item.targetPath)
         if (recordRemoved || removed) {
           const result = await flush()
           if (result === false) throw new Error('flush failed')
@@ -1622,8 +1730,8 @@ export function createSkillsService({
       throw error
     } finally {
       if (!committed && !recoveryRequired) {
-        try { if (existsSync(journal)) rmSync(journal, { force: true }) } catch {}
-        try { if (existsSync(backup)) rmSync(backup, { recursive: true, force: true }) } catch {}
+        try { if (existsSync(journal)) removeTrustedRecoveryFile(journal, path => rmSync(path, { force: true })) } catch {}
+        try { if (existsSync(backup)) removeTrustedRecoveryBackup(backup) } catch {}
       }
     }
   }
@@ -1647,7 +1755,7 @@ export function createSkillsService({
     let recoveryRequired = false
     let committed = false
     try {
-      recoveryCopy(canonical, backup)
+      copyCanonicalToRecoveryBackup(pkg.id)
       backupReady = true
       writeRemovalJournal(removalSnapshot(pkg, installations, sourceIdentity, desiredStates, serverMapping))
       journalWritten = true
@@ -1656,7 +1764,11 @@ export function createSkillsService({
         removed.push(installation)
         managedRemoval(installation.targetPath, installation.deployedSha256)
       }
-      managedRemoval(canonical, pkg.contentSha256)
+      const trustedCanonical = containedNewPackageDirectory(pkg.id)
+      if (!trustedCanonical || normalizedPath(trustedCanonical) !== normalizedPath(canonical)) {
+        throw serviceError('Skill removal recovery is required', 'SKILL_PROJECTION_RECOVERY_REQUIRED')
+      }
+      managedRemoval(trustedCanonical, pkg.contentSha256)
       canonicalRemoved = true
       await db.transaction(() => {
         for (const installation of installations) db.deleteSkillInstallation(installation.id)
@@ -1676,10 +1788,10 @@ export function createSkillsService({
       try {
         if (recordsRemoved) db.deleteSkillRemovalOperation(pkg.id)
         if (canonicalRemoved && !existsSync(canonical)) {
-          recoveryCopy(backup, canonical)
+          copyRecoveryBackupToCanonical(pkg.id)
         }
         for (const installation of removed.reverse()) {
-          if (!existsSync(installation.targetPath)) recoveryCopy(backup, installation.targetPath)
+          if (!existsSync(installation.targetPath)) copyRecoveryBackupToProjection(pkg.id, installation.targetPath)
         }
         if (recordsRemoved) {
           await db.transaction(() => {
@@ -1707,8 +1819,8 @@ export function createSkillsService({
       throw error
     } finally {
       if (!committed && !recoveryRequired) {
-        try { if (existsSync(journal)) rmSync(journal, { force: true }) } catch {}
-        try { if (existsSync(backup)) rmSync(backup, { recursive: true, force: true }) } catch {}
+        try { if (existsSync(journal)) removeTrustedRecoveryFile(journal, path => rmSync(path, { force: true })) } catch {}
+        try { if (existsSync(backup)) removeTrustedRecoveryBackup(backup) } catch {}
       }
     }
   }

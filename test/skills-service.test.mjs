@@ -341,6 +341,77 @@ test('committed package removal retries failed backup cleanup without restoring 
   })
 })
 
+test('committed removal cleanup rejects a swapped staging junction without touching its external sentinel', async (t) => {
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user' })
+
+    await assert.rejects(service.removePackage(installed.id), { code: 'SKILL_REMOVAL_CLEANUP_PENDING' })
+    const backup = join(root, 'user-data', 'skills', '.staging', `removal-recovery-${installed.id}`)
+    const external = join(root, 'outside', 'recovery')
+    const sentinel = join(root, 'outside', 'sentinel.txt')
+    mkdirSync(external, { recursive: true })
+    writeFileSync(sentinel, 'must remain')
+    rmSync(backup, { recursive: true, force: true })
+    if (!createDirectoryLink(t, external, backup)) return
+
+    const fresh = createSkillsService({
+      db, userDataPath: join(root, 'user-data'), home: join(root, 'home'),
+      sourceLoader: createSkillSourceLoader({ stagingRoot: join(root, 'staging') }), flush: () => db.flush()
+    })
+    await assert.rejects(
+      fresh.getState(),
+      (error) => error.code === 'SKILL_PROJECTION_RECOVERY_REQUIRED' &&
+        error.message === 'Skill removal recovery is required'
+    )
+    assert.equal(readFileSync(sentinel, 'utf8'), 'must remain')
+    assert.equal(db.getSkillRemovalOperation(installed.id)?.packageId, installed.id)
+  }, {
+    removalCleanupFileOps: {
+      removeBackup() { throw new Error('cleanup deferred') }
+    }
+  })
+})
+
+test('canonical removal rejects a swapped package junction without touching its external sentinel', async (t) => {
+  let canonical
+  let parkedCanonical
+  let external
+  await withService(async ({ root, db, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({ source: { type: 'local', path: source }, targetAdapterIds: ['claude'], scopeType: 'user' })
+    canonical = join(root, 'user-data', 'skills', 'packages', installed.id, 'current')
+    parkedCanonical = join(root, 'parked-canonical')
+    external = join(root, 'outside', 'current')
+    const sentinel = join(root, 'outside', 'sentinel.txt')
+    createSkill(external)
+    writeFileSync(sentinel, 'must remain')
+
+    await assert.rejects(
+      service.removePackage(installed.id),
+      (error) => error.code === 'SKILL_PROJECTION_RECOVERY_REQUIRED' &&
+        error.message === 'Skill removal recovery is required'
+    )
+    assert.equal(readFileSync(sentinel, 'utf8'), 'must remain')
+    assert.ok(db.getSkillPackage(installed.id))
+  }, {
+    removalRecoveryFileOps: {
+      copy(source, target, options) {
+        const copied = copySkillDirectoryAtomic(source, target, options)
+        if (resolve(source) === resolve(canonical)) {
+          renameSync(canonical, parkedCanonical)
+          if (!createDirectoryLink(t, external, canonical)) {
+            throw new Error('junction capability unavailable')
+          }
+        }
+        return copied
+      }
+    }
+  })
+})
+
 test('fresh recovery rejects tampered removal identifiers without touching an external sentinel', async () => {
   const unsafePackageIds = ['../outside', 'nested/child', 'nested\\child', 'C:\\outside']
   await withService(async ({ root, db }) => {
