@@ -278,3 +278,82 @@ test('batch coordinator captures sessions before state migration and an installe
   assert.deepEqual(organizationResult.succeeded[0].affectedSessionIds, ['organization-session'])
   assert.ok(organizationService.calls.findIndex((call) => call[0] === 'sessions') < organizationService.calls.findIndex((call) => call[0] === 'update-organization'))
 })
+
+test('batch coordinator resolves the exact projection session rather than every package installation', async () => {
+  const pkg = packageView('a')
+  pkg.installations.push({ id: 'a-claude', targetAdapterId: 'claude', scopeType: 'user', scopeKey: '*', enabled: true, status: 'ready' })
+  const skillService = services({ packages: [pkg] })
+  skillService.getAffectedSessions = async (installationIds) => {
+    skillService.calls.push(['sessions', ...installationIds])
+    return installationIds.map((id) => ({ id: `session-${id}` }))
+  }
+  const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: { list: () => [] } })
+  const initial = request('remove_projections', [{ kind: 'package', id: 'a' }])
+  const preview = await coordinator.preview(initial)
+  const result = await coordinator.apply({ ...initial, expectedRevision: preview.revision })
+
+  assert.deepEqual(result.succeeded[0].affectedSessionIds, ['session-a-codex'])
+  assert.deepEqual(skillService.calls, [['sessions', 'a-codex'], ['remove-projection', 'a-codex']])
+})
+
+test('batch coordinator scopes state-change session lookup to planned adapters', async () => {
+  const pkg = packageView('a')
+  pkg.installations.push(
+    { id: 'a-claude', targetAdapterId: 'claude', scopeType: 'user', scopeKey: '*', enabled: true, status: 'ready' },
+    { id: 'a-project', targetAdapterId: 'codex', scopeType: 'project', scopeKey: 'F:\\project', enabled: true, status: 'ready' }
+  )
+  const skillService = services({ packages: [pkg] })
+  skillService.previewCliStateChange = async () => ({ revision: 'a'.repeat(64), classification: 'migration_required', impacts: [{ adapterId: 'claude' }] })
+  skillService.getAffectedSessions = async (installationIds) => {
+    skillService.calls.push(['sessions', ...installationIds])
+    return installationIds.map((id) => ({ id: `session-${id}` }))
+  }
+  const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: { list: () => [] } })
+  const initial = request('set_cli_state', [{ kind: 'package', id: 'a' }])
+  const preview = await coordinator.preview(initial)
+  const result = await coordinator.apply({ ...initial, expectedRevision: preview.revision })
+
+  assert.deepEqual(result.succeeded[0].affectedSessionIds, ['session-a-claude', 'session-a-codex'])
+  assert.deepEqual(skillService.calls.filter((call) => call[0] === 'sessions'), [['sessions', 'a-claude', 'a-codex']])
+})
+
+test('batch coordinator gets new organization-install sessions from returned projections after success', async () => {
+  const calls = []
+  const skillService = services({ packages: [] })
+  skillService.getAffectedSessions = async (installationIds) => {
+    calls.push(['sessions', ...installationIds])
+    return installationIds.map((id) => ({ id: `session-${id}` }))
+  }
+  const catalog = {
+    list: () => [{ versionId: 'new-version', serverOrigin: 'https://skills.example.test', organizationId: 'org-1', lifecycleStatus: 'ACTIVE' }],
+    async install() {
+      calls.push(['install'])
+      return { id: 'new-package', installations: [{ id: 'new-codex', targetAdapterId: 'codex', scopeType: 'user', scopeKey: '*' }] }
+    }
+  }
+  const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: catalog })
+  const initial = { action: 'install_organization', items: [{ kind: 'organization_version', id: 'new-version' }], targets: { scopeType: 'user', scopeKey: '*', targetAdapterIds: ['codex'] } }
+  const preview = await coordinator.preview(initial)
+  const result = await coordinator.apply({ ...initial, expectedRevision: preview.revision })
+
+  assert.deepEqual(result.succeeded[0].affectedSessionIds, ['session-new-codex'])
+  assert.deepEqual(calls, [['install'], ['sessions', 'new-codex']])
+})
+
+test('batch coordinator associates an organization update by persisted slug when catalog version changes', async () => {
+  const pkg = packageView('a', { organization: 'org-1' })
+  pkg.sourceIdentity.catalogVersionId = 'old-version'
+  pkg.server = { slug: 'release-notes' }
+  const skillService = services({ packages: [pkg] })
+  skillService.getAffectedSessions = async (installationIds) => installationIds.map((id) => ({ id: `session-${id}` }))
+  const catalog = {
+    list: () => [{ versionId: 'new-version', serverOrigin: 'https://skills.example.test', organizationId: 'org-1', slug: 'release-notes', lifecycleStatus: 'ACTIVE' }],
+    async update() { return { id: 'a', installations: pkg.installations } }
+  }
+  const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: catalog })
+  const initial = { action: 'update_organization', items: [{ kind: 'organization_version', id: 'new-version' }], targets: { scopeType: 'user', scopeKey: '*', targetAdapterIds: ['codex'] } }
+  const preview = await coordinator.preview(initial)
+  const result = await coordinator.apply({ ...initial, expectedRevision: preview.revision })
+
+  assert.deepEqual(result.succeeded[0].affectedSessionIds, ['session-a-codex'])
+})

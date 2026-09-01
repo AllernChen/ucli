@@ -59,13 +59,14 @@ function identityOf(value) {
 }
 
 function packageForOrganizationVersion(packages, version) {
-  return [...packages].find((pkg) => {
+  const candidates = [...packages].filter((pkg) => {
     const identity = pkg?.sourceIdentity
     return identity?.originKind === 'organization' &&
       identity.serverOrigin?.toLowerCase() === version.serverOrigin?.toLowerCase() &&
-      identity.organizationId === version.organizationId &&
-      identity.catalogVersionId === version.versionId
-  }) || null
+      identity.organizationId === version.organizationId
+  })
+  return candidates.find((pkg) => pkg.sourceIdentity.catalogVersionId === version.versionId) ||
+    candidates.find((pkg) => pkg.server?.slug && pkg.server.slug === version.slug) || null
 }
 
 function safeSessionIds(sessions) {
@@ -172,6 +173,18 @@ function entryDigest(entry) {
 function installationFor(pkg, targets) {
   return (pkg.installations || []).find(item => item.targetAdapterId === targets.adapterId &&
     item.scopeType === targets.scopeType && item.scopeKey === targets.scopeKey) || null
+}
+
+function installationsForScope(pkg, targets, adapterIds = null) {
+  const adapters = adapterIds ? new Set(adapterIds) : null
+  return (pkg?.installations || []).filter((item) => item.scopeType === targets.scopeType &&
+    item.scopeKey === targets.scopeKey && (!adapters || adapters.has(item.targetAdapterId)))
+}
+
+function installationIdsFromResult(result, targets) {
+  const packages = Array.isArray(result) ? result : [result]
+  return [...new Set(packages.flatMap((pkg) => installationsForScope(pkg, targets, targets.targetAdapterIds)
+    .map((item) => item.id)).filter((id) => typeof id === 'string' && id))].sort()
 }
 
 function targetRequest(targets) {
@@ -286,15 +299,35 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
     const result = request.action === 'install_organization'
       ? await organizationCatalog.install(entry.value.versionId, targetRequest(request.targets))
       : await organizationCatalog.update(entry.value.versionId, targetRequest(request.targets))
-    return { packageId: result?.id || null, affectedAdapterIds: [...request.targets.targetAdapterIds].sort() }
+    return {
+      packageId: result?.id || null,
+      affectedAdapterIds: [...request.targets.targetAdapterIds].sort(),
+      returnedInstallationIds: installationIdsFromResult(result, request.targets)
+    }
   }
 
-  async function affectedSessionIdsFor(entry) {
+  function affectedInstallationIdsBefore(request, entry, plan) {
+    const pkg = entry.item.kind === 'organization_version' ? entry.associatedPackage : entry.value
+    if (!pkg) return []
+    if (request.action === 'remove_projections') {
+      const installation = installationFor(entry.value, request.targets)
+      return installation?.id ? [installation.id] : []
+    }
+    if (request.action === 'set_cli_state') {
+      const adapterIds = new Set([request.targets.adapterId, ...(plan.plan?.impacts || []).map((impact) => impact.adapterId)])
+      return installationsForScope(pkg, request.targets, adapterIds).map((item) => item.id)
+    }
+    if (request.action === 'update_organization') {
+      return installationsForScope(pkg, request.targets, request.targets.targetAdapterIds).map((item) => item.id)
+    }
+    return (pkg.installations || []).map((item) => item.id)
+  }
+
+  async function affectedSessionIdsFor(installationIds) {
     if (typeof skillsService.getAffectedSessions !== 'function') return []
-    const installationIds = [...new Set((entry.associatedPackage?.installations || []).map((item) => item?.id)
-      .filter((id) => typeof id === 'string' && id))].sort()
-    if (!installationIds.length) return []
-    try { return safeSessionIds(await skillsService.getAffectedSessions(installationIds)) } catch { return [] }
+    const ids = [...new Set((installationIds || []).filter((id) => typeof id === 'string' && id))].sort()
+    if (!ids.length) return []
+    try { return safeSessionIds(await skillsService.getAffectedSessions(ids)) } catch { return [] }
   }
 
   async function applyOnce(request) {
@@ -325,14 +358,19 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
           result.skipped.push({ item, reasonCode: plan.reasonCode || (plan.classification === 'noop' ? 'SKILL_BATCH_NOOP' : 'SKILL_BATCH_BLOCKED') })
           continue
         }
-        // Resolve affected sessions before files or package records change; removal
-        // and migrations may make the old installation ids unavailable afterwards.
-        const affectedSessionIds = await affectedSessionIdsFor(entry)
+        // Resolve known projections before mutation. A brand-new organization
+        // install has no pre-existing projection, so it is resolved from the
+        // verified install result below.
+        const beforeInstallationIds = affectedInstallationIdsBefore(input, entry, plan)
+        const beforeSessionIds = await affectedSessionIdsFor(beforeInstallationIds)
         const completed = await execute(input, entry, plan)
         if (completed.skipped) {
           result.skipped.push({ item, reasonCode: completed.skipped })
           continue
         }
+        const affectedSessionIds = input.action === 'install_organization'
+          ? await affectedSessionIdsFor(completed.returnedInstallationIds)
+          : beforeSessionIds
         result.succeeded.push({
           item, packageId: completed.packageId, action: input.action,
           affectedAdapterIds: completed.affectedAdapterIds, affectedSessionIds
