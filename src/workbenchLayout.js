@@ -54,6 +54,7 @@ export async function activatePaneSession(session, paneIndex, {
   const capabilities = deriveSessionCapabilityState(session)
   if (!capabilities.known) return false
   if (session.status === 'offline') {
+    if (session.canStart === false) return false
     await restartSession(session.id, paneIndex)
     return true
   }

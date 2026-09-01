@@ -225,7 +225,7 @@ export function registerAiCliProfileIpc({
     const cwd = typeof options.cwd === 'string' && options.cwd.length <= 4096 && !options.cwd.includes('\0')
       ? options.cwd
       : undefined
-    const [cliInventory] = await Promise.all([inspectCliTools()])
+    const cliInventory = await inspectCliTools().catch(() => [])
     const cliConfiguration = service.listCliConfigurationState({ cwd }).map(safeCliConfiguration)
     const profileAdapters = cliConfiguration
       .filter((item) => item.mode === 'profiles')

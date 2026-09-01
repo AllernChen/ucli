@@ -738,7 +738,9 @@ export function runResolvedProcess(file, args, {
     })
     timer = setTimeout(() => {
       timedOut = true
-      terminationPromise = Promise.resolve(terminateProcessTree(child))
+      terminationPromise = Promise.resolve()
+        .then(() => terminateProcessTree(child))
+        .catch(() => false)
       terminationTimer = setTimeout(() => finish(-1, false), terminationWaitMs)
     }, timeoutMs)
   })

@@ -15,9 +15,10 @@ export function isReadyServiceProfileForAdapter(profile, adapterId) {
 }
 
 export function sessionProfileDraftFor(session = {}) {
+  const current = session || {}
   return {
-    profileId: session.profileId || 'system',
-    model: session.profileId ? (session.model || null) : null
+    profileId: current.profileId || 'system',
+    model: current.profileId ? (current.model || null) : null
   }
 }
 

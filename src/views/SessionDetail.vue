@@ -455,6 +455,7 @@ import { useAiCliProfilesStore } from '../stores/aiCliProfiles.js'
 import { matchesBinding } from '../keybindings.js'
 import { ipc } from '../ipc.js'
 import { groupSessionsByProject } from '../sessionGrouping.js'
+import { initializeSessionDetail } from '../sessionDetailStartup.js'
 import { nextSessionPaneIndex, targetPaneForSessionAddition } from '../workbenchKeyboard.js'
 import { isClipboardCopyShortcut, isClipboardPasteShortcut, shouldBlockDuplicateClipboardPaste, shouldHandleTerminalPaste, shouldSendClipboardPaste } from '../terminalKeybindings.js'
 import { shouldOpenTerminalLink } from '../terminalLinks.js'
@@ -1366,14 +1367,24 @@ function deactivateWorkbench() {
 onActivated(activateWorkbench)
 onDeactivated(deactivateWorkbench)
 
+function logSessionDetailStartup(evidence) {
+  if (import.meta.env.DEV) ipc.log('info', 'session-detail-startup', evidence)
+}
+
 onMounted(async () => {
-  await Promise.all([sessions.init(), settings.load(), gateway.init(), aiProfiles.load()])
-  await sessions.loadWorkbench()
+  logSessionDetailStartup({ phase: 'mounted' })
+  await initializeSessionDetail({ sessions, settings, gateway, aiProfiles })
+  logSessionDetailStartup({
+    phase: 'workbench-loaded',
+    sessionCount: sessions.sessions.length,
+    savedPaneCount: sessions.workbench.paneSessionIds.length
+  })
   sessionListHidden.value = sessions.workbench.sessionListHidden // sync after load
   const savedIds = sessions.workbench.paneSessionIds
   const count = sessions.workbench.splitCount || 1
   createPanes(count)
   await nextTick()
+  logSessionDetailStartup({ phase: 'panes-created', paneCount: panes.value.length })
 
   // If navigated from card click, put pending session in first empty pane
   if (sessions.pendingAssign) {
@@ -1393,6 +1404,7 @@ onMounted(async () => {
       sessions.setWorkbenchPane(i, null)
     }
   }
+  logSessionDetailStartup({ phase: 'ready', paneCount: panes.value.length })
 })
 
 onBeforeUnmount(() => {

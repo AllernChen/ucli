@@ -336,6 +336,33 @@ test('resolved process timeout waits for confirmed tree termination before settl
   assert.equal(result.terminationConfirmed, true)
 })
 
+test('resolved process timeout absorbs a rejected tree termination immediately', async () => {
+  const { EventEmitter } = await import('node:events')
+  const { PassThrough } = await import('node:stream')
+  const child = new EventEmitter()
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
+  child.pid = 42
+  child.kill = () => true
+
+  const pending = runResolvedProcess(process.execPath, [], {
+    timeoutMs: 1,
+    terminationWaitMs: 100,
+    spawnProcess: () => child,
+    terminateProcessTree: async () => { throw new Error('spawn ENOMEM') }
+  })
+
+  await new Promise(resolve => setTimeout(resolve, 20))
+  child.emit('close', -1)
+  const result = await pending
+  assert.deepEqual(result, {
+    code: -1,
+    stdout: '',
+    stderr: '',
+    terminationConfirmed: false
+  })
+})
+
 test('profile listing inspects direct safe children and returns only allowlisted status metadata', async () => {
   const home = temporaryRoot('ucli-dsh-profiles-')
   try {

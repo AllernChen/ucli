@@ -178,6 +178,25 @@ test('restored panes activate in layout order without overlapping session starts
   ])
 })
 
+test('a restored offline session that cannot start remains assigned without a restart attempt', async () => {
+  const restarted = []
+
+  await restoreAssignedPaneSessions([
+    { paneIndex: 0, sessionId: 'service-profile-without-model' }
+  ], {
+    getSession: (sessionId) => ({
+      id: sessionId,
+      status: 'offline',
+      canStart: false,
+      capabilities: TERMINAL_CAPABILITIES
+    }),
+    restartSession: async (sessionId) => restarted.push(sessionId),
+    attachSession: async () => {}
+  })
+
+  assert.deepEqual(restarted, [])
+})
+
 test('a failed restored pane does not prevent a later pane from activating', async () => {
   const activated = []
   const failures = []

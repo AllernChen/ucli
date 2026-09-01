@@ -5,7 +5,7 @@ import test from 'node:test'
 import { registerAiCliProfileIpc } from '../electron/aiCliProfiles/ipc.js'
 import { stableServiceProfileId } from '../electron/serverConnection/serviceProfileCatalog.js'
 
-function register(serviceOverrides = {}) {
+function register(serviceOverrides = {}, dependencyOverrides = {}) {
   const handlers = new Map()
   const calls = []
   const profile = {
@@ -36,9 +36,9 @@ function register(serviceOverrides = {}) {
   registerAiCliProfileIpc({
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
     service,
-    inspectCliTools: async () => [
+    inspectCliTools: dependencyOverrides.inspectCliTools || (async () => [
       { id: 'codex', displayName: 'Codex', installed: true, version: '1.2.3', path: 'C:\\bin\\codex.exe', error: 'secret details' }
-    ],
+    ]),
     getCodexRuntime: () => ({
       currentProvider: 'work',
       providerCatalog: [{ id: 'work', displayName: 'Work' }],
@@ -156,6 +156,18 @@ test('profile state includes a chat-only service profile exactly once without ma
       protocols: ['openai_chat'], availabilityStatus: 'ready'
     }]
   }])
+})
+
+test('profile state remains available when optional CLI inventory inspection fails', async () => {
+  const { handlers } = register({}, {
+    inspectCliTools: async () => { throw new Error('spawn ENOMEM') }
+  })
+
+  const state = await handlers.get('ai-cli-profiles:get-state')({}, {})
+
+  assert.deepEqual(state.cliInventory, [])
+  assert.equal(state.profiles[0].id, 'profile-1')
+  assert.equal(state.cliConfiguration[0].adapterId, 'codex')
 })
 
 test('profile binding accepts canonical service IDs and rejects unsafe opaque IDs before delegation', async () => {

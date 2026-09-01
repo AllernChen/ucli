@@ -4,8 +4,16 @@ import test from 'node:test'
 import {
   deriveServiceProfileSessionState,
   deriveSessionConfigState,
-  importedSessionModelForSelection
+  importedSessionModelForSelection,
+  sessionProfileDraftFor
 } from '../src/sessionConfigPresentation.js'
+
+test('closed session configuration starts with a safe system draft', () => {
+  assert.deepEqual(sessionProfileDraftFor(null), {
+    profileId: 'system',
+    model: null
+  })
+})
 
 test('active unmanaged Codex sessions expose direct Provider controls', () => {
   assert.deepEqual(deriveSessionConfigState({

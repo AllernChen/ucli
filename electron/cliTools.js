@@ -50,6 +50,7 @@ const CLI_TOOLS = {
     upgradeCommand: 'npm install -g @deepseek-ai/dsh@0.1.0-rc.6'
   }
 }
+const activeCliInspections = new WeakMap()
 export function listCliToolDefinitions() {
   return Object.values(CLI_TOOLS).map(summaryCapability)
 }
@@ -176,7 +177,15 @@ export async function inspectCliTool(id, runner = runFixedCommand, options = {})
 }
 
 export async function inspectCliTools(runner = runFixedCommand) {
-  return Promise.all(Object.keys(CLI_TOOLS).map((id) => inspectCliTool(id, runner)))
+  const active = activeCliInspections.get(runner)
+  if (active) return active
+  const inspection = Promise.all(Object.keys(CLI_TOOLS).map((id) => inspectCliTool(id, runner)))
+  activeCliInspections.set(runner, inspection)
+  const release = () => {
+    if (activeCliInspections.get(runner) === inspection) activeCliInspections.delete(runner)
+  }
+  inspection.then(release, release)
+  return inspection
 }
 
 export async function runCliToolAction(id, action, runner = runFixedCommand, options = {}) {

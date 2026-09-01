@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import * as cliTools from '../electron/cliTools.js'
 
-const { inspectCliTool, listCliToolDefinitions, runCliToolAction } = cliTools
+const { inspectCliTool, inspectCliTools, listCliToolDefinitions, runCliToolAction } = cliTools
 const npmPrefix = process.platform === 'win32' ? 'F:\\npm' : '/opt/npm'
 const npmBin = process.platform === 'win32' ? npmPrefix : path.join(npmPrefix, 'bin')
 
@@ -37,6 +37,33 @@ test('CLI catalog keeps installation separate from safe summary execution', () =
     { id: 'ucode', safeForSummary: false, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'no-guaranteed-no-tools-mode' },
     { id: 'deepseek-harness', safeForSummary: false, summaryExecutorAvailable: false, summaryExecutorUnavailableReason: 'unsupported-executor' }
   ])
+})
+
+test('concurrent CLI inventory requests share one live inspection', async () => {
+  const originalPath = process.env.PATH
+  let calls = 0
+  const runner = async (command) => {
+    calls += 1
+    if (command === 'npm prefix -g') {
+      return { code: 0, stdout: `${npmPrefix}\n`, stderr: '' }
+    }
+    if (command.startsWith('where ') || command.startsWith('command -v ')) {
+      return { code: 0, stdout: `${npmBin}${path.sep}tool\n`, stderr: '' }
+    }
+    return { code: 0, stdout: '1.0.0\n', stderr: '' }
+  }
+
+  try {
+    const [first, second] = await Promise.all([
+      inspectCliTools(runner),
+      inspectCliTools(runner)
+    ])
+
+    assert.deepEqual(second, first)
+    assert.equal(calls, 10)
+  } finally {
+    process.env.PATH = originalPath
+  }
 })
 
 test('DeepSeek Harness inventory exposes compatibility without resolved runtime paths', async () => {
