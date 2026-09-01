@@ -624,6 +624,189 @@ export function groupSkillCatalogBySourceProject(entries = [], { status = 'all' 
     })
 }
 
+function normaliseOrganizationOrigin(value) {
+  try { return new URL(String(value || '')).origin } catch { return null }
+}
+
+function organizationIdentity(value = {}) {
+  const serverOrigin = normaliseOrganizationOrigin(value.serverOrigin)
+  if (value.originKind !== 'organization' || !serverOrigin || !value.organizationId ||
+    !value.catalogVersionId || !/^[a-f0-9]{64}$/.test(String(value.artifactSha256 || ''))) return null
+  return {
+    serverOrigin,
+    organizationId: value.organizationId,
+    organizationName: value.organizationName || value.organizationId,
+    identityStatus: value.identityStatus || 'name_pending',
+    catalogVersionId: value.catalogVersionId
+  }
+}
+
+function organizationVersionIdentity(value = {}) {
+  const serverOrigin = normaliseOrganizationOrigin(value.serverOrigin)
+  if (!serverOrigin || !value.organizationId || !value.versionId) return null
+  return { serverOrigin, organizationId: value.organizationId, versionId: value.versionId }
+}
+
+function catalogOrganizationEntry(version = {}) {
+  const identity = organizationVersionIdentity(version)
+  if (!identity) return null
+  return {
+    key: `organization-version:${identity.serverOrigin}:${identity.organizationId}:${identity.versionId}`,
+    name: version.name || version.skill?.name || version.slug || identity.versionId,
+    description: version.description || version.skill?.description || '',
+    packages: [], installations: [], sources: [], visibility: {}, status: 'ready', builtinOnly: false,
+    organizationVersions: [{ ...version, ...identity, installedPackageId: null }],
+    installed: false,
+    originKind: 'organization'
+  }
+}
+
+// The online catalog is supplemental: installed packages retain their persisted identity
+// even while a server is unavailable. A catalog record can only attach to an installed
+// package through that identity's normalized origin, organization and catalog version ID.
+export function buildSkillsManagementCatalog({ packages = [], discovered = [], organizationVersions = [], includeBuiltIn = false } = {}) {
+  const entries = aggregateSkillCatalog({ packages, discovered, includeBuiltIn }).map((entry) => ({
+    ...entry,
+    organizationVersions: [],
+    installed: entry.packages.length > 0,
+    originKind: entry.packages.some((pkg) => organizationIdentity(pkg.sourceIdentity)) ? 'organization' : null
+  }))
+  const installedByVersion = new Map()
+  for (const entry of entries) {
+    for (const pkg of entry.packages) {
+      const identity = organizationIdentity(pkg.sourceIdentity)
+      if (!identity) continue
+      installedByVersion.set(`${identity.serverOrigin}:${identity.organizationId}:${identity.catalogVersionId}`, { entry, pkg, identity })
+    }
+  }
+
+  for (const version of organizationVersions) {
+    const identity = organizationVersionIdentity(version)
+    if (!identity) continue
+    const installed = installedByVersion.get(`${identity.serverOrigin}:${identity.organizationId}:${identity.versionId}`)
+    const presentation = { ...version, ...identity, installedPackageId: installed?.pkg.id || null }
+    if (installed) {
+      installed.entry.organizationVersions.push(presentation)
+      installed.entry.installed = true
+      installed.entry.originKind = 'organization'
+    } else {
+      const entry = catalogOrganizationEntry(version)
+      if (entry) entries.push(entry)
+    }
+  }
+
+  return entries.sort((left, right) => left.name.localeCompare(right.name))
+}
+
+function sourceGroupForPackage(pkg = {}) {
+  const identity = organizationIdentity(pkg.sourceIdentity)
+  if (identity) return {
+    key: `organization:${identity.serverOrigin}:${identity.organizationId}`,
+    kind: 'organization', label: identity.organizationName,
+    organization: identity
+  }
+  if (pkg.sourceIdentity?.originKind === 'organization') return { key: 'local:unresolved', kind: 'unresolved', label: '来源待确认' }
+  const repository = pkg.sourceIdentity?.originKind === 'github' || pkg.sourceType === 'github'
+    ? normaliseGitHubRepository(pkg.sourceLocator || pkg.sourceProject?.locator)
+    : pkg.sourceIdentity?.originKind === 'gitlab' || pkg.sourceType === 'gitlab'
+      ? normaliseGitLabRepository(pkg.sourceLocator || pkg.sourceProject?.locator)
+      : null
+  if (repository) return { ...repository, kind: repository.key.split(':', 1)[0] }
+  return { key: 'local:managed', kind: 'local', label: '本地受管 Skills' }
+}
+
+function sourceGroupForDiscovered(source = {}) {
+  if (source.origin === 'plugin') {
+    const marketplace = source.plugin?.marketplace || 'unknown'
+    const id = source.plugin?.id || 'unknown'
+    return { key: `local:plugin:${marketplace}:${id}`, kind: 'plugin', label: `插件 · ${id}` }
+  }
+  if (BUILT_IN_ORIGINS.has(source.origin)) {
+    return { key: `local:builtin:${source.adapterId || 'unknown'}`, kind: 'builtin', label: `${skillCliName(source.adapterId)} 内置` }
+  }
+  return { key: `local:discovered:${source.sourceKind || 'unknown'}`, kind: 'discovered', label: skillSourceKindLabel(source.sourceKind) }
+}
+
+export function groupSkillCatalogByOrigin(entries = [], { view = 'all', status = 'all' } = {}) {
+  const groups = new Map()
+  const ensure = (group) => {
+    if (!groups.has(group.key)) groups.set(group.key, { ...group, entries: [] })
+    return groups.get(group.key)
+  }
+  const add = (group, entry, packages, installations, sources) => {
+    const sliced = sliceCatalogEntry(entry, packages, installations, sources)
+    sliced.organizationVersions = entry.organizationVersions || []
+    sliced.installed = Boolean(packages.length)
+    sliced.originKind = group.kind
+    if (matchesCatalogStatus(sliced, status)) ensure(group).entries.push(sliced)
+  }
+
+  for (const entry of entries) {
+    const buckets = new Map()
+    for (const pkg of entry.packages || []) {
+      const group = sourceGroupForPackage(pkg)
+      const bucket = buckets.get(group.key) || { group, packages: [], sources: [] }
+      bucket.packages.push(pkg)
+      buckets.set(group.key, bucket)
+    }
+    for (const source of entry.sources || []) {
+      const group = sourceGroupForDiscovered(source)
+      const bucket = buckets.get(group.key) || { group, packages: [], sources: [] }
+      bucket.sources.push(source)
+      buckets.set(group.key, bucket)
+    }
+    if (!buckets.size && (entry.organizationVersions || []).length) {
+      const version = entry.organizationVersions[0]
+      const group = { key: `organization:${version.serverOrigin}:${version.organizationId}`, kind: 'organization', label: version.organizationName || version.organizationId }
+      buckets.set(group.key, { group, packages: [], sources: [] })
+    }
+    for (const { group, packages: groupedPackages, sources } of buckets.values()) {
+      const ids = new Set(groupedPackages.map((pkg) => pkg.id))
+      const installations = (entry.installations || []).filter((item) => ids.has(item.packageId))
+      add(group, entry, groupedPackages, installations, sources)
+    }
+  }
+
+  const onlyOrganization = view === 'organization'
+  const onlyLocal = view === 'local'
+  return [...groups.values()]
+    .filter((group) => !onlyOrganization || group.kind === 'organization')
+    .filter((group) => !onlyLocal || group.kind !== 'organization')
+    .map((group) => ({ ...group, entries: group.entries.sort((left, right) => left.name.localeCompare(right.name)) }))
+    .sort((left, right) => {
+      const order = { organization: 0, github: 1, gitlab: 2, local: 3, discovered: 4, plugin: 5, builtin: 6, unresolved: 7 }
+      return (order[left.kind] ?? 99) - (order[right.kind] ?? 99) || left.key.localeCompare(right.key)
+    })
+}
+
+function actualCliState(entry, adapterId) {
+  const installation = (entry.installations || []).find((item) => item.targetAdapterId === adapterId)
+  if (installation?.enabled && ['ready', 'update_available'].includes(installation.status)) return 'enabled'
+  if (installation && (!installation.enabled || installation.status === 'disabled')) return 'disabled'
+  const visibility = entry.visibility?.[adapterId]
+  if (visibility?.visible) return visibility.direct ? 'enabled' : 'inherited'
+  return 'disabled'
+}
+
+export function buildSkillCliStateCells(entry = {}, adapters = []) {
+  const pkg = (entry.packages || []).length === 1 ? entry.packages[0] : null
+  const states = pkg?.cliDesiredStates || []
+  const scopeType = (entry.installations || [])[0]?.scopeType || states[0]?.scopeType || 'user'
+  const scopeKey = (entry.installations || [])[0]?.scopeKey || states[0]?.scopeKey || '*'
+  return adapters.map((adapter) => {
+    const state = states.find((item) => item.adapterId === adapter.id && item.scopeType === scopeType && item.scopeKey === scopeKey) || null
+    const actualState = actualCliState(entry, adapter.id)
+    const desiredState = state?.desiredState || (actualState === 'inherited' ? 'inherit' : actualState)
+    const enforcementStatus = state?.enforcementStatus || 'satisfied'
+    return {
+      packageId: pkg?.id || null, scopeType, scopeKey, adapterId: adapter.id,
+      displayName: adapter.displayName || skillCliName(adapter.id), desiredState, actualState,
+      enforcementStatus, reasonCode: state?.reasonCode || null,
+      actionability: enforcementStatus === 'blocked' ? 'blocked' : enforcementStatus === 'migration_required' ? 'migration_required' : 'direct'
+    }
+  })
+}
+
 export function skillStatusPresentation(status) {
   return STATUSES[status] || { label: '未知状态', color: 'default' }
 }

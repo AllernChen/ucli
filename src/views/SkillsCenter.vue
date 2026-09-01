@@ -6,7 +6,7 @@
         <p>统一管理 Claude Code、Codex、OpenCode、U-Code 和 DeepSeek Harness 的可复用能力。</p>
       </div>
       <a-space>
-        <a-button :loading="skills.loading" @click="reload">重新扫描</a-button>
+        <a-button :loading="skills.loading" @click="reload">重新扫描本地</a-button>
         <a-button type="primary" @click="openInstall">安装 Skill</a-button>
       </a-space>
     </div>
@@ -19,6 +19,15 @@
       :message="skills.error.message"
       @close="skills.error = null"
     />
+
+    <a-card :bordered="false">
+      <a-radio-group v-model:value="activeView" button-style="solid">
+        <a-radio-button value="all">全部</a-radio-button>
+        <a-radio-button value="organization">组织 Skills</a-radio-button>
+        <a-radio-button value="local">本地 Skills</a-radio-button>
+      </a-radio-group>
+      <span class="skills-muted skills-view-help">组织目录与本地扫描独立刷新；已安装组织 Skill 始终保留来源身份。</span>
+    </a-card>
 
     <a-card class="skills-project-card" :bordered="false">
       <div class="skills-project-row">
@@ -33,7 +42,7 @@
       </div>
     </a-card>
 
-    <a-card v-if="serverConnection.status !== 'disconnected'" title="组织 Skills" class="skills-project-card server-skills-catalog" :bordered="false">
+    <a-card v-if="activeView !== 'local' && serverConnection.status !== 'disconnected'" title="组织 Skills" class="skills-project-card server-skills-catalog" :bordered="false">
       <template #extra>
         <a-space>
           <span v-if="serverConnection.skillsSyncState.lastSyncedAt" class="skills-muted">目录已同步</span>
@@ -136,7 +145,7 @@
             <div>
               <strong>{{ sourceProject.label }}</strong>
               <div class="skills-muted">
-                {{ sourceProject.kind === 'github' ? 'GitHub 源项目' : sourceProject.kind === 'gitlab' ? 'GitLab 源项目' : '本地、接管与已发现的 Skills' }}
+                {{ sourceProject.kind === 'organization' ? '组织提供；安装后仍保留服务端和组织来源' : sourceProject.kind === 'github' ? 'GitHub 源项目' : sourceProject.kind === 'gitlab' ? 'GitLab 源项目' : '本地、接管与已发现的 Skills' }}
                 · {{ sourceProject.entries.length }} 个 Skill
               </div>
             </div>
@@ -264,12 +273,6 @@
                   </div>
                 </div>
                 <a-space v-if="!item.dshSource || !dshSkillSourcePresentation(item).readOnly">
-                  <a-switch
-                    :checked="item.enabled"
-                    :loading="skills.saving"
-                    :disabled="['drifted', 'invalid', 'broken_link'].includes(item.status)"
-                    @change="toggleInstallation(item, $event)"
-                  />
                   <a-button size="small" danger @click="confirmRemove(item)">移除</a-button>
                 </a-space>
               </div>
@@ -329,31 +332,10 @@
 
           <div class="skill-cli-section">
             <div class="skill-cli-heading">
-              <strong>AI CLI 使用情况</strong>
-              <span class="skills-muted">已应用 / 可用（兼容继承） / 已发现 / 已停用 / 未应用；支持应用、直接应用和纳入管理</span>
+              <strong>AI CLI 期望与实际状态</strong>
+              <span class="skills-muted">直接切换会先预览影响；兼容继承无法可靠隔离时会被阻止。旧位置可继续用于直接应用、纳入管理与修复。</span>
             </div>
-            <div class="skill-cli-matrix">
-              <a-tooltip
-                v-for="cell in buildSkillCliMatrix(entry, skills.adapters)"
-                :key="cell.adapterId"
-                :title="cell.disabledReason || (cell.state === 'inherited' ? `通过 ${cell.inheritedFrom.map(skillCliName).join('、')} 兼容可用` : '')"
-              >
-                <div class="skill-cli-cell" :class="`is-${cell.state}`">
-                  <span class="skill-cli-name">{{ cell.displayName }}</span>
-                  <a-tag :color="cliCellColor(cell.state)">{{ cell.label }}</a-tag>
-                  <span v-if="cell.state === 'inherited'" class="skills-muted">
-                    来自 {{ cell.inheritedFrom.map(skillCliName).join('、') }}
-                  </span>
-                  <a-button
-                    v-if="cell.action"
-                    size="small"
-                    type="link"
-                    :loading="skills.saving"
-                    @click="handleCliAction(entry, cell)"
-                  >{{ cell.actionLabel }}</a-button>
-                </div>
-              </a-tooltip>
-            </div>
+            <SkillCliStateMatrix :entry="entry" :adapters="skills.adapters" :saving="skills.stateSaving" @preview-change="previewCliStateChange" />
           </div>
 
           <div v-if="entry.packages.length" class="skill-package-actions">
@@ -615,18 +597,20 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 
 import { ipc } from '../ipc.js'
+import SkillCliStateMatrix from '../components/skills/SkillCliStateMatrix.vue'
 import {
   aggregateSkillCatalog,
   buildPluginCopyInstallRequest,
   buildSkillCollectionInstallRequests,
   buildSkillInstallRequest,
+  buildSkillsManagementCatalog,
   buildSourceProjectCliSummary,
   buildSkillCliMatrix,
   canConfirmSkillInstall,
   createLatestRequestGuard,
   dshSkillSourcePresentation,
   filterSkillCatalog,
-  groupSkillCatalogBySourceProject,
+  groupSkillCatalogByOrigin,
   resolveSkillCollectionInstallSelection,
   resolveSkillInstallPreflight,
   skillCliName,
@@ -648,6 +632,7 @@ const cliFilter = ref('all')
 const statusFilter = ref('all')
 const scopeFilter = ref('all')
 const showBuiltIn = ref(false)
+const activeView = ref('all')
 const installOpen = ref(false)
 const detailOpen = ref(false)
 const detailPackage = ref(null)
@@ -667,22 +652,29 @@ const serverSkillTargets = reactive({ targetAdapterIds: ['codex'], scopeType: 'u
 const canUseServerSkillTargets = computed(() => serverSkillTargets.targetAdapterIds.length > 0 &&
   (serverSkillTargets.scopeType === 'user' || Boolean(serverSkillTargets.projectPath.trim())))
 
-const catalog = computed(() => aggregateSkillCatalog({
+const catalog = computed(() => buildSkillsManagementCatalog({
   packages: skills.packages,
   discovered: skills.discovered,
+  organizationVersions: serverConnection.skills,
   includeBuiltIn: showBuiltIn.value
 }))
 const userInstalledCatalog = computed(() => aggregateSkillCatalog({
   packages: skills.packages,
   discovered: skills.discovered
 }))
-const visibleCatalog = computed(() => filterSkillCatalog(catalog.value, {
-  search: search.value,
-  adapterId: cliFilter.value,
-  status: 'all',
-  scopeType: scopeFilter.value
+const visibleCatalog = computed(() => {
+  const installed = filterSkillCatalog(catalog.value.filter((entry) => entry.installations.length || entry.sources.length), {
+    search: search.value, adapterId: cliFilter.value, status: 'all', scopeType: scopeFilter.value
+  })
+  const query = search.value.trim().toLowerCase()
+  const online = catalog.value.filter((entry) => !entry.installations.length && !entry.sources.length &&
+    (!query || `${entry.name} ${entry.description}`.toLowerCase().includes(query)) &&
+    (statusFilter.value === 'all' || entry.status === statusFilter.value))
+  return [...installed, ...online]
+})
+const sourceProjects = computed(() => groupSkillCatalogByOrigin(visibleCatalog.value, {
+  view: activeView.value, status: statusFilter.value
 }))
-const sourceProjects = computed(() => groupSkillCatalogBySourceProject(visibleCatalog.value, { status: statusFilter.value }))
 const detailSourceProject = computed(() =>
   sourceProjects.value.find(item => item.key === sourceProjectDetailKey.value) || null
 )
@@ -847,6 +839,36 @@ async function syncOrganizationSkills() {
     await serverConnection.loadCachedSkills()
     await skills.load(projectPath.value)
   } catch { message.error(serverConnection.skillsCatalogError?.message || '无法同步组织 Skills') }
+}
+async function previewCliStateChange(change) {
+  if (!change.packageId) return
+  try {
+    const preview = await skills.previewCliStateChange({
+      packageId: change.packageId, scopeType: change.scopeType, scopeKey: change.scopeKey,
+      changes: [{ adapterId: change.adapterId, desiredState: change.desiredState }]
+    })
+    if (preview.classification === 'blocked') {
+      message.warning(preview.reasonCode || '当前 CLI 无法可靠隔离继承目录')
+      return
+    }
+    const impacts = Array.isArray(preview.impacts) && preview.impacts.length
+      ? `将影响：${preview.impacts.map((impact) => impact.adapterId || impact).join('、')}。`
+      : '没有其他 CLI 会被影响。'
+    Modal.confirm({
+      title: change.desiredState === 'enabled' ? '启用此 CLI 的 Skill？' : '停用此 CLI 的 Skill？',
+      content: `${impacts} UCLI 会按预览的安全计划执行。`,
+      okText: '确认应用', cancelText: '取消',
+      async onOk() {
+        await skills.applyCliStateChange({
+          packageId: change.packageId, scopeType: change.scopeType, scopeKey: change.scopeKey,
+          changes: [{ adapterId: change.adapterId, desiredState: change.desiredState }], expectedRevision: preview.revision
+        })
+        message.success(change.desiredState === 'enabled' ? '已启用' : '已停用')
+      }
+    })
+  } catch (error) {
+    message.error(error?.message || '无法预览 CLI 状态变更')
+  }
 }
 async function chooseServerSkillProject() {
   const selected = await ipc.pickDirectory()

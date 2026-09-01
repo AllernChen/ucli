@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import test from 'node:test'
+import * as skillsPresentation from '../src/skillsPresentation.js'
 
 import {
   aggregateSkillCatalog,
@@ -1003,13 +1004,13 @@ test('catalog groups an adopted managed package using restored source-project me
   assert.deepEqual(groups[0].entries[0].packages.map((pkg) => pkg.id), ['pkg-adopted'])
 })
 
-test('Skills page renders source-project groups with safe external navigation', () => {
+test('Skills page renders origin groups with safe external navigation', () => {
   const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
-  assert.match(page, /groupSkillCatalogBySourceProject/)
+  assert.match(page, /groupSkillCatalogByOrigin/)
   assert.match(page, /打开项目/)
   assert.match(page, /ipc\.openExternal\(sourceProject\.repositoryUrl\)/)
   assert.match(page, /status:\s*'all'/)
-  assert.match(page, /groupSkillCatalogBySourceProject\(visibleCatalog\.value,\s*\{\s*status:\s*statusFilter\.value\s*\}\)/)
+  assert.match(page, /groupSkillCatalogByOrigin\(visibleCatalog\.value,\s*\{\s*view:\s*activeView\.value,\s*status:\s*statusFilter\.value\s*\}\)/)
 })
 
 test('Skills install workflow auto-detects GitHub or GitLab from the repository address', () => {
@@ -1269,4 +1270,107 @@ test('Skills page explains source ownership, entry paths and broken links', () =
   assert.match(page, /source\.health === 'ready'/)
   assert.match(page, /Skill 无效/)
   assert.match(page, /source\.manageable !== false/)
+})
+
+test('management catalog retains installed organization identity and merges only its persisted catalog version', () => {
+  assert.equal(typeof skillsPresentation.buildSkillsManagementCatalog, 'function')
+  const catalog = skillsPresentation.buildSkillsManagementCatalog({
+    packages: [{
+      id: 'installed-org', name: 'release-notes', description: 'Installed organization skill',
+      sourceIdentity: {
+        originKind: 'organization', serverOrigin: 'https://server.example.test/catalog', organizationId: 'org-1',
+        organizationName: 'Engineering', identityStatus: 'resolved', catalogVersionId: 'version-1', artifactSha256: 'a'.repeat(64)
+      },
+      installations: [{ id: 'installation-1', targetAdapterId: 'codex', enabled: true, status: 'ready', scopeType: 'user', visibility: visibleFromCodex }],
+      visibility: visibleFromCodex
+    }, {
+      id: 'unresolved-local', name: 'same-name', description: 'Local copy', sourceType: 'local',
+      installations: [], visibility: {}
+    }],
+    organizationVersions: [{
+      versionId: 'version-1', serverOrigin: 'https://server.example.test', organizationId: 'org-1', organizationName: 'Engineering',
+      slug: 'release-notes', version: '1.0.0', lifecycleStatus: 'ACTIVE'
+    }, {
+      versionId: 'version-2', serverOrigin: 'https://server.example.test', organizationId: 'org-1', organizationName: 'Engineering',
+      slug: 'release-notes', version: '2.0.0', lifecycleStatus: 'ACTIVE'
+    }]
+  })
+
+  const organizationEntry = catalog.find((entry) => entry.packages.some((pkg) => pkg.id === 'installed-org'))
+  assert.equal(organizationEntry.installed, true)
+  assert.equal(organizationEntry.organizationVersions.length, 1)
+  assert.equal(organizationEntry.organizationVersions[0].installedPackageId, 'installed-org')
+  assert.equal(catalog.find((entry) => entry.organizationVersions?.[0]?.versionId === 'version-2').installed, false)
+  assert.equal(catalog.find((entry) => entry.packages.some((pkg) => pkg.id === 'unresolved-local')).originKind, null)
+})
+
+test('origin grouping uses stored organization identity and retains distinct local origins', () => {
+  assert.equal(typeof skillsPresentation.groupSkillCatalogByOrigin, 'function')
+  const entries = skillsPresentation.buildSkillsManagementCatalog({
+    packages: [{
+      id: 'org-package', name: 'organization-skill', installations: [], visibility: {},
+      sourceIdentity: {
+        originKind: 'organization', serverOrigin: 'https://server.example.test/path', organizationId: 'org-1',
+        organizationName: 'Engineering', identityStatus: 'resolved', catalogVersionId: 'version-1', artifactSha256: 'a'.repeat(64)
+      }
+    }, {
+      id: 'github-package', name: 'git-skill', sourceType: 'github', sourceLocator: 'https://github.com/acme/skills.git', installations: [], visibility: {}
+    }, {
+      id: 'local-package', name: 'local-skill', sourceType: 'local', installations: [], visibility: {}
+    }],
+    discovered: [{ name: 'built-in', sources: [{ key: 'builtin', adapterId: 'codex', origin: 'bundled', sourceKind: 'codex_builtin', scopeType: 'system', visibility: {} }] }],
+    includeBuiltIn: true
+  })
+  const groups = skillsPresentation.groupSkillCatalogByOrigin(entries, { view: 'all' })
+
+  assert.deepEqual(groups.map((group) => group.key), [
+    'organization:https://server.example.test:org-1',
+    'github:acme/skills',
+    'local:managed',
+    'local:builtin:codex'
+  ])
+  assert.notEqual(groups[0].key, 'local:unresolved')
+  assert.deepEqual(skillsPresentation.groupSkillCatalogByOrigin(entries, { view: 'organization' }).map((group) => group.key), [
+    'organization:https://server.example.test:org-1'
+  ])
+  assert.deepEqual(skillsPresentation.groupSkillCatalogByOrigin(entries, { view: 'local', status: 'ready' }).map((group) => group.key), [
+    'github:acme/skills', 'local:managed', 'local:builtin:codex'
+  ])
+})
+
+test('CLI state cells expose desired, actual and blocked state without a direct installation toggle', () => {
+  assert.equal(typeof skillsPresentation.buildSkillCliStateCells, 'function')
+  const [claude, codex] = skillsPresentation.buildSkillCliStateCells({
+    packages: [{
+      id: 'pkg-1',
+      cliDesiredStates: [{ packageId: 'pkg-1', scopeType: 'user', scopeKey: '*', adapterId: 'claude', desiredState: 'disabled', enforcementStatus: 'blocked', reasonCode: 'SKILL_CLI_ISOLATION_UNSUPPORTED' }]
+    }],
+    installations: [{ id: 'install-1', packageId: 'pkg-1', targetAdapterId: 'codex', scopeType: 'user', scopeKey: '*', enabled: true, status: 'ready' }],
+    visibility: { claude: { visible: true, direct: false, inheritedFrom: ['codex'] }, codex: { visible: true, direct: true, inheritedFrom: [] } }
+  }, [
+    { id: 'claude', displayName: 'Claude Code' }, { id: 'codex', displayName: 'Codex' }
+  ])
+
+  assert.deepEqual({ desiredState: claude.desiredState, actualState: claude.actualState, enforcementStatus: claude.enforcementStatus, actionability: claude.actionability }, {
+    desiredState: 'disabled', actualState: 'inherited', enforcementStatus: 'blocked', actionability: 'blocked'
+  })
+  assert.deepEqual({ desiredState: codex.desiredState, actualState: codex.actualState, enforcementStatus: codex.enforcementStatus, actionability: codex.actionability }, {
+    desiredState: 'enabled', actualState: 'enabled', enforcementStatus: 'satisfied', actionability: 'direct'
+  })
+})
+
+test('Skills page separates organization and local views with preview-based CLI controls', () => {
+  const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
+  const matrixPath = new URL('../src/components/skills/SkillCliStateMatrix.vue', import.meta.url)
+  assert.equal(existsSync(matrixPath), true)
+  const matrix = readFileSync(matrixPath, 'utf8')
+
+  for (const label of ['全部', '组织 Skills', '本地 Skills', '同步组织目录', '重新扫描本地']) assert.match(page, new RegExp(label))
+  assert.match(page, /SkillCliStateMatrix/)
+  assert.match(page, /buildSkillsManagementCatalog/)
+  assert.match(page, /groupSkillCatalogByOrigin/)
+  assert.match(matrix, /preview-change/)
+  assert.match(matrix, /SKILL_CLI_ISOLATION_UNSUPPORTED/)
+  assert.match(matrix, /:checked="cell\.desiredState !== 'disabled'"/)
+  assert.doesNotMatch(page, /setSkillEnabled\(item\.id, false\)/)
 })
