@@ -2,6 +2,20 @@ import { defineStore } from 'pinia'
 
 import { ipc } from '../ipc.js'
 
+function sameStatePreviewIdentity(left, right) {
+  return left?.packageId === right?.packageId &&
+    left?.scopeType === right?.scopeType &&
+    left?.scopeKey === right?.scopeKey
+}
+
+function statePreviewIdentity(request) {
+  return {
+    packageId: request?.packageId ?? null,
+    scopeType: request?.scopeType ?? null,
+    scopeKey: request?.scopeKey ?? null
+  }
+}
+
 export const useSkillsStore = defineStore('skills', {
   state: () => ({
     adapters: [],
@@ -15,11 +29,18 @@ export const useSkillsStore = defineStore('skills', {
     saving: false,
     stateSaving: false,
     statePreview: null,
+    statePreviewIdentity: null,
+    statePreviewToken: 0,
     checking: false,
     batchProgress: null,
     error: null
   }),
   actions: {
+    clearStatePreview() {
+      this.statePreviewToken += 1
+      this.statePreview = null
+      this.statePreviewIdentity = null
+    },
     safeError(error, fallbackMessage) {
       const safe = {
         code: error?.code || 'SKILL_OPERATION_FAILED',
@@ -29,7 +50,9 @@ export const useSkillsStore = defineStore('skills', {
       return safe
     },
     async load(projectPath = this.projectPath) {
-      this.projectPath = projectPath || ''
+      const nextProjectPath = projectPath || ''
+      if (nextProjectPath !== this.projectPath) this.clearStatePreview()
+      this.projectPath = nextProjectPath
       this.loading = true
       this.error = null
       try {
@@ -61,11 +84,21 @@ export const useSkillsStore = defineStore('skills', {
     inspectSource(source, context) { return ipc.inspectSkillSource(source, context) },
     async previewCliStateChange(request) {
       this.error = null
+      const identity = statePreviewIdentity(request)
+      const token = this.statePreviewToken + 1
+      this.statePreviewToken = token
+      if (!sameStatePreviewIdentity(this.statePreviewIdentity, identity)) this.statePreview = null
+      this.statePreviewIdentity = identity
       try {
         const preview = await ipc.previewCliStateChange(request)
+        if (this.statePreviewToken !== token || !sameStatePreviewIdentity(this.statePreviewIdentity, identity)) return preview
         this.statePreview = preview
         return preview
       } catch (error) {
+        if (this.statePreviewToken === token && sameStatePreviewIdentity(this.statePreviewIdentity, identity)) {
+          this.statePreview = null
+          this.statePreviewIdentity = null
+        }
         this.error = this.safeError(error, 'Skill 状态预览失败')
         throw error
       }
@@ -76,7 +109,7 @@ export const useSkillsStore = defineStore('skills', {
       try {
         const result = await ipc.applyCliStateChange(request)
         await this.load()
-        this.statePreview = null
+        this.clearStatePreview()
         return result
       } catch (error) {
         this.error = this.safeError(error, 'Skill 状态保存失败')

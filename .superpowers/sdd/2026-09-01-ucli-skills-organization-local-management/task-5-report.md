@@ -45,3 +45,24 @@ All commands exited successfully. Node emitted the repository's existing `MODULE
 
 - No server code, data schema, UI component, or legacy `setSkillEnabled` caller was changed.
 - `inherit` is admitted at the IPC enum boundary as required; the existing trusted planner remains authoritative for whether a requested state is executable.
+
+## Review follow-up: mutation serialization and preview fencing
+
+- Added a promise-queued, package-wide main-process mutation boundary. It serializes CLI state apply, package and installation removal, local and verified-server update, adapter apply, enablement, drift resolution, and CLI recovery. Package-wide locking is intentionally stronger than per-scope locking because canonical package content and managed-package removal span all scopes.
+- The queued operation enters the existing state coordinator only after it owns the lock, so its current snapshot and expected-revision check cannot race an earlier same-package mutation. Lock entries are deleted after either success or failure.
+- Added store preview identity (`packageId`, `scopeType`, `scopeKey`) and a monotonic request token. A late preview cannot replace a newer request; a project change clears and fences pending previews.
+
+### Follow-up TDD and verification
+
+Before the production change, two service concurrency tests and two deferred-preview tests failed as expected: a same-revision second apply settled before the first mutation finished, removal interleaved with an apply, a late preview overwrote the newer result, and a scope switch did not fence a pending preview.
+
+```powershell
+node --test test/skills-ipc.test.mjs test/skills-renderer-ipc.test.mjs test/skills-store.test.mjs test/skills-state-coordinator.test.mjs test/skills-service.test.mjs test/skills-contracts.test.mjs
+# 139 passed / 0 failed / 0 skipped
+
+node --check electron/skills/service.js
+node --check src/stores/skills.js
+git diff --check
+```
+
+The repository's existing `MODULE_TYPELESS_PACKAGE_JSON` warning remained the only warning.

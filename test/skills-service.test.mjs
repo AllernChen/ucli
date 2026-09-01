@@ -55,6 +55,12 @@ async function withService(work, overrides = {}) {
   }
 }
 
+function deferred() {
+  let resolve
+  const promise = new Promise((complete) => { resolve = complete })
+  return { promise, resolve }
+}
+
 test('local installations expose trusted provenance and preserve canonical metadata until package removal', async () => {
   await withService(async ({ root, db, service }) => {
     const source = join(root, 'source')
@@ -130,6 +136,87 @@ test('CLI state reconciliation creates OpenCode before disabling Codex and commi
     ])
     assert.equal(result.package.id, installed.id)
     assert.equal(result.plan.revision, preview.revision)
+  })
+})
+
+test('concurrent CLI state applies recheck the revision only after the first mutation settles', async () => {
+  let holdFlush = false
+  const flushStarted = deferred()
+  const releaseFlush = deferred()
+  await withService(async ({ root, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    const request = {
+      packageId: installed.id, scopeType: 'user', scopeKey: '*',
+      changes: [
+        { adapterId: 'codex', desiredState: 'disabled' },
+        { adapterId: 'opencode', desiredState: 'enabled' }
+      ]
+    }
+    const preview = service.previewCliStateChange(request)
+    holdFlush = true
+    const first = service.applyCliStateChange({ ...request, expectedRevision: preview.revision })
+    await flushStarted.promise
+    const second = service.applyCliStateChange({ ...request, expectedRevision: preview.revision })
+    let secondSettled = false
+    void second.then(() => { secondSettled = true }, () => { secondSettled = true })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(secondSettled, false)
+
+    releaseFlush.resolve()
+    assert.equal((await first).package.id, installed.id)
+    await assert.rejects(second, { code: 'SKILL_PROJECTION_PLAN_STALE' })
+  }, {
+    flushFactory: (db) => async () => {
+      if (holdFlush) {
+        holdFlush = false
+        flushStarted.resolve()
+        await releaseFlush.promise
+      }
+      return db.flush()
+    }
+  })
+})
+
+test('package removal waits for a same-package CLI state apply to finish', async () => {
+  let holdFlush = false
+  const flushStarted = deferred()
+  const releaseFlush = deferred()
+  await withService(async ({ root, service }) => {
+    const source = join(root, 'source')
+    createSkill(source)
+    const installed = await service.install({
+      source: { type: 'local', path: source }, targetAdapterIds: ['codex'], scopeType: 'user'
+    })
+    const request = {
+      packageId: installed.id, scopeType: 'user', scopeKey: '*',
+      changes: [{ adapterId: 'codex', desiredState: 'disabled' }]
+    }
+    const preview = service.previewCliStateChange(request)
+    holdFlush = true
+    const applying = service.applyCliStateChange({ ...request, expectedRevision: preview.revision })
+    await flushStarted.promise
+    const removing = service.removePackage(installed.id)
+    let removalSettled = false
+    void removing.then(() => { removalSettled = true }, () => { removalSettled = true })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(removalSettled, false)
+
+    releaseFlush.resolve()
+    assert.equal((await applying).package.id, installed.id)
+    assert.equal(await removing, true)
+  }, {
+    flushFactory: (db) => async () => {
+      if (holdFlush) {
+        holdFlush = false
+        flushStarted.resolve()
+        await releaseFlush.promise
+      }
+      return db.flush()
+    }
   })
 })
 

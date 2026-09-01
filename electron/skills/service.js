@@ -143,11 +143,31 @@ export function createSkillsService({
   const skillHome = resolve(home || homedir())
   const packagesRoot = join(skillsRoot, 'packages')
   const updateStagingRoot = join(skillsRoot, '.staging')
+  // Canonical package content and package removal span every scope, so the
+  // mutation boundary is deliberately package-wide rather than scope-local.
+  const packageMutationLocks = new Map()
   let ucodeDiscoveryCache = { key: null, checkedAt: 0, items: [] }
   mkdirSync(packagesRoot, { recursive: true })
   mkdirSync(updateStagingRoot, { recursive: true })
   const packagesRootIdentity = captureDirectoryIdentity(packagesRoot)
   const updateStagingRootIdentity = captureDirectoryIdentity(updateStagingRoot)
+
+  function withPackageMutationLock(packageId, work) {
+    const key = typeof packageId === 'string' ? packageId : ''
+    const previous = packageMutationLocks.get(key) || Promise.resolve()
+    let release
+    const current = new Promise((resolve) => { release = resolve })
+    packageMutationLocks.set(key, current)
+    return previous.catch(() => undefined).then(work).finally(() => {
+      release()
+      if (packageMutationLocks.get(key) === current) packageMutationLocks.delete(key)
+    })
+  }
+
+  function withInstallationMutationLock(installationId, work) {
+    const packageId = db.getSkillInstallation(installationId)?.packageId
+    return packageId ? withPackageMutationLock(packageId, work) : work()
+  }
   const stateRecoveryPackages = new Set()
   const stateRecoverySnapshots = new Map()
   let stateRecoveryUnsafe = false
@@ -2433,18 +2453,18 @@ export function createSkillsService({
     install,
     installMany,
     installVerifiedServerArchive,
-    updateVerifiedServerArchive,
+    updateVerifiedServerArchive: (request) => withPackageMutationLock(request?.packageId, () => updateVerifiedServerArchive(request)),
     previewCliStateChange: stateCoordinator.preview,
-    applyCliStateChange: stateCoordinator.apply,
-    resolveCliStateRecovery,
-    applyToAdapter,
-    setEnabled,
-    resolveDrift,
-    removeInstallation,
-    removePackage,
+    applyCliStateChange: (request) => withPackageMutationLock(request?.packageId, () => stateCoordinator.apply(request)),
+    resolveCliStateRecovery: (packageId) => withPackageMutationLock(packageId, () => resolveCliStateRecovery(packageId)),
+    applyToAdapter: (...args) => withPackageMutationLock(args[0], () => applyToAdapter(...args)),
+    setEnabled: (...args) => withInstallationMutationLock(args[0], () => setEnabled(...args)),
+    resolveDrift: (...args) => withInstallationMutationLock(args[0], () => resolveDrift(...args)),
+    removeInstallation: (installationId) => withInstallationMutationLock(installationId, () => removeInstallation(installationId)),
+    removePackage: (packageId) => withPackageMutationLock(packageId, () => removePackage(packageId)),
     adopt,
     previewUpdate,
-    update,
+    update: (packageId, expectedRevision) => withPackageMutationLock(packageId, () => update(packageId, expectedRevision)),
     checkUpdates,
     getAffectedSessions,
     async restartSessions(sessionIds = []) {

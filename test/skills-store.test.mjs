@@ -8,6 +8,7 @@ let stateLoads = 0
 let failRefresh = false
 let batchResponse
 let statePreviewResponse
+let previewCliStateChange
 let store
 
 globalThis.window = {
@@ -27,7 +28,7 @@ globalThis.window = {
       }
     },
     async previewCliStateChange(request) {
-      return { ...statePreviewResponse, receivedRequest: request }
+      return previewCliStateChange(request)
     },
     async applyCliStateChange(request) {
       if (request.expectedRevision === 'stale'.repeat(13).slice(0, 64)) {
@@ -60,6 +61,7 @@ function resetStore() {
   statePreviewResponse = {
     revision: 'a'.repeat(64), classification: 'migration_required', impacts: ['codex']
   }
+  previewCliStateChange = async (request) => ({ ...statePreviewResponse, receivedRequest: request })
   setActivePinia(createPinia())
   store = useSkillsStore()
 }
@@ -89,6 +91,51 @@ test('Skills store sends one batch mutation and refreshes state once', async () 
   assert.equal(stateLoads, 1)
   assert.equal(store.batchProgress, null)
   assert.equal(store.saving, false)
+})
+
+function deferred() {
+  let resolve
+  const promise = new Promise((complete) => { resolve = complete })
+  return { promise, resolve }
+}
+
+test('Skills store ignores a late CLI state preview after a newer package request', async () => {
+  resetStore()
+  const first = deferred()
+  const second = deferred()
+  let calls = 0
+  previewCliStateChange = () => (++calls === 1 ? first.promise : second.promise)
+  const requestA = { packageId: 'package-a', scopeType: 'user', scopeKey: '*', changes: [] }
+  const requestB = { packageId: 'package-b', scopeType: 'user', scopeKey: '*', changes: [] }
+
+  const pendingA = store.previewCliStateChange(requestA)
+  const pendingB = store.previewCliStateChange(requestB)
+  second.resolve({ revision: 'b'.repeat(64), classification: 'direct' })
+  await pendingB
+  first.resolve({ revision: 'a'.repeat(64), classification: 'direct' })
+  await pendingA
+
+  assert.deepEqual(store.statePreview, { revision: 'b'.repeat(64), classification: 'direct' })
+  assert.deepEqual(store.statePreviewIdentity, {
+    packageId: 'package-b', scopeType: 'user', scopeKey: '*'
+  })
+})
+
+test('Skills store clears and fences a pending project preview when the project scope changes', async () => {
+  resetStore()
+  const pending = deferred()
+  previewCliStateChange = () => pending.promise
+  const request = {
+    packageId: 'package-1', scopeType: 'project', scopeKey: 'F:\\demo', changes: []
+  }
+
+  const preview = store.previewCliStateChange(request)
+  await store.load('F:\\other-project')
+  pending.resolve({ revision: 'a'.repeat(64), classification: 'direct' })
+  await preview
+
+  assert.equal(store.statePreview, null)
+  assert.equal(store.statePreviewIdentity, null)
 })
 
 test('Skills store retains a CLI state preview and applies it with separate saving state', async () => {
