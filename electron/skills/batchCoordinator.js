@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute } from 'node:path'
+import { MAX_SKILLS_BATCH_ITEMS } from '../../shared/skillsBatchContracts.js'
 
 const ACTIONS = new Map([
   ['install_organization', 'organization_version'],
@@ -57,6 +58,23 @@ function identityOf(value) {
   return `${source.serverOrigin.toLowerCase()}:${source.organizationId}`
 }
 
+function packageForOrganizationVersion(packages, version) {
+  return [...packages].find((pkg) => {
+    const identity = pkg?.sourceIdentity
+    return identity?.originKind === 'organization' &&
+      identity.serverOrigin?.toLowerCase() === version.serverOrigin?.toLowerCase() &&
+      identity.organizationId === version.organizationId &&
+      identity.catalogVersionId === version.versionId
+  }) || null
+}
+
+function safeSessionIds(sessions) {
+  return [...new Set((sessions || [])
+    .map((session) => session?.id)
+    .filter((id) => typeof id === 'string' && id && id.length <= 128 && !id.includes('\0')))]
+    .sort()
+}
+
 function targetScope(targets) {
   if (!targets || typeof targets !== 'object' || Array.isArray(targets)) throw batchError('SKILL_BATCH_CONTEXT_INVALID')
   if (targets.scopeType === 'user' && targets.scopeKey === '*') return { scopeType: 'user', scopeKey: '*' }
@@ -68,7 +86,7 @@ function targetScope(targets) {
 
 function validateRequest(request, { apply = false } = {}) {
   if (!request || typeof request !== 'object' || Array.isArray(request) || !ACTIONS.has(request.action) ||
-    !Array.isArray(request.items) || request.items.length < 1 || request.items.length > 200) {
+    !Array.isArray(request.items) || request.items.length < 1 || request.items.length > MAX_SKILLS_BATCH_ITEMS) {
     throw batchError('SKILL_BATCH_CONTEXT_INVALID')
   }
   const expectedKind = ACTIONS.get(request.action)
@@ -186,7 +204,11 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
     const entries = request.items.map((item) => {
       const value = item.kind === 'package' ? packages.get(item.id) : versions.get(item.id)
       if (!value) throw batchError('SKILL_BATCH_CONTEXT_INVALID')
-      const entry = { item, value, context: item.kind === 'package' ? identityOf(value) : `${value.serverOrigin?.toLowerCase()}:${value.organizationId}` }
+      const associatedPackage = item.kind === 'organization_version' ? packageForOrganizationVersion(packages.values(), value) : value
+      const entry = {
+        item, value, associatedPackage,
+        context: item.kind === 'package' ? identityOf(value) : `${value.serverOrigin?.toLowerCase()}:${value.organizationId}`
+      }
       return { ...entry, digest: entryDigest(entry) }
     })
     const contexts = new Set(entries.map(entry => entry.context || 'local'))
@@ -267,6 +289,14 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
     return { packageId: result?.id || null, affectedAdapterIds: [...request.targets.targetAdapterIds].sort() }
   }
 
+  async function affectedSessionIdsFor(entry) {
+    if (typeof skillsService.getAffectedSessions !== 'function') return []
+    const installationIds = [...new Set((entry.associatedPackage?.installations || []).map((item) => item?.id)
+      .filter((id) => typeof id === 'string' && id))].sort()
+    if (!installationIds.length) return []
+    try { return safeSessionIds(await skillsService.getAffectedSessions(installationIds)) } catch { return [] }
+  }
+
   async function applyOnce(request) {
     if (closed) return { succeeded: [], failed: [], skipped: [], recoveryRequired: [], aborted: { code: 'SKILL_BATCH_SHUTDOWN', remainingItems: [] } }
     const input = validateRequest(request, { apply: true })
@@ -295,12 +325,18 @@ export function createSkillsBatchCoordinator({ skillsService, organizationCatalo
           result.skipped.push({ item, reasonCode: plan.reasonCode || (plan.classification === 'noop' ? 'SKILL_BATCH_NOOP' : 'SKILL_BATCH_BLOCKED') })
           continue
         }
+        // Resolve affected sessions before files or package records change; removal
+        // and migrations may make the old installation ids unavailable afterwards.
+        const affectedSessionIds = await affectedSessionIdsFor(entry)
         const completed = await execute(input, entry, plan)
         if (completed.skipped) {
           result.skipped.push({ item, reasonCode: completed.skipped })
           continue
         }
-        result.succeeded.push({ item, packageId: completed.packageId, action: input.action, affectedAdapterIds: completed.affectedAdapterIds })
+        result.succeeded.push({
+          item, packageId: completed.packageId, action: input.action,
+          affectedAdapterIds: completed.affectedAdapterIds, affectedSessionIds
+        })
       } catch (error) {
         const code = error?.code || 'SKILL_OPERATION_FAILED'
         if (code === 'SKILL_PROJECTION_RECOVERY_REQUIRED') {

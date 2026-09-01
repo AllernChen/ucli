@@ -1,5 +1,6 @@
 import { sanitiseSkillError } from './contracts.js'
 import { isAbsolute } from 'node:path'
+import { MAX_SKILLS_BATCH_ITEMS } from '../../shared/skillsBatchContracts.js'
 
 const ADAPTER_IDS = new Set(['claude', 'codex', 'opencode', 'ucode', 'deepseek-harness'])
 const REF_TYPES = new Set(['default', 'branch', 'tag', 'commit'])
@@ -118,7 +119,7 @@ const BATCH_ACTIONS = new Map([
 function batchRequest(value, { apply = false } = {}) {
   const input = object(value, 'request')
   const expectedKind = BATCH_ACTIONS.get(input.action)
-  if (!expectedKind || !Array.isArray(input.items) || !input.items.length || input.items.length > 200) {
+  if (!expectedKind || !Array.isArray(input.items) || !input.items.length || input.items.length > MAX_SKILLS_BATCH_ITEMS) {
     throw ipcError('batch request is invalid')
   }
   const seen = new Set()

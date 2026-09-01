@@ -7,6 +7,13 @@
         <a-button v-if="retryAvailable" size="small" :loading="saving" :disabled="saving" aria-label="仅重试失败的 Skills" @click="$emit('retry')">仅重试失败项</a-button>
       </a-space>
     </div>
+    <a-alert
+      v-if="selectionLimitReached"
+      class="skills-batch-limit"
+      type="warning"
+      show-icon
+      :message="`当前筛选结果有 ${availableItemCount} 项；单次最多选择 200 项。`"
+    />
 
     <a-space v-if="selectedCount" wrap class="skills-batch-actions">
       <a-button v-if="can('install_organization')" type="primary" :disabled="saving || !targetAdapterIds.length" aria-label="预览批量安装组织 Skills" @click="requestPreview('install_organization')">批量安装</a-button>
@@ -27,6 +34,12 @@
     <div v-if="result" class="skills-batch-result-summary" aria-live="polite">
       成功 {{ result.succeeded?.length || 0 }} · 失败 {{ result.failed?.length || 0 }} · 跳过 {{ result.skipped?.length || 0 }}
       <span v-if="result.aborted"> · 批次中止：{{ result.aborted.code }}</span>
+      <div v-for="entry in result.recoveryRequired || []" :key="`recovery:${entry.item.kind}:${entry.item.id}`" class="skills-batch-result-detail">
+        需要恢复：{{ entry.item.id }}<span v-if="entry.recoveryAction"> · {{ entry.recoveryAction }}</span>
+      </div>
+      <div v-if="result.aborted?.remainingItems?.length" class="skills-batch-result-detail">
+        未执行 {{ result.aborted.remainingItems.length }} 项：{{ result.aborted.remainingItems.map((item) => item.id).join('、') }}
+      </div>
     </div>
   </a-card>
 
@@ -60,6 +73,8 @@ const props = defineProps({
   preview: { type: Object, default: null },
   result: { type: Object, default: null },
   retryAvailable: Boolean,
+  selectionLimitReached: Boolean,
+  availableItemCount: { type: Number, default: 0 },
   saving: Boolean
 })
 const emit = defineEmits(['preview', 'apply', 'clear', 'retry', 'close-preview'])
@@ -103,7 +118,8 @@ function confirmManagedRemoval() {
 <style scoped>
 .skills-batch-action-bar { margin-bottom: 12px; }
 .skills-batch-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
-.skills-batch-actions, .skills-batch-targets, .skills-batch-result-summary { margin-top: 10px; }
+.skills-batch-actions, .skills-batch-targets, .skills-batch-result-summary, .skills-batch-limit { margin-top: 10px; }
+.skills-batch-result-detail { margin-top: 4px; }
 .skills-batch-preview-category { margin-top: 12px; }
 .skills-muted { color: #8c8c8c; font-size: 12px; word-break: break-word; }
 </style>

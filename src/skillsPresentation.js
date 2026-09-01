@@ -1,4 +1,7 @@
 import { isAllowedGitLabUrl } from './gitRemotePolicy.js'
+import { MAX_SKILLS_BATCH_ITEMS } from '../shared/skillsBatchContracts.js'
+
+export { MAX_SKILLS_BATCH_ITEMS }
 
 const STATUSES = {
   ready: { label: '可用', color: 'green' },
@@ -805,19 +808,18 @@ function stableManagementItems(items = []) {
   return [...byKey.values()].sort((left, right) => left.id.localeCompare(right.id) || left.kind.localeCompare(right.kind))
 }
 
-function managementItemForEntry(entry = {}) {
+function managementItemsForEntry(entry = {}) {
   if (entry.selectable === false) return null
-  const packageId = (entry.packages || [])
+  const packageItems = (entry.packages || [])
     .map((pkg) => pkg?.id)
     .filter((id) => typeof id === 'string' && id)
-    .sort()[0]
-  if (packageId) return { kind: 'package', id: packageId }
-  const versionId = (entry.organizationVersions || [])
+    .map((id) => ({ kind: 'package', id }))
+  if (packageItems.length) return packageItems
+  return (entry.organizationVersions || [])
     .filter((version) => version?.lifecycleStatus !== 'REVOKED')
     .map((version) => version?.versionId)
     .filter((id) => typeof id === 'string' && id)
-    .sort()[0]
-  return versionId ? { kind: 'organization_version', id: versionId } : null
+    .map((id) => ({ kind: 'organization_version', id }))
 }
 
 function managementSelectionContext({ view = 'all', organizationKey = null, scopeKey = '*' } = {}) {
@@ -842,16 +844,19 @@ export function resolveSkillManagementSelection({
 } = {}) {
   const context = managementSelectionContext({ view, organizationKey, scopeKey })
   const contextChanged = Boolean(selectionContext && !sameManagementSelectionContext(selectionContext, context))
-  const selectAllItems = stableManagementItems((visibleEntries || []).map(managementItemForEntry).filter(Boolean))
-  const available = new Set(selectAllItems.map((item) => `${item.kind}:${item.id}`))
+  const allAvailableItems = stableManagementItems((visibleEntries || []).flatMap((entry) => managementItemsForEntry(entry) || []))
+  const selectAllItems = allAvailableItems.slice(0, MAX_SKILLS_BATCH_ITEMS)
+  const available = new Set(allAvailableItems.map((item) => `${item.kind}:${item.id}`))
   const selected = contextChanged ? [] : stableManagementItems(selectedItems)
     .filter((item) => available.has(`${item.kind}:${item.id}`))
-  const selectedItemsInContext = stableManagementItems(selected)
+  const selectedItemsInContext = stableManagementItems(selected).slice(0, MAX_SKILLS_BATCH_ITEMS)
   return {
     context,
     contextChanged,
     selectAllItems,
     selectedItems: selectedItemsInContext,
+    availableItemCount: allAvailableItems.length,
+    selectionLimitReached: allAvailableItems.length > MAX_SKILLS_BATCH_ITEMS,
     allSelected: selectAllItems.length > 0 && selectedItemsInContext.length === selectAllItems.length,
     partiallySelected: selectedItemsInContext.length > 0 && selectedItemsInContext.length < selectAllItems.length
   }
@@ -862,7 +867,7 @@ export function buildSkillsBatchRequest({ action, selection, adapterId, desiredS
   const selectedItems = stableManagementItems(Array.isArray(selection)
     ? selection
     : selection?.selectedItems || selection?.items || [])
-  if (!expectedKind || !selectedItems.length || selectedItems.some((item) => item.kind !== expectedKind)) return null
+  if (!expectedKind || !selectedItems.length || selectedItems.length > MAX_SKILLS_BATCH_ITEMS || selectedItems.some((item) => item.kind !== expectedKind)) return null
   const scopeType = targets.scopeType
   const scopeKey = targets.scopeKey
   if (!((scopeType === 'user' && scopeKey === '*') || (scopeType === 'project' && typeof scopeKey === 'string' && scopeKey))) return null

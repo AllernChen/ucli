@@ -323,6 +323,35 @@ test('Skills store keeps a batch preview and retains failed plus remaining items
   assert.equal(store.batchSaving, false)
 })
 
+test('Skills store ignores a stale batch preview and applies only its immutable current binding', async () => {
+  resetStore()
+  const first = deferred()
+  const second = deferred()
+  const requestA = { action: 'update_packages', items: [{ kind: 'package', id: 'a' }], targets: { scopeType: 'user', scopeKey: '*' } }
+  const requestB = { action: 'update_packages', items: [{ kind: 'package', id: 'b' }], targets: { scopeType: 'user', scopeKey: '*' } }
+  previewSkillsBatchAction = request => request.items[0].id === 'a' ? first.promise : second.promise
+
+  const previewA = store.previewBatchAction(requestA)
+  assert.equal(store.batchPreviewing, true)
+  const previewB = store.previewBatchAction(requestB)
+  second.resolve({ revision: 'b'.repeat(64), action: 'update_packages', items: requestB.items, categories: {} })
+  await previewB
+  first.resolve({ revision: 'a'.repeat(64), action: 'update_packages', items: requestA.items, categories: {} })
+  await previewA
+
+  assert.equal(store.batchPreviewing, false)
+  assert.equal(store.batchPreview.revision, 'b'.repeat(64))
+  await assert.rejects(
+    store.applyBatchAction({ ...requestA, expectedRevision: 'a'.repeat(64) }),
+    { code: 'SKILL_PROJECTION_PLAN_STALE' }
+  )
+  await assert.rejects(
+    store.applyBatchAction({ ...requestA, expectedRevision: 'b'.repeat(64) }),
+    { code: 'SKILL_PROJECTION_PLAN_STALE' }
+  )
+  await store.applyBatchAction()
+})
+
 test('Skills store preserves mutation results when the final refresh fails', async () => {
   resetStore()
   const batchRequests = requests()

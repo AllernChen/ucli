@@ -79,7 +79,7 @@ test('batch coordinator executes package operations in stable order and preserve
 
   assert.deepEqual(result, {
     succeeded: [{
-      item: { kind: 'package', id: 'a' }, packageId: 'a', action: 'set_cli_state', affectedAdapterIds: ['codex']
+      item: { kind: 'package', id: 'a' }, packageId: 'a', action: 'set_cli_state', affectedAdapterIds: ['codex'], affectedSessionIds: []
     }],
     failed: [{ item: { kind: 'package', id: 'b' }, code: 'SKILL_DRIFTED', retryable: false }],
     skipped: [],
@@ -159,8 +159,8 @@ test('batch coordinator records a stale item and continues independently revalid
 
   assert.deepEqual(await applying, {
     succeeded: [
-      { item: { kind: 'package', id: 'a' }, packageId: 'a', action: 'set_cli_state', affectedAdapterIds: ['codex'] },
-      { item: { kind: 'package', id: 'c' }, packageId: 'c', action: 'set_cli_state', affectedAdapterIds: ['codex'] }
+      { item: { kind: 'package', id: 'a' }, packageId: 'a', action: 'set_cli_state', affectedAdapterIds: ['codex'], affectedSessionIds: [] },
+      { item: { kind: 'package', id: 'c' }, packageId: 'c', action: 'set_cli_state', affectedAdapterIds: ['codex'], affectedSessionIds: [] }
     ],
     failed: [{ item: { kind: 'package', id: 'b' }, code: 'SKILL_PROJECTION_PLAN_STALE', retryable: false }],
     skipped: [], recoveryRequired: [], aborted: null
@@ -218,11 +218,63 @@ test('batch coordinator closes admission and drains a deferred catalog operation
 
   assert.deepEqual(await applying, {
     succeeded: [{
-      item: { kind: 'organization_version', id: 'a' }, packageId: 'package-a', action: 'install_organization', affectedAdapterIds: ['codex']
+      item: { kind: 'organization_version', id: 'a' }, packageId: 'package-a', action: 'install_organization', affectedAdapterIds: ['codex'], affectedSessionIds: []
     }],
     failed: [], skipped: [], recoveryRequired: [],
     aborted: { code: 'SKILL_BATCH_SHUTDOWN', remainingItems: [{ kind: 'organization_version', id: 'b' }] }
   })
   await stopping
   await assert.rejects(coordinator.preview(initial), { code: 'SKILL_BATCH_SHUTDOWN' })
+})
+
+test('batch coordinator captures safe affected session ids before a destructive package mutation', async () => {
+  const skillService = services({ packages: [packageView('a')] })
+  skillService.getAffectedSessions = async (installationIds) => {
+    skillService.calls.push(['sessions', ...installationIds])
+    return [{ id: 'session-a' }, { id: 'session-a' }, { id: 'not-a-session' }]
+  }
+  const coordinator = createSkillsBatchCoordinator({ skillsService: skillService, organizationCatalog: { list: () => [] } })
+  const initial = request('remove_packages', [{ kind: 'package', id: 'a' }])
+  const preview = await coordinator.preview(initial)
+
+  const result = await coordinator.apply({ ...initial, expectedRevision: preview.revision })
+
+  assert.deepEqual(result.succeeded, [{
+    item: { kind: 'package', id: 'a' }, packageId: 'a', action: 'remove_packages',
+    affectedAdapterIds: ['codex'], affectedSessionIds: ['not-a-session', 'session-a']
+  }])
+  assert.deepEqual(skillService.calls, [['sessions', 'a-codex'], ['remove-package', 'a']])
+})
+
+test('batch coordinator captures sessions before state migration and an installed organization update', async () => {
+  const migrationService = services({ packages: [packageView('a')] })
+  migrationService.getAffectedSessions = async (installationIds) => {
+    migrationService.calls.push(['sessions', ...installationIds])
+    return [{ id: 'migration-session' }]
+  }
+  const migration = createSkillsBatchCoordinator({ skillsService: migrationService, organizationCatalog: { list: () => [] } })
+  const stateRequest = request('set_cli_state', [{ kind: 'package', id: 'a' }])
+  const statePreview = await migration.preview(stateRequest)
+  const stateResult = await migration.apply({ ...stateRequest, expectedRevision: statePreview.revision })
+  assert.deepEqual(stateResult.succeeded[0].affectedSessionIds, ['migration-session'])
+  assert.ok(migrationService.calls.findIndex((call) => call[0] === 'sessions') < migrationService.calls.findIndex((call) => call[0] === 'apply-state'))
+
+  const organizationService = services({ packages: [packageView('a', { organization: 'org-1' })] })
+  organizationService.getAffectedSessions = async (installationIds) => {
+    organizationService.calls.push(['sessions', ...installationIds])
+    return [{ id: 'organization-session' }]
+  }
+  const catalog = {
+    list: () => [{ versionId: 'a-version', serverOrigin: 'https://skills.example.test', organizationId: 'org-1', lifecycleStatus: 'ACTIVE' }],
+    async update(versionId) { organizationService.calls.push(['update-organization', versionId]); return { id: 'a' } }
+  }
+  const organization = createSkillsBatchCoordinator({ skillsService: organizationService, organizationCatalog: catalog })
+  const organizationRequest = {
+    action: 'update_organization', items: [{ kind: 'organization_version', id: 'a-version' }],
+    targets: { scopeType: 'user', scopeKey: '*', targetAdapterIds: ['codex'] }
+  }
+  const organizationPreview = await organization.preview(organizationRequest)
+  const organizationResult = await organization.apply({ ...organizationRequest, expectedRevision: organizationPreview.revision })
+  assert.deepEqual(organizationResult.succeeded[0].affectedSessionIds, ['organization-session'])
+  assert.ok(organizationService.calls.findIndex((call) => call[0] === 'sessions') < organizationService.calls.findIndex((call) => call[0] === 'update-organization'))
 })

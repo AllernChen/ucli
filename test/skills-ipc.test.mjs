@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { registerSkillsIpc } from '../electron/skills/ipc.js'
+import { MAX_SKILLS_BATCH_ITEMS } from '../shared/skillsBatchContracts.js'
 
 function registry() {
   const handlers = new Map()
@@ -73,6 +74,20 @@ test('Skills IPC rebuilds a bounded batch request without renderer provenance', 
     handlers.get('skills:apply-batch-action')({}, { ...request, items: [], expectedRevision: 'invalid' }),
     (error) => error.code === 'SKILL_IPC_INVALID'
   )
+})
+
+test('Skills IPC enforces the shared batch item limit before calling the coordinator', async () => {
+  const { handlers, ipcMain } = registry()
+  let called = false
+  registerSkillsIpc({ ipcMain, service: {}, batchCoordinator: { preview() { called = true }, apply() {} } })
+  const request = {
+    action: 'update_packages',
+    items: Array.from({ length: MAX_SKILLS_BATCH_ITEMS + 1 }, (_, index) => ({ kind: 'package', id: `package-${index}` })),
+    targets: { scopeType: 'user', scopeKey: '*' }
+  }
+
+  await assert.rejects(handlers.get('skills:preview-batch-action')({}, request), { code: 'SKILL_IPC_INVALID' })
+  assert.equal(called, false)
 })
 
 test('Skills IPC accepts only a package id for guarded CLI-state recovery and sanitizes failures', async () => {

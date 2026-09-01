@@ -16,6 +16,25 @@ function statePreviewIdentity(request) {
   }
 }
 
+function cloneBatchRequest(request = {}) {
+  return Object.freeze({
+    action: request.action,
+    items: Object.freeze((request.items || []).map((item) => Object.freeze({ kind: item.kind, id: item.id }))),
+    targets: Object.freeze(Object.fromEntries(Object.entries(request.targets || {})
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [key, Array.isArray(value) ? Object.freeze([...value]) : value])))
+  })
+}
+
+function canonicalBatchRequest(request) {
+  const snapshot = cloneBatchRequest(request)
+  return JSON.stringify({
+    action: snapshot.action,
+    items: [...snapshot.items].sort((left, right) => left.id.localeCompare(right.id) || left.kind.localeCompare(right.kind)),
+    targets: Object.fromEntries(Object.entries(snapshot.targets).sort(([left], [right]) => left.localeCompare(right)))
+  })
+}
+
 export const useSkillsStore = defineStore('skills', {
   state: () => ({
     adapters: [],
@@ -35,7 +54,10 @@ export const useSkillsStore = defineStore('skills', {
     checking: false,
     batchProgress: null,
     batchSaving: false,
+    batchPreviewing: false,
+    batchPreviewToken: 0,
     batchPreview: null,
+    batchPreviewBinding: null,
     batchResult: null,
     batchRequest: null,
     batchSelection: [],
@@ -89,20 +111,55 @@ export const useSkillsStore = defineStore('skills', {
       }
     },
     inspectSource(source, context) { return ipc.inspectSkillSource(source, context) },
-    async previewBatchAction(request) {
-      this.error = null
-      const preview = await ipc.previewSkillsBatchAction(request)
-      this.batchPreview = preview
-      this.batchRequest = { ...request, items: [...(request.items || [])] }
-      return preview
+    clearBatchPreview({ keepRequest = true } = {}) {
+      this.batchPreviewToken += 1
+      this.batchPreviewing = false
+      this.batchPreview = null
+      this.batchPreviewBinding = null
+      if (!keepRequest) this.batchRequest = null
     },
-    async applyBatchAction(request) {
+    async previewBatchAction(request) {
+      const snapshot = cloneBatchRequest(request)
+      const token = this.batchPreviewToken + 1
+      this.batchPreviewToken = token
+      this.batchPreviewing = true
+      this.batchPreview = null
+      this.batchPreviewBinding = null
+      this.error = null
+      try {
+        const preview = await ipc.previewSkillsBatchAction(snapshot)
+        if (this.batchPreviewToken !== token) return preview
+        if (typeof preview?.revision !== 'string' || !/^[a-f0-9]{64}$/i.test(preview.revision)) {
+          throw Object.assign(new Error('Skill batch preview is invalid'), { code: 'SKILL_PROJECTION_PLAN_STALE' })
+        }
+        this.batchPreview = preview
+        this.batchRequest = snapshot
+        this.batchPreviewBinding = Object.freeze({ request: snapshot, revision: preview.revision })
+        return preview
+      } catch (error) {
+        if (this.batchPreviewToken === token) {
+          this.batchPreview = null
+          this.batchPreviewBinding = null
+          this.error = this.safeError(error, 'Skill 批量操作预览失败')
+        }
+        throw error
+      } finally {
+        if (this.batchPreviewToken === token) this.batchPreviewing = false
+      }
+    },
+    async applyBatchAction(request = null) {
       if (this.batchSaving) throw Object.assign(new Error('Skill batch operation is already in progress'), { code: 'SKILL_OPERATION_IN_PROGRESS' })
+      const binding = this.batchPreviewBinding
+      if (!binding || this.batchPreviewing || (request &&
+        (request.expectedRevision !== binding.revision || canonicalBatchRequest(request) !== canonicalBatchRequest(binding.request)))) {
+        throw Object.assign(new Error('Skill batch plan is stale'), { code: 'SKILL_PROJECTION_PLAN_STALE' })
+      }
       this.batchSaving = true
       this.error = null
       try {
-        const result = await ipc.applySkillsBatchAction(request)
+        const result = await ipc.applySkillsBatchAction({ ...binding.request, expectedRevision: binding.revision })
         this.batchResult = result
+        this.clearBatchPreview()
         const remaining = [
           ...(result.failed || []).map(entry => entry.item),
           ...(result.skipped || []).map(entry => entry.item),
@@ -128,8 +185,8 @@ export const useSkillsStore = defineStore('skills', {
     async retryFailedBatch() {
       if (!this.batchRequest || !this.batchRetryableSelection.length) return null
       const request = { ...this.batchRequest, items: [...this.batchRetryableSelection] }
-      const preview = await this.previewBatchAction(request)
-      return this.applyBatchAction({ ...request, expectedRevision: preview.revision })
+      await this.previewBatchAction(request)
+      return this.applyBatchAction()
     },
     async previewCliStateChange(request) {
       this.error = null

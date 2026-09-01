@@ -1563,11 +1563,32 @@ test('batch management UI has accessible selection, preview, retry and separate 
   assert.match(page, /SkillsBatchActionBar/)
   assert.match(page, /全选当前筛选结果/)
   assert.match(page, /a-checkbox/)
-  for (const label of ['可直接执行', '需要迁移', '无法隔离', '存在冲突', '无需变化', '仅重试失败项', '确认移除受管包', '成功', '失败', '跳过']) {
+  for (const label of ['可直接执行', '需要迁移', '无法隔离', '存在冲突', '无需变化', '仅重试失败项', '确认移除受管包', '成功', '失败', '跳过', '需要恢复', '未执行', '单次最多选择 200 项']) {
     assert.match(actionBar, new RegExp(label))
   }
   assert.match(actionBar, /aria-label/)
   assert.match(actionBar, /:disabled=.*saving/)
+  assert.match(page, /affectedSessionIds/)
   for (const event of ['preview', 'apply', 'clear', 'retry']) assert.match(actionBar, new RegExp(`emit\\('${event}'|\\$emit\\('${event}'`))
   assert.doesNotMatch(actionBar, /targetPath|serverOrigin|organizationId|artifactSha256/)
+})
+
+test('management selection flattens every managed package identity and caps visible select-all', () => {
+  assert.equal(skillsPresentation.MAX_SKILLS_BATCH_ITEMS, 200)
+  const flattened = skillsPresentation.resolveSkillManagementSelection({
+    visibleEntries: [{ key: 'same-name', packages: [{ id: 'package-z' }, { id: 'package-a' }], installations: [], organizationVersions: [] }],
+    selectedItems: [], view: 'local', organizationKey: null, scopeKey: '*'
+  })
+  assert.deepEqual(flattened.selectAllItems, [{ kind: 'package', id: 'package-a' }, { kind: 'package', id: 'package-z' }])
+
+  const selection = skillsPresentation.resolveSkillManagementSelection({
+    visibleEntries: [
+      ...Array.from({ length: 201 }, (_, index) => ({ key: `extra-${index}`, packages: [{ id: `extra-${index}` }], installations: [], organizationVersions: [] }))
+    ],
+    selectedItems: [], view: 'local', organizationKey: null, scopeKey: '*'
+  })
+
+  assert.equal(selection.selectAllItems.length, 200)
+  assert.equal(selection.availableItemCount, 201)
+  assert.equal(selection.selectionLimitReached, true)
 })
