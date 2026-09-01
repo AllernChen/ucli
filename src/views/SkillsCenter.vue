@@ -6,8 +6,8 @@
         <p>统一管理 Claude Code、Codex、OpenCode、U-Code 和 DeepSeek Harness 的可复用能力。</p>
       </div>
       <a-space>
-        <a-button :loading="skills.loading" @click="reload">重新扫描本地</a-button>
-        <a-button type="primary" @click="openInstall">安装 Skill</a-button>
+        <a-button :loading="skills.loading" aria-label="重新扫描本地 Skills" @click="reload">重新扫描本地</a-button>
+        <a-button type="primary" aria-label="安装本地 Skill" @click="openInstall">安装 Skill</a-button>
       </a-space>
     </div>
 
@@ -45,16 +45,20 @@
     <a-card v-if="activeView !== 'local' && serverConnection.status !== 'disconnected'" title="组织 Skills" class="skills-project-card server-skills-catalog" :bordered="false">
       <template #extra>
         <a-space>
-          <span v-if="serverConnection.skillsSyncState.lastSyncedAt" class="skills-muted">目录已同步</span>
-          <a-button size="small" :loading="serverConnection.skillsSyncState.status === 'syncing'" @click="syncOrganizationSkills">同步组织目录</a-button>
+          <a-tag v-if="serverConnection.skillsSyncState.status === 'syncing'" color="processing">目录同步中</a-tag>
+          <a-tag v-else-if="serverConnection.skillsSyncState.error || serverConnection.skillsCatalogError || serverConnection.skillsSyncState.status === 'error'" color="red">同步失败</a-tag>
+          <a-tag v-else-if="serverConnection.skillsSyncState.status === 'stale'" color="orange">目录已过期</a-tag>
+          <a-tag v-else-if="serverConnection.skillsSyncState.lastSyncedAt" color="green">目录已同步</a-tag>
+          <span v-if="serverConnection.skillsSyncState.lastSyncedAt" class="skills-muted">上次同步：{{ formatSyncTime(serverConnection.skillsSyncState.lastSyncedAt) }}</span>
+          <a-button size="small" aria-label="同步组织 Skills 目录" :loading="serverConnection.skillsSyncState.status === 'syncing'" @click="syncOrganizationSkills">同步组织目录</a-button>
         </a-space>
       </template>
       <a-alert
-        v-if="serverConnection.skillsCatalogError"
+        v-if="serverConnection.skillsSyncState.error || serverConnection.skillsCatalogError"
         type="warning"
         show-icon
         closable
-        :message="serverConnection.skillsCatalogError.message"
+        :message="(serverConnection.skillsSyncState.error || serverConnection.skillsCatalogError).message"
         @close="serverConnection.skillsCatalogError = null"
       />
       <a-empty v-if="!serverConnection.skills.length" description="当前没有可用的组织 Skills" />
@@ -811,6 +815,10 @@ function clearPreview() {
   inspecting.value = false
 }
 function formatBytes(value) { return value < 1024 ? `${value} B` : `${(value / 1024).toFixed(1)} KB` }
+function formatSyncTime(value) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '未知' : date.toLocaleString()
+}
 function scopeLabel(scopeType) { return scopeType === 'project' ? '项目级' : scopeType === 'user' ? '用户级' : '系统' }
 function sourceHealthColor(health) { return ['broken_link', 'invalid'].includes(health) ? 'red' : 'green' }
 function sourceHealthLabel(health, link) {

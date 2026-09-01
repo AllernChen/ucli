@@ -1374,3 +1374,81 @@ test('Skills page separates organization and local views with preview-based CLI 
   assert.match(matrix, /:checked="cell\.desiredState !== 'disabled'"/)
   assert.doesNotMatch(page, /setSkillEnabled\(item\.id, false\)/)
 })
+
+test('CLI state cells keep each user and project scope tuple separate and preserve inherit', () => {
+  const cells = skillsPresentation.buildSkillCliStateCells({
+    packages: [{
+      id: 'pkg-scoped',
+      cliDesiredStates: [
+        { packageId: 'pkg-scoped', scopeType: 'user', scopeKey: '*', adapterId: 'claude', desiredState: 'inherit', enforcementStatus: 'satisfied', reasonCode: null },
+        { packageId: 'pkg-scoped', scopeType: 'project', scopeKey: 'F:/project-a', adapterId: 'claude', desiredState: 'disabled', enforcementStatus: 'blocked', reasonCode: 'SKILL_CLI_ISOLATION_UNSUPPORTED' }
+      ]
+    }],
+    installations: [
+      { id: 'user-codex', packageId: 'pkg-scoped', targetAdapterId: 'codex', scopeType: 'user', scopeKey: '*', enabled: true, status: 'ready' },
+      { id: 'project-claude', packageId: 'pkg-scoped', targetAdapterId: 'claude', scopeType: 'project', scopeKey: 'F:/project-a', enabled: false, status: 'disabled' }
+    ],
+    visibility: { claude: { visible: true, direct: false, inheritedFrom: ['codex'] } }
+  }, [{ id: 'claude', displayName: 'Claude Code' }, { id: 'codex', displayName: 'Codex' }])
+
+  assert.deepEqual(cells.map((cell) => [cell.scopeType, cell.scopeKey, cell.adapterId, cell.desiredState]), [
+    ['user', '*', 'claude', 'inherit'], ['user', '*', 'codex', 'enabled'],
+    ['project', 'F:/project-a', 'claude', 'disabled'], ['project', 'F:/project-a', 'codex', 'disabled']
+  ])
+  assert.equal(cells[0].actionability, 'inherit')
+})
+
+test('CLI state cells expose abnormal physical state and block ordinary desired-state mutations', () => {
+  const [cell] = skillsPresentation.buildSkillCliStateCells({
+    packages: [{ id: 'pkg-abnormal', cliDesiredStates: [{ packageId: 'pkg-abnormal', scopeType: 'user', scopeKey: '*', adapterId: 'codex', desiredState: 'enabled', enforcementStatus: 'error', reasonCode: 'SKILL_PROJECTION_RECOVERY_REQUIRED' }] }],
+    installations: [{ id: 'drifted', packageId: 'pkg-abnormal', targetAdapterId: 'codex', scopeType: 'user', scopeKey: '*', enabled: true, status: 'drifted' }],
+    visibility: { codex: { visible: true, direct: true, inheritedFrom: [] } }
+  }, [{ id: 'codex', displayName: 'Codex' }])
+
+  assert.deepEqual({ desiredState: cell.desiredState, actualState: cell.actualState, enforcementStatus: cell.enforcementStatus, actionability: cell.actionability }, {
+    desiredState: 'enabled', actualState: 'drifted', enforcementStatus: 'error', actionability: 'blocked'
+  })
+})
+
+test('a persisted desired-state mismatch is explicit and cannot be toggled as an ordinary state', () => {
+  const [cell] = skillsPresentation.buildSkillCliStateCells({
+    packages: [{ id: 'pkg-mismatch', cliDesiredStates: [{ packageId: 'pkg-mismatch', scopeType: 'user', scopeKey: '*', adapterId: 'codex', desiredState: 'disabled', enforcementStatus: 'satisfied', reasonCode: null }] }],
+    installations: [{ id: 'enabled', packageId: 'pkg-mismatch', targetAdapterId: 'codex', scopeType: 'user', scopeKey: '*', enabled: true, status: 'ready' }],
+    visibility: { codex: { visible: true, direct: true, inheritedFrom: [] } }
+  }, [{ id: 'codex', displayName: 'Codex' }])
+
+  assert.deepEqual({ enforcementStatus: cell.enforcementStatus, reasonCode: cell.reasonCode, actionability: cell.actionability }, {
+    enforcementStatus: 'error', reasonCode: 'SKILL_PROJECTION_STATE_MISMATCH', actionability: 'blocked'
+  })
+})
+
+test('organization groups retain only catalog versions from their exact persisted identity', () => {
+  const identity = (organizationId, versionId, hash) => ({
+    originKind: 'organization', serverOrigin: 'https://server.example.test/catalog', organizationId,
+    organizationName: organizationId, identityStatus: 'resolved', catalogVersionId: versionId, artifactSha256: hash.repeat(64)
+  })
+  const groups = skillsPresentation.groupSkillCatalogByOrigin(skillsPresentation.buildSkillsManagementCatalog({
+    packages: [
+      { id: 'org-a-package', name: 'same-name', sourceIdentity: identity('org-a', 'version-a', 'a'), installations: [], visibility: {} },
+      { id: 'org-b-package', name: 'same-name', sourceIdentity: identity('org-b', 'version-b', 'b'), installations: [], visibility: {} }
+    ],
+    organizationVersions: [
+      { versionId: 'version-a', serverOrigin: 'https://server.example.test', organizationId: 'org-a', organizationName: 'org-a', slug: 'same-name' },
+      { versionId: 'version-b', serverOrigin: 'https://server.example.test', organizationId: 'org-b', organizationName: 'org-b', slug: 'same-name' }
+    ]
+  }))
+
+  assert.deepEqual(groups.map((group) => [group.key, group.entries[0].organizationVersions.map((version) => version.versionId)]), [
+    ['organization:https://server.example.test:org-a', ['version-a']],
+    ['organization:https://server.example.test:org-b', ['version-b']]
+  ])
+})
+
+test('Skills state matrix exposes accessible scope, desired, actual, enforcement and sync-state controls', () => {
+  const page = readFileSync(new URL('../src/views/SkillsCenter.vue', import.meta.url), 'utf8')
+  const matrix = readFileSync(new URL('../src/components/skills/SkillCliStateMatrix.vue', import.meta.url), 'utf8')
+
+  for (const label of ['上次同步', '目录已过期', '同步失败', '目录同步中']) assert.match(page, new RegExp(label))
+  for (const label of ['期望状态', '实际状态', '执行状态', '独立启用', 'aria-label']) assert.match(matrix, new RegExp(label))
+  assert.match(matrix, /desiredState: 'enabled'/)
+})

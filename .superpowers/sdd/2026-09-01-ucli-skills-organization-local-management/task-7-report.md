@@ -17,3 +17,12 @@
 ## Concerns
 
 - No server or CLI runtime was started. This UI slice uses the established preview/apply IPC and existing strict projection planner; end-to-end filesystem projection behavior remains covered by its earlier task suites.
+
+## Review-fix follow-up
+
+- The CLI matrix now renders every persisted user/project scope tuple instead of selecting an arbitrary first installation. `inherit` remains distinct and offers an explicit independent-enable action; the regular switch can request disable.
+- Desired state, actual state, and enforcement state are shown separately. Drift, missing/invalid/conflict, recovery/error, and persisted desired/actual mismatches fail closed and disable ordinary state mutation.
+- Organization-version cards are filtered to the exact normalized origin and organization group, including same-name Skills from distinct organizations.
+- The organization header now exposes syncing, stale, error, and last-successful-sync states independently. New controls have accessible labels.
+- Review RED: the focused presentation test failed for scope tuples, abnormal/mismatch state, multi-organization grouping, and sync/matrix rendering before these changes.
+- Review GREEN: `node --test test/skills-presentation.test.mjs test/skills-store.test.mjs` — 76 passed, 0 failed; `npm run build` and `git diff --check` passed.

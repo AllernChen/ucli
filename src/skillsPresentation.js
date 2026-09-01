@@ -735,7 +735,11 @@ export function groupSkillCatalogByOrigin(entries = [], { view = 'all', status =
   }
   const add = (group, entry, packages, installations, sources) => {
     const sliced = sliceCatalogEntry(entry, packages, installations, sources)
-    sliced.organizationVersions = entry.organizationVersions || []
+    sliced.organizationVersions = group.kind === 'organization'
+      ? (entry.organizationVersions || []).filter((version) =>
+          version.serverOrigin === group.organization?.serverOrigin &&
+          version.organizationId === group.organization?.organizationId)
+      : []
     sliced.installed = Boolean(packages.length)
     sliced.originKind = group.kind
     if (matchesCatalogStatus(sliced, status)) ensure(group).entries.push(sliced)
@@ -757,7 +761,11 @@ export function groupSkillCatalogByOrigin(entries = [], { view = 'all', status =
     }
     if (!buckets.size && (entry.organizationVersions || []).length) {
       const version = entry.organizationVersions[0]
-      const group = { key: `organization:${version.serverOrigin}:${version.organizationId}`, kind: 'organization', label: version.organizationName || version.organizationId }
+      const group = {
+        key: `organization:${version.serverOrigin}:${version.organizationId}`,
+        kind: 'organization', label: version.organizationName || version.organizationId,
+        organization: { serverOrigin: version.serverOrigin, organizationId: version.organizationId }
+      }
       buckets.set(group.key, { group, packages: [], sources: [] })
     }
     for (const { group, packages: groupedPackages, sources } of buckets.values()) {
@@ -779,32 +787,58 @@ export function groupSkillCatalogByOrigin(entries = [], { view = 'all', status =
     })
 }
 
-function actualCliState(entry, adapterId) {
-  const installation = (entry.installations || []).find((item) => item.targetAdapterId === adapterId)
+const CLI_STATE_INSTALLATION_ORDER = ['drifted', 'broken_link', 'invalid', 'missing', 'conflict', 'disabled', 'ready', 'update_available']
+const ABNORMAL_CLI_STATES = new Set(['drifted', 'broken_link', 'invalid', 'missing', 'conflict'])
+
+function installationForScope(entry, adapterId, scopeType, scopeKey) {
+  return (entry.installations || [])
+    .filter((item) => item.targetAdapterId === adapterId && item.scopeType === scopeType && item.scopeKey === scopeKey)
+    .sort((left, right) =>
+      (CLI_STATE_INSTALLATION_ORDER.indexOf(left.status) + 1 || 99) - (CLI_STATE_INSTALLATION_ORDER.indexOf(right.status) + 1 || 99) ||
+      String(left.id).localeCompare(String(right.id))
+    )[0] || null
+}
+
+function actualCliState(entry, adapterId, scopeType, scopeKey) {
+  const installation = installationForScope(entry, adapterId, scopeType, scopeKey)
+  if (installation && ABNORMAL_CLI_STATES.has(installation.status)) return installation.status
   if (installation?.enabled && ['ready', 'update_available'].includes(installation.status)) return 'enabled'
   if (installation && (!installation.enabled || installation.status === 'disabled')) return 'disabled'
   const visibility = entry.visibility?.[adapterId]
-  if (visibility?.visible) return visibility.direct ? 'enabled' : 'inherited'
+  const scopeInstallations = (entry.installations || []).filter((item) =>
+    item.scopeType === scopeType && item.scopeKey === scopeKey && item.enabled && ['ready', 'update_available'].includes(item.status)
+  )
+  if (visibility?.visible && scopeInstallations.length) return visibility.direct ? 'enabled' : 'inherited'
   return 'disabled'
 }
 
 export function buildSkillCliStateCells(entry = {}, adapters = []) {
   const pkg = (entry.packages || []).length === 1 ? entry.packages[0] : null
   const states = pkg?.cliDesiredStates || []
-  const scopeType = (entry.installations || [])[0]?.scopeType || states[0]?.scopeType || 'user'
-  const scopeKey = (entry.installations || [])[0]?.scopeKey || states[0]?.scopeKey || '*'
-  return adapters.map((adapter) => {
-    const state = states.find((item) => item.adapterId === adapter.id && item.scopeType === scopeType && item.scopeKey === scopeKey) || null
-    const actualState = actualCliState(entry, adapter.id)
-    const desiredState = state?.desiredState || (actualState === 'inherited' ? 'inherit' : actualState)
-    const enforcementStatus = state?.enforcementStatus || 'satisfied'
-    return {
-      packageId: pkg?.id || null, scopeType, scopeKey, adapterId: adapter.id,
-      displayName: adapter.displayName || skillCliName(adapter.id), desiredState, actualState,
-      enforcementStatus, reasonCode: state?.reasonCode || null,
-      actionability: enforcementStatus === 'blocked' ? 'blocked' : enforcementStatus === 'migration_required' ? 'migration_required' : 'direct'
-    }
-  })
+  const scopes = new Map()
+  for (const item of [...(entry.installations || []), ...states]) {
+    if (!item.scopeType || !item.scopeKey) continue
+    scopes.set(`${item.scopeType}:${item.scopeKey}`, { scopeType: item.scopeType, scopeKey: item.scopeKey })
+  }
+  if (!scopes.size) scopes.set('user:*', { scopeType: 'user', scopeKey: '*' })
+  return [...scopes.values()]
+    .sort((left, right) => (left.scopeType === 'user' ? 0 : 1) - (right.scopeType === 'user' ? 0 : 1) || left.scopeKey.localeCompare(right.scopeKey))
+    .flatMap(({ scopeType, scopeKey }) => adapters.map((adapter) => {
+      const state = states.find((item) => item.adapterId === adapter.id && item.scopeType === scopeType && item.scopeKey === scopeKey) || null
+      const actualState = actualCliState(entry, adapter.id, scopeType, scopeKey)
+      const desiredState = state?.desiredState || (actualState === 'inherited' ? 'inherit' : actualState === 'enabled' ? 'enabled' : 'disabled')
+      const mismatch = Boolean(state && desiredState !== 'inherit' && desiredState !== actualState)
+      const enforcementStatus = state?.enforcementStatus === 'satisfied' && mismatch
+        ? 'error'
+        : state?.enforcementStatus || (ABNORMAL_CLI_STATES.has(actualState) ? 'error' : 'satisfied')
+      const blocked = enforcementStatus === 'blocked' || ['error', 'recovery_required'].includes(enforcementStatus) || ABNORMAL_CLI_STATES.has(actualState)
+      return {
+        packageId: pkg?.id || null, scopeType, scopeKey, adapterId: adapter.id,
+        displayName: adapter.displayName || skillCliName(adapter.id), desiredState, actualState,
+        enforcementStatus, reasonCode: state?.reasonCode || (mismatch ? 'SKILL_PROJECTION_STATE_MISMATCH' : ABNORMAL_CLI_STATES.has(actualState) ? `SKILL_PROJECTION_${actualState.toUpperCase()}` : null),
+        actionability: blocked ? 'blocked' : desiredState === 'inherit' ? 'inherit' : enforcementStatus === 'migration_required' ? 'migration_required' : 'direct'
+      }
+    }))
 }
 
 export function skillStatusPresentation(status) {
