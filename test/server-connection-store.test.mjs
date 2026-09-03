@@ -519,6 +519,61 @@ test('retains only stable public connection errors and refreshes catalog actions
   assert.equal(listedSkills >= 3, true)
 })
 
+test('service profile sync refreshes bootstrap and model projection without syncing Skills', async () => {
+  const connection = store()
+  const calls = []
+  const previous = {
+    syncServerConnection: window.ucli.syncServerConnection,
+    listServerConnectionModels: window.ucli.listServerConnectionModels,
+    getAiCliProfileState: window.ucli.getAiCliProfileState,
+    syncServerConnectionSkills: window.ucli.syncServerConnectionSkills
+  }
+  window.ucli.syncServerConnection = async () => { calls.push('connection'); return initialState }
+  window.ucli.listServerConnectionModels = async () => {
+    calls.push('models')
+    return [{ id: 'service-profile', sourceKind: 'server', models: [] }]
+  }
+  window.ucli.getAiCliProfileState = async () => {
+    calls.push('profiles')
+    return { profiles: [], cliInventory: [], cliConfiguration: [], codexRuntime: null, claudeRuntime: null }
+  }
+  window.ucli.syncServerConnectionSkills = async () => { calls.push('skills'); return [] }
+  connection.applyState(initialState)
+
+  try {
+    await connection.syncServiceProfiles()
+
+    assert.deepEqual(calls, ['connection', 'models', 'profiles'])
+    assert.deepEqual(connection.models, [{ id: 'service-profile', sourceKind: 'server', models: [] }])
+  } finally {
+    Object.assign(window.ucli, previous)
+  }
+})
+
+test('organization Skills refresh remains isolated from the model catalog', async () => {
+  const connection = store()
+  const calls = []
+  const previous = {
+    ensureServerConnectionSkillsFresh: window.ucli.ensureServerConnectionSkillsFresh,
+    listServerConnectionModels: window.ucli.listServerConnectionModels
+  }
+  window.ucli.ensureServerConnectionSkillsFresh = async ({ force }) => {
+    calls.push(force === true ? 'skills-force' : 'skills-cached')
+    return { status: 'ready', lastSyncedAt: 2, catalogRevision: 2, error: null }
+  }
+  window.ucli.listServerConnectionModels = async () => { calls.push('models'); return [] }
+  connection.applyState(initialState)
+
+  try {
+    await connection.ensureSkillsFresh({ force: true })
+
+    assert.deepEqual(calls, ['skills-force'])
+    assert.equal(connection.skillsSyncState.catalogRevision, 2)
+  } finally {
+    Object.assign(window.ucli, previous)
+  }
+})
+
 test('retry redeem is single-flight and invokes IPC only once', async () => {
   const connection = store()
   await connection.loadAttempt('attempt-1')

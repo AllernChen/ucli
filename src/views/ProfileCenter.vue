@@ -212,6 +212,12 @@
             <h3>服务档案</h3>
             <p>组织提供的服务按服务端和组织归并，只读展示全部模型能力。</p>
           </div>
+          <a-button
+            size="small"
+            :loading="serviceProfileSyncing"
+            :disabled="!canSyncServiceProfiles"
+            @click="syncServiceProfiles"
+          >同步服务档案</a-button>
         </div>
         <a-alert
           v-if="connection.modelCatalogError"
@@ -348,6 +354,7 @@ const serviceDefaultDialogOpen = ref(false)
 const selectedServiceProfileId = ref(null)
 const selectedServiceModelId = ref(null)
 const serviceDefaultScope = ref('app')
+const serviceProfileSyncing = ref(false)
 const modelCatalogRetrying = ref(false)
 const modelCatalogRetryAttempts = ref(0)
 const MODEL_CATALOG_RETRY_LIMIT = 3
@@ -384,6 +391,8 @@ const serviceDefaultSelection = computed(() => validateServiceProfileSelection({
 }))
 const canRetryModelCatalog = computed(() => Boolean(connection.modelCatalogError?.retryable) &&
   !modelCatalogRetrying.value && modelCatalogRetryAttempts.value < MODEL_CATALOG_RETRY_LIMIT)
+const canSyncServiceProfiles = computed(() => ['connected', 'expiring'].includes(connection.status) &&
+  !connection.busy && !serviceProfileSyncing.value)
 const canInitializeDshProfile = computed(() => {
   const name = newDshProfileName.value.trim()
   return ['managed', 'system'].includes(dshRuntimeView.value.selected) &&
@@ -462,6 +471,20 @@ async function retryModelCatalog() {
     // The model catalog alert keeps the safe error and exposes the remaining retries.
   } finally {
     modelCatalogRetrying.value = false
+  }
+}
+
+async function syncServiceProfiles() {
+  if (!canSyncServiceProfiles.value) return
+  serviceProfileSyncing.value = true
+  try {
+    await connection.syncServiceProfiles()
+    modelCatalogRetryAttempts.value = 0
+    message.success('服务档案已同步')
+  } catch {
+    message.error(connection.modelCatalogError?.message || connection.connectionError?.message || '无法同步服务档案')
+  } finally {
+    serviceProfileSyncing.value = false
   }
 }
 

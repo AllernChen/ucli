@@ -305,6 +305,10 @@ export const useServerConnectionStore = defineStore('server-connection', {
     retryConnection() { return this.runConnectionAction(() => ipc.serverConnection.retry(), '无法重试服务端连接') },
     syncConnection() { return this.runConnectionAction(() => ipc.serverConnection.sync(), '无法同步服务端连接') },
     disconnect() { return this.runConnectionAction(() => ipc.serverConnection.disconnect(), '无法断开服务端连接') },
+    async syncServiceProfiles() {
+      await this.syncConnection()
+      return this.syncModels()
+    },
     async syncModels() {
       const lifecycle = this._lifecycle
       const identity = this._connectionIdentity

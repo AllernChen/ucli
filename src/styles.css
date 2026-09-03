@@ -108,6 +108,9 @@ html, body, #app {
 .profile-runtime-row p { margin: 4px 0; color: #595959; }
 .profile-path, .profile-project-path { color: #8c8c8c; font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px; word-break: break-all; }
 .profile-project-path { margin-top: 12px; padding-top: 10px; border-top: 1px solid #f0f0f0; }
+.service-profile-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.service-profile-heading h3 { margin: 0 0 4px; }
+.service-profile-heading p { margin: 0; color: #6b7280; }
 .profile-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 14px; }
 .profile-card { border-radius: 10px; }
 .profile-card-title { display: flex; align-items: center; gap: 8px; }
