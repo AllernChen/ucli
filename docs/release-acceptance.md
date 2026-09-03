@@ -2,7 +2,7 @@
 
 本清单用于 UCLI Windows x64 发布前和 GitHub Release 发布后的人工验收。自动化 `npm run verify:release` 只验证构建产物和更新元数据的一致性；以下交互行为必须在实际 Windows 环境中验证。
 
-## 0. 0.12.2 发布证据
+## 0. 0.12.2 未发布候选证据
 
 | 项目 | 当前证据 / 状态 |
 | --- | --- |
@@ -11,7 +11,7 @@
 | 干净依赖与审计 | PASS：Node.js `24.9.0` / npm `11.6.0` 下从 lockfile 执行 `npm ci --registry=https://registry.npmjs.org`，安装 605 个包、审计 606 个包；`npm audit --registry=https://registry.npmjs.org` 为 0 vulnerabilities。构建链的 `@xmldom/xmldom`、`fast-uri` 与运行时传递依赖 `qs` 已由受测精确 override 固定到修复版本。 |
 | 自动化与构建门 | PASS：干净依赖树上 `npm test` 共 2092 项，2080 通过、0 失败、12 个平台条件跳过；`npm run build`、`npm run dist:win`、`npm run verify:release -- --platform win32 --arch x64` 和 `git diff --check` 均通过。现存 `MODULE_TYPELESS_PACKAGE_JSON`、废弃传递包及 `asar: false` 输出为既有非阻断提示。 |
 | Windows 本地产物 | PASS：同一次 Windows x64 构建生成 Setup `UCLI-Setup-0.12.2-x64.exe`（134,254,336 bytes，SHA-256 `60293FD360181D58AD5265A14239AF98358D4B1D7A7301DF89FBCA78193686D7`）；blockmap（137,298 bytes，SHA-256 `6750CFD47519BEB199420B1CC9DD457F2AB630DDD9DADE95CB27468202C40E0D`）；Portable `UCLI-Portable-0.12.2-x64.exe`（133,998,847 bytes，SHA-256 `99134A76ED48B6D12E25915154871BB6260ABAE30D89E86FA684A734387F8F2B`）；`latest.yml`（348 bytes，SHA-256 `B5DDA60C74ADC23206E1E554C988CDFDBDD58D603D6B27BE44193FADE1C27672`）。证据文档不属于 `electron-builder.yml` 的打包输入。 |
-| GitHub 发布 | 待完成：推送不可变标签 `v0.12.2` 后，由 `.github/workflows/release.yml` 重新运行测试、平台构建和产物校验，再创建 GitHub Release 与 `SHA256SUMS.txt`。 |
+| GitHub 发布 | FAIL / 未发布：不可变标签 `v0.12.2` 指向 `7fafa1cf29c2efa552b29a4f8ce0aff71dea9da4`；GitHub Actions run `33712452896` 的 Windows 与 macOS job 均在 `npm ci` 前置门失败，因为本地 npm 11.6 生成的锁文件缺少 npm 11.16 仍要求的 `@electron/windows-sign@1.2.2`、`cross-dirname@0.1.0` 和 `fs-extra@11.4.0` optional peer 记录。CI 未执行测试、构建、产物上传或发布，GitHub Release 与远端发布资产均不存在；该标签不移动，由修复后的 `0.12.3` 取代。 |
 
 ## 0. 0.12.1 发布证据
 

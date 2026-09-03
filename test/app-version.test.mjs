@@ -14,15 +14,24 @@ const bridgePackage = JSON.parse(readFileSync(
 ))
 
 test('app metadata retains the quarantined 0.11.0 bridge package', () => {
-  assert.equal(packageJson.version, '0.12.2')
-  assert.equal(packageLock.version, '0.12.2')
-  assert.equal(packageLock.packages[''].version, '0.12.2')
+  assert.equal(packageJson.version, '0.12.3')
+  assert.equal(packageLock.version, '0.12.3')
+  assert.equal(packageLock.packages[''].version, '0.12.3')
   assert.equal(bridgePackage.version, '0.11.0')
   assert.equal(packageJson.overrides['glob@10.4.5'], '10.5.0')
   assert.equal(packageJson.overrides['@xmldom/xmldom@0.8.14'], '0.8.15')
   assert.equal(packageJson.overrides['@xmldom/xmldom@0.9.11'], '0.9.12')
   assert.equal(packageJson.overrides['fast-uri@3.1.5'], '3.1.7')
   assert.equal(packageJson.overrides['qs@6.15.3'], '6.16.0')
+  assert.equal(
+    packageLock.packages['node_modules/electron-winstaller/node_modules/@electron/windows-sign']?.version,
+    '1.2.2'
+  )
+  assert.equal(packageLock.packages['node_modules/cross-dirname']?.version, '0.1.0')
+  assert.equal(
+    packageLock.packages['node_modules/electron-winstaller/node_modules/@electron/windows-sign/node_modules/fs-extra']?.version,
+    '11.4.0'
+  )
 })
 
 test('sidebar version is injected from the package version during renderer build', () => {
