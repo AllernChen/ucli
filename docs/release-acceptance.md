@@ -2,6 +2,17 @@
 
 本清单用于 UCLI Windows x64 发布前和 GitHub Release 发布后的人工验收。自动化 `npm run verify:release` 只验证构建产物和更新元数据的一致性；以下交互行为必须在实际 Windows 环境中验证。
 
+## 0. 0.12.3 发布证据
+
+| 项目 | 当前证据 / 状态 |
+| --- | --- |
+| 发布候选源码 | PASS：服务档案同步入口实现基线为 `26dc9f8`，npm 11.16 锁文件兼容与 `0.12.3` 发布准备基线为 `9d14d9b348a3fd7dd0301317ceb429f59e768a22`；`package.json`、lockfile、侧栏版本与安装产物版本均为 `0.12.3`。设备注册线缆继续使用 `clientVersion: 0.12.0` 协议合同，不将桌面补丁版本误作协议版本。 |
+| 服务档案与 Skills 同步 | PASS：2026-09-03（Asia/Shanghai）在 UCLI DEV 验证配置档案页“同步服务档案”可独立刷新连接与模型目录，`qwen3.8-27b` 显示 `OpenAI Responses`、可用、上下文 32768；同步过程中按钮禁用并显示加载态，完成后无新增错误。Skills 页面保留独立“同步组织目录”，执行成功并更新最近同步时间；服务档案同步不隐式同步 Skills。 |
+| 干净依赖与审计 | PASS：Node.js `24.9.0` 下使用 GitHub Actions 同代 npm `11.16.0` 从 lockfile 执行真实 `npm ci --registry=https://registry.npmjs.org`，安装 533 个包、审计 534 个包；`npm audit --registry=https://registry.npmjs.org` 为 0 vulnerabilities。锁文件显式保留 npm 11.16 所需的 `@electron/windows-sign@1.2.2`、`cross-dirname@0.1.0` 与 `fs-extra@11.4.0` optional peer 记录；受测精确 override 固定已知漏洞依赖到修复版本。 |
+| 自动化与构建门 | PASS：上述干净依赖树上 `npm test` 共 2092 项，2080 通过、0 失败、12 个平台条件跳过；`npm run build`、`npm run dist:win`、`npm run verify:release -- --platform win32 --arch x64` 和 `git diff --check` 均通过。现存 `MODULE_TYPELESS_PACKAGE_JSON`、废弃传递包及 `asar: false` 输出为既有非阻断提示。 |
+| Windows 本地产物 | PASS：同一次 Windows x64 构建生成 Setup `UCLI-Setup-0.12.3-x64.exe`（134,254,203 bytes，SHA-256 `4425F8AC8DBD02434AC6FEB5806341FBB3DBAC2EE3633FC658B2082F4313E004`）；blockmap（137,381 bytes，SHA-256 `215DB9148D81ACA1B844269D3C3842E419BA8D68CE381BE7FFC9117B5A84A269`）；Portable `UCLI-Portable-0.12.3-x64.exe`（133,998,770 bytes，SHA-256 `55C95A27D67664F187B9AAB1F09B5E7D0144938A659C0927630EB4D48264ACB5`）；`latest.yml`（348 bytes，SHA-256 `C8469968B2C52CA79036F4AD2738386563DD7AE8E1732759427C0C5D068BB52C`）。证据文档不属于 `electron-builder.yml` 的打包输入。 |
+| GitHub 发布 | PENDING：候选证据提交完成后创建不可变标签 `v0.12.3` 并由 `.github/workflows/release.yml` 执行远端 Windows 门、资产上传和 GitHub Release；发布完成前不将本行标为 PASS。 |
+
 ## 0. 0.12.2 未发布候选证据
 
 | 项目 | 当前证据 / 状态 |
