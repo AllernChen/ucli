@@ -20,7 +20,7 @@ test('app release package and acceptance documentation agree', async () => {
     readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8'),
     readFile(new URL('../docs/release-acceptance.md', import.meta.url), 'utf8')
   ])
-  assert.equal(JSON.parse(packageSource).version, '0.12.1')
+  assert.equal(JSON.parse(packageSource).version, '0.12.2')
   assert.match(readme, /配置档案/)
   assert.match(readme, /CC Switch/)
   assert.match(readme, /Claude 登录态/)
@@ -29,6 +29,9 @@ test('app release package and acceptance documentation agree', async () => {
   assert.match(readme, /Bedrock.*Vertex.*Foundry/s)
   assert.doesNotMatch(readme, /\uFFFD/)
   assert.doesNotMatch(changelog, /\uFFFD/)
+  assert.match(changelog, /## \[0\.12\.2\] - 2026-09-03/)
+  assert.match(changelog, /同步服务档案/)
+  assert.match(changelog, /Skills 页面.*同步组织目录/s)
   assert.match(changelog, /## \[0\.12\.1\] - 2026-09-01/)
   assert.match(acceptance, /## 0\. 0\.12\.1 发布证据/)
   assert.match(acceptance, /d0f64c682af621a061b255f256f47d2840171d31/)
